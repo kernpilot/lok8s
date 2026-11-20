@@ -15,9 +15,9 @@
 # real one and skips without sops, ssh-to-age or ssh-keygen. Each test that
 # runs the real sops carries the tag real-sops: the argsh container of CI has
 # no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
-# the step. That step also checks the TAP plan 1..7: a test that gets or
-# loses the tag changes that number in .github/workflows/ci.yml. No test
-# prints a private key.
+# the step. That step also checks the TAP plan of every tagged test under
+# tests/unit (1..14): a test that gets or loses the tag changes that number
+# in .github/workflows/ci.yml and TESTING.md. No test prints a private key.
 
 setup() {
   load "../test_helper"
@@ -120,6 +120,23 @@ _stub_encrypt() {
 
 _stub_compare() {
   secrets::_twin_matches() { return 0; }
+}
+
+# _stub_sops — the real secrets::_encrypt_file, with sops as a function: the
+# encrypt writes the envelope of the first rule to its --output path and logs
+# the plaintext (relative to PATH_CLUSTERS), as _stub_encrypt does.
+_stub_sops() {
+  sops() {
+    local -a a=("${@}")
+    local i out=""
+    for (( i = 0; i + 1 < ${#a[@]}; i++ )); do
+      [[ "${a[i]}" != --output ]] || out="${a[i + 1]}"
+    done
+    [[ -n "${out}" ]] || return 1
+    echo "${a[-1]#"${PATH_CLUSTERS}/"}" >> "${ENCRYPT_LOG}"
+    _first_rule_envelope > "${out}"
+  }
+  _stub_compare
 }
 
 # _cache <domain> <name> <recipient> — a plaintext cache file and its .enc
@@ -720,7 +737,9 @@ a.dev/secrets/Secret.db.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}
   [ "$(readlink "${CFG}")" = "${conf}" ]
   cmp "${conf}" "${want}" || { cat "${conf}" >&2; return 1; }
   [ "$(stat -c %a "${conf}")" = 640 ] || { echo "mode $(stat -c %a "${conf}")" >&2; return 1; }
-  [ "$(ls -A "${conf%/*}")" = sops.yaml ] || { echo "a temp file was left: $(ls -A "${conf%/*}")" >&2; return 1; }
+  # No temp file is left, and the lock is beside the target, not the link.
+  [ "$(ls -A "${conf%/*}")" = $'sops.yaml\nsops.yaml.lock' ] || { echo "the dir of the target: $(ls -A "${conf%/*}")" >&2; return 1; }
+  [ ! -e "${CFG}.lock" ] || { echo "a lock beside the link" >&2; return 1; }
 }
 
 @test "with --all, a domain directory it cannot search is refused before any write" {
@@ -1483,6 +1502,60 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
 }
 
 # bats test_tags=real-sops
+@test "an identity that does not decrypt the .enc is refused by the compare before any write" {
+  # A third key, in no rule and on no label: the real sops fails to decrypt,
+  # and the compare does not read that failure as a twin that matches, also
+  # for an empty twin (a failed decrypt prints nothing, and cmp finds an
+  # empty twin equal to it). A marker shows that the decrypt got the third
+  # identity from its key file; with no identity, the decrypt does not run
+  # and the refusal is the same. .sops.yaml and every file of the stores stay
+  # byte-equal (Go twin: TestRemoveKeyRefusesATwinThatDiffersFromItsEnc).
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" keep gone saved="${BATS_TEST_TMPDIR}/saved" store="${PATH_CLUSTERS}/a.dev/secrets"
+  local id marks="${BATS_TEST_TMPDIR}/marks" refusal
+  _keep_gone "${k}"
+  ssh-keygen -q -t ed25519 -N '' -C other -f "${k}/other" </dev/null >/dev/null 2>&1
+  ssh-to-age -private-key -i "${k}/other" -o "${k}/other.age" 2>/dev/null
+  _rules "${keep},${gone}"
+  printf 'v' > "${store}/Secret.app.default.K"
+  : > "${store}/Secret.empty.default.K"
+  domain=a.dev secrets::encrypt >/dev/null
+  [ -s "${store}/Secret.empty.default.K.enc" ] || { echo "fixture: the empty twin has no .enc" >&2; return 1; }
+  mkdir -p "${saved}"
+  cp -p "${CFG}" "${saved}/sops.yaml"
+  cp -a "${PATH_CLUSTERS}" "${saved}/clusters"
+  # The marker: one line for each decrypt, which names the identity that
+  # the decrypt got. Nothing prints the identity.
+  id="$(grep -m1 'AGE-SECRET-KEY-' "${k}/other.age")"
+  sops() {
+    if [[ "${1:-}" == decrypt ]]; then
+      if [[ "${SOPS_AGE_KEY:-}" == "${id}" ]]; then echo "the third identity" >> "${marks}"; else echo "another identity" >> "${marks}"; fi
+    fi
+    command sops "$@"
+  }
+  refusal="[error] cannot decrypt ${store}/Secret.app.default.K.enc to compare it with its twin
+[error] cannot decrypt ${store}/Secret.empty.default.K.enc to compare it with its twin
+${_twin_tail}"
+
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/other.age" run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${marks}")" = $'the third identity\nthe third identity' ] || { echo "marks: $(cat "${marks}")" >&2; return 1; }
+  _same_store "${saved}"
+
+  # No identity: setup's SOPS_AGE_KEY_FILE names no file, and no SSH key.
+  command rm -f -- "${marks}"
+  DOMAIN=a.dev run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${marks}" ] || { echo "a decrypt ran with no identity: $(cat "${marks}")" >&2; return 1; }
+  _same_store "${saved}"
+}
+
+# bats test_tags=real-sops
 @test "a twin with the value of its .enc passes the compare when it is the older file, and is re-keyed" {
   # The times of the files do not count: app as lo secrets encrypt leaves
   # it, other set back in time (Go twin:
@@ -1641,6 +1714,110 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+@test "a lock path that is a symlink is refused before the open, and the file that it names keeps its bytes" {
+  # The lock can sit in the directory of the file that a .sops.yaml link
+  # names, where another user can write. The open appends and the run never
+  # uses a lock that a link names (Go twin:
+  # TestKeyCommandsRefuseALockThatIsNotARegularFile).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local victim="${BATS_TEST_TMPDIR}/victim" before
+  printf 'the bytes of another file\n' > "${victim}"
+  ln -s "${victim}" "${CFG}.lock"
+  before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${CFG}.lock is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${victim}")" = 'the bytes of another file' ] || { echo "the file that the link names changed" >&2; return 1; }
+  [ "$(readlink "${CFG}.lock")" = "${victim}" ]
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "two .sops.yaml links that name one file take one lock, beside that file, also through a chain of links" {
+  # A run through the other link holds the lock (in this shell); remove-key
+  # through the first link, which gets to the file through a second link, is
+  # refused and changes nothing. When the lock is free again, the same run
+  # edits the file at the end of the chain (Go twin:
+  # TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local conf="${BATS_TEST_TMPDIR}/conf/sops.yaml" mid="${BATS_TEST_TMPDIR}/conf/mid.yaml"
+  local other="${BATS_TEST_TMPDIR}/other" before dest="" lockfd p
+  mkdir -p "${conf%/*}" "${other}"
+  mv -- "${CFG}" "${conf}"
+  ln -s "${conf}" "${mid}"
+  ln -s "${mid}" "${CFG}"
+  ln -s "${conf}" "${other}/.sops.yaml"
+  before="$(cat "${conf}")"
+  secrets::_config_dest "${other}/.sops.yaml"
+  exec {lockfd}>>"${dest}.lock"
+  flock -n "${lockfd}"
+  LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
+  exec {lockfd}>&-
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${conf}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+
+  LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "the run after the release: status $status: $output" >&2; return 1; }
+  grep -qF -- "age: '${RCPT_A}'" "${conf}" || { echo "the file at the end of the chain was not edited" >&2; cat "${conf}" >&2; return 1; }
+  [ -L "${CFG}" ] && [ -L "${mid}" ] || { echo "a link was replaced by a file" >&2; return 1; }
+  [ -s "${ENCRYPT_LOG}" ]
+  for p in "${CFG}" "${other}/.sops.yaml" "${mid}"; do
+    [ ! -e "${p}.lock" ] || { echo "a lock beside the link ${p}" >&2; return 1; }
+  done
+}
+
+@test "the resolution of a .sops.yaml link that names no regular file is refused with one line" {
+  # It fails closed: no path comes back to lock beside (Go twin:
+  # TestSopsConfigDestRefusesALinkThatNamesNoRegularFile).
+  _load
+  local target
+  mkdir -p "${PATH_BASE}/dir"
+  for target in gone.yaml dir; do
+    rm -f -- "${CFG}"
+    ln -s "${target}" "${CFG}"
+    run secrets::_config_dest "${CFG}"
+    [ "$status" -eq 1 ] || { echo "${target}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${CFG} does not resolve to a regular file — nothing was changed; run this command again" ] || {
+      echo "${target}: $output" >&2; return 1; }
+  done
+}
+
+@test "remove-key writes the .sops.yaml file that it locked, also when the link names another file after the open of the lock" {
+  # The link is resolved once. A link pointed at b.yaml between the open of
+  # the lock and the write does not move the write (Go twin:
+  # TestKeyCommandsWriteTheFileThatTheyLocked). The stub encrypt reads the
+  # rules through the link, so b.yaml holds the rules of the edit already,
+  # plus a comment that the edit of a.yaml does not have.
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local dir="${BATS_TEST_TMPDIR}/conf" before_b
+  mkdir -p "${dir}"
+  mv -- "${CFG}" "${dir}/a.yaml"
+  { echo '# b.yaml'; sed "s|,${RCPT_B}||" "${dir}/a.yaml"; } > "${dir}/b.yaml"
+  ln -s "${dir}/a.yaml" "${CFG}"
+  before_b="$(cat "${dir}/b.yaml")"
+  # secrets::_lock runs flock after the open of the lock file.
+  flock() { rm -f -- "${CFG}" && ln -s -- "${dir}/b.yaml" "${CFG}" && command flock "$@"; }
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF -- "age: '${RCPT_A}'" "${dir}/a.yaml" || { echo "the file beside the lock was not edited" >&2; cat "${dir}/a.yaml" >&2; return 1; }
+  [ "$(cat "${dir}/b.yaml")" = "${before_b}" ] || { echo "the write went to the file that the link names now" >&2; return 1; }
+  [ "$(readlink "${CFG}")" = "${dir}/b.yaml" ]
+  [ ! -e "${dir}/b.yaml.lock" ]
+}
+
 @test ".sops.yaml is replaced, not rewritten in place, and keeps its mode" {
   _load
   _stub_encrypt
@@ -1654,6 +1831,32 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${CFG}")" != "${before}" ]
   [ "$(stat -c %a "${CFG}")" = "640" ]
   [ -z "$(find "${PATH_BASE}" -name '.sops.yaml.tmp-*')" ]
+}
+
+@test "a plaintext dated in the future stays the newer file after the re-key, and an edit of it is encrypted" {
+  # The real secrets::_encrypt_file runs around a sops stub. The .enc keeps
+  # the time of the encrypt, never a time later than now, and one warning
+  # line names the plaintext. An edit after the run gets the time of now, and
+  # the encrypt sweep writes the .enc again (Go twin:
+  # TestRemoveKeyKeepsAFutureDatedPlaintextNewerAndAnEditIsNotLost).
+  _load
+  _stub_sops
+  _cache a.dev app "${RCPT_B}"
+  local plain="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K" line
+  line="[warn] ${plain} has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)"
+  touch -t 209901010000 "${plain}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(grep -cxF -- "${line}" <<< "${output}")" = 1 ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = a.dev/secrets/Secret.app.default.K ] || { cat "${ENCRYPT_LOG}" >&2; return 1; }
+  [[ "${plain}" -nt "${plain}.enc" ]] || { echo "the .enc is dated after the plaintext" >&2; return 1; }
+  [ "$(stat -c %Y -- "${plain}.enc")" -le "$(date +%s)" ] || { echo "the .enc has a time in the future" >&2; return 1; }
+
+  printf 'w' > "${plain}"
+  run secrets::_encrypt_store "${PATH_CLUSTERS}/a.dev/secrets" "" find
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = $'a.dev/secrets/Secret.app.default.K\na.dev/secrets/Secret.app.default.K' ] || {
+    echo "the encrypt skipped the edit:" >&2; cat "${ENCRYPT_LOG}" >&2; return 1; }
 }
 
 @test "a re-key that stops after the write prints the command that resumes it" {

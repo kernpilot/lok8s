@@ -254,17 +254,18 @@ func opens(t *testing.T, enc string, id *age.X25519Identity, plain string) bool 
 	return err == nil && string(dec) == plain
 }
 
-// freshen makes each plaintext one second newer than its .enc: the state
-// after `lo secrets decrypt`.
+// freshen makes each plaintext one second newer than its .enc, both in the
+// past: the state after `lo secrets decrypt`. (A plaintext dated after now
+// stays the newer file after a re-key, with a warning: nudgeNewer.)
 func freshen(t *testing.T, plains ...string) {
 	t.Helper()
+	enc := time.Now().Add(-2 * time.Second)
+	plain := enc.Add(time.Second)
 	for _, p := range plains {
-		info, err := os.Stat(p + ".enc")
-		if err != nil {
+		if err := os.Chtimes(p+".enc", enc, enc); err != nil {
 			t.Fatal(err)
 		}
-		ts := info.ModTime().Add(time.Second)
-		if err := os.Chtimes(p, ts, ts); err != nil {
+		if err := os.Chtimes(p, plain, plain); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -696,6 +697,79 @@ func TestRemoveKeyRekeysATwinThatIsOlderThanItsEnc(t *testing.T) {
 		if readFile(t, enc) == encBefore || opens(t, enc, gone, "v") || !opens(t, enc, keep, "v") {
 			t.Errorf("future=%v: the .enc was not re-keyed", future)
 		}
+	}
+}
+
+// A plaintext dated in the future stays the newer file after the re-key:
+// the .enc keeps the time of its write, never a time later than now, and
+// the encrypt prints one warning line that names the plaintext. An edit of
+// the plaintext after the run (dated now) is encrypted, and a decrypt keeps
+// it. tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeyKeepsAFutureDatedPlaintextNewerAndAnEditIsNotLost(t *testing.T) {
+	f := newLinkFixture(t, "remove-key")
+	plain := f.store + "/Secret.app.default.K"
+	enc := plain + ".enc"
+	future := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(plain, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.run(); err != nil {
+		t.Fatalf("%v\n%s", err, f.errOut.String())
+	}
+	warn := "[warn] " + f.c.rel(plain) + " has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)\n"
+	if n := strings.Count(f.errOut.String(), warn); n != 1 {
+		t.Errorf("the warning shows %d time(s), want 1:\n%s", n, f.errOut.String())
+	}
+	info, err := os.Stat(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().After(time.Now()) {
+		t.Errorf("the .enc has a time in the future: %v", info.ModTime())
+	}
+	if !newerThan(plain, enc) {
+		t.Error("the .enc is the newer file of the pair")
+	}
+	f.rekeyed("app", "v")
+
+	write(t, plain, "w")
+	encryptStore(t, f.c, "a.dev", f.out, f.errOut)
+	if !opens(t, enc, f.keep, "w") {
+		t.Fatal("the encrypt skipped the edit of the plaintext")
+	}
+	t.Setenv("SOPS_AGE_KEY", f.keep.String())
+	if err := f.c.Decrypt("/nonexistent-ssh-key"); err != nil {
+		t.Fatalf("%v\n%s", err, f.errOut.String())
+	}
+	if got := readFile(t, plain); got != "w" {
+		t.Errorf("the decrypt put back %q", got)
+	}
+}
+
+// add-key encrypts every file of the list that it checked, whatever the
+// times say. The run sets the plaintexts to now, so an .enc dated in the
+// future stays the newer file, and a sweep that skips it would leave it
+// without the new recipient. tests/unit/secrets_add_key_test.bats runs the
+// same case.
+func TestAddKeyRekeysAnEncDatedInTheFuture(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	enc := f.store + "/Secret.app.default.K.enc"
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(enc, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(); err != nil {
+		t.Fatalf("%v\n%s", err, f.errOut.String())
+	}
+	f.rekeyed("app", "v")
+	f.rekeyed("db", "w")
+	info, err := os.Stat(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().After(time.Now()) {
+		t.Errorf("the .enc has a time in the future: %v", info.ModTime())
 	}
 }
 

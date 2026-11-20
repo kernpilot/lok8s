@@ -50,6 +50,12 @@ func (c *Context) Init(sshKey string) error {
 
 	sopsConfig := c.sopsConfigPath()
 
+	// Before the first write (the config), and on a rerun with a config
+	// too: the .gitignore of the store that init writes (gitignoreOK).
+	if !c.gitignoreOK(c.initStorePath()) {
+		return ErrHandled
+	}
+
 	if fsutil.IsRegular(sopsConfig) {
 		raw, _ := os.ReadFile(sopsConfig)
 		// Check if this key is already present
@@ -97,7 +103,7 @@ creation_rules:
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return ensureGitignore(dir)
+	return c.ensureGitignore(dir)
 }
 
 // grepQF mirrors `grep -qF pattern file` on in-memory content: an empty
@@ -128,10 +134,11 @@ func grepQF(content, pattern string) bool {
 // new recipient would appear to be added while some secrets stayed unreadable
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
-// the ordering is part of the observable contract. A store of the context
-// that does not resolve, and an .enc of the store that the encrypt refuses
-// (a symlink, a directory, a FIFO, a socket or a device), are refused
-// BEFORE the write, so the run cannot stop half way at them.)
+// the ordering is part of the observable contract. A .gitignore of the
+// store that is not a regular file, a store of the context that does not
+// resolve, and an .enc of the store that the encrypt refuses (a symlink, a
+// directory, a FIFO, a socket or a device), are refused BEFORE the write,
+// so the run cannot stop half way at them.)
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -146,14 +153,27 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
+	// Before the first write (the lock file): the .gitignore of the store
+	// that the encrypt below writes (gitignoreOK). A store that does not
+	// resolve is refused below (encryptTargets), and StorePath names
+	// another store then.
+	if !c.gitignoreOK(c.StorePath()) {
+		return ErrHandled
+	}
+	// The file that the lock, the read and the write use, resolved once
+	// (lock.go).
+	dest, err := c.sopsConfigDest()
+	if err != nil {
+		return err
+	}
 	// One run at a time, from this read to the last encrypt (lock.go).
-	unlock, err := c.lockSopsConfig()
+	unlock, err := c.lockSopsConfig(dest)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	raw, err := os.ReadFile(sopsConfig)
+	raw, err := os.ReadFile(dest)
 	if err != nil {
 		return err
 	}
@@ -181,11 +201,14 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	}
 
 	// Append to every creation rule's age list (comma-separated, sops' own
-	// format). replaceFile writes through a symlinked .sops.yaml to its
-	// target, and the link stays a link.
+	// format). replaceFile writes dest, the file that a symlinked .sops.yaml
+	// names, and the link stays a link.
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
-	if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
+	if err := replaceFile(dest, []byte(edited)); err != nil {
+		if c.reportTempLeft(err) {
+			return ErrHandled
+		}
 		return err
 	}
 	if after < 1 {
@@ -388,9 +411,21 @@ func (c *Context) encryptFile(plaintext string) error {
 	if err := sopsEncryptFile(sopsConfig, plaintext, encPath); err != nil {
 		// The bash path surfaces the sops CLI's own stderr before the [error]
 		// line; the library error stands in for it here.
-		fmt.Fprintln(c.ErrOut, err)
+		if !c.reportTempLeft(err) {
+			fmt.Fprintln(c.ErrOut, err)
+		}
 		ui.ErrorTo(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
 		return ErrHandled
+	}
+	// An .enc with the same time as its plaintext gets a time of the kernel
+	// after it (nudgeNewer). A plaintext dated after now stays the newer
+	// file, with a warning (bash: the test after the rename in
+	// secrets::_encrypt_file): each encrypt writes its .enc again, and an
+	// edit of it is not lost. A plaintext that is newer than its .enc but
+	// not after now gets no warning: the clock of the kernel, which stamps
+	// the .enc, can be behind time.Now().
+	if !nudgeNewer(encPath, plaintext) {
+		ui.WarnTo(c.ErrOut, "%s has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)", c.rel(plaintext))
 	}
 	return nil
 }
@@ -399,7 +434,8 @@ func (c *Context) encryptFile(plaintext string) error {
 // followed), is a regular file or does not exist (bash:
 // secrets::_enc_path_ok). Any other lstat error refuses too, for example
 // ENAMETOOLONG for a name that is too long: the bash twin tells "does not
-// exist" from the other errors with secrets::_absent.
+// exist" from the other errors with secrets::_absent. ensureGitignore checks
+// the .gitignore of the store with it too.
 //
 // It checks the last part of the path only. The store directory and its
 // parent directories are trusted: they belong to the user who runs lo. A
@@ -464,7 +500,7 @@ func (c *Context) Encrypt(name string) error {
 	if name != "" {
 		prefix = "Secret." + name + "."
 	}
-	return c.encryptSweep(secretsDir, name, func() []string { return sweepPlaintexts(secretsDir, prefix) })
+	return c.encryptSweep(secretsDir, name, false, func() []string { return sweepPlaintexts(secretsDir, prefix) })
 }
 
 // encryptSweep is the sweep of Encrypt over the store secretsDir (bash:
@@ -473,14 +509,19 @@ func (c *Context) Encrypt(name string) error {
 // after the .gitignore write: Encrypt lists the store there, and AddKey
 // gives the list that it checked before its first write (encryptChecked).
 // name is for the message when nothing matched.
-func (c *Context) encryptSweep(secretsDir, name string, list func() []string) error {
+//
+// With force it encrypts every file of the list, also one whose .enc is
+// newer: the re-key of AddKey, where a new .enc must list the new recipient
+// whatever the times say (an .enc dated in the future stays newer than the
+// plaintexts that the run set to now).
+func (c *Context) encryptSweep(secretsDir, name string, force bool, list func() []string) error {
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
 
 	// Ensure .gitignore blocks plaintext before we create .enc files
-	if err := ensureGitignore(secretsDir); err != nil {
+	if err := c.ensureGitignore(secretsDir); err != nil {
 		return err
 	}
 
@@ -493,7 +534,7 @@ func (c *Context) encryptSweep(secretsDir, name string, list func() []string) er
 	for _, plaintext := range list() {
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
-		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
+		if !force && fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
 			skipped++
 			continue
 		}
@@ -630,7 +671,10 @@ func (c *Context) Decrypt(sshKey string) error {
 		if err := os.Chmod(plaintext, 0o600); err != nil {
 			return err
 		}
-		nudgeNewer(plaintext, encFile)
+		// An .enc dated in the future keeps the plaintext the older file,
+		// as in the bash twin, which sets no time. On an equal time the
+		// plaintext gets a time of the kernel after the .enc.
+		_ = nudgeNewer(plaintext, encFile)
 		count++
 	}
 

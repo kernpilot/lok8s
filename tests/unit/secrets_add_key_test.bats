@@ -157,11 +157,12 @@ _add() { # <key> [all] [skip_orphans]
 @test "without flock, add-key refuses before .sops.yaml is touched and makes no lock file" {
   # A run without the lock can undo another run's change. The PATH has the
   # tools of the run and no flock: a link to each one found on PATH (mv too:
-  # the check for a mv that takes -T comes before the lock).
+  # the check for a mv that takes -T comes before the lock; ls too: the check
+  # of the .gitignore before the lock looks up a path that is absent with it).
   _load
   local bin="${BATS_TEST_TMPDIR}/no-flock" tool path
   mkdir -p "${bin}"
-  for tool in sops grep sed cat mv; do
+  for tool in sops grep sed cat mv ls; do
     path="$(type -P "${tool}")" || continue
     ln -s "${path}" "${bin}/${tool}"
   done
@@ -473,6 +474,44 @@ _ls_then_missing() {
   [ "$(cat "${store}/Secret.db.default.KEY.enc")" = "stub-enc w" ]
 }
 
+@test "a .gitignore of the store that is a symlink is refused before any write, also for a recipient that is already there" {
+  # The check comes before the lock file, the .sops.yaml write and the
+  # touch of the plaintexts (Go twin: TestAddKeyRefusesABadGitignoreBeforeAnyWrite).
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" outside="${BATS_TEST_TMPDIR}/elsewhere/gitignore" key before
+  mkdir -p "${outside%/*}"
+  printf '# not the rules of lok8s\n' > "${outside}"
+  ln -s "${outside}" "${store}/.gitignore"
+  printf 'v' > "${store}/Secret.app.default.K"
+  touch -t 200001010000 "${store}/Secret.app.default.K"
+  for key in "${KEY_B}" "${KEY_A}"; do
+    before="$(_state "${PATH_BASE}" "${store}" "${outside%/*}")"
+    DOMAIN=a.dev run _add "${key}"
+    [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${store}/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again" ] || {
+      echo "$output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}" "${store}" "${outside%/*}")" = "${before}" ] || { echo "${key}: a write" >&2; return 1; }
+    [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "${key}: a lock file" >&2; return 1; }
+    [ ! -s "${ENCRYPT_RAN}" ]
+  done
+}
+
+@test "add-key encrypts every file of the list that it checked, also one whose .enc is dated in the future" {
+  # The run sets the plaintexts to now, so an .enc dated in the future stays
+  # the newer file, and a sweep that skips it would leave it without the new
+  # recipient (Go twin: TestAddKeyRekeysAnEncDatedInTheFuture).
+  _load_sweep
+  local store="${PATH_CLUSTERS}/a.dev/secrets"
+  printf 'v' > "${store}/Secret.app.default.K"
+  printf 'old' > "${store}/Secret.app.default.K.enc"
+  touch -t 209901010000 "${store}/Secret.app.default.K.enc"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.app.default.K" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  [ "$(cat "${store}/Secret.app.default.K.enc")" = "stub-enc v" ]
+  [ "$(stat -c %Y -- "${store}/Secret.app.default.K.enc")" -le "$(date +%s)" ] || { echo "the .enc has a time in the future" >&2; return 1; }
+}
+
 @test "a domain whose store does not resolve is refused before any write, with --all and without" {
   # secrets::path says why, and the last line says that .sops.yaml did not
   # change and what to do. Before, the run added the recipient, then
@@ -523,5 +562,53 @@ _ls_then_missing() {
   [ "$(readlink "${PATH_BASE}/.sops.yaml")" = "${conf}" ]
   cmp "${conf}" "${want}" || { cat "${conf}" >&2; return 1; }
   [ "$(stat -c %a "${conf}")" = 640 ] || { echo "mode $(stat -c %a "${conf}")" >&2; return 1; }
-  [ "$(ls -A "${conf%/*}")" = sops.yaml ] || { echo "a temp file was left: $(ls -A "${conf%/*}")" >&2; return 1; }
+  # No temp file is left, and the lock is beside the target, not the link.
+  [ "$(ls -A "${conf%/*}")" = $'sops.yaml\nsops.yaml.lock' ] || { echo "the dir of the target: $(ls -A "${conf%/*}")" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock beside the link" >&2; return 1; }
+}
+
+@test "a lock in a directory that it cannot write is refused, also for a recipient that is already there, and the line names the directory" {
+  # With a .sops.yaml link the lock goes beside the file that the link
+  # names (Go twin: TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened).
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  local dir="${BATS_TEST_TMPDIR}/conf" before
+  mkdir -p "${dir}"
+  mv -- "${PATH_BASE}/.sops.yaml" "${dir}/sops.yaml"
+  ln -s "${dir}/sops.yaml" "${PATH_BASE}/.sops.yaml"
+  dir="$(readlink -f -- "${dir}")"
+  before="$(cat "${dir}/sops.yaml")"
+  chmod 555 "${dir}"
+  DOMAIN=a.dev run _add "${KEY_A}"
+  chmod 755 "${dir}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock — the lock goes beside the file that .sops.yaml names, so lo needs write access to ${dir}; nothing was changed" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${dir}/sops.yaml")" = "${before}" ]
+  [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
+
+@test "add-key writes the .sops.yaml file that it locked, also when the link names another file after the open of the lock" {
+  # The link is resolved once. A link pointed at b.yaml between the open of
+  # the lock and the write does not move the write (Go twin:
+  # TestKeyCommandsWriteTheFileThatTheyLocked).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  local dir="${BATS_TEST_TMPDIR}/conf" before_b
+  mkdir -p "${dir}"
+  mv -- "${PATH_BASE}/.sops.yaml" "${dir}/a.yaml"
+  { echo '# b.yaml'; cat -- "${dir}/a.yaml"; } > "${dir}/b.yaml"
+  ln -s "${dir}/a.yaml" "${PATH_BASE}/.sops.yaml"
+  before_b="$(cat "${dir}/b.yaml")"
+  # secrets::_lock runs flock after the open of the lock file.
+  flock() { rm -f -- "${PATH_BASE}/.sops.yaml" && ln -s -- "${dir}/b.yaml" "${PATH_BASE}/.sops.yaml" && command flock "$@"; }
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${dir}/a.yaml" || { echo "the file beside the lock was not edited" >&2; cat "${dir}/a.yaml" >&2; return 1; }
+  [ "$(cat "${dir}/b.yaml")" = "${before_b}" ] || { echo "the write went to the file that the link names now" >&2; return 1; }
+  [ "$(readlink "${PATH_BASE}/.sops.yaml")" = "${dir}/b.yaml" ]
+  [ ! -e "${dir}/b.yaml.lock" ]
+  [ -s "${ENCRYPT_RAN}" ]
 }

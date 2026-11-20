@@ -63,6 +63,47 @@ func TestInitGolden(t *testing.T) {
 	}
 }
 
+// Init checks the .gitignore of the store before its first write, and a
+// rerun with a config checks it too (bash: tests/unit/secrets_test.bats). A
+// .gitignore that is a symlink is refused with one line, and nothing is
+// written: no .sops.yaml, and the file that the link names keeps its bytes.
+func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	_, pubPath := testSSHKeypair(t, c.Paths.Base)
+	outside := c.Paths.Base + "/elsewhere/gitignore"
+	write(t, outside, "# not the rules of lok8s\n")
+	mkdir(t, c.Paths.Base+"/.secrets")
+	if err := os.Symlink(outside, c.Paths.Base+"/.secrets/.gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
+	before := fileStates(t, c.Paths.Base)
+	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	sameStates(t, before, fileStates(t, c.Paths.Base))
+
+	// A rerun: the config exists and lists the key.
+	agePubkey, _, err := deriveAgePublicKey(pubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sopsRules(t, c, agePubkey)
+	out.Reset()
+	errOut.Reset()
+	before = fileStates(t, c.Paths.Base)
+	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
+		t.Fatalf("the rerun: want ErrHandled, got %v\n%s", err, out.String())
+	}
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("the rerun: stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	sameStates(t, before, fileStates(t, c.Paths.Base))
+}
+
 func TestInitMissingKey(t *testing.T) {
 	c, _, errOut := testEnv(t)
 	if err := c.Init(c.Paths.Base + "/nope"); !errors.Is(err, ErrHandled) {

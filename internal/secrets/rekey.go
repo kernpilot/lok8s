@@ -20,7 +20,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -302,10 +301,11 @@ func (c *Context) rel(path string) string {
 // to now and returns the count (bash: secrets::_touch_plaintexts). Encrypt
 // skips a file whose .enc is newer, and a recipient change does not touch the
 // plaintext, so without this nudge a re-key re-encrypts nothing: the manual
-// step these commands exist to remove.
+// step these commands exist to remove. The time is the one of the kernel
+// (touchNow, as the touch of the bash twin), not time.Now(): an .enc that
+// the encrypt writes right after is then never older than its plaintext.
 func touchPlaintexts(stores []string) (int, error) {
 	touched := 0
-	now := time.Now()
 	for _, store := range stores {
 		for _, base := range storeEntries(store, "Secret.") {
 			plain := store + "/" + base
@@ -314,7 +314,7 @@ func touchPlaintexts(stores []string) (int, error) {
 			if !fsutil.Exists(plain) || strings.HasSuffix(base, ".enc") {
 				continue
 			}
-			if err := os.Chtimes(plain, now, now); err != nil {
+			if err := touchNow(plain); err != nil {
 				return touched, err
 			}
 			touched++
@@ -359,9 +359,11 @@ func (l sweepList) encs() []string {
 // before its first write. It does not list the store again, so a file that
 // the run itself changes (a plaintext link to the .gitignore that the sweep
 // writes) is not added. Another process that writes to the store during the
-// run is outside the threat model.
+// run is outside the threat model. It encrypts every file of the list,
+// whatever the times say (force): an .enc dated in the future would
+// otherwise keep the old recipients.
 func (c *Context) encryptChecked(l sweepList) error {
-	return c.encryptSweep(l.dir, "", func() []string { return l.plains })
+	return c.encryptSweep(l.dir, "", true, func() []string { return l.plains })
 }
 
 // refuseEncPaths refuses each .enc of encs that the encrypt refuses
@@ -740,15 +742,15 @@ func ownIdentity(recipient string) string {
 // not. A run that prints no match warning has not read the others.
 const ownIdentityScope = "the check for your own decrypt identity reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files"
 
-// replaceFile writes content to path through a temp file in the same
-// directory and a rename (bash: secrets::_replace), so no reader sees half a
-// file. The new file keeps the mode of the old one. For a symlink it
-// replaces the file the link points to.
-func replaceFile(path string, content []byte) error {
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
-	}
+// replaceFile writes content to target, the file that sopsConfigDest
+// resolved, through a temp file in the same directory and a rename (bash:
+// secrets::_replace), so no reader sees half a file. The new file keeps the
+// mode of the old one. It does not resolve target again: the caller took the
+// lock beside it and read it. The rename replaces a link at target instead
+// of writing through it, and never moves the temp file into a directory. A
+// temp file that it cannot remove gives a *tempLeftError (removeTemp), and
+// the callers print it with reportTempLeft.
+func replaceFile(target string, content []byte) (err error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		return err
@@ -758,10 +760,9 @@ func replaceFile(path string, content []byte) error {
 		return err
 	}
 	name := tmp.Name()
-	done := false
 	defer func() {
-		if !done {
-			_ = os.Remove(name)
+		if err != nil {
+			err = removeTemp(err, name)
 		}
 	}()
 	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
@@ -778,7 +779,6 @@ func replaceFile(path string, content []byte) error {
 	if err := os.Rename(name, target); err != nil {
 		return err
 	}
-	done = true
 	return nil
 }
 
@@ -1072,13 +1072,19 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
-	unlock, err := c.lockSopsConfig()
+	// The file that the lock, the read and the write use, resolved once
+	// (lock.go).
+	dest, err := c.sopsConfigDest()
+	if err != nil {
+		return err
+	}
+	unlock, err := c.lockSopsConfig(dest)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	raw, err := os.ReadFile(sopsConfig)
+	raw, err := os.ReadFile(dest)
 	if err != nil {
 		return err
 	}
@@ -1216,7 +1222,10 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	// resumed by running the command again: the recipient is then in no
 	// rule, and every managed .enc is re-keyed again.
 	if rules > 0 {
-		if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
+		if err := replaceFile(dest, []byte(edited)); err != nil {
+			if c.reportTempLeft(err) {
+				return ErrHandled
+			}
 			return err
 		}
 		fmt.Fprintf(c.Out, "removed recipient from .sops.yaml (%d creation rule(s))\n", rules)

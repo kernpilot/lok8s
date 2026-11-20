@@ -7,13 +7,15 @@ package secrets
 // encrypt refuses too (a directory, a FIFO, a socket, a path that it cannot
 // look up), and its encrypt reads the list that it checked. A .sops.yaml
 // that is a symlink stays a link: both commands write the edit to its
-// target.
+// target. The encrypt refuses a .gitignore of the store that is a symlink or
+// a directory (tests/unit/secrets_test.bats runs the bash twin).
 // tests/unit/secrets_add_key_test.bats and
 // tests/unit/secrets_remove_key_test.bats run the same cases through the bash
 // twin.
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -244,7 +246,7 @@ func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) 
 			tc.make(t, f, enc)
 			// The lock file is there before the run, so that the listing of
 			// the project shows any other new entry.
-			write(t, f.c.sopsConfigLock(), "")
+			write(t, lockPath(t, f.c), "")
 			before := fileStates(t, f.c.Paths.Base)
 
 			if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -285,7 +287,7 @@ func TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite(t *testing.T) {
 	if _, err := os.Lstat(plain + ".enc"); err == nil || errors.Is(err, fs.ErrNotExist) {
 		t.Skipf("the lstat of a name of %d bytes does not fail with another error: %v", len(name)+len(".enc"), err)
 	}
-	write(t, f.c.sopsConfigLock(), "")
+	write(t, lockPath(t, f.c), "")
 	before := fileStates(t, f.c.Paths.Base)
 
 	if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -344,7 +346,7 @@ func TestAddKeyRefusesALinkAndADirectoryInOneStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	mkdir(t, db)
-	write(t, f.c.sopsConfigLock(), "")
+	write(t, lockPath(t, f.c), "")
 	before := fileStates(t, f.c.Paths.Base)
 
 	if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -413,7 +415,7 @@ func TestAddKeyRefusesAStoreThatDoesNotResolveBeforeAnyWrite(t *testing.T) {
 			f := newLinkFixture(t, "add-key")
 			mkdir(t, f.c.Paths.Clusters+"/c.dev")
 			f.c.Domain = "c.dev"
-			write(t, f.c.sopsConfigLock(), "")
+			write(t, lockPath(t, f.c), "")
 			before := fileStates(t, f.c.Paths.Base)
 			f.out.Reset()
 			f.errOut.Reset()
@@ -466,7 +468,7 @@ func TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey(t *testing.T) 
 	if strings.Contains(readFile(t, target), g) || !strings.Contains(readFile(t, f.store+"/Secret.db.default.K.enc"), g) {
 		t.Fatal("fixture: the link lists the recipient, or the .enc of db does not")
 	}
-	write(t, f.c.sopsConfigLock(), "")
+	write(t, lockPath(t, f.c), "")
 	before := fileStates(t, f.c.Paths.Base)
 
 	if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -478,6 +480,44 @@ func TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey(t *testing.T) 
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 	}
 	sameStates(t, before, fileStates(t, f.c.Paths.Base))
+}
+
+// A .gitignore of the store that is a symlink or a directory: the encrypt
+// refuses it before it reads or writes it, and encrypts nothing. The file
+// that the link names and every entry of the project stay as they were.
+func TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		make func(t *testing.T, gitignore, outside string)
+	}{
+		{"a symlink", func(t *testing.T, gitignore, outside string) {
+			write(t, outside, "# not the rules of lok8s\n")
+			if err := os.Symlink(outside, gitignore); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a directory", func(t *testing.T, gitignore, _ string) {
+			mkdir(t, gitignore)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			testAgeIdentity(t, c)
+			store := c.Paths.Base + "/.secrets"
+			write(t, store+"/Secret.app.default.K", "v")
+			tc.make(t, store+"/.gitignore", c.Paths.Base+"/elsewhere/gitignore")
+			before := fileStates(t, c.Paths.Base)
+
+			if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, c.Paths.Base))
+		})
+	}
 }
 
 // A .sops.yaml that is a symlink stays a link: both commands write the edit
@@ -522,10 +562,353 @@ func TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig(t *testing.T) {
 			if info.Mode().Perm() != 0o640 {
 				t.Errorf("the mode of the target was not kept: %v", info.Mode().Perm())
 			}
-			if entries, _ := os.ReadDir(filepath.Dir(conf)); len(entries) != 1 {
-				t.Errorf("a temp file was left: %d entries", len(entries))
+			// No temp file is left, and the lock is beside the target.
+			var names []string
+			entries, _ := os.ReadDir(filepath.Dir(conf))
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if strings.Join(names, " ") != "sops.yaml sops.yaml.lock" {
+				t.Errorf("the dir of the target holds %q, want the file and its lock", names)
+			}
+			if _, err := os.Lstat(f.c.sopsConfigPath() + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("a lock beside the link: %v", err)
 			}
 			f.rekeyed("app", "v")
+		})
+	}
+}
+
+// With a .sops.yaml link, the lock goes beside the file that the link names.
+// In a directory that lo cannot write, both commands refuse, also add-key of
+// a recipient that is already there and remove-key of a key in no rule. The
+// line names that directory and says where the lock goes; nothing changes.
+func TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			sopsRules(t, c, keyA)
+			dir := mkdir(t, c.Paths.Base+"/conf")
+			if err := os.Rename(c.sopsConfigPath(), dir+"/sops.yaml"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("conf/sops.yaml", c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			real, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			before := fileStates(t, c.Paths.Base)
+
+			if cmd == "add-key" {
+				err = c.AddKey(keyA, false, false)
+			} else {
+				err = c.RemoveKey(keyB, false, false)
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			want := "[error] cannot open the lock file " + real + "/sops.yaml.lock — the lock goes beside the file that .sops.yaml names, so lo needs write access to " + real + "; nothing was changed\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, c.Paths.Base))
+		})
+	}
+}
+
+// Two .sops.yaml links that name one file take one lock, beside that file,
+// also when one of them gets there through a second link: while a run
+// through the other link holds it, a run is refused and changes nothing, and
+// no lock is made beside a link. When the lock is free again, the same run
+// goes on and writes the file at the end of the chain.
+func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			f := newLinkFixture(t, cmd)
+			dir := t.TempDir()
+			conf := filepath.Join(dir, "sops.yaml")
+			if err := os.Rename(f.c.sopsConfigPath(), conf); err != nil {
+				t.Fatal(err)
+			}
+			mid := filepath.Join(dir, "mid.yaml")
+			if err := os.Symlink("sops.yaml", mid); err != nil {
+				t.Fatal(err)
+			}
+			other := *f.c
+			paths := *f.c.Paths
+			paths.Base = t.TempDir()
+			other.Paths = &paths
+			// .sops.yaml -> mid.yaml -> sops.yaml, and the other project's
+			// .sops.yaml -> sops.yaml.
+			if err := os.Symlink(mid, f.c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(conf, other.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(lockWaitEnv, "0")
+			dest, err := other.sopsConfigDest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			unlock, err := other.lockSopsConfig(dest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			released := false
+			defer func() {
+				if !released {
+					unlock()
+				}
+			}()
+			target, err := filepath.EvalSymlinks(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := fileStates(t, f.c.Paths.Base, other.Paths.Base, dir)
+
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+			}
+			want := "[error] " + target + ".lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
+			if f.errOut.String() != want || f.out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, f.c.Paths.Base, other.Paths.Base, dir))
+
+			unlock()
+			released = true
+			if err := f.run(); err != nil {
+				t.Fatalf("the run after the release: %v\n%s", err, f.errOut.String())
+			}
+			has := strings.Contains(readFile(t, conf), f.gone.Recipient().String())
+			if has != (cmd == "add-key") {
+				t.Errorf("%s after the release: the file at the end of the chain was not edited:\n%s", cmd, readFile(t, conf))
+			}
+			for _, p := range []string{f.c.sopsConfigPath(), mid} {
+				if info, err := os.Lstat(p); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+					t.Errorf("%s is no longer a link", p)
+				}
+			}
+			for _, p := range []string{f.c.sopsConfigPath(), other.sopsConfigPath(), mid} {
+				if _, err := os.Lstat(p + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("a lock beside the link %s: %v", p, err)
+				}
+			}
+			f.rekeyed("app", "v")
+		})
+	}
+}
+
+// The .gitignore write goes to a temp file in the store and a rename: a hard
+// link to the old file keeps its bytes, the new file has mode 0644, and no
+// temp file stays (bash: tests/unit/secrets_test.bats).
+func TestEnsureGitignoreReplacesAHardLink(t *testing.T) {
+	c, _, errOut := testEnv(t)
+	dir := mkdir(t, c.Paths.Base+"/.secrets")
+	outside := c.Paths.Base + "/elsewhere"
+	write(t, outside, "# old\n")
+	if err := os.Link(outside, dir+"/.gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ensureGitignore(dir); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if got := readFile(t, outside); got != "# old\n" {
+		t.Errorf("the hard link sees %q: the write went through it", got)
+	}
+	if got := readFile(t, dir+"/.gitignore"); got != gitignoreContent {
+		t.Errorf(".gitignore: %q", got)
+	}
+	info, err := os.Stat(dir + "/.gitignore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("mode %v, want 0644", info.Mode().Perm())
+	}
+	if left, _ := filepath.Glob(dir + "/..gitignore.tmp-*"); len(left) != 0 {
+		t.Errorf("temp files stay: %q", left)
+	}
+}
+
+// A .gitignore that it cannot write (the store is read-only): the old file
+// stays, and ensureGitignore prints the error and a last line that names the
+// file, and returns ErrHandled (bash: tests/unit/secrets_test.bats).
+func TestEnsureGitignoreReportsAWriteThatFails(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, _, errOut := testEnv(t)
+	dir := mkdir(t, c.Paths.Base+"/.secrets")
+	write(t, dir+"/.gitignore", "# old\n")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := c.ensureGitignore(dir); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+	if got := readFile(t, dir+"/.gitignore"); got != "# old\n" {
+		t.Errorf(".gitignore: %q", got)
+	}
+}
+
+// Init returns the refusal of its .gitignore write (bash:
+// tests/unit/secrets_test.bats).
+func TestInitReturnsAGitignoreWriteThatFails(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, _, errOut := testEnv(t)
+	_, pubPath := testSSHKeypair(t, c.Paths.Base)
+	dir := mkdir(t, c.Paths.Base+"/.secrets")
+	write(t, dir+"/.gitignore", "# old\n")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+}
+
+// add-key checks the .gitignore of the store before its first write, the
+// lock file included: a .gitignore that is a symlink is refused with one
+// line, also for a recipient that is already there, and nothing is
+// written (bash: tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run("present="+strconv.FormatBool(present), func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			gitignore := f.store + "/.gitignore"
+			if err := os.Remove(gitignore); err != nil {
+				t.Fatal(err)
+			}
+			outside := f.c.Paths.Base + "/elsewhere/gitignore"
+			write(t, outside, "# not the rules of lok8s\n")
+			if err := os.Symlink(outside, gitignore); err != nil {
+				t.Fatal(err)
+			}
+			if present {
+				sopsRules(t, f.c, f.keep.Recipient().String()+","+f.gone.Recipient().String())
+			}
+			before := fileStates(t, f.c.Paths.Base)
+
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+			}
+			want := "[error] " + f.c.rel(gitignore) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
+			if f.errOut.String() != want || f.out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, f.c.Paths.Base))
+		})
+	}
+}
+
+// The resolution of .sops.yaml fails closed: a link that names no file, or a
+// directory, is refused with one line, and no path comes back to lock
+// beside (bash: secrets::_config_dest).
+func TestSopsConfigDestRefusesALinkThatNamesNoRegularFile(t *testing.T) {
+	for _, target := range []string{"gone.yaml", "dir"} {
+		t.Run(target, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			mkdir(t, c.Paths.Base+"/dir")
+			if err := os.Symlink(target, c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			dest, err := c.sopsConfigDest()
+			if !errors.Is(err, ErrHandled) || dest != "" {
+				t.Fatalf("want ErrHandled and no path, got %q, %v", dest, err)
+			}
+			want := "[error] " + c.sopsConfigPath() + " does not resolve to a regular file — nothing was changed; run this command again\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+		})
+	}
+}
+
+// The lock and the write name one file. A run resolves the .sops.yaml link
+// once: when the link names another file while the run waits for the lock,
+// the run still reads and writes the file beside the lock that it took, and
+// the other file keeps its bytes. The re-key reads the creation rules
+// through the link, so b.yaml holds the rules of the edit already (plus a
+// comment that the edit of a.yaml does not have).
+func TestKeyCommandsWriteTheFileThatTheyLocked(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			f := newLinkFixture(t, cmd)
+			dir := mkdir(t, f.c.Paths.Base+"/conf")
+			a, b := dir+"/a.yaml", dir+"/b.yaml"
+			if err := os.Rename(f.c.sopsConfigPath(), a); err != nil {
+				t.Fatal(err)
+			}
+			rules := strings.Replace(readFile(t, a), ","+f.gone.Recipient().String(), "", 1)
+			write(t, b, "# b.yaml\n"+rules)
+			if err := os.Symlink("conf/a.yaml", f.c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(lockWaitEnv, "5")
+			held, err := os.OpenFile(a+".lock", os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = held.Close() })
+			if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+			// The first wait for the lock points the link at b.yaml, then
+			// frees the lock beside a.yaml.
+			waits := 0
+			saved := lockSleep
+			t.Cleanup(func() { lockSleep = saved })
+			lockSleep = func(context.Context, time.Duration) error {
+				waits++
+				if waits == 1 {
+					if err := os.Remove(f.c.sopsConfigPath()); err != nil {
+						t.Error(err)
+					}
+					if err := os.Symlink("conf/b.yaml", f.c.sopsConfigPath()); err != nil {
+						t.Error(err)
+					}
+					if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+						t.Error(err)
+					}
+				}
+				return nil
+			}
+			wantB := readFile(t, b)
+
+			if err := f.run(); err != nil {
+				t.Fatalf("%v\n%s", err, f.errOut.String())
+			}
+			if waits == 0 {
+				t.Fatal("the run did not wait for the lock")
+			}
+			if got := strings.Contains(readFile(t, a), f.gone.Recipient().String()); got != (cmd == "add-key") {
+				t.Errorf("the file beside the lock was not edited:\n%s", readFile(t, a))
+			}
+			if got := readFile(t, b); got != wantB {
+				t.Errorf("the file that the link names after the lock was written:\n%s", got)
+			}
+			if target, err := os.Readlink(f.c.sopsConfigPath()); err != nil || target != "conf/b.yaml" {
+				t.Errorf("the link names %q (%v), want conf/b.yaml", target, err)
+			}
+			if _, err := os.Lstat(b + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("a lock beside b.yaml: %v", err)
+			}
 		})
 	}
 }

@@ -150,8 +150,8 @@ jobs:
         # step fails before bats runs when sops or ssh-to-age resolves to
         # another file. The TAP output goes through tee into a log, under
         # pipefail (as in "Provision & register" of spinup.yml), so a failed
-        # test fails the step. The step also fails when the plan is not 1..7
-        # (the seven tagged tests) or when a test skipped.
+        # test fails the step. The step also fails when the plan is not 1..14
+        # (the fourteen tagged tests) or when a test skipped.
         run: |
           set -euo pipefail
           export PATH="${GITHUB_WORKSPACE}/.bin:${HOME}/.local/bin:${PATH}"
@@ -167,7 +167,7 @@ jobs:
           log="$(mktemp)"
           bats --filter-tags real-sops tests/unit/ | tee "${log}"
           plan="$(head -n 1 "${log}")"
-          if [[ "${plan}" != "1..7" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..7"; exit 1; fi
+          if [[ "${plan}" != "1..14" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..14"; exit 1; fi
           if grep -q '# skip' "${log}"; then echo "::error::a real-sops bats test skipped"; exit 1; fi
 
       - name: CRD drift gate (lo crds check)

@@ -280,12 +280,23 @@ func TestRemoveKeyFailsClosedOnWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// lockPath is the lock that a run of c takes: beside .sops.yaml, or beside
+// the file that a .sops.yaml link names (sopsConfigDest).
+func lockPath(t *testing.T, c *Context) string {
+	t.Helper()
+	dest, err := resolveConfig(c.sopsConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dest + ".lock"
+}
+
 // holdLock takes the lock of .sops.yaml as another run would, and makes the
 // command under test give up at once.
 func holdLock(t *testing.T, c *Context) {
 	t.Helper()
 	t.Setenv(lockWaitEnv, "0")
-	f, err := os.OpenFile(c.sopsConfigLock(), os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(lockPath(t, c), os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +330,7 @@ func TestKeyCommandsRefuseWhileTheLockIsHeld(t *testing.T) {
 			if err := tc.run(c); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v", err)
 			}
-			want := "[error] " + c.sopsConfigLock() + " is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
+			want := "[error] " + lockPath(t, c) + " is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -341,8 +352,55 @@ func TestKeyCommandsReleaseTheLock(t *testing.T) {
 	}
 }
 
+// The lock can sit in the directory of the file that a .sops.yaml link
+// names, where another user can write. A lock path that is a symlink or a
+// directory is refused before the open: both commands print the line of the
+// bash twin, change nothing, and the file that the link names keeps its
+// bytes.
+func TestKeyCommandsRefuseALockThatIsNotARegularFile(t *testing.T) {
+	for _, kind := range []string{"a symlink", "a directory"} {
+		for _, cmd := range []string{"add-key", "remove-key"} {
+			t.Run(kind+"/"+cmd, func(t *testing.T) {
+				c, out, errOut := testEnv(t)
+				c.Domain = "a.dev"
+				sopsRules(t, c, keyA+","+keyB)
+				if cmd == "add-key" {
+					sopsRules(t, c, keyA)
+				}
+				lock := c.sopsConfigPath() + ".lock"
+				victim := c.Paths.Base + "/elsewhere/victim"
+				write(t, victim, "the bytes of another file\n")
+				if kind == "a symlink" {
+					if err := os.Symlink(victim, lock); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					mkdir(t, lock)
+				}
+				before := fileStates(t, c.Paths.Base)
+
+				var err error
+				if cmd == "add-key" {
+					err = c.AddKey(keyB, false, false)
+				} else {
+					err = c.RemoveKey(keyB, false, false)
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				if errOut.String() != want || out.String() != "" {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+				}
+				sameStates(t, before, fileStates(t, c.Paths.Base))
+			})
+		}
+	}
+}
+
 // The replace keeps the mode, leaves a hard link to the old file with the
-// old content, and replaces the target of a symlink, not the link.
+// old content, and, given the path that resolveConfig makes of a symlink,
+// replaces the target of the link, not the link.
 func TestReplaceFile(t *testing.T) {
 	dir := t.TempDir()
 	target := dir + "/target.yaml"
@@ -357,7 +415,11 @@ func TestReplaceFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := replaceFile(dir+"/link", []byte("new\n")); err != nil {
+	dest, err := resolveConfig(dir + "/link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFile(dest, []byte("new\n")); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, target); got != "new\n" {
@@ -482,12 +544,16 @@ func treeBytes(t *testing.T, dir string) map[string]string {
 // value of the .enc. A twin that differs, a file that the caller cannot
 // decrypt and a twin that it cannot read are refused by their path, and
 // .sops.yaml and every file of the store stay byte-equal. No value is
-// printed: stdout and stderr are pinned whole.
+// printed: stdout and stderr are pinned whole. An identity that is in no
+// rule is read and does not decrypt (not the error of no identity), also for
+// an empty twin: an empty failed decrypt is not a twin that matches.
 // tests/unit/secrets_remove_key_test.bats runs the same cases.
 func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		caller  bool // the caller holds the identity that stays
+		wrong   bool // the caller holds an identity that is in no rule
+		empty   bool // the twin of app is empty
 		differs bool // the twin gets another value, newer than its .enc
 		unread  bool // the twin gets mode 000
 		want    string
@@ -500,6 +566,13 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 		},
 		{
 			name: "a file that the caller cannot decrypt",
+			want: "[error] cannot decrypt clusters/a.dev/secrets/Secret.app.default.K.enc to compare it with its twin\n" +
+				"[error] cannot decrypt clusters/a.dev/secrets/Secret.other.default.K.enc to compare it with its twin\n",
+		},
+		{
+			name:  "an identity that does not decrypt the files, with an empty twin",
+			wrong: true,
+			empty: true,
 			want: "[error] cannot decrypt clusters/a.dev/secrets/Secret.app.default.K.enc to compare it with its twin\n" +
 				"[error] cannot decrypt clusters/a.dev/secrets/Secret.other.default.K.enc to compare it with its twin\n",
 		},
@@ -521,12 +594,30 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 			sopsRules(t, c, k+","+g)
 			a := c.Paths.Clusters + "/a.dev/secrets"
 			app, other := a+"/Secret.app.default.K", a+"/Secret.other.default.K"
-			write(t, app, "v")
+			value := "v"
+			if tc.empty {
+				value = ""
+			}
+			write(t, app, value)
 			write(t, other, "w")
 			encryptStore(t, c, "a.dev", out, errOut)
 			freshen(t, app, other)
 			if tc.caller {
 				callerIdentity(t, keep)
+			}
+			if tc.wrong {
+				callerIdentity(t, newAgeIdentity(t))
+			}
+			// The marker of the identity: an identity that is read and does
+			// not decrypt, or no identity.
+			if !tc.caller {
+				mark := ErrNoIdentity
+				if tc.wrong {
+					mark = ErrDecryptEnc
+				}
+				if _, err := DecryptEntry(app + ".enc"); !errors.Is(err, mark) {
+					t.Fatalf("the identity: want %v, got %v", mark, err)
+				}
 			}
 			if tc.differs {
 				write(t, app, "x")
@@ -553,7 +644,7 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 			if !maps.Equal(treeBytes(t, c.Paths.Clusters), before) {
 				t.Error("a file of the store changed before the refusal")
 			}
-			if !opens(t, app+".enc", gone, "v") || !opens(t, other+".enc", gone, "w") {
+			if !opens(t, app+".enc", gone, value) || !opens(t, other+".enc", gone, "w") {
 				t.Error("an .enc was re-keyed before the refusal")
 			}
 		})

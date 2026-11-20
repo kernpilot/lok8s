@@ -31,6 +31,7 @@ require_tools() {
   done
 }
 
+# bats test_tags=real-sops
 @test "secrets: SOPS/age encrypt → decrypt round-trips a value" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -59,6 +60,7 @@ require_tools() {
 # it (the recreate: "Decrypted 71" of 103, 32 skipped without a word). Now it
 # compares the kept plaintext with the decrypted .enc, names each one that
 # differs (never its value), counts both kinds in the summary and exits 0.
+# bats test_tags=real-sops
 @test "secrets decrypt: a kept newer plaintext is compared with its .enc" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -146,6 +148,7 @@ require_tools() {
 
 # A kept plaintext whose .enc this key cannot decrypt fails the run, the same
 # way a decrypt of a missing plaintext does.
+# bats test_tags=real-sops
 @test "secrets decrypt: the compare fails on an .enc the key cannot decrypt" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -163,6 +166,7 @@ require_tools() {
   assert_line '[error] Failed to decrypt Secret.app.default.K.enc'
 }
 
+# bats test_tags=real-sops
 @test "secrets: encrypt writes a .secrets/.gitignore that commits only .enc" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -178,6 +182,192 @@ require_tools() {
   assert_success
   run cat "${PATH_SECRETS}/.gitignore"
   assert_output --partial '!Secret.*.enc'
+}
+
+# A .gitignore of the store that is a symlink or a directory: encrypt refuses
+# it before it reads or writes it, and stops. The file that the link names
+# and the store stay as they were: type, link, time and bytes of each entry
+# (Go twin: TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile). No
+# crypto tools: the encrypt of a file is a stub that logs it.
+_gitignore_refused() { # <link|dir>
+  local outside="${BATS_TEST_TMPDIR}/elsewhere" log="${BATS_TEST_TMPDIR}/encrypt.log" before
+  mkdir -p "${outside}"
+  : > "${log}"
+  secrets::_encrypt_file() { echo "${1}" >> "${log}"; }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  case "${1}" in
+    link) printf '# not the rules of lok8s\n' > "${outside}/gitignore"
+          ln -s "${outside}/gitignore" "${PATH_SECRETS}/.gitignore" ;;
+    dir) mkdir "${PATH_SECRETS}/.gitignore" ;;
+  esac
+  _states() {
+    find "${PATH_SECRETS}" "${outside}" -printf '%y %p %l %T@\n' | LC_ALL=C sort
+    find "${PATH_SECRETS}" "${outside}" -type f -exec cksum {} + | LC_ALL=C sort
+  }
+  before="$(_states)"
+  run secrets::encrypt
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again" ] || {
+    echo "$output" >&2; return 1; }
+  [ ! -s "${log}" ] || { echo "encrypted: $(cat "${log}")" >&2; return 1; }
+  [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
+}
+
+# The .gitignore write goes to a temp file in the store and a rename: a hard
+# link to the old file keeps its bytes, the new file has mode 0644, and no
+# temp file stays (Go twin: TestEnsureGitignoreReplacesAHardLink).
+@test "secrets: the .gitignore write replaces a hard link instead of writing through it" {
+  local outside="${BATS_TEST_TMPDIR}/elsewhere"
+  printf '# old\n' > "${outside}"
+  ln "${outside}" "${PATH_SECRETS}/.gitignore"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${outside}")" = '# old' ] || { echo "the write went through the hard link" >&2; return 1; }
+  grep -qxF '!Secret.*.enc' "${PATH_SECRETS}/.gitignore"
+  [ ! "${outside}" -ef "${PATH_SECRETS}/.gitignore" ]
+  [ "$(stat -c %a "${PATH_SECRETS}/.gitignore")" = 644 ]
+  [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ]
+}
+
+# A .gitignore that it cannot write (the store is read-only): status 1, the
+# last line names the file, and the old file stays (Go twin:
+# TestEnsureGitignoreReportsAWriteThatFails).
+@test "secrets: a .gitignore write that fails gives status 1 and keeps the old file" {
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  printf '# old\n' > "${PATH_SECRETS}/.gitignore"
+  chmod 555 "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  chmod 755 "${PATH_SECRETS}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
+}
+
+# init returns the status of its .gitignore write (Go twin:
+# TestInitReturnsAGitignoreWriteThatFails). ssh-to-age and sops are
+# functions: no crypto tools.
+@test "secrets init: a .gitignore write that fails gives status 1" {
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  sops() { :; }
+  printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  printf '# old\n' > "${PATH_SECRETS}/.gitignore"
+  chmod 555 "${PATH_SECRETS}"
+  run secrets::init
+  chmod 755 "${PATH_SECRETS}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
+}
+
+# A write that fails and whose temp file cannot be removed names the temp
+# file with the same line in the three writes through a temp file: the
+# .gitignore, the .sops.yaml and an .enc (Go twin:
+# TestWriteReplacingReportsATempFileItCannotRemove). The functions below
+# fail for a temp file only, so the teardown removes the rest.
+@test "secrets: a temp file that a failed write cannot remove is named, with the same line in each write" {
+  rm() { case "${*: -1}" in *.tmp-*) echo "rm: cannot remove '${*: -1}'" >&2; return 1 ;; esac; command rm "$@"; }
+  chmod() { case "${*: -1}" in *.tmp-*) return 1 ;; esac; command chmod "$@"; }
+  cp() { case "${*: -1}" in *.tmp-*) return 1 ;; esac; command cp "$@"; }
+  sops() { return 1; }
+  local re='\[error\] cannot remove the temp file '
+
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE "${re}\.secrets/\.\.gitignore\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  run secrets::_replace "${PATH_BASE}/.sops.yaml" 'new'
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE "${re}\.sops\.yaml\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_BASE}/.sops.yaml")" = 'creation_rules: []' ]
+
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  run secrets::_encrypt_file "${PATH_SECRETS}/Secret.app.default.K"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE "${re}\.secrets/\.Secret\.app\.default\.K\.enc\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] Failed to encrypt Secret.app.default.K" ] || { echo "$output" >&2; return 1; }
+}
+
+# An .enc that is older than its plaintext, with a plaintext that is not
+# after now, is no time in the future: the clock that stamps a write can be
+# behind the time of the system, so an .enc written after its plaintext can
+# get the older time. The encrypt prints no warning (Go twin:
+# TestNudgeNewerWarnsOnlyForATimeAfterNow). The sops function dates the .enc
+# one second before the plaintext, and the plaintext is one minute old: the
+# test sets each time, so the result does not depend on the clock.
+@test "secrets encrypt: an .enc older than a plaintext that is not after now gets no warning" {
+  sops() {
+    [ "${8}" = --output ] || return 1
+    printf 'enc' > "${9}" && touch -r "${10}" -d '-1 second' -- "${9}"
+  }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  local plain="${PATH_SECRETS}/Secret.app.default.K"
+  printf 'v' > "${plain}"
+  touch -d '-1 minute' -- "${plain}"
+  run secrets::_encrypt_file "${plain}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "${output}" != *'[warn]'* ]] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${plain}.enc")" = enc ]
+  [[ "${plain}" -nt "${plain}.enc" ]] || { echo "fixture: the .enc is not the older file" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '.*.now-*')" ] || { echo "a temp file of the time check stayed" >&2; return 1; }
+}
+
+# A plaintext dated after now gets the warning, and the encrypt ends with
+# status 0 (Go twin: TestNudgeNewerWarnsOnlyForATimeAfterNow).
+@test "secrets encrypt: a plaintext dated after now gets the future-time warning" {
+  sops() {
+    [ "${8}" = --output ] || return 1
+    printf 'enc' > "${9}"
+  }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  local plain="${PATH_SECRETS}/Secret.app.default.K" line
+  line="[warn] .secrets/Secret.app.default.K has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)"
+  printf 'v' > "${plain}"
+  touch -d '+1 hour' -- "${plain}"
+  run secrets::_encrypt_file "${plain}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output}" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '.*.now-*')" ] || { echo "a temp file of the time check stayed" >&2; return 1; }
+}
+
+# init checks the .gitignore of the store before its first write, and a
+# rerun with a config checks it too. Its status is the refusal's: 1, no
+# .sops.yaml, and the file that the link names keeps its bytes (Go twin:
+# TestInitRefusesABadGitignoreBeforeAnyWrite). ssh-to-age and sops are
+# functions: no crypto tools.
+@test "secrets init: a .gitignore that is a symlink is refused before the config is written, also on a rerun" {
+  ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  sops() { :; }
+  printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  local outside="${BATS_TEST_TMPDIR}/elsewhere/gitignore" line
+  mkdir -p "${outside%/*}"
+  printf '# not the rules of lok8s\n' > "${outside}"
+  ln -s "${outside}" "${PATH_SECRETS}/.gitignore"
+  line="[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote the config" >&2; return 1; }
+  [ "$(cat "${outside}")" = '# not the rules of lok8s' ]
+
+  printf "creation_rules:\n  - path_regex: 'Secret\\\\..*'\n    age: '%s'\n" "$(ssh-to-age)" > "${PATH_BASE}/.sops.yaml"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "the rerun: status $status: $output" >&2; return 1; }
+  [ "$output" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${outside}")" = '# not the rules of lok8s' ]
+}
+
+@test "secrets encrypt: a .gitignore that is a symlink is refused, and the file it names is not written" {
+  _gitignore_refused link
+}
+
+@test "secrets encrypt: a .gitignore that is a directory is refused" {
+  _gitignore_refused dir
 }
 
 # --- flat-store shadow / drift detection (no crypto tools needed) -------------
