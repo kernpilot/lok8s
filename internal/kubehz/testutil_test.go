@@ -288,6 +288,9 @@ type exitErr int
 
 func (e exitErr) Error() string { return "exit status " + strconv.Itoa(int(e)) }
 
+// ExitCode is the status that execx.ExitCode reads.
+func (e exitErr) ExitCode() int { return int(e) }
+
 func loSpec(h *harness) string {
 	return h.writeSpec("test.kubehz.dev", "kind: Lo\nspec:\n  cluster:\n    domain: test.kubehz.dev\n")
 }
