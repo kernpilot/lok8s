@@ -74,19 +74,52 @@ export PATH="${STUBS}:${PATH}"
 # is rewritten, and only a whole line that matches the exact divergence of
 # this case, so the Go stderr is compared as it is:
 #   - no binding context (-): the bash `set -u` abort names the script line;
-#   - an unreadable file: Go adds the error of os.ReadFile;
-#   - a truncated document: bash prints where jq's parser stopped, Go names
-#     the file and the error of encoding/json.
+#   - an unreadable file (only the case of OPEN_CASE_FILE): Go adds the
+#     error of os.ReadFile;
+#   - a truncated document (only the case of PARSE_CASE_FILE): bash prints
+#     where jq's parser stopped, Go names the file and the error of
+#     encoding/json.
+# The path goes into the sed program as a literal: sed_quote escapes it
+# for the pattern (each ERE metacharacter and the # delimiter) and for the
+# replacement (\, & and #). A newline in the path ends the s command: sed
+# then fails, and the case fails with it (fail closed). The exit status is
+# the status of sed, or of cat for a case without a rewrite.
+OPEN_CASE_FILE="${WORK}/does-not-exist.json"
+PARSE_CASE_FILE="${WORK}/capi-broken.json"
 err_as_go() {
-  local hook="${1}" file="${2/#"${WORK}"/WORK}"
-  local file_re="${file//./\\.}"
+  local hook="${1}" file="${2/#"${WORK}"/WORK}" file_re file_rep
   if [[ "${2}" == "-" ]]; then
     sed -E "s#^HOOKS/${hook}\\.sh: line [0-9]+: BINDING_CONTEXT_PATH: unbound variable\$#error: BINDING_CONTEXT_PATH: unbound variable#"
-  else
-    sed -E \
-      -e "s#^jq: error: Could not open file ${file_re}: No such file or directory\$#jq: error: Could not open file ${file}: open ${file}: no such file or directory#" \
-      -e "s#^jq: parse error: Unfinished JSON term at EOF at line [0-9]+, column [0-9]+\$#jq: parse error: ${file}: unexpected end of JSON input#"
+    return
   fi
+  file_re="$(sed_quote '\.[](){}*+?^$|#' "${file}")"
+  file_rep="$(sed_quote '\&#' "${file}")"
+  local prog=()
+  if [[ "${2}" == "${OPEN_CASE_FILE}" ]]; then
+    prog+=(-e "s#^jq: error: Could not open file ${file_re}: No such file or directory\$#jq: error: Could not open file ${file_rep}: open ${file_rep}: no such file or directory#")
+  fi
+  if [[ "${2}" == "${PARSE_CASE_FILE}" ]]; then
+    prog+=(-e "s#^jq: parse error: Unfinished JSON term at EOF at line [0-9]+, column [0-9]+\$#jq: parse error: ${file_rep}: unexpected end of JSON input#")
+  fi
+  if (( ${#prog[@]} == 0 )); then
+    cat
+    return
+  fi
+  sed -E "${prog[@]}"
+}
+
+# sed_quote <chars> <text>: <text> with a backslash before each character
+# that is in <chars>.
+sed_quote() {
+  local chars="${1}" text="${2}" out="" c i
+  for (( i = 0; i < ${#text}; i++ )); do
+    c="${text:i:1}"
+    if [[ "${chars}" == *"${c}"* ]]; then
+      out+="\\"
+    fi
+    out+="${c}"
+  done
+  printf '%s' "${out}"
 }
 
 # run_hook <impl> <hook> <binding-file-or-> [args...] — runs one
@@ -116,8 +149,8 @@ run_hook() {
 }
 
 # check <label> <hook> <binding-file-or-> [args...] — both implementations,
-# diff rc, stdout, stderr (the bash side through err_as_go) and the stub
-# call log.
+# diff rc, stdout, stderr (the bash side through err_as_go, into
+# bash.err.go; a failed rewrite fails the case) and the stub call log.
 check() {
   local label="${1}" hook="${2}" binding="${3}"; shift 3
   run_hook bash "${hook}" "${binding}" "$@"
@@ -132,9 +165,15 @@ check() {
   if [[ -n "${diff_out}" ]]; then
     echo "FAIL: ${hook} ${label} — stdout differs:"; echo "${diff_out}" | head -20 | sed 's/^/  /'; ok=0
   fi
-  diff_out="$(diff <(err_as_go "${hook}" "${binding}" < "${WORK}/bash.err") "${WORK}/go.err" || true)"
-  if [[ -n "${diff_out}" ]]; then
-    echo "FAIL: ${hook} ${label} — stderr differs:"; echo "${diff_out}" | head -20 | sed 's/^/  /'; ok=0
+  local err_rc=0
+  err_as_go "${hook}" "${binding}" < "${WORK}/bash.err" > "${WORK}/bash.err.go" || err_rc=$?
+  if (( err_rc != 0 )); then
+    echo "FAIL: ${hook} ${label} — the stderr rewrite failed (sed rc ${err_rc})"; ok=0
+  else
+    diff_out="$(diff "${WORK}/bash.err.go" "${WORK}/go.err" || true)"
+    if [[ -n "${diff_out}" ]]; then
+      echo "FAIL: ${hook} ${label} — stderr differs:"; echo "${diff_out}" | head -20 | sed 's/^/  /'; ok=0
+    fi
   fi
   diff_out="$(diff "${WORK}/bash.klog" "${WORK}/go.klog" || true)"
   if [[ -n "${diff_out}" ]]; then
@@ -175,7 +214,9 @@ for hook in lo-reconcile capi-reconcile capi-status-sync; do
   fi
   # trigger without a binding context: exit 1 in both (message allowed to differ)
   check "no BINDING_CONTEXT_PATH" "${hook}" -
-  check "unreadable BINDING_CONTEXT_PATH" "${hook}" "${WORK}/does-not-exist.json"
+  # The binding file of this case is OPEN_CASE_FILE: only here does
+  # err_as_go rewrite the open error.
+  check "unreadable BINDING_CONTEXT_PATH" "${hook}" "${OPEN_CASE_FILE}"
   check "empty batch" "${hook}" "$(binding empty '[]')"
 done
 
@@ -201,6 +242,8 @@ expect_klog "kubectl apply -f -"
 expect_klog "name: prod"
 check "aws render + apply" capi-reconcile "$(binding capi-aws '[{"object":{"metadata":{"name":"aws1"},"spec":{"cluster":{"domain":"a.example.com"},"aws":{"region":"eu-central-1"},"workers":{"w":{"replicas":1}}}}}]')"
 expect_klog 'AWSCluster'
+# The binding file of this case is PARSE_CASE_FILE: only here does
+# err_as_go rewrite the parse error.
 check "parse error in the binding context (jq rc 5)" capi-reconcile "$(binding capi-broken '[')"
 check "two CRs in one batch (export leak)" capi-reconcile "$(binding capi-two "[{\"object\":${CAPI_CR}},{\"object\":{\"metadata\":{\"name\":\"second\"},\"spec\":{\"cluster\":{\"domain\":\"s.example.com\"},\"hcloud\":{\"region\":\"nbg1\"}}}}]")"
 rm -rf "${HOOKS}/capi-templates"
