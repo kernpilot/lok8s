@@ -458,9 +458,11 @@ YAML
   kubectl() { return 1; }
   export -f kubectl
   # The read runs under timeout(1) (capi::_status_bounded), and timeout
-  # runs a program, not a function. This stand-in drops its three options
-  # and runs the rest, so the read reaches the kubectl stub above.
-  timeout() { shift 3; "$@"; }
+  # runs a program, not a function. This stand-in logs its arguments, drops
+  # its three options and runs the rest, so the read reaches the kubectl
+  # stub above.
+  TIMEOUT_LOG="${BATS_TEST_TMPDIR}/timeout.log"
+  timeout() { echo "timeout $*" >> "${TIMEOUT_LOG}"; shift 3; "$@"; }
   export -f timeout
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
@@ -468,6 +470,9 @@ YAML
   run driver::status "test.lok8s.dev"
   assert_success
   assert_output "NotFound"
+  # The bound and the grace of the read: 10 s, then SIGKILL 2 s later.
+  run cat "${TIMEOUT_LOG}"
+  assert_output "timeout -k 2 10 kubectl get cluster test-prod --kubeconfig ${PATH_BASE}/.kubeconfig/mgmt.lok8s.dev.yaml -o jsonpath={.status.phase}"
 }
 
 @test "capi.sh driver::status returns Unknown for SaaS mode" {

@@ -37,17 +37,21 @@ YAML
 
 teardown() { teardown_tmpdir; }
 
-# capi_kubectl_stub <phase|hang>: a real kubectl program in a directory of
-# this test, put first on PATH. It writes its arguments to KUBECTL_LOG. With
-# "phase" it prints Provisioned. With "hang" it sleeps for 10 s (a read
-# that does not end). The test checks that kubectl is the stub, so no other
-# kubectl can run.
+# capi_kubectl_stub <phase|stdin|hang>: a real kubectl program in a
+# directory of this test, put first on PATH. It writes its arguments to
+# KUBECTL_LOG. With "phase" it prints Provisioned. With "stdin" it also
+# logs the first line of its stdin ("stdin=empty" for none), then prints
+# Provisioned. With "hang" it sleeps for 10 s (a read that does not end).
+# The test checks that kubectl is the stub, so no other kubectl can run.
 capi_kubectl_stub() {
   local bin="${BATS_TEST_TMPDIR}/bin"
   mkdir -p "${bin}"
   {
     printf '#!/bin/sh\nPATH=/usr/bin:/bin\necho "$*" >> "%s"\n' "${KUBECTL_LOG}"
-    if [[ "${1}" == phase ]]; then
+    if [[ "${1}" == stdin ]]; then
+      printf 'IFS= read -r line || line=empty\necho "stdin=${line}" >> "%s"\n' "${KUBECTL_LOG}"
+    fi
+    if [[ "${1}" == phase || "${1}" == stdin ]]; then
       printf 'printf Provisioned\n'
     else
       printf 'exec sleep 10\n'
@@ -83,6 +87,22 @@ _capi_status_read() {
   assert_output "Provisioned"
   run cat "${KUBECTL_LOG}"
   assert_output "$(_capi_status_read)"
+}
+
+# The read gets an empty stdin (</dev/null): timeout runs kubectl in a
+# process group that is not the foreground group of a terminal, so a
+# credential plugin that reads the terminal would stop until the bound. The
+# stdin of driver::status is a file with a line in it, as a terminal with
+# typed input (Go twin: the stdin check of TestStatusReadIsBounded).
+@test "capi driver::status gives the management read an empty stdin" {
+  command -v timeout &>/dev/null || skip "timeout(1) not available"
+  capi_kubectl_stub stdin
+  printf 'typed\n' > "${BATS_TEST_TMPDIR}/typed"
+  run driver::status test.dev < "${BATS_TEST_TMPDIR}/typed"
+  assert_success
+  assert_output "Provisioned"
+  run cat "${KUBECTL_LOG}"
+  assert_output "$(_capi_status_read)"$'\nstdin=empty'
 }
 
 # Without timeout on PATH, the read runs with no bound, as before. PATH is
