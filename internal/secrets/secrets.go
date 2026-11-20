@@ -223,15 +223,21 @@ var writeGitignore = func(w io.Writer) error {
 // storeEntries lists the store's file names in bash glob order (byte-sorted),
 // filtered to those with the given prefix. Only names are filtered here;
 // callers apply their own regular-file / .enc checks like the bash loops do.
+// It drops the error of the directory read. AddKey does not use it: each of
+// its listings checks the error (storeNames).
 func storeEntries(dir, prefix string) []string {
 	names, _ := storeNames(dir, prefix)
 	return names
 }
 
+// readDir reads a directory for storeNames (a seam: a test makes a listing
+// of the store fail).
+var readDir = os.ReadDir
+
 // storeNames is storeEntries with the error of the directory read, for a
 // caller that must fail closed when it cannot list the store.
 func storeNames(dir, prefix string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
 		return nil, err
 	}

@@ -544,6 +544,55 @@ func TestKeyCommandsRefuseALockFIFOPutThereAfterTheCheck(t *testing.T) {
 	}
 }
 
+// Another regular file put at the lock path after the open and before the
+// test of the opened file (the lockOpened seam): the opened file and the
+// file at the path are two regular files, not the same file. Both commands
+// refuse with a line that says that the file at the lock path changed after
+// its check, not with the line of a path that is not a regular file, and
+// .sops.yaml stays as it was (bash: tests/unit/secrets_add_key_test.bats).
+func TestKeyCommandsRefuseALockFileReplacedAfterTheOpen(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			sopsRules(t, c, keyA+","+keyB)
+			if cmd == "add-key" {
+				sopsRules(t, c, keyA)
+			}
+			lock := c.sopsConfigPath() + ".lock"
+			before := readFile(t, c.sopsConfigPath())
+			calls := 0
+			lockOpened = func(path string) {
+				calls++
+				if err := os.Remove(path); err != nil {
+					t.Error(err)
+					return
+				}
+				write(t, path, "")
+			}
+			t.Cleanup(func() { lockOpened = func(string) {} })
+
+			var err error
+			if cmd == "add-key" {
+				err = c.AddKey(keyB, false, false)
+			} else {
+				err = c.RemoveKey(keyB, false, false)
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			if calls != 1 {
+				t.Fatalf("the seam ran %d times, want 1", calls)
+			}
+			want := "[error] " + lock + " changed after its check (another file is there now): the command stopped before it wrote .sops.yaml or the store; run this command again\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			unchanged(t, c, before)
+		})
+	}
+}
+
 // The replace keeps the mode, leaves a hard link to the old file with the
 // old content, and, given the path that resolveConfig makes of a symlink,
 // replaces the target of the link, not the link.

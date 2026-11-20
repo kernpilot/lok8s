@@ -55,6 +55,10 @@ var lockSleep clock.SleepFunc = clock.Sleep
 // seam: a test puts a link at the path there).
 var lockChecked = func(string) {}
 
+// lockOpened runs after the open of the lock and before the test of the
+// opened file (a seam: a test puts another file at the path there).
+var lockOpened = func(string) {}
+
 // sopsConfigDest resolves the project's .sops.yaml once for a run of add-key
 // or remove-key (bash: secrets::_config_dest): the path itself, or, when it
 // is a symlink, the file at the end of all its links. The lock sits beside
@@ -106,8 +110,9 @@ func resolveConfig(path string) (string, error) {
 // names (openedPathOK). An entry put there after the check is refused with
 // the line of the check: a link (the open fails with ELOOP), a FIFO (with no
 // reader the open fails with ENXIO and does not wait; with a reader fstat
-// refuses it), a directory, or another regular file that the path no longer
-// names.
+// refuses it), or a directory. Another regular file at the path after the
+// open is refused with a line that says that the file at the path changed
+// after its check.
 //
 // The boundary: the directory of the lock must be trusted. The checks find
 // an entry that another user puts there during the run, but a user who can
@@ -130,7 +135,13 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s — the lock goes beside the file that .sops.yaml names, so lo needs write access to %s; nothing was changed", path, filepath.Dir(path))
 		return nil, ErrHandled
 	}
-	if !openedPathOK(f, path) {
+	lockOpened(path)
+	switch ok, swapped := openedPathOK(f, path); {
+	case swapped:
+		_ = f.Close()
+		ui.ErrorTo(c.ErrOut, "%s changed after its check (another file is there now): the command stopped before it wrote .sops.yaml or the store; run this command again", path)
+		return nil, ErrHandled
+	case !ok:
 		_ = f.Close()
 		c.refuseLockPath(path)
 		return nil, ErrHandled
@@ -166,12 +177,20 @@ func (c *Context) refuseLockPath(path string) {
 
 // openedPathOK reports whether f, opened from path, is a regular file and
 // path, read without following a link, still names it (bash: the /dev/fd
-// test of secrets::_lock).
-func openedPathOK(f *os.File, path string) bool {
+// test of secrets::_lock). swapped is true when f and the file at path are
+// two regular files that are not the same file: the file at the path
+// changed after its check.
+func openedPathOK(f *os.File, path string) (ok, swapped bool) {
 	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() {
-		return false
+		return false, false
 	}
 	li, err := os.Lstat(path)
-	return err == nil && os.SameFile(fi, li)
+	if err != nil || !li.Mode().IsRegular() {
+		return false, false
+	}
+	if os.SameFile(fi, li) {
+		return true, false
+	}
+	return false, true
 }

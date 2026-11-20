@@ -144,25 +144,27 @@ func grepQF(content, pattern string) bool {
 // that is older than its .enc (after a pull) replaces the value of that
 // .enc.
 //
-// A rerun finishes the work of a run that stopped after its write. When
-// .sops.yaml lists the recipient already, the run reads the sops envelope
-// of each .enc of the sweep (unfinishedEncs, at most 16 MiB each): an .enc
-// that is missing, or whose envelope does not show the recipient with a mac,
-// a lastmodified and an armored age entry (encAdded), is not finished. That
-// check shows that sops added the key, not that the file decrypts. Before
-// it decides, the run refuses what the first run refuses (a store that does
-// not resolve or list, an .enc that is not a regular file, an orphan that
-// does not show the recipient without skipOrphans) and writes the
-// .gitignore. Then it re-keys the files that are not finished, and only
-// those, and leaves .sops.yaml as it is. After the encrypt it reads the
-// sweep again, and a file that still does not show the recipient (its
-// creation rule does not list the key) fails the run. With nothing left,
-// the run changes nothing.
+// A rerun finishes the work of a run that stopped after its write, as far
+// as it can detect that work. When .sops.yaml lists the recipient already,
+// the run reads the sops envelope of each .enc of the sweep
+// (unfinishedEncs, at most 16 MiB each): an .enc that is missing, or that
+// does not pass the recipient envelope check (encAdded: an entry of the
+// recipient with an armored age block, a mac and a lastmodified), is not
+// finished. That check is structural: it does not show that sops wrote the
+// entry or that the key can decrypt the file. Before it decides, the run
+// refuses what the first run refuses (a store that does not resolve or
+// list, an .enc that is not a regular file, a .sops.yaml that is also a
+// file that the run writes, an orphan that does not pass the check without
+// skipOrphans) and writes the .gitignore. Then it re-keys the files that
+// are not finished, and only those, and leaves .sops.yaml as it is. After
+// the encrypt it reads the sweep again, and a file that still does not
+// pass the check (its creation rule does not list the key) fails the run.
+// With nothing left, the run changes nothing.
 //
 // The writes replace each file with a rename, so a run that stops or is
-// killed leaves each file whole, old or new, and a rerun finishes the
-// work. They are not synced to the disk (no fsync): a power loss can lose a
-// write or change their order.
+// killed leaves each file whole, old or new, and a rerun finishes the work
+// that it can detect. They are not synced to the disk (no fsync): a power
+// loss can lose a write or change their order.
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -217,6 +219,12 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// after the write). A rerun refuses it too, before it decides that
 	// nothing is left to do.
 	if c.refuseEncPaths(checked.encs()) {
+		return ErrHandled
+	}
+	// The .gitignore and the .enc files that the run writes must not be the
+	// file of .sops.yaml: their write would replace it (refuseConfigAlias).
+	// A rerun with nothing to do writes the .gitignore too.
+	if c.refuseConfigAlias(dest, checked) {
 		return ErrHandled
 	}
 	// A recipient that .sops.yaml lists already is done when the re-key of
@@ -275,12 +283,22 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
 		return ErrHandled
 	}
-	if orphans := len(c.orphanEncs(stores)); orphans > 0 && !skipOrphans {
-		c.refuseOrphans(orphans)
+	// One listing of each store, whose error is checked: the store of the
+	// sweep was listed before the write (storeListing).
+	names, err := c.storeListing(stores, checked, true)
+	if err != nil {
+		return err
+	}
+	orphans, err := c.addKeyOrphans(stores, names, "")
+	if err != nil {
+		return err
+	}
+	if len(orphans) > 0 && !skipOrphans {
+		c.refuseOrphans(len(orphans))
 		return ErrHandled
 	}
 
-	rekeyed, err := touchPlaintexts(stores)
+	rekeyed, err := touchPlaintexts(stores, names)
 	if err != nil {
 		return err
 	}
@@ -302,10 +320,10 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 // recipient already (bash: the same steps in secrets::add-key), and returns
 // the .enc files of the sweep whose re-key is not finished
 // (unfinishedEncs). It runs before the decision that nothing is left to
-// do. The orphans of the stores of the run (rekeyStores) whose envelope
-// does not show the recipient (openOrphans) are refused without
-// skipOrphans, with the lines of the first run: an earlier run that stopped
-// at the orphan check is not reported as done.
+// do. The orphans of the stores of the run (rekeyStores, storeListing) that
+// do not pass the recipient envelope check (addKeyOrphans) are refused
+// without skipOrphans, with the lines of the first run: an earlier run that
+// stopped at the orphan check is not reported as done.
 func (c *Context) rerunLeft(checked sweepList, recipient string, all, skipOrphans bool) ([]string, error) {
 	left, err := c.unfinishedEncs(checked, recipient)
 	if err != nil {
@@ -319,7 +337,11 @@ func (c *Context) rerunLeft(checked sweepList, recipient string, all, skipOrphan
 		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
 		return nil, ErrHandled
 	}
-	orphans, err := c.openOrphans(stores, recipient)
+	names, err := c.storeListing(stores, checked, false)
+	if err != nil {
+		return nil, err
+	}
+	orphans, err := c.addKeyOrphans(stores, names, recipient)
 	if err != nil {
 		return nil, err
 	}
@@ -335,9 +357,9 @@ func (c *Context) rerunLeft(checked sweepList, recipient string, all, skipOrphan
 // re-keys the files of left only: an .enc whose re-key is finished keeps
 // its bytes, so a plaintext that is older than a pulled .enc does not
 // replace it. Then it reads the sweep again (unfinishedEncs). An .enc that
-// still does not show the recipient means that its creation rule does not
-// list the key (the key can be in a comment of .sops.yaml only): the run
-// names each such file and fails, with no "done" line.
+// still does not pass the recipient envelope check means that its creation
+// rule does not list the key (the key can be in a comment of .sops.yaml
+// only): the run names each such file and fails, with no "done" line.
 func (c *Context) finishReKey(checked sweepList, left []string, recipient string) error {
 	if len(left) == 0 {
 		fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
@@ -359,7 +381,7 @@ func (c *Context) finishReKey(checked sweepList, left []string, recipient string
 	}
 	if len(still) > 0 {
 		for _, enc := range still {
-			ui.ErrorTo(c.ErrOut, "the sops metadata of %s has no entry for the recipient after the re-key", c.rel(enc))
+			ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not pass the recipient envelope check after the re-key", c.rel(enc))
 		}
 		ui.ErrorTo(c.ErrOut, "  the key is in .sops.yaml, but the creation rule of these files may not list it (for example, the key is only in a comment): fix .sops.yaml, then run this command again")
 		return ErrHandled
@@ -566,16 +588,23 @@ func encDestinationOK(path string) bool {
 }
 
 // sweepPlaintexts returns the plaintext cache files of dir that the encrypt
-// sweep reads: each regular file whose name starts with prefix and does not
-// end in .enc (bash: secrets::_sweep_files). Encrypt lists the store with it
-// after the .gitignore write. AddKey lists the store with it once, before
-// its first write (encryptTargets): it checks the .enc of each file, and its
-// encrypt reads that same list (encryptChecked), so a file that the run
-// itself changes is not added. Another process that writes to the store
-// during the run is outside the threat model.
+// sweep reads (plaintextsOf over the names of storeEntries, bash:
+// secrets::_sweep_files). Encrypt lists the store with it after the
+// .gitignore write.
 func sweepPlaintexts(dir, prefix string) []string {
+	return plaintextsOf(dir, storeEntries(dir, prefix))
+}
+
+// plaintextsOf returns the plaintext cache files among names, entries of
+// dir: each regular file whose name does not end in .enc. AddKey lists the
+// store once, before its first write (encryptTargets), and gets its sweep
+// from those names: it checks the .enc of each file, and its encrypt reads
+// that same list (encryptChecked), so a file that the run itself changes is
+// not added. Another process that writes to the store during the run is
+// outside the threat model.
+func plaintextsOf(dir string, names []string) []string {
 	var plains []string
-	for _, base := range storeEntries(dir, prefix) {
+	for _, base := range names {
 		plaintext := dir + "/" + base
 		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") {
 			continue

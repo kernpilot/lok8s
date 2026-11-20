@@ -306,10 +306,12 @@ func (c *Context) rel(path string) string {
 // step these commands exist to remove. The time is the one of the kernel
 // (touchNow, as the touch of the bash twin), not time.Now(): an .enc that
 // the encrypt writes right after is then never older than its plaintext.
-func touchPlaintexts(stores []string) (int, error) {
+// It reads the names of each store from names (storeListing) and does not
+// list a store again.
+func touchPlaintexts(stores []string, names map[string][]string) (int, error) {
 	touched := 0
 	for _, store := range stores {
-		for _, base := range storeEntries(store, "Secret.") {
+		for _, base := range names[store] {
 			plain := store + "/" + base
 			// bash tests [[ -e && != *.enc ]] — any existing entry counts,
 			// not just regular files.
@@ -327,47 +329,52 @@ func touchPlaintexts(stores []string) (int, error) {
 
 // sweepList is the list of the encrypt sweep that AddKey checks before its
 // first write, and that its encrypt then reads (encryptChecked): the store
-// of the context and its plaintext cache files.
+// of the context, the Secret.* names of its one listing (names), and the
+// plaintext cache files among them (plains). The later steps of AddKey read
+// names for that store (storeListing) and do not list it again.
 type sweepList struct {
 	dir    string
+	names  []string
 	plains []string
 }
 
 // encryptTargets resolves the store of the context and lists the plaintext
 // cache files that the sweep of Encrypt("") reads there (bash: the list
-// before the first write of secrets::add-key), with sweepPlaintexts, the
-// helper of the sweep itself (listStore). AddKey reads it before its first
-// write, also when .sops.yaml lists the recipient already, and stops with
-// --all too: its encrypt re-keys this store. A store that does not resolve
-// is refused (ResolveStore prints why), and so is a store that it cannot
-// list: an empty list would let the run report the re-key as done.
+// before the first write of secrets::add-key), with one listing whose error
+// it checks (listStore). AddKey reads it before its first write, also when
+// .sops.yaml lists the recipient already, and stops with --all too: its
+// encrypt re-keys this store. A store that does not resolve is refused
+// (ResolveStore prints why), and so is a store that it cannot list
+// (refuseUnlistable): an empty list would let the run report the re-key as
+// done.
 func (c *Context) encryptTargets() (sweepList, error) {
 	dir, err := c.ResolveStore()
 	if err != nil {
 		ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
 		return sweepList{}, err
 	}
-	plains, err := listStore(dir)
+	names, err := listStore(dir)
 	if err != nil {
-		ui.ErrorTo(c.ErrOut, "cannot list the store %s (not a directory, or no read or search permission): add-key did not change .sops.yaml; fix the store, then run this command again", c.rel(dir))
+		c.refuseUnlistable(dir, false)
 		return sweepList{}, ErrHandled
 	}
-	return sweepList{dir: dir, plains: plains}, nil
+	return sweepList{dir: dir, names: names, plains: plaintextsOf(dir, names)}, nil
 }
 
-// listStore returns the plaintext cache files of the store dir
-// (sweepPlaintexts), or the error of a store that it cannot list (bash:
-// secrets::_list_store): a path that is not a directory, a directory that
-// it cannot read or search, a symlink whose target it cannot stat. A store
-// that does not exist holds no file and is no error: the encrypt warns
-// about it.
+// listStore lists the store dir once and returns its Secret.* names, or the
+// error of a store that it cannot list (bash: secrets::_store_names and its
+// callers): a path that is not a directory, a directory that it cannot read
+// or search, a read of the directory that fails (storeNames returns the
+// error of the read), a symlink whose target it cannot stat. A store that
+// does not exist holds no file and is no error: the encrypt warns about it.
 func listStore(dir string) ([]string, error) {
 	_, absent, err := statPath(dir)
 	if absent {
 		return nil, nil
 	}
+	var names []string
 	if err == nil {
-		_, err = storeNames(dir, "Secret.")
+		names, err = storeNames(dir, "Secret.")
 	}
 	if err == nil {
 		_, err = os.Stat(dir + "/.")
@@ -375,7 +382,69 @@ func listStore(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sweepPlaintexts(dir, "Secret."), nil
+	return names, nil
+}
+
+// refuseUnlistable prints the refusal of AddKey for a store that it cannot
+// list (listStore; bash: secrets::_refuse_unlistable). wrote tells whether
+// the run wrote .sops.yaml before that listing: only a store of --all that
+// is not the store of the sweep is listed after the write.
+func (c *Context) refuseUnlistable(dir string, wrote bool) {
+	outcome := "add-key did not change .sops.yaml"
+	if wrote {
+		outcome = "add-key wrote .sops.yaml and stopped before the re-key"
+	}
+	ui.ErrorTo(c.ErrOut, "cannot list the store %s (not a directory, no read or search permission, or the read of the directory failed): %s; fix the store, then run this command again", c.rel(dir), outcome)
+}
+
+// storeListing returns the Secret.* names of each store of the re-key
+// (bash: secrets::_rekey_names): for the store of the sweep, the names of
+// its one listing (checked.names), and for each other store (--all), one
+// listing whose error it checks (listStore). The orphan check and the touch
+// read these names, so no step of AddKey lists a store again or drops the
+// error of a listing. A store that it cannot list is refused
+// (refuseUnlistable, with wrote for that line): ErrHandled.
+func (c *Context) storeListing(stores []string, checked sweepList, wrote bool) (map[string][]string, error) {
+	names := make(map[string][]string, len(stores))
+	for _, store := range stores {
+		if store == checked.dir {
+			names[store] = checked.names
+			continue
+		}
+		list, err := listStore(store)
+		if err != nil {
+			c.refuseUnlistable(store, wrote)
+			return nil, ErrHandled
+		}
+		names[store] = list
+	}
+	return names, nil
+}
+
+// refuseConfigAlias refuses a .sops.yaml whose file (dest, after its links)
+// is also a file that AddKey writes, and reports whether it refused (bash:
+// secrets::_config_alias): the .gitignore of the store, or an .enc of the
+// sweep. ensureGitignore and the encrypt replace such a file, so the run
+// would replace its own .sops.yaml. It compares the two files (os.SameFile:
+// the same device and inode), so a hard link counts too. AddKey calls it
+// before its first change of .sops.yaml, the .gitignore or an .enc. A path
+// that it cannot stat is not a file that it can compare, and is no alias:
+// the .gitignore and an .enc that do not exist yet, and dest after a change
+// during the run (outside the threat model).
+func (c *Context) refuseConfigAlias(dest string, checked sweepList) bool {
+	conf, err := os.Stat(dest)
+	if err != nil {
+		return false
+	}
+	for _, out := range append([]string{checked.dir + "/.gitignore"}, checked.encs()...) {
+		info, err := os.Stat(out)
+		if err != nil || !os.SameFile(conf, info) {
+			continue
+		}
+		ui.ErrorTo(c.ErrOut, ".sops.yaml names %s, and add-key writes that file as %s: nothing was changed; give .sops.yaml a file of its own, then run this command again", c.rel(dest), c.rel(out))
+		return true
+	}
+	return false
 }
 
 // unfinishedEncs returns each .enc of the list l whose re-key is not
@@ -400,31 +469,37 @@ func (c *Context) unfinishedEncs(l sweepList, recipient string) ([]string, error
 	return left, nil
 }
 
-// openOrphans warns about each Secret.*.enc of the stores without a
-// decrypted twin (as orphanEncs does) whose sops envelope does not show that
-// recipient was added (keyAdded), and returns them (bash:
-// secrets::_open_orphans): the orphans that a rerun of add-key cannot
-// finish. An orphan that shows the recipient needs no re-key and gets no
-// warning. An .enc larger than maxEncRead is refused: ErrHandled.
-func (c *Context) openOrphans(stores []string, recipient string) ([]string, error) {
-	var open []string
+// addKeyOrphans warns about each Secret.*.enc of the stores without a
+// decrypted twin, and returns them (bash: secrets::_add_key_orphans): the
+// orphans that a re-key cannot rewrite. It reads the names of each store
+// from names (storeListing). Each listed entry counts, whatever kind of
+// entry it is: a symlink whose target does not exist counts too, because it
+// is in the store and a re-key cannot rewrite it. With a recipient (a rerun
+// of AddKey), an orphan whose sops envelope passes the recipient envelope
+// check (keyAdded) needs no re-key and gets no warning, and an .enc larger
+// than maxEncRead is refused: ErrHandled. (remove-key uses orphanEncs.)
+func (c *Context) addKeyOrphans(stores []string, names map[string][]string, recipient string) ([]string, error) {
+	var orphans []string
 	for _, store := range stores {
-		for _, base := range storeEntries(store, "Secret.") {
+		for _, base := range names[store] {
 			enc := store + "/" + base
-			if !isEncEntry(base) || !fsutil.Exists(enc) || fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
+			if !isEncEntry(base) || fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
 				continue
 			}
-			added, err := c.keyAdded(enc, recipient)
-			if err != nil {
-				return nil, err
+			if recipient != "" {
+				added, err := c.keyAdded(enc, recipient)
+				if err != nil {
+					return nil, err
+				}
+				if added {
+					continue
+				}
 			}
-			if !added {
-				ui.WarnTo(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", c.rel(enc))
-				open = append(open, enc)
-			}
+			ui.WarnTo(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", c.rel(enc))
+			orphans = append(orphans, enc)
 		}
 	}
-	return open, nil
+	return orphans, nil
 }
 
 // refuseOrphans prints the refusal of add-key for orphan .enc files that a
@@ -436,10 +511,11 @@ func (c *Context) refuseOrphans(n int) {
 	ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
 }
 
-// maxEncRead is the largest .enc whose sops metadata add-key reads: 16 MiB.
-// A Kubernetes Secret holds at most 1 MiB, and the .enc of one of its keys
-// (the value in base64, in the JSON envelope of sops) stays below 2 MiB.
-// The bash twin has the same limit (secrets::_key_added).
+// maxEncRead is the largest .enc whose sops metadata add-key reads: 16 MiB,
+// a limit of this metadata check. A Kubernetes Secret holds at most 1 MiB,
+// and the .enc of one of its keys (the value in base64, in the JSON
+// envelope of sops) stays below 2 MiB. The bash twin has the same limit
+// (secrets::_key_added).
 const maxEncRead = 16 << 20
 
 // errEncTooLarge: the .enc is larger than maxEncRead.
@@ -479,13 +555,13 @@ func readEncMeta(path string) ([]byte, error) {
 }
 
 // keyAdded reads the .enc at enc (readEncMeta) and reports whether its sops
-// envelope shows that recipient was added (encAdded). A file that does not
-// exist, or that it cannot open or read, does not. A file larger than
+// envelope passes the recipient envelope check (encAdded). A file that does
+// not exist, or that it cannot open or read, does not. A file larger than
 // maxEncRead is refused with one line that names it: ErrHandled.
 func (c *Context) keyAdded(enc, recipient string) (bool, error) {
 	raw, err := readEncMeta(enc)
 	if errors.Is(err, errEncTooLarge) {
-		ui.ErrorTo(c.ErrOut, "%s is larger than 16 MiB (more than any .enc that lo writes): add-key does not read its sops metadata and stops here; restore or remove that file, then run this command again", c.rel(enc))
+		ui.ErrorTo(c.ErrOut, "%s is larger than 16 MiB, the size limit of the metadata check: add-key does not read its sops metadata and stops here; restore or remove that file, then run this command again", c.rel(enc))
 		return false, ErrHandled
 	}
 	if err != nil {
@@ -494,17 +570,21 @@ func (c *Context) keyAdded(enc, recipient string) (bool, error) {
 	return encAdded(raw, recipient), nil
 }
 
-// encAdded reports whether raw, the JSON envelope of an .enc, shows that
-// sops added recipient to the file (bash: secrets::_enc_lists with added):
-// encRecipients reads it without an error (it parses, holds no member
-// twice, and spells no key of the metadata in another case), its sops
-// metadata holds a mac and a lastmodified that are strings and not empty,
-// and an age entry of recipient (in sops.age or in a sops.key_groups item)
-// holds an enc that is an armored age block: its first line is the header
-// of the age armor and its last line the footer. A label alone ({"recipient"}
-// with no enc) does not show it. The check does not decrypt the file: it
-// shows that sops wrote an entry for the key, not that the key opens the
-// file.
+// encAdded is the recipient envelope check: it reports whether raw, the
+// JSON envelope of an .enc, has the structure that sops writes for
+// recipient (bash: secrets::_enc_lists with added). encRecipients reads it
+// without an error (it parses, holds no member twice, and spells no key of
+// the metadata in another case), its sops metadata holds a mac and a
+// lastmodified that are strings and not empty, and an age entry of
+// recipient (in sops.age or in a sops.key_groups item) holds an enc that is
+// an armored age block: its first line is the header of the age armor and
+// its last line the footer. A label alone ({"recipient"} with no enc) does
+// not pass. Only the entries of recipient are read for their enc: an entry
+// of another recipient does not change the state of this one, so a fault
+// there does not make the run re-key the file from a plaintext that can be
+// older than the .enc (the bash twin reads the same entries). The check is
+// structural: it does not decrypt the file, so it does not show that sops
+// wrote the entry or that the key can decrypt the file.
 func encAdded(raw []byte, recipient string) bool {
 	if _, err := encRecipients(raw); err != nil {
 		return false
