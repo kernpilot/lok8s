@@ -382,3 +382,236 @@ _kind_domains() {
   assert_success
   assert_line "  ✓ kind — ${_kind_purpose}"
 }
+
+# ── doctor::_sso_check: the SecurityPolicy CRD for sso-gate (issue #141) ─────
+# The cases are shared with the Go twin (internal/cli/cmd_doctor_ssogate_test.go)
+# under tests/fixtures/doctor-sso-gate/cases/<case>/ (the files are listed in
+# that test). kubectl is a stand-in script of this test, first on PATH: it
+# records its argv and answers the CRD read from the case (`json <file>`,
+# `none`, `blank` or `fail <rc> <stderr>`); any other kubectl command exits
+# 99. Only this file knows one more answer:
+#   hang <s> <json file>   the read ends after <s> seconds
+# No real kubectl runs and no cluster is reached.
+
+_sso_no_answer="kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
+_sso_read="get crd securitypolicies.gateway.envoyproxy.io --ignore-not-found -o json --request-timeout=10s"
+
+# _sso_setup — the bootstrap entry parser, a project under BATS_TEST_TMPDIR
+# and the stand-in kubectl.
+_sso_setup() {
+  :usage() { :; }
+  :args() { shift; }
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  if ! command -v jq &>/dev/null; then skip "jq not available"; fi
+  export SSO_FIX="${_PROJECT_ROOT}/tests/fixtures/doctor-sso-gate"
+  export PATH_BASE="${BATS_TEST_TMPDIR}/project"
+  export PATH_CLUSTERS="${PATH_BASE}/clusters"
+  export PATH_LOK8S="${PATH_BASE}/.lok8s"
+  unset LOK8S_CLUSTER_NAME
+  export CALLS="${BATS_TEST_TMPDIR}/kubectl.calls"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  SSO_STUB="${BATS_TEST_TMPDIR}/sso-stub"
+  mkdir -p "${SSO_STUB}"
+  cat > "${SSO_STUB}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${CALLS}"
+[[ "${3:-} ${4:-}" == "get crd" ]] || exit 99
+if [[ ! -f "${CASE}/crd" ]]; then
+  echo "unexpected read"
+  exit 0
+fi
+read -r kind a b < "${CASE}/crd"
+case "${kind}" in
+  json) cat "${SSO_FIX}/json/${a}" ;;
+  none) ;;
+  blank) printf ' \n\t\r\n' ;;
+  fail) printf '%s\n' "${b}" >&2; exit "${a}" ;;
+  hang) sleep "${a}" 3>&-; cat "${SSO_FIX}/json/${b}" ;;
+esac
+STUB
+  chmod +x "${SSO_STUB}/kubectl"
+  export PATH="${SSO_STUB}:${PATH}"
+  [[ "$(command -v kubectl)" == "${SSO_STUB}/kubectl" ]] || fail "the stand-in kubectl is not first on PATH"
+}
+
+# _sso_case_dir <dir> — the domain sso.example of the case under PATH_BASE.
+_sso_case_dir() {
+  export CASE="${1}"
+  [[ -f "${CASE}/want" ]] || fail "no case ${CASE}"
+  SSO_KC_NAME=sso-test
+  if [[ -f "${CASE}/kubeconfig-name" ]]; then SSO_KC_NAME="$(cat "${CASE}/kubeconfig-name")"; fi
+  mkdir -p "${PATH_CLUSTERS}/sso.example"
+  local f
+  for f in cluster.lok8s.yaml deploy.lok8s.yaml; do
+    if [[ -f "${CASE}/${f}" ]]; then cp "${CASE}/${f}" "${PATH_CLUSTERS}/sso.example/${f}"; fi
+  done
+  if [[ ! -f "${CASE}/no-kubeconfig" ]]; then
+    mkdir -p "${PATH_BASE}/.kubeconfig"
+    printf 'apiVersion: v1\nkind: Config\n' > "${PATH_BASE}/.kubeconfig/${SSO_KC_NAME}.yaml"
+  fi
+}
+
+# _sso_assert_case — the output and the read of the last run against the
+# case, and no temp dir left.
+_sso_assert_case() {
+  assert_success
+  assert_output "$(cat "${CASE}/want")"
+  refute_output --partial CANARY
+  local want_calls=""
+  if [[ -f "${CASE}/crd" ]]; then
+    want_calls="--kubeconfig ${PATH_BASE}/.kubeconfig/${SSO_KC_NAME}.yaml ${_sso_read}"
+  fi
+  assert_equal "$(cat "${CALLS}" 2>/dev/null)" "${want_calls}"
+  local left
+  left="$(find "${TMPDIR}" -maxdepth 1 -name 'lo-doctor-rbac.*')"
+  [[ -z "${left}" ]] || fail "temp dir left: ${left}"
+}
+
+# _sso_case <name> — run the check for the shared case.
+_sso_case() {
+  _sso_setup
+  _sso_case_dir "${SSO_FIX}/cases/${1}"
+  run doctor::_sso_check sso.example
+  _sso_assert_case
+}
+
+# _sso_path_without <tool> — prints a PATH of one new dir with a link to each
+# program of PATH except <tool> (the first one of a name wins, so the
+# stand-in kubectl too).
+_sso_path_without() {
+  local dir="${BATS_TEST_TMPDIR}/sso-path-without-${1}" d f
+  mkdir "${dir}" || fail "${dir} exists"
+  local -a dirs=() files=()
+  IFS=: read -ra dirs <<< "${PATH}"
+  for d in "${dirs[@]}"; do
+    [[ -d "${d}" ]] || continue
+    files=()
+    for f in "${d}"/*; do
+      [[ "${f##*/}" == "${1}" ]] || files+=("${f}")
+    done
+    (( ${#files[@]} == 0 )) || ln -s "${files[@]}" "${dir}/" 2>/dev/null || true
+  done
+  [[ ! -e "${dir}/${1}" ]] || fail "${1} is still in ${dir}"
+  echo "${dir}"
+}
+
+@test "sso: the CRD that declares spec.mergeType passes" { _sso_case declared; }
+@test "sso: the CRD without spec.mergeType fails, and the check returns 0" { _sso_case not-declared; }
+@test "sso: v1alpha1 after another version is read by its name" { _sso_case v1alpha1-last; }
+@test "sso: a first version with the field does not hide a v1alpha1 without it" { _sso_case first-version-declares; }
+@test "sso: the addon as a map entry counts" { _sso_case map-entry; }
+@test "sso: a v1alpha1 without a schema fails" { _sso_case no-schema; }
+@test "sso: a null field fails" { _sso_case field-null; }
+@test "sso: a key in another case is not the field" { _sso_case field-key-case; }
+@test "sso: no CRD skips" { _sso_case no-crd; }
+@test "sso: an empty List is no CRD" { _sso_case no-crd-empty-list; }
+@test "sso: JSON white space only is no CRD" { _sso_case no-crd-white-space; }
+@test "sso: a CRD without v1alpha1 is not checked" { _sso_case no-v1alpha1; }
+@test "sso: a forbidden read prints the reason of the CRD" { _sso_case read-forbidden; }
+@test "sso: an unauthorized read prints the reason of the CRD" { _sso_case read-unauthorized; }
+@test "sso: a refused connection prints the fixed reason" { _sso_case read-refused; }
+@test "sso: another kubectl failure prints the reason of the CRD" { _sso_case read-other; }
+@test "sso: an answer that is not JSON is invalid" { _sso_case read-not-json; }
+@test "sso: an answer that is not an object is invalid" { _sso_case read-not-an-object; }
+@test "sso: a List with an item is invalid" { _sso_case read-list-with-item; }
+@test "sso: a second JSON document is invalid" { _sso_case read-two-documents; }
+@test "sso: a leading byte-order mark is invalid" { _sso_case read-bom; }
+@test "sso: a NaN is invalid" { _sso_case read-nan; }
+@test "sso: a number out of the float64 range is invalid" { _sso_case read-out-of-range; }
+@test "sso: two versions named v1alpha1 are invalid" { _sso_case read-two-v1alpha1; }
+@test "sso: a version name that is not a string is invalid" { _sso_case read-name-not-a-string; }
+@test "sso: a step of the path that is not an object is invalid" { _sso_case read-step-not-an-object; }
+@test "sso: a field that is not an object is invalid" { _sso_case read-field-not-an-object; }
+@test "sso: versions that are not a list are invalid" { _sso_case read-versions-not-a-list; }
+@test "sso: a version that is not an object is invalid" { _sso_case read-version-not-an-object; }
+@test "sso: no sso-gate in spec.bootstrap prints nothing and reads nothing" { _sso_case addon-not-in-spec; }
+@test "sso: the default spec.bootstrap has no sso-gate" { _sso_case default-bootstrap; }
+@test "sso: sso-gate as a path entry does not count" { _sso_case addon-as-path-entry; }
+@test "sso: no kubeconfig skips" { _sso_case no-kubeconfig; }
+@test "sso: a kubeconfig path with a control character skips" { _sso_case kubeconfig-control-char; }
+@test "sso: a deploy domain prints nothing" { _sso_case deploy-domain; }
+@test "sso: no cluster spec prints nothing" { _sso_case no-cluster-spec; }
+@test "sso: an unreadable cluster spec prints nothing" { _sso_case spec-cannot-be-read; }
+
+# Each shared case has a test above, so the bats twin runs what the Go twin
+# runs.
+@test "sso: every shared case has a bats test" {
+  local dir name missing=""
+  for dir in "${_PROJECT_ROOT}"/tests/fixtures/doctor-sso-gate/cases/*/; do
+    name="$(basename "${dir}")"
+    grep -qE "\{ _sso_case ${name}; \}\$" "${BATS_TEST_FILENAME}" || missing+=" ${name}"
+  done
+  [[ -z "${missing}" ]] || fail "cases without a bats test:${missing}"
+}
+
+@test "sso: no active domain prints no line" {
+  _sso_setup
+  run doctor::_sso_check ""
+  assert_success
+  assert_output ""
+  [[ ! -e "${CALLS}" ]] || fail "a read ran: $(cat "${CALLS}")"
+}
+
+@test "sso: no jq says not checked and reads nothing" {
+  _sso_setup
+  _sso_case_dir "${SSO_FIX}/cases/declared"
+  local p; p="$(_sso_path_without jq)"
+  PATH="${p}" run doctor::_sso_check sso.example
+  assert_success
+  assert_output "  ! sso-gate SecurityPolicy CRD not checked: jq not found"
+  [[ ! -e "${CALLS}" ]] || fail "a read ran: $(cat "${CALLS}")"
+}
+
+@test "sso: no kubectl says not checked" {
+  _sso_setup
+  _sso_case_dir "${SSO_FIX}/cases/declared"
+  local p; p="$(_sso_path_without kubectl)"
+  PATH="${p}" run doctor::_sso_check sso.example
+  assert_success
+  assert_output "  ! sso-gate SecurityPolicy CRD not checked: kubectl not found"
+  [[ ! -e "${CALLS}" ]] || fail "a read ran: $(cat "${CALLS}")"
+}
+
+# The bound stops a read that does not end (a credential plugin that waits
+# for a login). The stand-in answers the declared CRD after 5 s: without the
+# bound, the check passes and this fails.
+@test "sso: the bound stops a hung read" {
+  _sso_setup
+  doctor::_rbac_bound() { echo 1; }
+  local dir="${BATS_TEST_TMPDIR}/case-hang"
+  mkdir -p "${dir}"
+  cp "${SSO_FIX}/cases/declared/cluster.lok8s.yaml" "${dir}/"
+  echo "hang 5 declared.json" > "${dir}/crd"
+  printf '%s\n' "  ! sso-gate SecurityPolicy CRD not checked: ${_sso_no_answer}" > "${dir}/want"
+  _sso_case_dir "${dir}"
+  local start="${SECONDS}"
+  run doctor::_sso_check sso.example
+  _sso_assert_case
+  (( SECONDS - start < 5 )) || fail "the check waited for the read: $(( SECONDS - start )) s"
+}
+
+# The ✗ line is advisory: main::doctor keeps its exit status. Every
+# required tool but yq and jq is a stub that exits 99, kind is the minimum
+# release, and the stand-in kubectl answers only the CRD read, so doctor
+# reaches no cluster.
+@test "sso: lo doctor keeps its exit status with the ✗ line" {
+  _sso_setup
+  _sso_case_dir "${SSO_FIX}/cases/not-declared"
+  _kind_stub 'kind v0.18.0 go1.20.2 linux/amd64\n'
+  local bin="${BATS_TEST_TMPDIR}/kind-bin" tool
+  for tool in argsh kustomize envsubst docker mkcert; do
+    printf '#!/bin/sh\nexit 99\n' > "${bin}/${tool}"
+    chmod +x "${bin}/${tool}"
+  done
+  :args() { :; }
+  DOMAIN_NAME=sso.example PATH="${bin}:${PATH}" run main::doctor < /dev/null
+  assert_success
+  assert_line "$(cat "${CASE}/want")"
+  assert_line "doctor: all required checks passed."
+  grep -qxF -- "--kubeconfig ${PATH_BASE}/.kubeconfig/sso-test.yaml ${_sso_read}" "${CALLS}" \
+    || fail "no CRD read in: $(cat "${CALLS}")"
+}

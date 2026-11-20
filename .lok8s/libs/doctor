@@ -119,6 +119,9 @@ main::doctor() {
   # The rook-ceph-csi-kms objects that the current values do not render
   # (advisory, with the same GET requests and plugin caveat).
   doctor::_kms_check "${domain}"
+  # The SecurityPolicy CRD of envoy-gateway, when spec.bootstrap has sso-gate
+  # (advisory, one GET request with the same plugin caveat).
+  doctor::_sso_check "${domain}"
 
   # Provider / infrastructure diagnosis — advisory, never affects the exit code.
   doctor::_provider_section "${domain}"
@@ -325,7 +328,7 @@ doctor::_rbac_cleanup() {
     { doctor::_rbac_stop "${_rbac_pid}"; doctor::_rbac_release; } 2>/dev/null
   fi
   if [[ -n "${_rbac_tmp}" ]]; then
-    rm -f -- "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${_rbac_tmp}/err" \
+    rm -f -- "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${_rbac_tmp}/crd.json" "${_rbac_tmp}/err" \
       "${_rbac_tmp}"/kms-{clusterroles,clusterrolebindings,roles,rolebindings}.{json,rec} \
       "${_rbac_tmp}"/refs-{clusterrolebindings,rolebindings,clusterroles}.{json,rec}
     rmdir -- "${_rbac_tmp}" 2>/dev/null || true
@@ -341,20 +344,35 @@ doctor::_rbac_cleanup() {
 # (doctor::_rbac_shape; <shape> defaults to <resource>), else to the fixed
 # reason of the failure's class. The stderr goes to <err file> for the class
 # and is never printed. A read that the bound stopped gives the reason of the
-# bound, also when kubectl handled the TERM and exited 0 (Go: rbacRead checks
+# bound, also when kubectl handled the TERM and exited 0 (Go: rbacGet checks
 # the context first).
 doctor::_rbac_read() {
   local kubeconfig="${1}" resource="${2}" out="${3}" err="${4}" shape="${5:-${2}}"
   shift 4
   (( $# == 0 )) || shift
+  doctor::_rbac_get "${out}" "${err}" --kubeconfig "${kubeconfig}" get "${resource}" "$@"
+  if [[ -z "${_rbac_reason}" ]] && ! doctor::_rbac_shape "${shape}" "${out}"; then
+    _rbac_reason="kubectl failed or did not return a valid list"
+  fi
+  return 0
+}
+
+# doctor::_rbac_get <out file> <err file> <kubectl arg...>
+# One bounded `kubectl <kubectl arg...> -o json --request-timeout=10s`
+# (doctor::_rbac_run: the bound, the process group and the stop). Sets
+# _rbac_reason to "" when kubectl exited 0 within the bound, else to the
+# fixed reason of the failure's class (doctor::_rbac_reason). The stderr goes
+# to <err file> for the class and is never printed. doctor::_rbac_read and
+# the sso-gate check (doctor::_sso_fetch) use it (Go: rbacGet).
+doctor::_rbac_get() {
+  local out="${1}" err="${2}"
+  shift 2
   _rbac_reason=""
-  doctor::_rbac_run "${out}" "${err}" kubectl --kubeconfig "${kubeconfig}" get "${resource}" "$@" -o json --request-timeout=10s
+  doctor::_rbac_run "${out}" "${err}" kubectl "$@" -o json --request-timeout=10s
   if (( _rbac_stopped )); then
     _rbac_reason="kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
   elif (( _rbac_rc != 0 )); then
     _rbac_reason=$(doctor::_rbac_reason "$(cat "${err}" 2>/dev/null)")
-  elif ! doctor::_rbac_shape "${shape}" "${out}"; then
-    _rbac_reason="kubectl failed or did not return a valid list"
   fi
   return 0
 }
@@ -1526,6 +1544,185 @@ doctor::_kms_report() {
   fi
   doctor::_warn "${line}. Doctor does not print those names. List the objects of the addon: kubectl --kubeconfig $(doctor::_rbac_quote "${kubeconfig}") get clusterroles,clusterrolebindings,roles,rolebindings --all-namespaces --selector ${selector}"
   return 0
+}
+
+# doctor::_sso_check <domain>
+# The SecurityPolicy CRD check for the sso-gate addon (issue #141). Go twin:
+# internal/cli/cmd_doctor_ssogate.go. The piped lines are the same in both.
+#
+# The SecurityPolicy of sso-gate sets spec.mergeType, so that the policy adds
+# to the guards of the Gateway's own policy and does not replace them.
+# envoy-gateway declares that field in its SecurityPolicy CRD from v1.8.0. On
+# an older CRD, a client-side apply drops the field without an error, and the
+# route then has the SSO policy only: the Gateway's guards (an IP allowlist,
+# a deny-by-default authorization) no longer apply to it.
+#
+# The check runs only when spec.bootstrap has sso-gate as a bare entry name
+# (read with the entry parser of `lo addons --detail`, as the RBAC migration
+# check reads its addons) and the domain has a kubeconfig (the file that the
+# entrypoint exports as KUBECONFIG). It makes one read: `kubectl get crd
+# securitypolicies.gateway.envoyproxy.io --ignore-not-found -o json`, with the
+# bound, the process group, the temp dir, the traps and the fixed reasons of
+# the RBAC migration check (doctor::_sso_fetch). kubectl's stderr is never
+# printed. The check selects the version v1alpha1 by its name, never by its
+# position in spec.versions (the order of that list is not a contract), and
+# looks for schema.openAPIV3Schema.properties.spec.properties.mergeType in it
+# (doctor::_sso_state).
+#
+# The lines: ✓ when the CRD declares the field; ✗ when it does not (upgrade
+# envoy-gateway first); ℹ (skipped) without a kubeconfig or a CRD; ! (not
+# checked) when jq or kubectl is not there or the read fails, with the fixed
+# reason of the failure. Without a domain, with a deploy domain, without a
+# cluster spec, with a spec that cannot be read, or without yq, it prints
+# nothing: the RBAC migration check above says it. Every line is advisory: it
+# always returns 0.
+doctor::_sso_check() {
+  local domain="${1}"
+  local skipped="sso-gate SecurityPolicy CRD check skipped: " not_checked="sso-gate SecurityPolicy CRD not checked: "
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  local kind
+  kind=$(domain::spec_driver "${spec}" lo 2>/dev/null) || return 0
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    return 0
+  fi
+  # The addon counts only as a bare entry name, never as a path entry, as in
+  # the RBAC migration check (Go: the Builtin flag of the parsed entry).
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp ex key enabled=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
+    [[ "${dr##*/}" != sso-gate ]] || enabled=1
+  done
+  (( enabled )) || return 0
+  # The bash twin reads the CRD with jq (the Go twin needs no jq).
+  if ! command -v jq >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}jq not found"
+    return 0
+  fi
+  local kubeconfig
+  kubeconfig="$(doctor::_rbac_kubeconfig "${spec}")"
+  if doctor::_rbac_has_control "${kubeconfig}"; then
+    doctor::_info "${skipped}the kubeconfig path has a control character"
+    return 0
+  fi
+  if [[ ! -f "${kubeconfig}" ]]; then
+    doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
+    return 0
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}kubectl not found"
+    return 0
+  fi
+  local result=""
+  result=$(doctor::_sso_fetch "${kubeconfig}") || result=""
+  case "${result}" in
+    present)     doctor::_ok "sso-gate: the SecurityPolicy CRD declares spec.mergeType" ;;
+    absent)      doctor::_bad "sso-gate: the SecurityPolicy CRD has no spec.mergeType, so envoy-gateway is older than v1.8.0: upgrade it first, then reconcile sso-gate" ;;
+    none)        doctor::_info "${skipped}the cluster has no SecurityPolicy CRD (envoy-gateway is not installed)" ;;
+    noversion)   doctor::_warn "${not_checked}the SecurityPolicy CRD has no version v1alpha1" ;;
+    fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}" ;;
+    *)           doctor::_warn "${not_checked}kubectl failed or did not return a valid CRD" ;;
+  esac
+  return 0
+}
+
+# doctor::_sso_fetch <kubeconfig>
+# The CRD read and its state. Prints one line: the state of
+# doctor::_sso_state, or "fail<TAB><reason>". It runs in a subshell, with the
+# temp dir, the traps and the cleanup of doctor::_rbac_fetch.
+doctor::_sso_fetch() ( doctor::_sso_fetch_in "$@" )
+
+# doctor::_sso_fetch_in <kubeconfig> — the body of doctor::_sso_fetch, always
+# in its subshell (see doctor::_rbac_fetch_in). The forbidden reason and the
+# reason of another failure name the CRD (Go: the same mapping of the
+# reasons of rbacGet).
+doctor::_sso_fetch_in() {
+  _rbac_tmp="" _rbac_pid="" _rbac_hold="" _rbac_shell="" _rbac_now=0 _rbac_rc=0 _rbac_stopped=0 _rbac_reason=""
+  trap 'doctor::_rbac_cleanup' EXIT
+  trap 'doctor::_rbac_cleanup; trap - EXIT INT; kill -INT "${BASHPID}"' INT
+  local invalid="kubectl failed or did not return a valid CRD" state="" forbidden other
+  forbidden="$(doctor::_rbac_reason forbidden)"
+  other="$(doctor::_rbac_reason "")"
+  if ! _rbac_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-doctor-rbac.XXXXXX"); then
+    _rbac_tmp=""
+    printf 'fail\t%s\n' "${invalid}"
+    exit 0
+  fi
+  doctor::_rbac_get "${_rbac_tmp}/crd.json" "${_rbac_tmp}/err" \
+    --kubeconfig "${1}" get crd securitypolicies.gateway.envoyproxy.io --ignore-not-found
+  if [[ "${_rbac_reason}" == "${forbidden}" ]]; then
+    _rbac_reason="the kubeconfig user cannot read the SecurityPolicy CRD (forbidden or unauthorized)"
+  elif [[ "${_rbac_reason}" == "${other}" ]]; then
+    _rbac_reason="${invalid}"
+  fi
+  if [[ -n "${_rbac_reason}" ]]; then
+    printf 'fail\t%s\n' "${_rbac_reason}"
+  elif state=$(doctor::_sso_state "${_rbac_tmp}/crd.json"); then
+    printf '%s\n' "${state}"
+  else
+    printf 'fail\t%s\n' "${invalid}"
+  fi
+}
+
+# doctor::_sso_state <file> — prints the state of the CRD read in <file> (Go:
+# ssoParse, the same rules): none (JSON white space only, or a List with no
+# items: --ignore-not-found prints nothing for a CRD that is not there),
+# noversion (no version v1alpha1), absent (v1alpha1 does not declare the
+# field), present (it does), or invalid. Else the file must be one JSON
+# object with a spec.versions list of objects, each with a string name
+# (absent or null: empty), and exactly one element with the name v1alpha1.
+# In it, each step of the path to the field that is there must be an object:
+# a step that is absent or null makes the field absent, any other value
+# makes the CRD invalid. As in doctor::_rbac_shape, a leading byte-order mark,
+# a second JSON value, NaN and a number out of the range of a float64 make it
+# invalid (the JSON decoder of Go refuses them). The stderr of jq is never
+# printed.
+doctor::_sso_state() {
+  local bom="" state=""
+  # The first 3 bytes (C locale: a character is a byte).
+  bom="$(LC_ALL=C; IFS= read -r -N 3 b < "${1}" && printf '%s' "${b}")" || bom=""
+  if [[ "${bom}" == $'\xef\xbb\xbf' ]]; then
+    echo invalid
+    return 0
+  fi
+  # shellcheck disable=SC2016 # jq program text
+  state=$(jq -r -s '
+    def look($keys): reduce $keys[] as $k ({v: ., s: ""};
+        if .s != "" then .
+        elif .v == null then .s = "absent"
+        elif (.v | type) != "object" then .s = "invalid"
+        else .v = .v[$k] end)
+      | if .s != "" then .s
+        elif .v == null then "absent"
+        elif (.v | type) == "object" then "present"
+        else "invalid" end;
+    if length == 0 then "none"
+    elif length != 1 or any(.. | numbers; isnan or isinfinite) then "invalid"
+    else .[0]
+      | if type != "object" then "invalid"
+        elif .kind == "List" then
+          (if (.items | type) == "array" and (.items | length) == 0 then "none" else "invalid" end)
+        elif (.spec | type) != "object" or (.spec.versions | type) != "array" then "invalid"
+        elif any(.spec.versions[]; type != "object" or ((.name | . == null or type == "string") | not)) then "invalid"
+        else [.spec.versions[] | select(.name == "v1alpha1")]
+          | if length == 0 then "noversion"
+            elif length > 1 then "invalid"
+            else .[0] | look(["schema", "openAPIV3Schema", "properties", "spec", "properties", "mergeType"]) end
+        end
+    end
+  ' "${1}" 2>/dev/null) || state=invalid
+  case "${state}" in
+    none|noversion|absent|present) ;;
+    *) state=invalid ;;
+  esac
+  printf '%s\n' "${state}"
 }
 
 # doctor::_provider_section <domain>
