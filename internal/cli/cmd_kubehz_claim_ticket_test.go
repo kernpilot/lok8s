@@ -100,8 +100,9 @@ func runKubehzLoTo(base string, out, errOut io.Writer, args ...string) error {
 }
 
 // checkTicketHidden checks a registration that must not show the ticket:
-// no form of it on stdout, on stderr, in the error or in a file of the
-// project, and the two lines in place of the ticket lines.
+// none of its five literal forms (testutil.NoClaimTicket) on stdout, on
+// stderr, in the error or in a file of the project, and the two lines in
+// place of the ticket lines.
 func checkTicketHidden(t *testing.T, name, base, out, errOut string, err error) {
 	t.Helper()
 	if err != nil {

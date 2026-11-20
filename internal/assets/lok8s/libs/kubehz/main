@@ -356,7 +356,11 @@ kubehz::get_ssh_fingerprint() {
 # create sees that the path is no regular file, removes it and warns.
 # Usage: kubehz::persist_bind_secret <domain> <secret>
 kubehz::persist_bind_secret() {
-  local domain="${1}" secret="${2}"
+  local domain="${1}"
+  # +x +i: as in kubehz::ensure_claim_key (mkdir and rm are children). A
+  # local that cannot be declared stores nothing, and the register goes on.
+  local +x +i secret || { warn "kubehz: could not store the bind secret (a readonly name or a nameref of the caller)"; return 0; }
+  secret="${2}"
   [[ -n "${secret}" ]] || return 0
   local dir="${PATH_CLUSTERS}/${domain}"
   local path="${dir}/.kubehz-bind"
@@ -433,7 +437,11 @@ kubehz::register_body() {
 kubehz::register_post() (
   local domain="${1}" api_url="${2}" next="${3}" auth="${4:-}"
   local -r tries=3 max_wait=60
-  local body tmp raw rc status out ra code delay try=1
+  # +x +i: as in kubehz::ensure_claim_key. body can hold the bind secret,
+  # raw and out the answer (a claim key, its ticket, a bind secret), and
+  # mktemp, curl, awk, sleep and the rm of the EXIT trap are children.
+  local +x +i body raw out || { error "kubehz::register_post: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local tmp rc status ra code delay try=1
   body=$(cat)
   tmp=$(mktemp -d) || return 1
   trap 'rm -rf "${tmp}"' EXIT
@@ -470,7 +478,9 @@ kubehz::register_post() (
       printf '%s\n' "${out}"
       return 0
     fi
-    code=$(jq -r '.data.code // .code // empty' <<<"${out}" 2>/dev/null) || code=""
+    # No here-string: bash can write one to a file in TMPDIR
+    # (utils/keysonly.sh).
+    code=$(printf '%s\n' "${out}" | jq -r '.data.code // .code // empty' 2>/dev/null) || code=""
     # The code comes from the server and goes to the terminal.
     [[ "${code}" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || code=""
     # The first Retry-After of the LAST answer in the header dump (-L writes
@@ -901,8 +911,9 @@ kubehz::deregister_cluster() {
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the tokens, the response and the key list
   # +x: a local takes the export flag of an exported variable of the same
   # name, and a child (jq, curl) would get the value. +i and the refusal:
-  # as in kubehz::space_api_call.
-  local +x +i response keys || { error "kubehz::deregister_cluster: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  # as in kubehz::space_api_call. msg: the platform's text of a refused
+  # delete (the key delete below runs curl after it).
+  local +x +i response keys msg || { error "kubehz::deregister_cluster: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   local rc=0
@@ -939,7 +950,6 @@ kubehz::deregister_cluster() {
         if [[ "${http_code}" == 2* ]]; then
           echo "kubehz: cluster ${domain} (${cluster_id}) removed from the platform."
         else
-          local msg
           msg=$(printf '%s' "${response%$'\n'*}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
           error "kubehz: delete refused for ${domain} (${cluster_id}) — HTTP ${http_code}${msg:+: ${msg}}. The registration was not removed."
           rc=1
@@ -984,7 +994,7 @@ kubehz::register() {
   local print_token=0
   local -a args=(
     'domain|:^~domain'  'Domain to use'
-    'print-token|:+'    'Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret'
+    'print-token|:+'    'Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret'
     "${args[@]:-}"
   )
   :args "Register cluster with kubehz" "${@}"

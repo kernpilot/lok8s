@@ -2513,7 +2513,7 @@ lo kubehz register [flags]
 
 ```
   -h, --help          help for register
-      --print-token   Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret
+      --print-token   Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
 ```
 
 ### SEE ALSO
@@ -3441,7 +3441,7 @@ lo provision [flags]
       --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
       --no-diff                   Dry run without the kubectl diff: render only, no cluster access
       --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
-      --print-token               Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret
+      --print-token               Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
       --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
       --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
@@ -4422,7 +4422,7 @@ lo up [flags]
       --ci tilt ci        Headless: build+deploy+wait-ready via tilt ci, exit with real status (no TTY/browser)
   -h, --help              help for up
   -o, --open-tilt         Open Tilt in a browser (interactive mode only)
-      --print-token       Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret
+      --print-token       Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
   -t, --timeout tilt ci   Readiness timeout for --ci (e.g. 300s, 10m); passed to tilt ci
 ```
 

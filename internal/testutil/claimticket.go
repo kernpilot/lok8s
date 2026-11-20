@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -37,7 +38,8 @@ var claimTicketForms = []string{
 	"AAAAC3NzaC1lZDI1NTE5AAAAILb+3WQ5OfPMd1OnV0p1lHo1cEizaxwddsmWOt+c+dpL",
 }
 
-// NoClaimTicket fails t when s holds the claim ticket fixture in any form.
+// NoClaimTicket fails t when s holds one of the five literal forms of the
+// claim ticket fixture in claimTicketForms.
 // where names the place of s (stdout, stderr, the error, a file).
 func NoClaimTicket(t testing.TB, where, s string) {
 	t.Helper()
@@ -64,10 +66,8 @@ func NoClaimTicketInFiles(t testing.TB, root string, skip ...string) {
 		if err != nil {
 			return err
 		}
-		for _, s := range skip {
-			if rel == s {
-				return nil
-			}
+		if slices.Contains(skip, rel) {
+			return nil
 		}
 		b, err := os.ReadFile(p)
 		if err != nil {

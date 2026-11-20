@@ -656,10 +656,12 @@ deletes the wrong one.
 ::: details The claim ticket on a terminal and on a pipe
 The fingerprint of the claim key is the one-time claim ticket. lo prints it
 only with `--print-token`, or when stdout is a terminal and the run is not a
-CI run (`CI` is set and not `false`, or `LOK8S_NONINTERACTIVE` is set). This
-applies to `lo kubehz register` and to the register step of `lo provision`
-and `lo up`. The register step of `lo recover` never prints it. When lo
-prints the ticket, the last lines of the claim key mode are:
+CI run. A CI run is a nonempty `LOK8S_NONINTERACTIVE` (any value, `false`
+too), or a nonempty `CI` that is not exactly `false` (so `CI=0` and
+`CI=FALSE` make a CI run too). This applies to `lo kubehz register` and
+to the register step of `lo provision` and `lo up`. `lo recover` passes no
+`--print-token` to its register step, so the same rule applies there. When
+lo prints the ticket, the last lines of the claim key mode are:
 
 ```text
   curl -X POST <api>/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \
@@ -689,14 +691,23 @@ a CI run), lo prints a placeholder in place of the ticket:
   and a program that reads the pty keep what lo prints.
 - In the bash implementation, these functions stop a shell trace
   (`set -x`), `set -a` and a DEBUG, RETURN or ERR trap of the caller until
-  they return, and keep their values out of the environment of a child:
-  `kubehz::register_cluster`, `kubehz::deregister_cluster`,
+  they return: `kubehz::register_cluster`, `kubehz::deregister_cluster`,
   `kubehz::ensure_claim_key`, `kubehz::direct_claim`,
   `kubehz::claim_key_own` and `kubehz::re-enroll`. So the trace does not
   show the ticket, the tokens or the answers of the platform in them. A
   trace of other code, before or after these functions, is not covered.
+- These functions and their helpers `kubehz::register_post` and
+  `kubehz::persist_bind_secret` declare the locals that hold the ticket,
+  a token, the bind secret or an answer of the platform with `local +x`.
+  So a child process (`curl`, `jq`, `mkdir`, `rm`) does not get these
+  values in its environment, also when the caller exported a name with
+  the same spelling. Other names and other functions are not covered.
+- `lo kubehz re-enroll` prints the code and the message of a refusal as
+  the platform sends them. lo does not sanitize this text.
 - The Go `lo mcp` does not offer `--print-token` to an agent. The bash
-  `lo mcp` (argsh) offers it.
+  `lo mcp` (argsh) offers it, because argsh cannot remove one flag from
+  its MCP tools. So an MCP client of the bash server can get the live
+  ticket in its tool result.
 :::
 
 ::: details Claim before you deploy: the bind secret

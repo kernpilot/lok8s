@@ -13,9 +13,13 @@ func TestNonInteractive(t *testing.T) {
 		{map[string]string{}, false},
 		{map[string]string{"CI": "true"}, true},
 		{map[string]string{"CI": "1"}, true},
+		{map[string]string{"CI": "0"}, true},
+		{map[string]string{"CI": "FALSE"}, true},
 		{map[string]string{"CI": "false"}, false},
 		{map[string]string{"CI": ""}, false},
 		{map[string]string{"LOK8S_NONINTERACTIVE": "1"}, true},
+		{map[string]string{"LOK8S_NONINTERACTIVE": "false"}, true},
+		{map[string]string{"LOK8S_NONINTERACTIVE": ""}, false},
 		{map[string]string{"LOK8S_NONINTERACTIVE": "1", "CI": "false"}, true},
 	} {
 		if got := NonInteractive(func(k string) string { return tc.env[k] }); got != tc.want {

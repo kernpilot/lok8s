@@ -8,12 +8,13 @@ package kubehz
 // twin is in tests/unit/kubehz_register_test.bats.
 //
 // The fixture is a real key and its real MD5 fingerprint
-// (testutil.ClaimKeyPublic, testutil.ClaimTicket). A hidden ticket is in no
-// form (testutil.NoClaimTicket) on stdout, on stderr, in the error or in a
+// (testutil.ClaimKeyPublic, testutil.ClaimTicket). A hidden ticket is in
+// none of the five literal forms (testutil.NoClaimTicket) on stdout, on stderr, in the error or in a
 // file of the project. The terminal is the stdout writer only
 // (ui.Styled), not the global override.
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -43,9 +44,7 @@ func ticketRun(t *testing.T, k ticketCase) (*harness, error) {
 	t.Helper()
 	h := newHarness(t)
 	h.env["HCLOUD_TOKEN"], h.env["HCLOUD_API_BASE"] = "hc_test", h.apiURL()
-	for key, v := range k.env {
-		h.env[key] = v
-	}
+	maps.Copy(h.env, k.env)
 	h.handle("POST /api/clusters/register", 200,
 		`{"id":"cl-5","bindSecret":"`+bindSecretFixture+`","claimKey":{"publicKey":"`+testutil.ClaimKeyPublic+`","fingerprint":"`+testutil.ClaimTicket+`","name":"kubehz-claim-test.kubehz.dev"}}`)
 	h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[]}`)
@@ -60,8 +59,9 @@ func ticketRun(t *testing.T, k ticketCase) (*harness, error) {
 	return h, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL())
 }
 
-// checkTicketHidden: the run ended well, uploaded the key, and holds the
-// ticket in no form anywhere. The curl hint has the placeholder, and the
+// checkTicketHidden: the run ended well, uploaded the key, and holds none
+// of the five literal forms of the ticket in its output, its error or a
+// file of the project. The curl hint has the placeholder, and the
 // last line names the key in the Hetzner Console and the re-run.
 func checkTicketHidden(t *testing.T, h *harness, err error) {
 	t.Helper()
@@ -110,13 +110,17 @@ func TestEnsureClaimKeyShowsTheTicketOnATerminal(t *testing.T) {
 	checkTicketShown(t, h, err)
 }
 
-// A CI run (CI set and not "false") or LOK8S_NONINTERACTIVE hides the
-// ticket on a terminal too: a runner can give the job a pty.
+// A CI run (CI nonempty and not "false", so CI=0 and CI=FALSE too) or a
+// nonempty LOK8S_NONINTERACTIVE ("false" too) hides the ticket on a
+// terminal too: a runner can give the job a pty.
 func TestEnsureClaimKeyHidesTheTicketOnATerminalInACIRun(t *testing.T) {
 	for _, env := range []map[string]string{
 		{"CI": "true"},
 		{"CI": "1"},
+		{"CI": "0"},
+		{"CI": "FALSE"},
 		{"LOK8S_NONINTERACTIVE": "1"},
+		{"LOK8S_NONINTERACTIVE": "false"},
 		{"LOK8S_NONINTERACTIVE": "1", "CI": "false"},
 	} {
 		h, err := ticketRun(t, ticketCase{outTTY: true, env: env})
