@@ -347,8 +347,27 @@ driver::status() {
   fi
 
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
-  kubectl get cluster "${cluster_name}" --kubeconfig "${mgmt_kubeconfig}" \
+  capi::_status_bounded kubectl get cluster "${cluster_name}" --kubeconfig "${mgmt_kubeconfig}" \
     -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound"
+}
+
+# capi::_status_bound — the bound of the whole status read, in seconds (Go:
+# statusReadBound). A test makes it short.
+capi::_status_bound() { echo 10; }
+
+# capi::_status_bounded <command...> — runs the command under timeout(1)
+# when it is on PATH: capi::_status_bound seconds, then SIGKILL 2 s after
+# the SIGTERM (Go: statusReadBound and statusReadGrace). A management
+# cluster that does not answer, or an exec credential plugin of its
+# kubeconfig, then cannot stop the status read. timeout signals its own
+# process group, so the plugin stops too. Without timeout on PATH, the
+# command runs with no bound, as before.
+capi::_status_bounded() {
+  if command -v timeout &>/dev/null; then
+    timeout -k 2 "$(capi::_status_bound)" "$@"
+  else
+    "$@"
+  fi
 }
 
 driver::kubeconfig() {
