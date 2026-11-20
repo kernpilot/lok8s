@@ -1,0 +1,23 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "rook-ceph-csi-kms-config",
+        "namespace": "rook-ceph",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "lok8s.dev/type": "system",
+          "lok8s.dev/category": "storage",
+          "csi-kms.lok8s.dev/option": "kms-config"
+        }
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

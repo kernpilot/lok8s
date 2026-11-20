@@ -368,6 +368,11 @@ type Resolved struct {
 	// Builtin marks a framework addon (bootstrap.Entry.Builtin) as opposed
 	// to a per-cluster target.
 	Builtin bool
+	// Inline and Env are the entry's values and env as the bootstrap
+	// renders it (bootstrap.Entry.Inline, and Entry.EnvLines as a map):
+	// `lo doctor` renders rook-ceph-csi-kms with them.
+	Inline string
+	Env    map[string]string
 }
 
 // EntryResolver reads a cluster spec's bootstrap entries for a driver kind

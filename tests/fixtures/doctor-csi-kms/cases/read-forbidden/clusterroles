@@ -1,0 +1,1 @@
+fail 1 Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io is forbidden: User "CANARY" cannot list resource

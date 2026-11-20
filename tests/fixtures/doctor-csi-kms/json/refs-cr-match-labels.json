@@ -1,0 +1,224 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "storage-reader"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/name": "rook-ceph-csi-kms"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "wide-reader"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {}
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "storage-writer"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/name": "rook-ceph-csi-kms",
+              "lok8s.dev/type": "user"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "two-selectors"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "absent.example.com/x": "y"
+            }
+          },
+          {
+            "matchLabels": {
+              "lok8s.dev/category": "storage"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "label-and-expression"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/name": "rook-ceph-csi-kms"
+            },
+            "matchExpressions": [
+              {
+                "key": "lok8s.dev/type",
+                "operator": "In",
+                "values": [
+                  "user"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "admin",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "rbac.authorization.k8s.io/aggregate-to-admin": "true"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "cluster-admin",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults"
+        }
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "edit",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults",
+          "rbac.authorization.k8s.io/aggregate-to-admin": "true"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "rbac.authorization.k8s.io/aggregate-to-edit": "true"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "view",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults",
+          "rbac.authorization.k8s.io/aggregate-to-edit": "true"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "rbac.authorization.k8s.io/aggregate-to-view": "true"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "CANARY Bad"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/category": "storage"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "fifth-reader"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/type": "system"
+            }
+          }
+        ]
+      },
+      "rules": []
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

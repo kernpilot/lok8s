@@ -1,0 +1,3 @@
+# ids: Role/ns/123
+kind: "Role"
+metadata: {name: "123", namespace: ns}

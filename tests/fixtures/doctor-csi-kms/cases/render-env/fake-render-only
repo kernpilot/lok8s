@@ -1,0 +1,1 @@
+The fake render only: the addon has no env placeholder. The render of this case has one, and the envsubst of the render gives it the value of the entry's env.
