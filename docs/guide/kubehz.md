@@ -714,15 +714,17 @@ paste it into the dashboard while signed in.
 3. **Paste it** into the dashboard **Claim** page while signed in. The platform
    attributes the cluster to your account and consumes the code (single-use).
 
-The claim code is the *only* secret that transits your browser, and only once.
-The **agent-token** (the credential that authenticates heartbeats) never
-leaves the cluster, and no command prints it, `lo kubehz claim-code`
-included.
+In this flow, the claim code is the *only* secret that transits your browser,
+and only once. The **agent-token** (the credential that authenticates
+heartbeats) never leaves the cluster, and no command prints it, `lo kubehz
+claim-code` included.
 
-The dashboard can also mint a claim nonce (`khzn_…`). `lo kubehz claim` places
-it for the agent, and the next heartbeat (within 5 minutes) echoes it to the
-platform. Give the nonce on stdin, so that it is not on the command line or in
-the shell history:
+The dashboard can also start the claim. Then it mints a claim nonce
+(`khzn_…`), and the nonce is the secret that transits your browser. The
+agent-token stays in the cluster in this flow too. `lo kubehz claim` places
+the nonce for the agent, and the next heartbeat (within 5 minutes) echoes it
+to the platform. Give the nonce on stdin, so that it is not on the command
+line or in the shell history:
 
 ```bash
 lo kubehz claim --nonce - < nonce.txt
