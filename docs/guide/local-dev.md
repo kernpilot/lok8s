@@ -282,7 +282,8 @@ nameserver of the node does not change.
 The field needs **kind v0.18.0 or later**. An older kind binary stops with an
 unknown-field error on the config. A node image from before kind v0.18.0
 ignores the field, and its nodes keep the host search domains. `lo doctor`
-checks the kind version: an older kind is a failure.
+checks the kind version: an older kind is a failure when the active domain
+uses the Lo driver.
 
 Short host names no longer resolve on the nodes either, not only in pods. This
 applies to image pulls (containerd resolves a registry host on the node) and

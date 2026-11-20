@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
@@ -153,7 +154,7 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := kindVersionRunner(tc.out, tc.err)
 			var out strings.Builder
-			ok := doctorKind(context.Background(), r, &out, bin, purpose)
+			ok := doctorKind(context.Background(), r, &out, bin, purpose, true)
 			if got := out.String(); got != tc.want || ok != tc.ok {
 				t.Errorf("kind version %q: %q ok=%v, want %q ok=%v", tc.out, got, ok, tc.want, tc.ok)
 			}
@@ -169,7 +170,7 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 func TestDoctorKindAbsentWarns(t *testing.T) {
 	r := kindVersionRunner("kind v0.17.0\n", nil)
 	var out strings.Builder
-	if !doctorKind(context.Background(), r, &out, t.TempDir(), "local clusters (Lo driver)") {
+	if !doctorKind(context.Background(), r, &out, t.TempDir(), "local clusters (Lo driver)", true) {
 		t.Error("an absent kind fails")
 	}
 	if want := "  ! kind not found (optional) — local clusters (Lo driver)\n"; out.String() != want {
@@ -180,20 +181,78 @@ func TestDoctorKindAbsentWarns(t *testing.T) {
 	}
 }
 
-// An older kind fails the tools section (and so the doctor exit code);
-// the same toolchain with the minimum kind passes it.
-func TestDoctorToolsSectionFailsOnAnOlderKind(t *testing.T) {
+// doctorKindDomains is a project with one domain of each kind that
+// kindFails tells apart. The bash twin writes the same specs
+// (tests/unit/doctor_test.bats, _kind_domains).
+func doctorKindDomains(t *testing.T) *config.Paths {
+	t.Helper()
+	p := synthProject(t)
+	for d, spec := range map[string]string{
+		"lo.dev/cluster.lok8s.yaml":      "kind: Lo\nmetadata:\n  name: lo\n",
+		"metal.dev/cluster.lok8s.yaml":   "kind: KubeOne\nmetadata:\n  name: metal\n",
+		"app.dev/deploy.lok8s.yaml":      "kind: Deploy\nspec:\n  clusterRef:\n    domain: lo.dev\n",
+		"nokind.dev/cluster.lok8s.yaml":  "metadata:\n  name: nokind\n",
+		"badkind.dev/cluster.lok8s.yaml": "kind: ../lo\nmetadata:\n  name: badkind\n",
+	} {
+		testutil.WriteFile(t, filepath.Join(p.Clusters, filepath.FromSlash(d)), spec)
+	}
+	return p
+}
+
+// An older kind fails the tools section (and so the doctor exit code)
+// when the active domain uses the Lo driver, and when there is no active
+// domain: no name, no spec, or a spec whose driver doctor cannot read.
+// For a domain of another driver, a deploy domain included, the line is
+// a warning with the same text, and the section passes. The minimum kind
+// passes for every domain. Bash twin: "doctor::_kind fails an older kind
+// only where the domain needs it" in tests/unit/doctor_test.bats.
+func TestDoctorToolsSectionOlderKindByDomain(t *testing.T) {
 	bin := doctorStubBin(t, "argsh", "yq", "kustomize", "kubectl", "envsubst", "docker", "jq", "kind")
+	p := doctorKindDomains(t)
+	const line = "kind v0.17.0 — local clusters (Lo driver); lo up needs kind v0.18.0 or later for networking.dnsSearch (fix: b update kind)\n"
 	for _, tc := range []struct {
-		out string
-		ok  bool
+		d    string
+		ok   bool
+		mark string
 	}{
-		{"kind v0.17.0 go1.19.4 linux/amd64\n", false},
-		{"kind v0.18.0 go1.20.2 linux/amd64\n", true},
+		{"lo.dev", false, "✗"},
+		{"", false, "✗"},
+		{"missing.dev", false, "✗"},
+		{"nokind.dev", false, "✗"},
+		{"badkind.dev", false, "✗"},
+		{"metal.dev", true, "!"},
+		{"app.dev", true, "!"},
 	} {
 		var out strings.Builder
-		if got := doctorToolsSection(context.Background(), kindVersionRunner(tc.out, nil), bin, &out); got != tc.ok {
-			t.Errorf("kind version %q: section ok=%v, want %v:\n%s", tc.out, got, tc.ok, out.String())
+		got := doctorToolsSection(context.Background(), kindVersionRunner("kind v0.17.0 go1.19.4 linux/amd64\n", nil), p, tc.d, bin, &out)
+		if got != tc.ok || !strings.Contains(out.String(), "\n  "+tc.mark+" "+line) {
+			t.Errorf("domain %q, an older kind: section ok=%v, want %v and the line %q:\n%s", tc.d, got, tc.ok, tc.mark+" "+line, out.String())
+		}
+		out.Reset()
+		got = doctorToolsSection(context.Background(), kindVersionRunner("kind v0.18.0 go1.20.2 linux/amd64\n", nil), p, tc.d, bin, &out)
+		if !got || !strings.Contains(out.String(), "\n  ✓ kind — local clusters (Lo driver)\n") {
+			t.Errorf("domain %q, the minimum kind: section ok=%v, want true:\n%s", tc.d, got, out.String())
+		}
+	}
+}
+
+// `lo doctor --domain` gives the active domain to the kind line: an older
+// kind on PATH is a failure for a domain of the Lo driver and a warning
+// for a KubeOne domain. The stub kind is the only tool on PATH. Bash twin:
+// "lo doctor reads the active domain for the kind line".
+func TestDoctorKindLineReadsTheActiveDomain(t *testing.T) {
+	p := doctorKindDomains(t)
+	bin := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(bin, "kind"), "#!/bin/sh\necho 'kind v0.17.0 go1.19.4 linux/amd64'\n")
+	if err := os.Chmod(filepath.Join(bin, "kind"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	const line = "kind v0.17.0 — local clusters (Lo driver); lo up needs kind v0.18.0 or later for networking.dnsSearch (fix: b update kind)\n"
+	for d, mark := range map[string]string{"lo.dev": "✗", "metal.dev": "!"} {
+		stdout, _, _ := runLo(t, NewRoot(p), "doctor", "--domain", d)
+		if !strings.Contains(stdout, "\n  "+mark+" "+line) {
+			t.Errorf("doctor --domain %s: no line %q in:\n%s", d, mark+" "+line, stdout)
 		}
 	}
 }

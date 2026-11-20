@@ -128,7 +128,7 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	// Each section reports whether a REQUIRED check failed; every failure
 	// keeps printing so the report is complete.
 	fail := !doctorRuntimeSection(ctx, r, path, out)
-	if !doctorToolsSection(ctx, r, path, out) {
+	if !doctorToolsSection(ctx, r, paths, d, path, out) {
 		fail = true
 	}
 	if !doctorEnvironmentSection(ctx, paths, d, path, toolchainFlag, out) {
@@ -182,8 +182,9 @@ func doctorRuntimeSection(ctx context.Context, r execx.Runner, path string, out 
 	return false
 }
 
-// doctorToolsSection is `--- tools ---`.
-func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io.Writer) bool {
+// doctorToolsSection is `--- tools ---`. d is the active domain: it decides
+// whether an older kind is a failure (kindFails).
+func doctorToolsSection(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, out io.Writer) bool {
 	fmt.Fprintln(out)
 	ui.Section(out, "tools")
 	ok := true
@@ -204,7 +205,7 @@ func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io
 	for _, t := range doctorToolsPost {
 		if t.name == "kind" {
 			// kind has a minimum release (doctorKind).
-			if !doctorKind(ctx, r, out, path, t.purpose) {
+			if !doctorKind(ctx, r, out, path, t.purpose, kindFails(paths, d)) {
 				ok = false
 			}
 			continue
@@ -233,11 +234,12 @@ var kindVersionRe = regexp.MustCompile(`^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9
 
 // doctorKind is the kind line of the tools section (bash: doctor::_kind).
 // kind is optional: when it is absent, the line is a warning. When it is
-// present, it must be doctorKindMin or later: an older kind is a failure
-// (false). Only major.minor.patch counts (toolchain.OlderRelease), so a
+// present, it must be doctorKindMin or later. An older kind is a failure
+// (false) when fails is true (kindFails), else a warning with the same
+// text. Only major.minor.patch counts (toolchain.OlderRelease), so a
 // pre-release of a later release passes. A failed `kind version`, or an
 // output without the version field, is a warning.
-func doctorKind(ctx context.Context, r execx.Runner, w io.Writer, path, purpose string) bool {
+func doctorKind(ctx context.Context, r execx.Runner, w io.Writer, path, purpose string, fails bool) bool {
 	kind, ok := toolchain.LookPath(path, "kind")
 	if !ok {
 		doctorWarn(w, "kind not found (optional) — "+purpose)
@@ -250,11 +252,31 @@ func doctorKind(ctx context.Context, r execx.Runner, w io.Writer, path, purpose 
 		doctorWarn(w, "kind — "+purpose+"; version unknown, "+need)
 		return true
 	case older:
-		doctorBad(w, "kind "+got+" — "+purpose+"; "+need+" (fix: b update kind)")
+		msg := "kind " + got + " — " + purpose + "; " + need + " (fix: b update kind)"
+		if !fails {
+			doctorWarn(w, msg)
+			return true
+		}
+		doctorBad(w, msg)
 		return false
 	}
 	doctorOK(w, "kind — "+purpose)
 	return true
+}
+
+// kindFails reports whether an older kind is a failure for the active
+// domain d (bash: doctor::_kind_fails). It is when d uses the Lo driver
+// (lo up runs kind for it), and when there is no active domain: d is
+// empty, or domain.Driver cannot read the driver of d (no
+// cluster.lok8s.yaml and no deploy.lok8s.yaml, or a spec without a kind or
+// with a malformed one). For a domain of another driver, a deploy domain
+// included, an older kind is a warning.
+func kindFails(paths *config.Paths, d string) bool {
+	if d == "" {
+		return true
+	}
+	drv, err := domain.Driver(paths.Clusters, d)
+	return err != nil || drv == "lo"
 }
 
 // kindRelease runs `kind version` and returns the release (vX.Y.Z, the
