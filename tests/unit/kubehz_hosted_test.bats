@@ -939,9 +939,10 @@ _hosted_temps() {
   [ -z "$(_hosted_temps "${PATH_BASE}/.kubeconfig" test.kubehz.dev.yaml)" ]
 }
 
-# A kubeconfig path that the write refuses stops the provision before the
-# create: the refusal creates no cluster (a re-run would create another
-# one).
+# A kubeconfig path that the write refuses (a directory, a link to one, a
+# link to nothing) stops the provision before the create: the refusal
+# creates no cluster (a re-run would create another one), and no
+# download starts.
 @test "provision_hosted: a refused kubeconfig path stops the provision before the create" {
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
@@ -955,6 +956,14 @@ _hosted_temps() {
   assert_output "ERR: ${kc} is a directory, not a file"
   [ ! -e "${CURL_CALLS}" ]
   rmdir "${kc}"
+  mkdir -p "${PATH_BASE}/realdir"
+  ln -s "${PATH_BASE}/realdir" "${kc}"
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_failure
+  assert_output "ERR: ${kc} is a directory, not a file"
+  [ ! -e "${CURL_CALLS}" ]
+  [ -z "$(ls -A "${PATH_BASE}/realdir")" ]
+  rm -- "${kc}"
   ln -s "${PATH_BASE}/none.yaml" "${kc}"
   run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
   assert_failure
@@ -1001,24 +1010,32 @@ _hosted_temps() {
 
 # Without mv -T, a directory can still come between the check and the
 # rename (here the mv itself puts it there first): mv then moves the new
-# file into it. The check after the rename finds no regular file, takes the
-# new file out of the directory by its exact path, and fails with one line.
-@test "kubehz::_write_private: without mv -T, a directory just before the rename gets the new file out again" {
+# file into it. The check after the rename finds no regular file at the
+# path and fails with one line that names the moved file. That file stays
+# (mode 0600), and nothing is removed: the mv here also puts another
+# file at the old temp path, and that file stays too.
+@test "kubehz::_write_private: without mv -T, a directory just before the rename keeps the new file, and the error names it" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml"
+  local seen="${BATS_TEST_TMPDIR}/temp-path" f
   printf 'old\n' > "${kc}"
   _KUBEHZ_MV_EXACT=0
   mv() {
     if [[ -f "${kc}" ]]; then command mv -- "${kc}" "${aside}" && mkdir -- "${kc}"; fi
-    command mv "$@"
+    command mv "$@" || return
+    printf '%s\n' "${@: -2:1}" > "${seen}"
+    printf other > "${@: -2:1}"
   }
   run kubehz::_write_private "${kc}" printf new
   assert_failure
-  assert_output --partial "${kc} is not a regular file after the rename: the new file is removed"
+  f=$(find "${kc}" -mindepth 1)
+  [ -n "${f}" ]
+  [ "$(cat "${f}")" = new ]
+  [ "$(stat -c %a "${f}")" = 600 ]
+  assert_output --partial "${kc} is a directory, not a file: the rename moved the new file into it. Remove ${f} (mode 0600)"
   [ "${#lines[@]}" -eq 1 ]
-  [ -z "$(find "${kc}" -mindepth 1)" ]
   [ "$(cat "${aside}")" = old ]
-  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+  [ "$(cat "$(cat "${seen}")")" = other ]
 }
 
 # _hosted_moved_run <kc> <aside> <signal> <prelude> <step>: run
@@ -1028,9 +1045,13 @@ _hosted_temps() {
 # test_f is the moved file), writes the number of files in <kc> to
 # <aside>.seen, and then sends <signal> to the shell. So the traps run
 # before the check after the rename. <prelude> is shell code that runs
-# after the library is sourced.
+# after the library is sourced. The call of mv has 2>/dev/null: a real mv
+# is a child process, and the traps run after it ends, without that
+# redirection. The mv here is a function, so it sends the signal with
+# the stderr of the shell (fd 9), and the traps write their line there.
 _hosted_moved_run() {
-  run bash -c 'import() { :; }
+  run bash -c 'exec 9>&2
+import() { :; }
 source "$6/utils/verbose.sh"
 source "$6/utils/http.sh"
 source "$6/libs/kubehz/hosted"
@@ -1042,7 +1063,7 @@ mv() {
   test_f=$(find "${test_kc}" -mindepth 1 -maxdepth 1)
   eval "${test_step}" || return
   find "${test_kc}" -mindepth 1 | wc -l > "${test_aside}.seen"
-  kill -s "${test_signal}" "$$"
+  { kill -s "${test_signal}" "$$"; } 2>&9
 }
 kubehz::_write_private "${test_kc}" printf new
 echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
@@ -1050,10 +1071,11 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
 
 # Without mv -T, a TERM or a HUP during the rename into a directory that
 # took the place of the file: the traps run before the check after the
-# rename. They remove the moved file from the directory (it is the temp
-# file of this run: the same inode), and the shell ends with the signal.
-@test "kubehz::_write_private: without mv -T, TERM and HUP during the rename into a directory leave no file in it" {
-  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" pair sig code
+# rename. They name the moved file in one line and remove nothing in the
+# directory (the file stays, mode 0600), and the shell ends with the
+# signal.
+@test "kubehz::_write_private: without mv -T, TERM and HUP during the rename into a directory name the moved file and remove nothing" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" pair sig code f
   for pair in TERM:143 HUP:129; do
     sig="${pair%:*}" code="${pair#*:}"
     rm -rf -- "${kc:?}" "${aside:?}" "${aside}.seen"
@@ -1063,16 +1085,20 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
     refute_output --partial returned
     # The rename put the new file into the directory before the signal.
     [ "$(cat "${aside}.seen")" -eq 1 ]
-    [ -d "${kc}" ]
-    [ -z "$(find "${kc}" -mindepth 1)" ] || { echo "${sig}: left in ${kc}: $(ls -A "${kc}")" >&2; return 1; }
+    f=$(find "${kc}" -mindepth 1)
+    [ -n "${f}" ] && [ "$(cat "${f}")" = new ] || { echo "${sig}: in ${kc}: $(ls -A "${kc}")" >&2; return 1; }
+    [ "$(stat -c %a "${f}")" = 600 ]
+    assert_output --partial "${kc} is a directory, not a file: the rename moved the new file into it. Remove ${f} (mode 0600)"
+    [ "${#lines[@]}" -eq 1 ]
     [ "$(cat "${aside}")" = old ]
     [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
   done
 }
 
-# The traps remove only the file that this run made. Here another file
-# (of this user, mode 0600) takes the place of the moved one before the
-# signal: its inode is not the inode of the temp file, so it stays.
+# The traps remove no file in that directory, also not one that another
+# process put there. Here another file (of this user, mode 0600) takes
+# the place of the moved one before the signal: it stays, and the line
+# names it (the traps cannot tell the two files apart).
 @test "kubehz::_write_private: the traps leave a file in that directory that this run did not make" {
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" files
   printf 'old\n' > "${kc}"
@@ -1083,22 +1109,7 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
   files=("${kc}"/*)
   [ "${#files[@]}" -eq 1 ]
   [ "$(cat "${files[0]}")" = other ]
-}
-
-# When the inode of the temp file cannot be read before the mv, the traps
-# remove the moved file only when it belongs to this user and has mode
-# 0600 (the mode of the temp file). A moved file of mode 0644 stays.
-@test "kubehz::_write_private: without the inode, the traps remove a moved file of this user only at mode 0600" {
-  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" pair mode want
-  for pair in 600:0 644:1; do
-    mode="${pair%:*}" want="${pair#*:}"
-    rm -rf -- "${kc:?}" "${aside:?}" "${aside}.seen"
-    printf 'old\n' > "${kc}"
-    _hosted_moved_run "${kc}" "${aside}" TERM 'kubehz::_inode() { return 1; }' "chmod ${mode} \"\${test_f}\""
-    [ "${status}" -eq 143 ] || { echo "mode ${mode}: status ${status}, want 143: ${output}" >&2; return 1; }
-    [ "$(cat "${aside}.seen")" -eq 1 ]
-    [ "$(find "${kc}" -mindepth 1 | wc -l)" -eq "${want}" ] || { echo "mode ${mode}: $(ls -A "${kc}"), want ${want} file(s)" >&2; return 1; }
-  done
+  assert_output --partial "${kc} is a directory, not a file: the rename moved the new file into it. Remove ${files[0]} (mode 0600)"
 }
 
 # The probe of mv -T runs once, in a temp directory of its own that it
@@ -1132,19 +1143,28 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
   [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
 }
 
-@test "kubehz::_write_private refuses a link to nothing and a directory, and leaves no temp file" {
+# The refusals come before the temp file and before the command (the
+# download): the command here makes a file, and it never runs.
+@test "kubehz::_write_private refuses a link to nothing, a directory and a link to a directory before the command, and leaves no temp file" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
-  local d="${BATS_TEST_TMPDIR}/wp"
-  mkdir -p "${d}/sub.yaml"
+  local d="${BATS_TEST_TMPDIR}/wp" ran="${BATS_TEST_TMPDIR}/ran"
+  mkdir -p "${d}/sub.yaml" "${d}/real"
   # The directory of the target exists: readlink -f alone would resolve it.
   ln -s "${d}/none.yaml" "${d}/dangling.yaml"
-  run kubehz::_write_private "${d}/dangling.yaml" printf x
+  ln -s "${d}/real" "${d}/dirlink.yaml"
+  run kubehz::_write_private "${d}/dangling.yaml" touch "${ran}"
   assert_failure
   assert_output --partial "Cannot resolve the symlink ${d}/dangling.yaml"
-  run kubehz::_write_private "${d}/sub.yaml" printf x
+  run kubehz::_write_private "${d}/sub.yaml" touch "${ran}"
   assert_failure
   assert_output --partial "${d}/sub.yaml is a directory, not a file"
-  [ "$(find "${d}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 ]
+  run kubehz::_write_private "${d}/dirlink.yaml" touch "${ran}"
+  assert_failure
+  assert_output --partial "${d}/dirlink.yaml is a directory, not a file"
+  [ ! -e "${ran}" ]
+  [ "$(find "${d}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 4 ]
+  [ -z "$(ls -A "${d}/sub.yaml")" ]
+  [ -z "$(ls -A "${d}/real")" ]
 }
 
 # A TERM or a HUP during the download: the trap removes the temp file and
@@ -1223,6 +1243,50 @@ failure rc=1
 same after failure
 the caller had traps
 new"
+}
+
+# The restore gives each trap of the caller back at once. A trap function
+# here logs each call of trap: no signal that had a trap is set to the
+# default on the way (a signal in that window would end the shell and
+# not run the trap of the caller). A signal that had no trap goes back to
+# the default, and an ignored signal stays ignored. Case all: INT, TERM
+# and HUP have traps. Case some: INT has one, TERM has none, HUP is
+# ignored.
+@test "kubehz::_write_private gives each trap of the caller back at once, and a signal without one goes back to the default" {
+  local log="${BATS_TEST_TMPDIR}/trap.log" c want_out want_log
+  for c in all some; do
+    : > "${log}"
+    run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"
+source "$2/utils/http.sh"
+source "$2/libs/kubehz/hosted"
+trap "echo caller-int" INT
+if [ "$4" = all ]; then trap "echo caller-term" TERM; trap "echo caller-hup" HUP; else trap "" HUP; fi
+before=$(trap -p INT TERM HUP)
+test_log="$3"
+trap() { printf "%s\n" "$*" >> "${test_log}"; builtin trap "$@"; }
+kubehz::_write_private "$1" printf new
+echo "rc=$?"
+unset -f trap
+[ "$(trap -p INT TERM HUP)" = "${before}" ] && echo same
+trap -p TERM' bash "${BATS_TEST_TMPDIR}/kc.yaml" "${_PROJECT_ROOT}/.lok8s" "${log}" "${c}"
+    assert_success
+    if [ "${c}" = all ]; then
+      want_out="rc=0
+same
+trap -- 'echo caller-term' SIGTERM"
+      want_log=$'-- echo caller-int SIGINT\n-- echo caller-term SIGTERM\n-- echo caller-hup SIGHUP'
+    else
+      want_out="rc=0
+same"
+      want_log=$'-- echo caller-int SIGINT\n- TERM\n--  SIGHUP'
+    fi
+    assert_output "${want_out}"
+    # The last three calls of trap are the restore, one per signal.
+    [ "$(tail -n 3 "${log}")" = "${want_log}" ] || { echo "${c}: $(cat "${log}")" >&2; return 1; }
+    # No other call sets a signal to the default (only TERM of case some).
+    [ "$(sed -n '/^- /p' "${log}")" = "$([ "${c}" = all ] || echo '- TERM')" ] || { echo "${c}: $(cat "${log}")" >&2; return 1; }
+  done
 }
 
 @test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
