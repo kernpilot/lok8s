@@ -65,10 +65,13 @@ setup() {
   mkdir -p "${TMPDIR}"
 
   # The stand-in kubectl: records its argv, answers from the case directory.
+  # It gets _stat_field of test_helper (a script does not load that file).
   STUB="${BATS_TEST_TMPDIR}/stub"
   mkdir -p "${STUB}"
-  cat > "${STUB}/kubectl" <<'STUB'
-#!/usr/bin/env bash
+  {
+    echo '#!/usr/bin/env bash'
+    declare -f _stat_field
+    cat <<'STUB'
 printf '%s\n' "$*" >> "${CALLS}"
 res="${4:-}"
 if [[ ! -f "${CASE}/${res}" ]]; then
@@ -76,24 +79,12 @@ if [[ ! -f "${CASE}/${res}" ]]; then
   exit 0
 fi
 read -r kind a b < "${CASE}/${res}"
-# _field <pid> <n> — field <n> of /proc/<pid>/stat after the command name
-# (1: the state, 2: the parent, 3: the process group), else of ps.
-_field() {
-  local st
-  if st="$(cat "/proc/${1}/stat" 2>/dev/null)"; then
-    st="${st##*) }"
-    read -r -a st <<< "${st}"
-    echo "${st[$(( ${2} - 1 ))]}"
-  else
-    case "${2}" in 2) ps -o ppid= -p "${1}" ;; 3) ps -o pgid= -p "${1}" ;; esac | tr -d ' '
-  fi
-}
 # _tree <term|ignore>: the pid files, and a child that ignores TERM (its
 # exec'd sleep inherits that). fd 3 (of bats) stays closed in each sleep.
 _tree() {
   echo "${EPOCHREALTIME//[!0-9]/}" > "${STUB_START}"
   echo "$$" > "${STUB_PID}"
-  _field "$$" 3 > "${STUB_PGID}"
+  _stat_field "$$" 3 > "${STUB_PGID}"
   [[ "${1}" == term ]] || trap '' TERM
   bash -c 'trap "" TERM; echo "$$" > "${CHILD_PID}"; exec sleep 30' 3>&- &
   # The child has written its pid before the stand-in goes on.
@@ -117,7 +108,7 @@ case "${kind}" in
     # The parent of the parent is the subshell of the reads: the check runs
     # the read under a leader, a coprocess of that subshell.
     echo "${EPOCHREALTIME//[!0-9]/}" > "${INT_SENT}"
-    kill -INT "$(_field "${PPID}" 2)"
+    kill -INT "$(_stat_field "${PPID}" 2)"
     sleep "${a}" 3>&-
     cat "${FIX}/json/${b}" ;;
   termok)
@@ -127,6 +118,7 @@ case "${kind}" in
     wait ;;
 esac
 STUB
+  } > "${STUB}/kubectl"
   chmod +x "${STUB}/kubectl"
   export PATH="${STUB}:${PATH}"
   [[ "$(command -v kubectl)" == "${STUB}/kubectl" ]] || fail "the stand-in kubectl is not first on PATH"
@@ -284,20 +276,6 @@ _assert_tree_gone() {
   [[ "${pgid}" != "$(cat "${STUB_PID}")" ]] || fail "the stand-in leads its process group"
   ! _group_alive "${pgid}" || fail "a process of the group of the read still runs after the check"
   (( took < ${2} )) || fail "the check took ${took} ms, want less than ${2} ms"
-}
-
-# _stat_field <pid> <n> — field <n> of /proc/<pid>/stat after the command
-# name (1: the state, 2: the parent, 3: the process group), else of ps;
-# empty when the process is gone. The stand-in has its own copy.
-_stat_field() {
-  local st
-  if st="$(cat "/proc/${1}/stat" 2>/dev/null)"; then
-    st="${st##*) }"
-    read -r -a st <<< "${st}"
-    echo "${st[$(( ${2} - 1 ))]}"
-  else
-    case "${2}" in 2) ps -o ppid= -p "${1}" ;; 3) ps -o pgid= -p "${1}" ;; esac 2>/dev/null | tr -d ' '
-  fi
 }
 
 # _log_kill — the check's kill(1) calls go to KILL_LOG, each with the state

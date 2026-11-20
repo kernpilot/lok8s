@@ -77,9 +77,12 @@ setup() {
   mkdir -p "${STUB}"
   # The stand-in kubectl: records its argv, answers from the case directory:
   # a labelled read from the file of its resource, a reference read (no
-  # selector) from refs-<resource>.
-  cat > "${STUB}/kubectl" <<'STUB'
-#!/usr/bin/env bash
+  # selector) from refs-<resource>. It gets _stat_field of test_helper (a
+  # script does not load that file).
+  {
+    echo '#!/usr/bin/env bash'
+    declare -f _stat_field
+    cat <<'STUB'
 printf '%s\n' "$*" >> "${CALLS}"
 # The check removes each raw list right after its read: no other .json file
 # is next to the output file of this read (Linux: /proc).
@@ -95,18 +98,11 @@ if [[ ! -f "${CASE}/${res}" ]]; then
   exit 0
 fi
 read -r kind a b < "${CASE}/${res}"
-# _pids — the pid files: the clock, the stand-in and its process group (/proc,
-# else ps).
+# _pids — the pid files: the clock, the stand-in and its process group.
 _pids() {
-  local st
   echo "${EPOCHREALTIME//[!0-9]/}" > "${STUB_START}"
   echo "$$" > "${STUB_PID}"
-  if st="$(cat "/proc/$$/stat" 2>/dev/null)"; then
-    read -r _ _ st _ <<< "${st##*) }"
-    echo "${st}" > "${STUB_PGID}"
-  else
-    ps -o pgid= -p "$$" | tr -d ' ' > "${STUB_PGID}"
-  fi
+  _stat_field "$$" 3 > "${STUB_PGID}"
 }
 case "${kind}" in
   json) cat "${FIX}/json/${a}" ;;
@@ -124,6 +120,7 @@ case "${kind}" in
     cat "${FIX}/json/${a}" ;;
 esac
 STUB
+  } > "${STUB}/kubectl"
   # The stand-in kustomize: the build of the bootstrap's render (its flags),
   # with the case's values lines in the merged values of the build directory.
   # A wrong call or a missing line goes into CALLS, so the calls of the case
