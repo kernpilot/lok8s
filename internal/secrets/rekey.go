@@ -450,7 +450,7 @@ func (c *Context) refuseConfigAlias(dest string, checked sweepList) bool {
 // unfinishedEncs returns each .enc of the list l whose re-key is not
 // finished for recipient (bash: secrets::_unfinished): an .enc that does not
 // exist, a file that it cannot open or read, and a file whose sops envelope
-// does not show that recipient was added (keyAdded). refuseEncPaths runs
+// does not pass the recipient envelope check (keyAdded). refuseEncPaths runs
 // before it, so each .enc of the list is a regular file or absent. An .enc
 // larger than maxEncRead is refused (keyAdded): ErrHandled. AddKey reads it
 // when .sops.yaml lists the recipient already, before and after its
