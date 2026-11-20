@@ -209,12 +209,12 @@ check - status --domain shared.dev                 # lo: NotFound
 check - status --domain beta.cloud                 # kubeone driver status, no Tilt section
 check - status --domain gamma.app                  # deploy → follows clusterRef
 check - status --domain delta.app                  # deploy without clusterRef (error merged into stdout)
-# NOT checked: `status --domain nope.dev` — see the ../evil note below (the
-# same unbound-variable crash: any domain without a spec).
-# NOT checked: `status --domain ../evil` — the bash dispatch_status ignores
-# resolve_spec's return and dies on an unbound LOK8S_SPEC_KIND (`set -u`);
-# the Go port prints the raw invalid-domain error and carries on with the
-# cluster-free sections. A bash defect, not a parity target.
+# NOT checked: `status --domain nope.dev` (no spec) and `status --domain
+# ../evil` (a traversal-shaped domain). Since #269 the bash dispatch_status
+# returns 1 when resolve_spec fails, so both twins print the lookup error in
+# the Cluster section and carry on with the cluster-free sections. Before,
+# the bash died on an unbound LOK8S_SPEC_KIND (`set -u`). No case diffs the
+# two domains yet.
 check_parse status extra
 mkdir -p "${PROJ}/clusters/alpha.dev/targets/zitadel" "${PROJ}/clusters/alpha.dev/targets/api"
 : > "${PROJ}/clusters/alpha.dev/artifacts.yaml"
