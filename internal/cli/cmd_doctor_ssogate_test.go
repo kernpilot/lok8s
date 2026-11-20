@@ -74,7 +74,7 @@ func ssoCase(t *testing.T, name string) (*config.Paths, string, *scriptRunner) {
 	}
 
 	r := &scriptRunner{handler: func(c execx.Cmd) error {
-		want := []string{"--kubeconfig", kubeconfig, "get", "crd", "securitypolicies.gateway.envoyproxy.io", "--ignore-not-found", "-o", "json", "--request-timeout=10s"}
+		want := []string{"--kubeconfig", kubeconfig, "get", "customresourcedefinitions.apiextensions.k8s.io", "securitypolicies.gateway.envoyproxy.io", "--ignore-not-found", "-o", "json", "--request-timeout=10s"}
 		if c.Name != kubectl || !slices.Equal(c.Args, want) {
 			t.Errorf("exec %s %q, want %s %q", c.Name, c.Args, kubectl, want)
 			return errors.New("unexpected exec")
@@ -117,20 +117,27 @@ func ssoCase(t *testing.T, name string) (*config.Paths, string, *scriptRunner) {
 }
 
 // TestDoctorSSOGateCases runs every shared case: (a) the field in v1alpha1
-// is OK, its absence is a FAIL (also without a schema, with a null field
-// and with a key in another case); (b) the version is selected by its name:
-// v1alpha1 after another version that lacks the field is OK, and another
-// version first that has the field does not hide a v1alpha1 without it;
-// (c) no CRD (no output, white space, an empty List) skips; (d) each failed
-// read prints its fixed reason and never kubectl's output; (e) an answer of
-// another shape (not JSON, not an object, a List with an item, two
-// documents, a byte-order mark, NaN, a number out of range, two v1alpha1, a
-// name that is not a string, a step or the field that is not an object,
-// versions that are not a list, a version that is not an object) prints the
-// fixed reason in both twins; (f) the addon as a map entry counts, as a
-// path entry or absent it does not, and the default spec.bootstrap has no
-// sso-gate; (g) no kubeconfig, a kubeconfig path with a control character,
-// a deploy domain, no cluster spec and a spec that cannot be read.
+// is OK, its absence is a FAIL (also without a schema, with a null field,
+// with a key in another case, and with the key only at a nested place);
+// (b) the version is selected by its name: v1alpha1 after another version
+// that lacks the field is OK, and another version first that has the field
+// does not hide a v1alpha1 without it; (c) the flags: a v1alpha1 that is
+// not served is not checked, also when it lacks the field (the served
+// check comes before the field); a storage version other than v1alpha1
+// without the field is a FAIL of its own, with the field it is OK, and when
+// v1alpha1 lacks the field too, the line of v1alpha1 wins; (d) no CRD (no
+// output, white space, an empty List) skips; (e) each failed read prints
+// its fixed reason and never kubectl's output; (f) an answer of another
+// shape (not JSON, not an object, a List with an item, two documents, a
+// byte-order mark, NaN, a number out of range, two v1alpha1, a name that is
+// not a string, a step or the field that is not an object, versions that
+// are not a list, a version that is not an object, a served flag that is
+// not a boolean, no storage flag, no or two storage versions, a field of
+// the storage version that is not an object) prints the fixed reason in
+// both twins; (g) the addon as a map entry counts, as a path entry or
+// absent it does not, and the default spec.bootstrap has no sso-gate; (h)
+// no kubeconfig, a kubeconfig path with a control character, a deploy
+// domain, no cluster spec and a spec that cannot be read.
 func TestDoctorSSOGateCases(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(ssoFixtures, "cases"))
 	if err != nil {

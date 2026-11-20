@@ -815,32 +815,61 @@ Three consequences:
   `.spec.mergeType: field not declared in schema`, while a client-side
   apply drops the field **silently** and leaves you with the replace
   behaviour. Check the CRD before you trust the field. When
-  `spec.bootstrap` has `sso-gate`, `lo doctor` does this check for you.
-  It reads the CRD from the domain's cluster (one GET request) and
-  prints one line at the end of the domain section:
+  `spec.bootstrap` has the entry name `sso-gate`, `lo doctor` does this
+  check for you (a path entry, such as `/.lok8s/addons/sso-gate`, gets
+  no line). It reads the CRD from the domain's cluster with one kubectl
+  command, which sends GET requests only (the CRD, and the API discovery
+  when the cache of kubectl has no answer). It prints one line after the
+  other lines of the domain section:
 
   ```console
   $ lo doctor --domain <domain>
     ✓ sso-gate: the SecurityPolicy CRD declares spec.mergeType
   ```
 
-  A `✗` line says that envoy-gateway is older than v1.8.0: upgrade it
-  first, then reconcile `sso-gate`. The line is advisory: it does not
-  change the exit code of `lo doctor`, so a script must read the line,
-  not the exit code. A `!` or `ℹ` line gives the reason when the check
-  did not run (for example: no kubeconfig, no kubectl, no CRD, or no
-  answer in 30 s). In that case, or without `lo doctor`, do the same
-  check by hand:
+  The check reads the version `v1alpha1` (the version that `sso-gate`
+  applies) and the storage version of the CRD. The apiserver stores each
+  object in the storage version, and removes the fields that the schema
+  of that version does not declare. There are two `✗` lines:
+
+  - `v1alpha1` does not declare the field: envoy-gateway is older than
+    v1.8.0. Upgrade it first, then reconcile `sso-gate`.
+  - The storage version is another version, and it does not declare the
+    field: the apiserver removes the field when it stores the policy.
+    Reinstall the CRDs of envoy-gateway first, then reconcile `sso-gate`.
+
+  When more than one case applies, the check prints one line: a
+  `v1alpha1` that is not served gives the `!` line, also when it does
+  not declare the field, and when `v1alpha1` does not declare the field,
+  its `✗` line wins over the line of the storage version.
+
+  The line is advisory: it does not change the exit code of `lo doctor`,
+  so a script must read the line, not the exit code. A `!` or `ℹ` line
+  gives the reason when the check did not run (for example: no
+  kubeconfig, no kubectl, no CRD, a CRD that does not serve `v1alpha1`,
+  or no answer in 30 s). The bash implementation (`lok8s.yaml`
+  `spec.implementation`) also needs yq to read `spec.bootstrap` (without
+  yq, the line of the RBAC migration check says so, and this check
+  prints no line) and jq to read the CRD (without jq, a `!` line). The
+  Go implementation needs neither. When the check did not run, or
+  without `lo doctor`, do the same check by hand:
 
   ```console
+  $ kubectl get customresourcedefinitions.apiextensions.k8s.io securitypolicies.gateway.envoyproxy.io \
+      -o jsonpath='{range .spec.versions[*]}{.name} served={.served} storage={.storage}{"\n"}{end}'
+  v1alpha1 served=true storage=true
   $ JP='{.spec.versions[?(@.name=="v1alpha1")]'
   $ JP="${JP}.schema.openAPIV3Schema.properties.spec.properties.mergeType.type}"
-  $ kubectl get crd securitypolicies.gateway.envoyproxy.io -o jsonpath="${JP}"
+  $ kubectl get customresourcedefinitions.apiextensions.k8s.io securitypolicies.gateway.envoyproxy.io \
+      -o jsonpath="${JP}"
   string     # empty output = your Envoy Gateway is too old
   ```
 
-  (Both select the version by name, not by `versions[0]`: the order of
-  that list is not a contract.)
+  `v1alpha1` must be served. When the storage version is another
+  version, set `JP` again with the name of the storage version in place
+  of `v1alpha1`, and run the last command again: it must print `string`
+  too. (Both select a version by name, not by `versions[0]`: the order
+  of that list is not a contract.)
 
 - **Upgrade Envoy Gateway before the policy reconciles.** Under `lo up`
   that ordering comes free from `dependsOn: [envoy-gateway]`, and a

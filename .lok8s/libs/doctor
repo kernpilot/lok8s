@@ -114,13 +114,15 @@ main::doctor() {
   fi
   # The RBAC migration check of the domain's cluster (advisory; it sends only
   # GET requests, and the credential plugin of the kubeconfig runs as kubectl
-  # runs it). Its lines close the domain section.
+  # runs it). Its lines come after the lines of the domain section; the two
+  # checks below follow them.
   doctor::_rbac_check "${domain}"
   # The rook-ceph-csi-kms objects that the current values do not render
   # (advisory, with the same GET requests and plugin caveat).
   doctor::_kms_check "${domain}"
   # The SecurityPolicy CRD of envoy-gateway, when spec.bootstrap has sso-gate
-  # (advisory, one GET request with the same plugin caveat).
+  # as an entry name (advisory; one kubectl read of the CRD, GET requests
+  # only, with the same plugin caveat).
   doctor::_sso_check "${domain}"
 
   # Provider / infrastructure diagnosis — advisory, never affects the exit code.
@@ -1560,22 +1562,33 @@ doctor::_kms_report() {
 # The check runs only when spec.bootstrap has sso-gate as a bare entry name
 # (read with the entry parser of `lo addons --detail`, as the RBAC migration
 # check reads its addons) and the domain has a kubeconfig (the file that the
-# entrypoint exports as KUBECONFIG). It makes one read: `kubectl get crd
+# entrypoint exports as KUBECONFIG). It runs one kubectl command: `kubectl get
+# customresourcedefinitions.apiextensions.k8s.io
 # securitypolicies.gateway.envoyproxy.io --ignore-not-found -o json`, with the
 # bound, the process group, the temp dir, the traps and the fixed reasons of
-# the RBAC migration check (doctor::_sso_fetch). kubectl's stderr is never
-# printed. The check selects the version v1alpha1 by its name, never by its
-# position in spec.versions (the order of that list is not a contract), and
-# looks for schema.openAPIV3Schema.properties.spec.properties.mergeType in it
-# (doctor::_sso_state).
+# the RBAC migration check (doctor::_sso_fetch). The full resource name needs
+# no short name (`crd`) from the API discovery of the cluster. kubectl sends
+# GET requests only: the CRD, and the API discovery when its cache has no
+# answer. kubectl's stderr is never printed.
 #
-# The lines: ✓ when the CRD declares the field; ✗ when it does not (upgrade
-# envoy-gateway first); ℹ (skipped) without a kubeconfig or a CRD; ! (not
-# checked) when jq or kubectl is not there or the read fails, with the fixed
-# reason of the failure. Without a domain, with a deploy domain, without a
-# cluster spec, with a spec that cannot be read, or without yq, it prints
-# nothing: the RBAC migration check above says it. Every line is advisory: it
-# always returns 0.
+# The check selects the version v1alpha1 by its name, never by its position
+# in spec.versions (the order of that list is not a contract), and looks for
+# schema.openAPIV3Schema.properties.spec.properties.mergeType in it
+# (doctor::_sso_state). Two flags of the versions also count: a v1alpha1 that
+# is not served gets the line of a CRD without v1alpha1 (an apply of sso-gate
+# then fails with an error, and drops nothing in silence), and a storage
+# version other than v1alpha1 that does not declare the field is a ✗ (the
+# apiserver prunes each object with the schema of the storage version before
+# it stores it). The Go twin's header has the details.
+#
+# The lines: ✓ when v1alpha1 and the storage version declare the field; ✗
+# when v1alpha1 does not (upgrade envoy-gateway first) or the storage version
+# does not (reinstall the CRDs of envoy-gateway first); ℹ (skipped) without a
+# kubeconfig or a CRD; ! (not checked) when jq or kubectl is not there, the
+# read fails, or the CRD has no served v1alpha1, with the fixed reason.
+# Without a domain, with a deploy domain, without a cluster spec, with a spec
+# that cannot be read, or without yq, it prints nothing: the RBAC migration
+# check above says it. Every line is advisory: it always returns 0.
 doctor::_sso_check() {
   local domain="${1}"
   local skipped="sso-gate SecurityPolicy CRD check skipped: " not_checked="sso-gate SecurityPolicy CRD not checked: "
@@ -1625,8 +1638,10 @@ doctor::_sso_check() {
   case "${result}" in
     present)     doctor::_ok "sso-gate: the SecurityPolicy CRD declares spec.mergeType" ;;
     absent)      doctor::_bad "sso-gate: the SecurityPolicy CRD has no spec.mergeType, so envoy-gateway is older than v1.8.0: upgrade it first, then reconcile sso-gate" ;;
+    dropped)     doctor::_bad "sso-gate: the storage version of the SecurityPolicy CRD has no spec.mergeType, so the apiserver drops the field when it stores the policy: reinstall the CRDs of envoy-gateway first, then reconcile sso-gate" ;;
     none)        doctor::_info "${skipped}the cluster has no SecurityPolicy CRD (envoy-gateway is not installed)" ;;
     noversion)   doctor::_warn "${not_checked}the SecurityPolicy CRD has no version v1alpha1" ;;
+    notserved)   doctor::_warn "${not_checked}the SecurityPolicy CRD does not serve the version v1alpha1" ;;
     fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}" ;;
     *)           doctor::_warn "${not_checked}kubectl failed or did not return a valid CRD" ;;
   esac
@@ -1656,7 +1671,8 @@ doctor::_sso_fetch_in() {
     exit 0
   fi
   doctor::_rbac_get "${_rbac_tmp}/crd.json" "${_rbac_tmp}/err" \
-    --kubeconfig "${1}" get crd securitypolicies.gateway.envoyproxy.io --ignore-not-found
+    --kubeconfig "${1}" get customresourcedefinitions.apiextensions.k8s.io \
+    securitypolicies.gateway.envoyproxy.io --ignore-not-found
   if [[ "${_rbac_reason}" == "${forbidden}" ]]; then
     _rbac_reason="the kubeconfig user cannot read the SecurityPolicy CRD (forbidden or unauthorized)"
   elif [[ "${_rbac_reason}" == "${other}" ]]; then
@@ -1674,13 +1690,16 @@ doctor::_sso_fetch_in() {
 # doctor::_sso_state <file> — prints the state of the CRD read in <file> (Go:
 # ssoParse, the same rules): none (JSON white space only, or a List with no
 # items: --ignore-not-found prints nothing for a CRD that is not there),
-# noversion (no version v1alpha1), absent (v1alpha1 does not declare the
-# field), present (it does), or invalid. Else the file must be one JSON
-# object with a spec.versions list of objects, each with a string name
-# (absent or null: empty), and exactly one element with the name v1alpha1.
-# In it, each step of the path to the field that is there must be an object:
-# a step that is absent or null makes the field absent, any other value
-# makes the CRD invalid. As in doctor::_rbac_shape, a leading byte-order mark,
+# noversion (no version v1alpha1), notserved (v1alpha1 is not served),
+# absent (v1alpha1 does not declare the field), dropped (v1alpha1 declares
+# it, and the storage version, another one, does not), present (both
+# declare it), or invalid. Else the file must be one JSON object with a
+# spec.versions list of objects, each with a string name (absent or null:
+# empty) and the booleans served and storage, exactly one storage version,
+# and exactly one element with the name v1alpha1. In a version, each step of
+# the path to the field that is there must be an object: a step that is
+# absent or null makes the field absent, any other value makes the CRD
+# invalid. As in doctor::_rbac_shape, a leading byte-order mark,
 # a second JSON value, NaN and a number out of the range of a float64 make it
 # invalid (the JSON decoder of Go refuses them). The stderr of jq is never
 # printed.
@@ -1703,6 +1722,7 @@ doctor::_sso_state() {
         elif .v == null then "absent"
         elif (.v | type) == "object" then "present"
         else "invalid" end;
+    def field: look(["schema", "openAPIV3Schema", "properties", "spec", "properties", "mergeType"]);
     if length == 0 then "none"
     elif length != 1 or any(.. | numbers; isnan or isinfinite) then "invalid"
     else .[0]
@@ -1710,16 +1730,25 @@ doctor::_sso_state() {
         elif .kind == "List" then
           (if (.items | type) == "array" and (.items | length) == 0 then "none" else "invalid" end)
         elif (.spec | type) != "object" or (.spec.versions | type) != "array" then "invalid"
-        elif any(.spec.versions[]; type != "object" or ((.name | . == null or type == "string") | not)) then "invalid"
-        else [.spec.versions[] | select(.name == "v1alpha1")]
+        elif any(.spec.versions[]; type != "object" or ((.name | . == null or type == "string") | not)
+            or (.served | type) != "boolean" or (.storage | type) != "boolean") then "invalid"
+        elif ([.spec.versions[] | select(.storage)] | length) != 1 then "invalid"
+        else ([.spec.versions[] | select(.storage)][0]) as $stored
+          | [.spec.versions[] | select(.name == "v1alpha1")]
           | if length == 0 then "noversion"
             elif length > 1 then "invalid"
-            else .[0] | look(["schema", "openAPIV3Schema", "properties", "spec", "properties", "mergeType"]) end
+            elif (.[0].served | not) then "notserved"
+            else .[0]
+              | (field) as $s
+              | if $s != "present" or .storage then $s
+                else ($stored | field) | if . == "absent" then "dropped" else . end
+                end
+            end
         end
     end
   ' "${1}" 2>/dev/null) || state=invalid
   case "${state}" in
-    none|noversion|absent|present) ;;
+    none|noversion|notserved|absent|dropped|present) ;;
     *) state=invalid ;;
   esac
   printf '%s\n' "${state}"
