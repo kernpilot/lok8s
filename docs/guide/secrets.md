@@ -250,6 +250,14 @@ commands replace `.sops.yaml` through a temporary file and a rename. Each
 encrypt writes its `.enc` file the same way, so an encrypt that stops leaves
 the old file whole.
 
+An encrypt (`lo secrets set --encrypt`, `lo secrets encrypt` and the re-key of
+`add-key` and `remove-key`) writes an `.enc` file only to a regular file or to
+a path that does not exist yet. When the `.enc` path is a symlink (to a file or
+to a directory), a directory, a FIFO or a device, the encrypt stops with an
+error that names the path, and it writes nothing there or through it. A
+symlinked `.enc` file is not followed and not replaced: remove the link, then
+encrypt again.
+
 ::: warning A removal does not revoke access
 The removed key can still decrypt the older `.enc` files in the git history,
 and its holder keeps every value that they decrypted before. After a removal,

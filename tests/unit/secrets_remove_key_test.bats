@@ -797,6 +797,115 @@ _sops_writes() {
   [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
 }
 
+# ── The .enc path of an encrypt ──────────────────────────────────────────
+# secrets::_encrypt_file, which set --encrypt, encrypt and the re-key share,
+# writes an .enc only to a regular file or a path that does not exist (Go
+# twin: TestSetEncryptRefusesAnEncPathThatIsNotARegularFile).
+
+_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again'
+
+# _set_encrypt <proj> — `lo secrets --domain a.dev set -n app --encrypt K v`
+# through the real entrypoint in the project, as _run_lo runs it, bounded at
+# 60 seconds: a step that opens a FIFO fails the test instead of blocking it.
+_set_encrypt() {
+  run timeout 60 env -C "${1}" \
+    PATH_BASE="${1}" \
+    PATH_BIN="${_PROJECT_ROOT}/.bin" \
+    PATH_LOK8S="${_PROJECT_ROOT}/.lok8s" \
+    PATH_SCRIPTS="${_PROJECT_ROOT}/.lok8s" \
+    PATH_CLUSTERS="${1}/clusters" \
+    PATH="${_PROJECT_ROOT}/.bin:${_PROJECT_ROOT}/.lok8s:${PATH}" \
+    "${_PROJECT_ROOT}/.lok8s/lo" secrets --domain a.dev set -n app --encrypt K v
+}
+
+@test "set --encrypt refuses an .enc path that is not a regular file and writes nothing outside the store" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  command -v timeout >/dev/null 2>&1 || skip "timeout not installed"
+  command -v mkfifo >/dev/null 2>&1 || skip "mkfifo not installed"
+  stub_tools kubectl
+  # A sops program that logs its run and writes its --output file: the
+  # refusal comes before sops runs.
+  local fake="${BATS_TEST_TMPDIR}/fake-sops"
+  mkdir -p "${fake}"
+  cat > "${fake}/sops" <<'EOF'
+#!/usr/bin/env bash
+echo "sops $*" >> "${FAKE_SOPS_LOG}"
+out=""
+while (( $# )); do
+  [[ "$1" != --output ]] || { out="$2"; shift; }
+  shift
+done
+printf 'ENC' > "${out}"
+EOF
+  chmod +x "${fake}/sops"
+  export FAKE_SOPS_LOG="${BATS_TEST_TMPDIR}/sops.log"
+  export PATH="${fake}:${PATH}"
+  local kind proj store enc outside
+  for kind in dirlink filelink dir fifo; do
+    proj="${BATS_TEST_TMPDIR}/proj-${kind}"
+    store="${proj}/clusters/a.dev/secrets"
+    enc="${store}/Secret.app.default.K.enc"
+    outside="${BATS_TEST_TMPDIR}/outside-${kind}"
+    mkdir -p "${store}" "${outside}"
+    printf "creation_rules:\n  - path_regex: '%s'\n    age: '%s'\n" 'Secret\..*' "${RCPT_A}" > "${proj}/.sops.yaml"
+    case "${kind}" in
+      dirlink) mkdir "${outside}/target" && ln -s "${outside}/target" "${enc}" ;;
+      filelink) printf 'old' > "${outside}/target" && ln -s "${outside}/target" "${enc}" ;;
+      dir) mkdir "${enc}" ;;
+      fifo) mkfifo "${enc}" ;;
+    esac
+    _set_encrypt "${proj}"
+    [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] clusters/a.dev/secrets/Secret.app.default.K.enc ${_enc_path_refusal}" ] || {
+      echo "${kind}: $output" >&2; return 1; }
+    [ ! -s "${FAKE_SOPS_LOG}" ] || { echo "${kind}: sops ran" >&2; return 1; }
+    [ -f "${store}/Secret.app.default.K" ] || { echo "${kind}: no plaintext cache" >&2; return 1; }
+    [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "${kind}: a temp file was left" >&2; return 1; }
+    case "${kind}" in
+      dirlink)
+        [[ -L "${enc}" && "$(readlink "${enc}")" == "${outside}/target" ]] || { echo "dirlink: the symlink changed" >&2; return 1; }
+        [ -z "$(ls -A "${outside}/target")" ] || { echo "dirlink: a file was written into the directory outside the store" >&2; return 1; }
+        ;;
+      filelink)
+        [[ -L "${enc}" && "$(readlink "${enc}")" == "${outside}/target" ]] || { echo "filelink: the symlink changed" >&2; return 1; }
+        [ "$(cat "${outside}/target")" = "old" ] || { echo "filelink: the file outside the store changed" >&2; return 1; }
+        ;;
+      dir)
+        [[ -d "${enc}" && ! -L "${enc}" && -z "$(ls -A "${enc}")" ]] || { echo "dir: the directory changed" >&2; return 1; }
+        ;;
+      fifo)
+        [ -p "${enc}" ] || { echo "fifo: the FIFO changed" >&2; return 1; }
+        ;;
+    esac
+  done
+  assert_no_tool_ran
+}
+
+@test "with GNU mv the rename takes -T: a symlink made after the check is replaced, not followed" {
+  _load
+  secrets::_mv_has_t || skip "mv has no -T (not GNU mv)"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" outside="${BATS_TEST_TMPDIR}/outside" f
+  f="${store}/Secret.app.default.K"
+  printf 'v' > "${f}"
+  mkdir -p "${outside}"
+  # The sops run makes the .enc path a symlink to a directory outside the
+  # store: a change in the window between the check and the rename.
+  sops() {
+    local out=""
+    while (( ${#} )); do
+      [[ "${1}" != --output ]] || { out="${2}"; shift; }
+      shift
+    done
+    ln -s "${outside}" "${f}.enc"
+    printf 'new' > "${out}"
+  }
+  run secrets::_encrypt_file "${f}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -z "$(ls -A "${outside}")" ] || { echo "the rename moved the .enc into the directory that the symlink names" >&2; return 1; }
+  [[ -f "${f}.enc" && ! -L "${f}.enc" ]] || { echo "the .enc is not a regular file" >&2; return 1; }
+  [ "$(cat "${f}.enc")" = "new" ]
+}
+
 @test "a stale cache (an .enc newer than its plaintext) is refused before any write" {
   # The re-key encrypts the plaintext: an older plaintext would overwrite the
   # newer value of the .enc.

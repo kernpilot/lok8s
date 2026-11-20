@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -337,14 +338,25 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 // walking up from the FILE's path, so a different .sops.yaml higher up (e.g.
 // the repo root, or under Docker) could silently supply other
 // creation_rules/recipients than the one we validated.
+//
+// The .enc path must be a regular file or absent (encDestinationOK) before
+// sops runs: a symlink (to a file or to a directory), a directory, a FIFO or
+// a device is refused with the same line as the bash twin, and nothing is
+// written. The rename would replace a symlink and refuse a directory; the
+// bash mv without -T moves the file INTO a directory that a symlink names.
 func (c *Context) encryptFile(plaintext string) error {
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
 		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
 		return ErrHandled
 	}
+	encPath := plaintext + ".enc"
+	if !encDestinationOK(encPath) {
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again", c.rel(encPath))
+		return ErrHandled
+	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))
-	if err := sopsEncryptFile(sopsConfig, plaintext, plaintext+".enc"); err != nil {
+	if err := sopsEncryptFile(sopsConfig, plaintext, encPath); err != nil {
 		// The bash path surfaces the sops CLI's own stderr before the [error]
 		// line; the library error stands in for it here.
 		fmt.Fprintln(c.ErrOut, err)
@@ -352,6 +364,17 @@ func (c *Context) encryptFile(plaintext string) error {
 		return ErrHandled
 	}
 	return nil
+}
+
+// encDestinationOK reports whether path, read with lstat (a symlink is not
+// followed), is a regular file or does not exist (bash: the check at the top
+// of secrets::_encrypt_file). Any other lstat error refuses too.
+func encDestinationOK(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return fi.Mode().IsRegular()
 }
 
 // Encrypt sweeps plaintext cache files into .enc twins (bash:

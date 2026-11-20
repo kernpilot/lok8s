@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -297,6 +299,106 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 	}
 	if fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY.enc") {
 		t.Error(".enc produced without config")
+	}
+}
+
+// encPathRefusal is the line both twins print for an .enc path that is not a
+// regular file.
+const encPathRefusal = "is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again"
+
+// The .enc path of set --encrypt must be a regular file or absent (an lstat):
+// a symlink to a directory outside the store, a symlink to a regular file
+// outside the store, a directory and a FIFO are refused before sops runs,
+// with the line of the bash twin. Nothing is written outside the store, the
+// path stays as it was, and no temp file stays in the store. Set runs under a
+// bound, so a step that opens the FIFO fails the test instead of blocking it.
+// tests/unit/secrets_remove_key_test.bats holds the bash twin.
+func TestSetEncryptRefusesAnEncPathThatIsNotARegularFile(t *testing.T) {
+	for _, kind := range []string{"a symlink to a directory", "a symlink to a regular file", "a directory", "a FIFO"} {
+		t.Run(kind, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			sopsRules(t, c, newAgeIdentity(t).Recipient().String())
+			store := mkdir(t, c.Paths.Clusters+"/a.dev/secrets")
+			enc := store + "/Secret.app.default.K.enc"
+			outside := t.TempDir()
+			target := outside + "/target"
+			switch kind {
+			case "a symlink to a directory":
+				mkdir(t, target)
+				if err := os.Symlink(target, enc); err != nil {
+					t.Fatal(err)
+				}
+			case "a symlink to a regular file":
+				write(t, target, "old")
+				if err := os.Symlink(target, enc); err != nil {
+					t.Fatal(err)
+				}
+			case "a directory":
+				mkdir(t, enc)
+			case "a FIFO":
+				if err := syscall.Mkfifo(enc, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(enc)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- c.Set(t.Context(), "app", "default", "K", "v", true) }()
+			select {
+			case err = <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatal("set --encrypt did not return within 30s: a step blocks on the .enc path")
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v", err)
+			}
+			want := "[error] clusters/a.dev/secrets/Secret.app.default.K.enc " + encPathRefusal + "\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr %q\nwant   %q", out.String(), errOut.String(), want)
+			}
+			after, err := os.Lstat(enc)
+			if err != nil || after.Mode().Type() != before.Mode().Type() {
+				t.Errorf("the .enc path changed: %v before, %v after (%v)", before.Mode().Type(), after, err)
+			}
+			if before.Mode()&os.ModeSymlink != 0 {
+				if link, err := os.Readlink(enc); err != nil || link != target {
+					t.Errorf("the symlink now names %q (%v), want %q", link, err, target)
+				}
+			}
+			switch kind {
+			case "a symlink to a directory", "a directory":
+				dir := map[string]string{"a symlink to a directory": target, "a directory": enc}[kind]
+				if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+					t.Errorf("the directory holds %d entries (%v), want none", len(entries), err)
+				}
+			case "a symlink to a regular file":
+				if got := readFile(t, target); got != "old" {
+					t.Error("the file outside the store changed")
+				}
+			}
+			wantOutside := 0 // the target of a symlink only
+			if before.Mode()&os.ModeSymlink != 0 {
+				wantOutside = 1
+			}
+			if entries, err := os.ReadDir(outside); err != nil || len(entries) != wantOutside {
+				t.Errorf("outside the store: %d entries (%v), want %d", len(entries), err, wantOutside)
+			}
+			entries, err := os.ReadDir(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if !slices.Equal(names, []string{"Secret.app.default.K", "Secret.app.default.K.enc"}) {
+				t.Errorf("the store holds %q, want the plaintext and the .enc path only", names)
+			}
+		})
 	}
 }
 
