@@ -171,7 +171,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       # Every leg runs. One broken scenario must not hide the state of the
-      # other nine.
+      # other legs.
       fail-fast: false
       matrix:
         # scenario × implementation. Both implementations are first class,
@@ -194,6 +194,12 @@ jobs:
         # implementations over the single-local-build fixture on every
         # pull request. single-local-build is not here for the same
         # reason — e2e-lo-up owns it.
+        #
+        # suc runs the go leg only. Its subject is the
+        # system-upgrade-controller addon (the narrowed RBAC and the two
+        # images pinned by digest) with one real Plan, not the
+        # implementation. Its budget is 29 minutes at most
+        # (tests/e2e/suc/test.bats).
         include:
           - {scenario: lifecycle, impl: go}
           - {scenario: lifecycle, impl: bash}
@@ -205,6 +211,7 @@ jobs:
           - {scenario: no-services, impl: go}
           - {scenario: no-services, impl: bash}
           - {scenario: cache-mode, impl: go}
+          - {scenario: suc, impl: go}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
