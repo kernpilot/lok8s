@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/render"
 )
 
 // toolCallArgvEnv turns this test binary into a probe. A real `lo mcp`
@@ -22,5 +25,16 @@ func TestMain(m *testing.M) {
 		fmt.Println(toolCallArgvMark + strings.Join(os.Args[1:], " "))
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// lo-full: the plugin home of the in-process render points at THIS
+	// binary, as it points at `lo`. When kustomize runs
+	// …/chartrenderer/ChartRenderer for an addon's chart (the real render of
+	// the doctor's rook-ceph-csi-kms check), the test binary must answer as
+	// the plugin, and must not run the tests again. lo core: DispatchPlugin
+	// does nothing, and the tests run.
+	if handled, rc := render.DispatchPlugin(context.Background(), os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
+		os.Exit(rc)
+	}
+	rc := m.Run()
+	render.Cleanup()
+	os.Exit(rc)
 }
