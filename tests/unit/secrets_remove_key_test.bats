@@ -150,6 +150,9 @@ _run_lo() {
 
 _rotate='[warn] a removal does not revoke what the key already read (older .enc files in git history included): rotate those secrets'
 _not_written='[error]   the re-key encrypts with age through the first matching rule: fix the creation rules first. Nothing was written.'
+# The scope line of the own-identity check: every run that reaches the check
+# prints it, with a match or not (Go twin: scopeWarn).
+_scope='[warn] the check for your own decrypt identity reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files'
 
 @test "the recipient leaves every creation rule and the store is re-keyed" {
   _load
@@ -982,7 +985,8 @@ EOF
   # The printed command resumes it.
   DOMAIN=a.dev run _rm "${RCPT_B}" 1
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-  [[ "$output" == "recipient not in .sops.yaml; 1 .enc file(s) still list it — re-keying them"* ]]
+  [[ "$output" == "${_scope}
+recipient not in .sops.yaml; 1 .enc file(s) still list it — re-keying them"* ]] || { echo "$output" >&2; return 1; }
   ! grep -qF "${RCPT_B}" "${PATH_CLUSTERS}/b.dev/secrets/Secret.app.default.K.enc"
 }
 
@@ -993,11 +997,29 @@ EOF
   printf '# created: test\n# public key: %s\n' "${RCPT_B}" > "${SOPS_AGE_KEY_FILE}"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-  # The second line names the two sources the check reads, and those it does
-  # not.
+  # The scope line follows: the two sources the check reads, and those it
+  # does not.
   [[ "$output" == *"[warn] the recipient is your own decrypt identity (${SOPS_AGE_KEY_FILE}): once it is removed, that identity cannot decrypt the re-keyed files
-[warn]   this check reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files"* ]] || {
+${_scope}
+"* ]] || {
     echo "$output" >&2; return 1; }
+  [ "$(grep -cF "${_scope}" <<< "$output")" -eq 1 ]
+}
+
+@test "a removal of a key that is not the caller's prints the scope line of the identity check only" {
+  # No match warning does not mean that the key is not the caller's: the
+  # check does not read every source.
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  printf '# created: test\n# public key: %s\n' "${RCPT_A}" > "${SOPS_AGE_KEY_FILE}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [[ "$output" != *"your own decrypt identity ("* ]] || { echo "$output" >&2; return 1; }
+  [ "$(grep -cxF "${_scope}" <<< "$output")" -eq 1 ] || { echo "$output" >&2; return 1; }
+  # Before the first write, as in the Go twin.
+  [[ "$output" == "${_scope}
+removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
 }
 
 @test "a private key argument is refused and not echoed" {

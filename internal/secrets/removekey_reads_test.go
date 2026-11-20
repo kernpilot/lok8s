@@ -338,6 +338,7 @@ func TestRemoveKeyPostCheckReadsAnEscapedRecipient(t *testing.T) {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
 	wantErr := "[warn] orphan (no decrypted twin, cannot re-key): clusters/a.dev/secrets/Secret.orphan.default.K.enc\n" +
+		scopeWarn +
 		"[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them\n" +
 		rotateWarn
 	if errOut.String() != wantErr {

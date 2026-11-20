@@ -231,6 +231,11 @@ func freshen(t *testing.T, plains ...string) {
 
 const rotateWarn = "[warn] a removal does not revoke what the key already read (older .enc files in git history included): rotate those secrets\n"
 
+// scopeWarn is the scope line of the own-identity check, which every
+// remove-key run that reaches the check prints, with a match or not. The
+// bats twin pins the same text.
+const scopeWarn = "[warn] the check for your own decrypt identity reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files\n"
+
 // The removal edits every creation rule and re-keys the store: after it the
 // removed identity cannot open the store, and the one that stays can. Only
 // the .enc files that listed the recipient are re-encrypted: a new plaintext
@@ -267,8 +272,8 @@ func TestRemoveKeyRekeysEveryRule(t *testing.T) {
 	if out.String() != wantOut {
 		t.Errorf("stdout:\n%q\nwant:\n%q", out.String(), wantOut)
 	}
-	if errOut.String() != rotateWarn {
-		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), rotateWarn)
+	if errOut.String() != scopeWarn+rotateWarn {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), scopeWarn+rotateWarn)
 	}
 	wantYAML := "creation_rules:\n  - path_regex: 'Secret\\..*'\n    age: '" + k + "'\n" +
 		"  - path_regex: 'Otherx\\..*'\n    age: '" + k + "'\n"
@@ -337,6 +342,7 @@ func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 			wantErr = "[warn] still listed in 1 .enc file(s) of a store this run did not re-key: clusters/b.dev/secrets\n" +
 				"[warn]   rerun with --all to re-key every domain store\n" + wantErr
 		}
+		wantErr = scopeWarn + wantErr
 		if errOut.String() != wantErr {
 			t.Errorf("all=%v: stderr:\n%q\nwant:\n%q", all, errOut.String(), wantErr)
 		}
@@ -411,6 +417,7 @@ func TestRemoveKeySkipOrphansWarns(t *testing.T) {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
 	wantErr := "[warn] orphan (no decrypted twin, cannot re-key): clusters/a.dev/secrets/Secret.orphan.default.K.enc\n" +
+		scopeWarn +
 		"[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them\n" +
 		rotateWarn
 	if errOut.String() != wantErr {

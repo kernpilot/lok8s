@@ -440,11 +440,35 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 				t.Fatalf("%v\n%s", err, errOut.String())
 			}
 			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files\n" +
-				"[warn] " + ownIdentityScope + "\n" + rotateWarn
+				scopeWarn + rotateWarn
 			if errOut.String() != want {
 				t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 			}
 		})
+	}
+}
+
+// A removal whose recipient matches neither source of the own-identity check
+// prints the scope line of the check all the same: no match warning does not
+// mean that the key is not the caller's. The keys file and the SSH .pub hold
+// other keys.
+func TestRemoveKeyPrintsTheIdentityScopeWithoutAMatch(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	c.Domain = "a.dev"
+	k, g := newAgeIdentity(t).Recipient().String(), newAgeIdentity(t).Recipient().String()
+	write(t, os.Getenv("SOPS_AGE_KEY_FILE"), "# created: test\n# public key: "+newAgeIdentity(t).Recipient().String()+"\n")
+	testSSHKeypair(t, mkdir(t, os.Getenv("HOME")+"/.ssh"))
+	sopsRules(t, c, k+","+g)
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	write(t, a+"/Secret.app.default.K", "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
+
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if errOut.String() != scopeWarn+rotateWarn {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), scopeWarn+rotateWarn)
 	}
 }
 
