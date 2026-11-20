@@ -180,6 +180,44 @@ require_tools() {
   assert_output --partial '!Secret.*.enc'
 }
 
+# A .gitignore of the store that is a symlink or a directory: encrypt refuses
+# it before it reads or writes it, and stops. The file that the link names
+# and the store stay as they were: type, link, time and bytes of each entry
+# (Go twin: TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile). No
+# crypto tools: the encrypt of a file is a stub that logs it.
+_gitignore_refused() { # <link|dir>
+  local outside="${BATS_TEST_TMPDIR}/elsewhere" log="${BATS_TEST_TMPDIR}/encrypt.log" before
+  mkdir -p "${outside}"
+  : > "${log}"
+  secrets::_encrypt_file() { echo "${1}" >> "${log}"; }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  case "${1}" in
+    link) printf '# not the rules of lok8s\n' > "${outside}/gitignore"
+          ln -s "${outside}/gitignore" "${PATH_SECRETS}/.gitignore" ;;
+    dir) mkdir "${PATH_SECRETS}/.gitignore" ;;
+  esac
+  _states() {
+    find "${PATH_SECRETS}" "${outside}" -printf '%y %p %l %T@\n' | LC_ALL=C sort
+    find "${PATH_SECRETS}" "${outside}" -type f -exec cksum {} + | LC_ALL=C sort
+  }
+  before="$(_states)"
+  run secrets::encrypt
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO or a device): the .gitignore was not written — remove it, then run lo secrets encrypt" ] || {
+    echo "$output" >&2; return 1; }
+  [ ! -s "${log}" ] || { echo "encrypted: $(cat "${log}")" >&2; return 1; }
+  [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
+}
+
+@test "secrets encrypt: a .gitignore that is a symlink is refused, and the file it names is not written" {
+  _gitignore_refused link
+}
+
+@test "secrets encrypt: a .gitignore that is a directory is refused" {
+  _gitignore_refused dir
+}
+
 # --- flat-store shadow / drift detection (no crypto tools needed) -------------
 # secrets::check_flat_shadows compares a domain's per-domain store against the
 # flat store, resolved as ${PATH_SECRETS:-${PATH_BASE}/.secrets} (PATH_SECRETS

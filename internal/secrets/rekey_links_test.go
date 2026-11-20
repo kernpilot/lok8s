@@ -7,7 +7,8 @@ package secrets
 // encrypt refuses too (a directory, a FIFO, a socket, a path that it cannot
 // look up), and its encrypt reads the list that it checked. A .sops.yaml
 // that is a symlink stays a link: both commands write the edit to its
-// target.
+// target. The encrypt refuses a .gitignore of the store that is a symlink or
+// a directory (tests/unit/secrets_test.bats runs the bash twin).
 // tests/unit/secrets_add_key_test.bats and
 // tests/unit/secrets_remove_key_test.bats run the same cases through the bash
 // twin.
@@ -478,6 +479,44 @@ func TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey(t *testing.T) 
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 	}
 	sameStates(t, before, fileStates(t, f.c.Paths.Base))
+}
+
+// A .gitignore of the store that is a symlink or a directory: the encrypt
+// refuses it before it reads or writes it, and encrypts nothing. The file
+// that the link names and every entry of the project stay as they were.
+func TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		make func(t *testing.T, gitignore, outside string)
+	}{
+		{"a symlink", func(t *testing.T, gitignore, outside string) {
+			write(t, outside, "# not the rules of lok8s\n")
+			if err := os.Symlink(outside, gitignore); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a directory", func(t *testing.T, gitignore, _ string) {
+			mkdir(t, gitignore)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			testAgeIdentity(t, c)
+			store := c.Paths.Base + "/.secrets"
+			write(t, store+"/Secret.app.default.K", "v")
+			tc.make(t, store+"/.gitignore", c.Paths.Base+"/elsewhere/gitignore")
+			before := fileStates(t, c.Paths.Base)
+
+			if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO or a device): the .gitignore was not written — remove it, then run lo secrets encrypt\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, c.Paths.Base))
+		})
+	}
 }
 
 // A .sops.yaml that is a symlink stays a link: both commands write the edit

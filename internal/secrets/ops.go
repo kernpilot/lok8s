@@ -97,7 +97,7 @@ creation_rules:
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return ensureGitignore(dir)
+	return c.ensureGitignore(dir)
 }
 
 // grepQF mirrors `grep -qF pattern file` on in-memory content: an empty
@@ -399,7 +399,8 @@ func (c *Context) encryptFile(plaintext string) error {
 // followed), is a regular file or does not exist (bash:
 // secrets::_enc_path_ok). Any other lstat error refuses too, for example
 // ENAMETOOLONG for a name that is too long: the bash twin tells "does not
-// exist" from the other errors with secrets::_absent.
+// exist" from the other errors with secrets::_absent. ensureGitignore checks
+// the .gitignore of the store with it too.
 //
 // It checks the last part of the path only. The store directory and its
 // parent directories are trusted: they belong to the user who runs lo. A
@@ -480,7 +481,7 @@ func (c *Context) encryptSweep(secretsDir, name string, list func() []string) er
 	}
 
 	// Ensure .gitignore blocks plaintext before we create .enc files
-	if err := ensureGitignore(secretsDir); err != nil {
+	if err := c.ensureGitignore(secretsDir); err != nil {
 		return err
 	}
 
