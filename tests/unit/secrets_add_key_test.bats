@@ -312,6 +312,46 @@ _refused_later() {
   _refused_later sha
 }
 
+@test "a plaintext whose .enc name is too long is refused before any write" {
+  # The lstat of the .enc fails with ENAMETOOLONG, and [[ -e ]] reads that as
+  # a path that does not exist. The check must not: the encrypt would stop
+  # after the .sops.yaml write, and a rerun would find the recipient present
+  # (Go twin: TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite).
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" max name before
+  max="$(getconf NAME_MAX "${store}" 2>/dev/null)" || max=255
+  [[ "${max}" =~ ^[0-9]+$ ]] || skip "the test dir has no NAME_MAX"
+  name="Secret.app.default."
+  while (( ${#name} < max - 2 )); do name+=K; done
+  { printf 'v\n' > "${store}/${name}"; } 2>/dev/null || skip "the filesystem refuses a name of ${#name} bytes"
+  ! ( : > "${store}/${name}.enc" ) 2>/dev/null || skip "the filesystem takes a name of $(( ${#name} + 4 )) bytes"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  printf 'enc %s\n' "${KEY_A}" > "${store}/Secret.db.default.KEY.enc"
+  touch -t 200001010000 "${store}/Secret.db.default.KEY.enc"
+  touch -t 200001010001 "${store}/${name}" "${store}/Secret.db.default.KEY"
+  # The lock file is there before the run (the lock writes it), so that the
+  # listing of the project shows any other new entry.
+  : > "${PATH_BASE}/.sops.yaml.lock"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}")"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/${name}.enc cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there
+[error]   replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_RAN}" ]
+  # The control: without the long name, the run adds the recipient.
+  rm -- "${store}/${name}"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ -s "${ENCRYPT_RAN}" ]
+}
+
 @test "a .sops.yaml that is a symlink stays a link: its target gets the recipient and keeps its mode" {
   # sed -i would put a regular file in the place of the link and leave the
   # target as it was (Go twin: TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig).

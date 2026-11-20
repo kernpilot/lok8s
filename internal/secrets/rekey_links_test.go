@@ -260,6 +260,47 @@ func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) 
 	}
 }
 
+// A regular plaintext whose name is so long that the name of its .enc is
+// over NAME_MAX: the lstat of the .enc fails with ENAMETOOLONG, not with
+// "does not exist". add-key refuses it before any write, with the line of a
+// lookup error. .sops.yaml, every .enc and every plaintext stay as they
+// were, and no temp file appears in the project or the store. The case
+// skips when the filesystem refuses the plaintext name or takes the .enc
+// name. The control: with the long plaintext removed, the run passes.
+func TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	name := "Secret.app.default."
+	name += strings.Repeat("K", 253-len(name))
+	plain := f.store + "/" + name
+	if err := os.WriteFile(plain, []byte("s"), 0o600); err != nil {
+		t.Skipf("the filesystem refuses a name of %d bytes: %v", len(name), err)
+	}
+	if _, err := os.Lstat(plain + ".enc"); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Skipf("the lstat of a name of %d bytes does not fail with another error: %v", len(name)+len(".enc"), err)
+	}
+	write(t, f.c.sopsConfigLock(), "")
+	before := fileStates(t, f.c.Paths.Base)
+
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	want := "[error] clusters/a.dev/secrets/" + name + ".enc cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there\n" +
+		"[error]   replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written\n"
+	if f.errOut.String() != want || f.out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+	}
+	sameStates(t, before, fileStates(t, f.c.Paths.Base))
+
+	if err := os.Remove(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(); err != nil {
+		t.Fatalf("with the long plaintext removed: %v\n%s", err, f.errOut.String())
+	}
+	f.rekeyed("app", "v")
+	f.rekeyed("db", "w")
+}
+
 // remove-key resumes a stopped re-key: .sops.yaml no longer lists the
 // recipient, the .enc of app was re-keyed and is now a symlink to a file
 // that does not list it, and the .enc of db still lists it. The labels do

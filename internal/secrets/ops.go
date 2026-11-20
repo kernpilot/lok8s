@@ -383,8 +383,10 @@ func (c *Context) encryptFile(plaintext string) error {
 }
 
 // encDestinationOK reports whether path, read with lstat (a symlink is not
-// followed), is a regular file or does not exist (bash: the check at the top
-// of secrets::_encrypt_file). Any other lstat error refuses too.
+// followed), is a regular file or does not exist (bash:
+// secrets::_enc_path_ok). Any other lstat error refuses too, for example
+// ENAMETOOLONG for a name that is too long: the bash twin tells "does not
+// exist" from the other errors with secrets::_absent.
 //
 // It checks the last part of the path only. The store directory and its
 // parent directories are trusted: they belong to the user who runs lo. A

@@ -344,7 +344,8 @@ func (c *Context) encryptTargets() []string {
 }
 
 // refuseEncPaths refuses each .enc of encs that the encrypt refuses
-// (encDestinationOK: a symlink, a directory, a FIFO or a device), before the
+// (encDestinationOK: a symlink, a directory, a FIFO or a device, or a path
+// whose lstat fails with an error other than "does not exist"), before the
 // first write, and reports whether it refused (bash: secrets::_enc_paths).
 // The re-key writes each .enc in place, and encryptFile refuses such an
 // entry, so one in the list would stop the run after .sops.yaml was
@@ -356,13 +357,18 @@ func (c *Context) refuseEncPaths(encs []string) bool {
 		if encDestinationOK(enc) {
 			continue
 		}
-		if info, err := os.Lstat(enc); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		info, err := os.Lstat(enc)
+		switch {
+		case err != nil:
+			ui.ErrorTo(c.ErrOut, "%s cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there", c.rel(enc))
+			others++
+		case info.Mode()&fs.ModeSymlink != 0:
 			ui.ErrorTo(c.ErrOut, "%s is a symlink: the re-key does not write an .enc through a link", c.rel(enc))
 			links++
-			continue
+		default:
+			ui.ErrorTo(c.ErrOut, "%s is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there", c.rel(enc))
+			others++
 		}
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there", c.rel(enc))
-		others++
 	}
 	switch {
 	case links+others == 0:
