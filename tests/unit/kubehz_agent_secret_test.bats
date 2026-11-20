@@ -450,6 +450,52 @@ STUBS_EOF
   assert_output --partial "Authorization: Bearer ${a} ;"
 }
 
+# The bind secret comes in two forms: 64 lowercase hex, or khzb_ and 64
+# lowercase hex. The register sends either one byte for byte.
+@test "agent: a khzb_ bind secret goes into the register body as it is" {
+  export BIND_SECRET="khzb_$(printf 'ab%.0s' $(seq 1 32))"
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+  assert_agent_calls_bounded
+  run command jq -r '.bindSecret' "${REGISTER_OUT}"
+  assert_output "${BIND_SECRET}"
+}
+
+# Any other value is left out of the register body, and the body stays
+# valid JSON: a wrong case, a wrong prefix, a length next to 64 or 69, and
+# a line end or a newline inside.
+@test "agent: a bind secret of any other shape is left out of the register body" {
+  local hex name
+  hex="$(printf '5e%.0s' $(seq 1 32))"
+  _build_runner
+  for name in upper-prefix upper-hex khza prefixed-63 prefixed-65 long65 short63 \
+    prefixed-newline prefixed-cr prefixed-crlf nl64 nl69 nl69-first; do
+    case "${name}" in
+      upper-prefix) BIND_SECRET="KHZB_${hex}" ;;
+      upper-hex) BIND_SECRET="khzb_${hex^^}" ;;
+      khza) BIND_SECRET="khza_${hex}" ;;
+      prefixed-63) BIND_SECRET="khzb_${hex:1}" ;;
+      prefixed-65) BIND_SECRET="khzb_${hex}a" ;;
+      long65) BIND_SECRET="${hex}a" ;;
+      short63) BIND_SECRET="${hex:1}" ;;
+      prefixed-newline) BIND_SECRET="khzb_${hex}"$'\n' ;;
+      prefixed-cr) BIND_SECRET="khzb_${hex}"$'\r' ;;
+      prefixed-crlf) BIND_SECRET="khzb_${hex}"$'\r\n' ;;
+      nl64) BIND_SECRET="${hex:0:32}"$'\n'"${hex:33}" ;;
+      nl69) BIND_SECRET="${hex}"$'\nabcd' ;;
+      nl69-first) BIND_SECRET=$'abcd\n'"${hex}" ;;
+    esac
+    export BIND_SECRET
+    _store_load no-data
+    rm -f "${REGISTER_OUT}"
+    run sh "${RUNNER}"
+    assert_success
+    run command jq -e 'has("agentTokenHash") and (has("bindSecret") | not)' "${REGISTER_OUT}"
+    [ "${status}" -eq 0 ] || { echo "the register body of ${name} is not valid JSON without bindSecret"; return 1; }
+  done
+}
+
 @test "agent: agent-register posts sha256(A)/sha256(C) — never the plaintext secrets" {
   _build_runner
   run sh "${RUNNER}"

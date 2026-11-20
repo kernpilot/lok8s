@@ -458,7 +458,7 @@ func (c *Context) stageBindSecret(ctx context.Context, workdir, domain string) (
 		return false, nil
 	}
 	if c.storedBindSecret(domain) == "" {
-		c.warnf("kubehz: clusters/%s/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters). The deploy does not stage it, so the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.", domain)
+		c.warnf("kubehz: clusters/%s/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). The deploy does not stage it, so the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.", domain)
 		return false, nil
 	}
 	if err := c.applyBindSecret(ctx, workdir, c.bindSecretPath(domain)); err != nil {

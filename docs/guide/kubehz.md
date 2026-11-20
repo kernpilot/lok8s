@@ -678,8 +678,10 @@ that the heartbeat agent has not taken over, and that still shows the cluster
 as being created. Then the re-run rotates the claim ticket: the record gets
 the fingerprint of the new key and a new secret, and the earlier ticket stops
 working. Otherwise the re-run counts as a re-run without the current secret
-(see below). lo uses the file only when it is readable and holds exactly 64
-lowercase hex characters, and it never puts the value on a command line.
+(see below). The file holds the bind secret as lo received it: 64 lowercase
+hex characters, or `khzb_` and 64 lowercase hex characters. lo accepts both
+forms, and only from a readable file with nothing else in it. It never puts
+the value on a command line.
 
 A re-run without the current secret (on another machine, in CI, where the
 runner does not keep the file, or with an older file) does not change the

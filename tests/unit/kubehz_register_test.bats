@@ -820,6 +820,46 @@ EOF
 
 BIND_STORED="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 BIND_NEXT="009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+# The khzb_ form: khzb_ and 64 lowercase hex characters, 69 bytes.
+BIND_PREFIXED="khzb_$(printf 'ab%.0s' $(seq 1 32))"
+BIND_PREFIXED_NEXT="khzb_$(printf 'cd%.0s' $(seq 1 32))"
+
+# The file contents that are no bind secret, in both forms (the names of
+# _write_bind_fixture). nl69 is the trap of a check per line: 64 hex, a
+# newline and 4 bytes make 69 bytes, and the first line matches.
+BIND_UNUSABLE=(upper short short-newline newline cr crlf prefixed-newline prefixed-cr prefixed-crlf
+  nl64 nl69 nl69-first prefixed-upper prefixed-upper-hex khza long65 prefixed-short68 prefixed-long70
+  not-hex oversized)
+
+# _write_bind_fixture <name> <path>: write the fixture <name> at <path>.
+_write_bind_fixture() {
+  local name="${1}" path="${2}"
+  case "${name}" in
+    valid) printf %s "${BIND_STORED}" ;;
+    prefixed) printf %s "${BIND_PREFIXED}" ;;
+    upper) printf %s "${BIND_STORED^^}" ;;
+    short) printf %s "${BIND_STORED:1}" ;;
+    short-newline) printf '%s\n' "${BIND_STORED:1}" ;;
+    newline) printf '%s\n' "${BIND_STORED}" ;;
+    cr) printf '%s\r' "${BIND_STORED}" ;;
+    crlf) printf '%s\r\n' "${BIND_STORED}" ;;
+    prefixed-newline) printf '%s\n' "${BIND_PREFIXED}" ;;
+    prefixed-cr) printf '%s\r' "${BIND_PREFIXED}" ;;
+    prefixed-crlf) printf '%s\r\n' "${BIND_PREFIXED}" ;;
+    nl64) printf '%s\n%s' "${BIND_STORED:0:32}" "${BIND_STORED:33}" ;;
+    nl69) printf '%s\nabcd' "${BIND_STORED}" ;;
+    nl69-first) printf 'abcd\n%s' "${BIND_STORED}" ;;
+    prefixed-upper) printf %s "KHZB_${BIND_STORED}" ;;
+    prefixed-upper-hex) printf %s "khzb_${BIND_STORED^^}" ;;
+    khza) printf %s "khza_${BIND_STORED}" ;;
+    long65) printf %s "${BIND_STORED}a" ;;
+    prefixed-short68) printf %s "khzb_${BIND_STORED:1}" ;;
+    prefixed-long70) printf %s "khzb_${BIND_STORED}a" ;;
+    not-hex) printf %s "g${BIND_STORED:1}" ;;
+    oversized) printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a ;;
+    *) echo "unknown bind fixture ${name}" >&2; return 1 ;;
+  esac > "${path}"
+}
 
 # _register_sandbox <response bindSecret>: the real jq behind a wrapper that
 # saves its argv, a Lo spec through the yq stub, and a curl that saves its
@@ -902,23 +942,61 @@ ${STUB_JQ_ARGV}:0"
   done
 }
 
+@test "register: every mode sends a stored khzb_ bind secret byte for byte and stores a khzb_ one" {
+  local mode bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    _register_sandbox "${BIND_PREFIXED_NEXT}"
+    _write_bind_fixture prefixed "${bind_file}"
+
+    run _register_mode "${mode}"
+    assert_success
+    refute_output --partial "${BIND_PREFIXED}"
+    run command jq -c . "${STUB_CURL_BODY}"
+    assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_PREFIXED}" '. + {bindSecret: $b}')"
+    run grep -c -e "${BIND_PREFIXED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"
+    assert_output "${STUB_CURL_ARGV}:0
+${STUB_JQ_ARGV}:0"
+    run cat "${bind_file}"
+    assert_output "${BIND_PREFIXED_NEXT}"
+    run stat -c '%s' "${bind_file}"
+    assert_output "69"
+  done
+}
+
+@test "bind_secret_ok: takes 64 hex or khzb_ and 64 hex, and refuses every other file (a newline inside one too)" {
+  _source_main_for_persist
+  local name bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for name in valid prefixed; do
+    _write_bind_fixture "${name}" "${bind_file}"
+    run kubehz::bind_secret_ok "${bind_file}"
+    [ "${status}" -eq 0 ] || { echo "bind_secret_ok refused the fixture ${name}"; return 1; }
+  done
+  # The trap: 69 bytes, and grep -x finds a line of 64 hex.
+  _write_bind_fixture nl69 "${bind_file}"
+  run wc -c < "${bind_file}"
+  assert_output "69"
+  run grep -Ecx '[0-9a-f]{64}' "${bind_file}"
+  assert_output "1"
+  for name in "${BIND_UNUSABLE[@]}"; do
+    _write_bind_fixture "${name}" "${bind_file}"
+    run kubehz::bind_secret_ok "${bind_file}"
+    [ "${status}" -ne 0 ] || { echo "bind_secret_ok took the fixture ${name}"; return 1; }
+  done
+  rm -f "${bind_file}"
+}
+
 @test "register: a missing, irregular or malformed stored bind secret adds no bindSecret" {
   local mode stored bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   for mode in legacy bearer claim-key; do
-    for stored in missing directory unreadable upper short short-newline newline not-hex oversized; do
+    for stored in missing directory unreadable "${BIND_UNUSABLE[@]}"; do
       [[ "${stored}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
       _register_sandbox ""
       rm -rf "${bind_file}"
       case "${stored}" in
         missing) ;;
         unreadable) printf %s "${BIND_STORED}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
-        oversized) { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${bind_file}" ;;
         directory) mkdir -p "${bind_file}" ;;
-        upper) printf %s "${BIND_STORED^^}" > "${bind_file}" ;;
-        short) printf %s "${BIND_STORED:1}" > "${bind_file}" ;;
-        short-newline) printf '%s\n' "${BIND_STORED:1}" > "${bind_file}" ;;
-        newline) printf '%s\n' "${BIND_STORED}" > "${bind_file}" ;;
-        not-hex) printf %s "g${BIND_STORED:1}" > "${bind_file}" ;;
+        *) _write_bind_fixture "${stored}" "${bind_file}" ;;
       esac
 
       run _register_mode "${mode}"

@@ -247,7 +247,7 @@ spec:
                     # staged (optional env from kubehz-agent-bind). Present: the
                     # register ADOPTS the announced row wherever it lives now
                     # (pending, claimed or attributed) instead of minting a
-                    # sibling. Sent only when it is exactly 64 hex, so a garbled
+                    # sibling. Sent only as 64 hex or khzb_ and 64 hex, so a garbled
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
                     # Absent: the api does not adopt an announced row by
@@ -257,7 +257,7 @@ spec:
                     BIND_FIELD=""
                     if [ -n "${BIND_SECRET}" ] \
                       && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
-                      && printf %s "${BIND_SECRET}" | grep -Eq '^[0-9a-f]{64}$'; then
+                      && printf %s "${BIND_SECRET}" | grep -Eq '^(khzb_)?[0-9a-f]{64}$'; then
                       BIND_FIELD=$(printf ',"bindSecret":"%s"' "${BIND_SECRET}")
                     fi
                     REGISTER_PAYLOAD=$(printf \

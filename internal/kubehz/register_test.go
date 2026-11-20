@@ -7,10 +7,12 @@ package kubehz
 import (
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -113,13 +115,18 @@ func TestDirectClaimNonClaimedFails(t *testing.T) {
 
 const bindSecretFixture = "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 
+// prefixedBindSecretFixture is a bind secret in the khzb_ form: khzb_ and
+// 64 lowercase hex characters, 69 bytes.
+var prefixedBindSecretFixture = "khzb_" + strings.Repeat("ab", 32)
+
 func bindSecretFile(h *harness, domain string) string {
 	return filepath.Join(h.ctx.Paths.Clusters, domain, ".kubehz-bind")
 }
 
 // persistBindSecret writes the announce's one-time secret at 0600 with no
 // trailing newline (the deploy reads it into a Secret whose value must be the
-// exact 64 hex), writes nothing for an empty secret, and rotates on a re-run.
+// exact value: 64 hex, or khzb_ and 64 hex), writes nothing for an empty
+// secret, and rotates on a re-run.
 func TestPersistBindSecret(t *testing.T) {
 	t.Run("writes the exact secret at 0600, no trailing newline", func(t *testing.T) {
 		h := newHarness(t)
@@ -137,6 +144,16 @@ func TestPersistBindSecret(t *testing.T) {
 		}
 		if fi.Mode().Perm() != 0o600 {
 			t.Fatalf("bind secret file mode = %v, want 0600", fi.Mode().Perm())
+		}
+	})
+	t.Run("a khzb_ secret is stored and read back byte for byte", func(t *testing.T) {
+		h := newHarness(t)
+		h.ctx.persistBindSecret("test.kubehz.dev", prefixedBindSecretFixture)
+		if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != prefixedBindSecretFixture {
+			t.Fatalf("bind secret file = %q, want %q with no trailing newline", got, prefixedBindSecretFixture)
+		}
+		if got := h.ctx.storedBindSecret("test.kubehz.dev"); got != prefixedBindSecretFixture {
+			t.Fatalf("storedBindSecret = %q, want %q", got, prefixedBindSecretFixture)
 		}
 	})
 	t.Run("an empty secret writes nothing", func(t *testing.T) {
@@ -340,41 +357,70 @@ func TestStoredBindSecretIgnoresAFIFO(t *testing.T) {
 	}
 }
 
-// Every register mode sends the stored bind secret, so a re-run keeps
-// the same cluster record, and stores the one the response hands out.
+// Every register mode sends the stored bind secret, in either form and byte
+// for byte, so a re-run keeps the same cluster record, and stores the one the
+// response hands out.
 func TestRegisterModesSendTheStoredBindSecret(t *testing.T) {
-	next := "00" + bindSecretFixture[2:]
-	for _, m := range registerModes {
-		t.Run(m.name, func(t *testing.T) {
-			h := newHarness(t)
-			h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
-			m.run(t, h, next)
-			r := h.lastReq("POST", "/api/clusters/register")
-			if want := m.base + `,"bindSecret":"` + bindSecretFixture + `"}`; r == nil || r.Body != want {
-				t.Fatalf("register body = %+v, want %s", r, want)
-			}
-			if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != next {
-				t.Fatalf("the new bind secret was not stored: %q", got)
-			}
-			mustNotContain(t, h.output(), bindSecretFixture)
-			mustNotContain(t, h.output(), next)
-		})
+	for _, form := range []struct{ name, stored, next string }{
+		{"64 hex", bindSecretFixture, "00" + bindSecretFixture[2:]},
+		{"khzb_ and 64 hex", prefixedBindSecretFixture, "khzb_" + strings.Repeat("cd", 32)},
+	} {
+		for _, m := range registerModes {
+			t.Run(form.name+"/"+m.name, func(t *testing.T) {
+				h := newHarness(t)
+				h.ctx.persistBindSecret("test.kubehz.dev", form.stored)
+				m.run(t, h, form.next)
+				r := h.lastReq("POST", "/api/clusters/register")
+				if want := m.base + `,"bindSecret":"` + form.stored + `"}`; r == nil || r.Body != want {
+					t.Fatalf("register body = %+v, want %s", r, want)
+				}
+				if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != form.next {
+					t.Fatalf("the new bind secret was not stored: %q", got)
+				}
+				mustNotContain(t, h.output(), form.stored)
+				mustNotContain(t, h.output(), form.next)
+			})
+		}
+	}
+}
+
+// unusableBindSecrets are file contents that are no bind secret, in both
+// forms: line ends, a newline inside (64 hex, a newline and 4 bytes is 69
+// bytes with a line that matches), upper case, the wrong prefix, and the
+// lengths next to 64 and 69.
+func unusableBindSecrets() map[string]string {
+	hex, prefixed := bindSecretFixture, prefixedBindSecretFixture
+	return map[string]string{
+		"upper-case hex":                 strings.ToUpper(hex),
+		"63 hex":                         hex[1:],
+		"63 hex and a newline":           hex[1:] + "\n",
+		"64 hex and a newline":           hex + "\n",
+		"64 hex and a CR":                hex + "\r",
+		"64 hex and a CRLF":              hex + "\r\n",
+		"khzb_ and 64 hex and a newline": prefixed + "\n",
+		"khzb_ and 64 hex and a CR":      prefixed + "\r",
+		"khzb_ and 64 hex and a CRLF":    prefixed + "\r\n",
+		"a newline inside 64 bytes":      hex[:32] + "\n" + hex[33:],
+		"64 hex, a newline and 4 bytes":  hex + "\nabcd",
+		"4 bytes, a newline and 64 hex":  "abcd\n" + hex,
+		"upper-case KHZB_ prefix":        "KHZB_" + hex,
+		"khzb_ and upper-case hex":       "khzb_" + strings.ToUpper(hex),
+		"khza_ and 64 hex":               "khza_" + hex,
+		"65 hex":                         hex + "a",
+		"khzb_ and 63 hex (68 bytes)":    "khzb_" + hex[1:],
+		"khzb_ and 65 hex (70 bytes)":    "khzb_" + hex + "a",
+		"not hex":                        "g" + hex[1:],
+		"oversized":                      hex + strings.Repeat("a", 200000),
 	}
 }
 
 // A missing, irregular or malformed stored value adds no bindSecret
 // (the api refuses a malformed one).
 func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
-	stored := map[string]string{
-		"upper-case hex":       strings.ToUpper(bindSecretFixture),
-		"63 hex":               bindSecretFixture[1:],
-		"63 hex and a newline": bindSecretFixture[1:] + "\n",
-		"64 hex and a newline": bindSecretFixture + "\n",
-		"not hex":              "g" + bindSecretFixture[1:],
-		"oversized":            bindSecretFixture + strings.Repeat("a", 200000),
-	}
+	stored := unusableBindSecrets()
+	names := append([]string{"missing", "a directory", "unreadable"}, slices.Sorted(maps.Keys(stored))...)
 	for _, m := range registerModes {
-		for _, name := range []string{"missing", "a directory", "unreadable", "upper-case hex", "63 hex", "63 hex and a newline", "64 hex and a newline", "not hex", "oversized"} {
+		for _, name := range names {
 			t.Run(m.name+"/"+name, func(t *testing.T) {
 				h := newHarness(t)
 				path := bindSecretFile(h, "test.kubehz.dev")

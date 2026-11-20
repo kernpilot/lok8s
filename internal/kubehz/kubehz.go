@@ -367,18 +367,27 @@ func createBindSecret(path, content string) error {
 	return nil
 }
 
-var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// A bind secret has one of two forms: 64 lowercase hex characters (64
+// bytes), or khzb_ and 64 lowercase hex characters (69 bytes). Without (?m),
+// $ is the end of the text, so a newline anywhere fails the match.
+const (
+	bindSecretHexLen      = 64
+	bindSecretPrefixedLen = 69
+)
+
+var bindSecretRe = regexp.MustCompile(`^(khzb_)?[0-9a-f]{64}$`)
 
 // storedBindSecret is the bind secret a previous register stored at
 // bindSecretPath: a readable regular file of exactly 64 lowercase hex
-// characters. A missing, unreadable, irregular or malformed file gives "".
-// Every register call sends the value as bindSecret, so a re-run
+// characters, or of khzb_ and 64 lowercase hex characters. A missing,
+// unreadable, irregular or malformed file gives "". lo changes no byte of
+// the value. Every register call sends the value as bindSecret, so a re-run
 // keeps the same cluster record, and the deploy stages only this value. The
 // api refuses a malformed value, so lo never sends one.
 //
 // The file is opened once, without blocking (openNonblock: a FIFO in the
 // slot would block a plain open), checked on the open file as a regular file,
-// and read for at most 65 bytes: the count and the anchored pattern each
+// and read for at most 70 bytes: the count and the anchored pattern each
 // refuse a longer file, and the cap bounds the read.
 func (c *Context) storedBindSecret(domain string) string {
 	f, err := openNonblock(c.bindSecretPath(domain))
@@ -389,9 +398,9 @@ func (c *Context) storedBindSecret(domain string) string {
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
 		return ""
 	}
-	buf := make([]byte, 65)
+	buf := make([]byte, bindSecretPrefixedLen+1)
 	n, _ := io.ReadFull(f, buf)
-	if n != 64 || !bindSecretRe.Match(buf[:n]) {
+	if (n != bindSecretHexLen && n != bindSecretPrefixedLen) || !bindSecretRe.Match(buf[:n]) {
 		return ""
 	}
 	return string(buf[:n])

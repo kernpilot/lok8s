@@ -374,16 +374,20 @@ kubehz::persist_bind_secret() {
 }
 
 # Succeed when <path> holds a bind secret: a readable regular file of exactly
-# 64 lowercase hex characters, with no newline. The register calls and the
-# deploy use this one check. The size comes first, so an oversized file is
-# never read.
+# 64 lowercase hex characters, or of khzb_ and 64 lowercase hex characters,
+# with no newline. The register calls and the deploy use this one check. The
+# size comes first, so an oversized file is never read. grep -x checks each
+# line on its own, so the file must have no newline: 64 hex, a newline and 4
+# more bytes make 69 bytes with a line that matches.
 # Usage: kubehz::bind_secret_ok <path>
 kubehz::bind_secret_ok() {
-  local path="${1}" size
+  local path="${1}" size lines
   [[ -f "${path}" && -r "${path}" ]] || return 1
   size=$(wc -c < "${path}") || return 1
-  (( size == 64 )) || return 1
-  grep -Eqx '[0-9a-f]{64}' "${path}"
+  (( size == 64 || size == 69 )) || return 1
+  lines=$(wc -l < "${path}") || return 1
+  (( lines == 0 )) || return 1
+  grep -Eqx '(khzb_)?[0-9a-f]{64}' "${path}"
 }
 
 # Print the JSON body of a register call: the object that <filter> builds
@@ -401,7 +405,7 @@ kubehz::register_body() {
   if kubehz::bind_secret_ok "${path}"; then
     # shellcheck disable=SC2016  # $bind is jq program text
     jq -n "${@}" --rawfile bind "${path}" \
-      "${filter}"' + (if $bind | test("\\A[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)'
+      "${filter}"' + (if $bind | test("\\A(khzb_)?[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)'
   else
     jq -n "${@}" "${filter}"
   fi

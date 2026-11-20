@@ -1552,6 +1552,8 @@ _podspec() {
 # ── stage_bind_secret ────────────────────────────────────
 
 BIND_SECRET_VALUE="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+# The khzb_ form: khzb_ and 64 lowercase hex characters, 69 bytes.
+BIND_SECRET_PREFIXED="khzb_$(printf 'ab%.0s' $(seq 1 32))"
 BIND_MANIFEST='kind: Secret
 metadata:
   name: kubehz-agent-bind
@@ -1587,9 +1589,10 @@ _stub_kubectl_bind() {
   export -f kubectl
 }
 
+# _write_bind_secret [value]: the stored bind secret (default BIND_SECRET_VALUE).
 _write_bind_secret() {
   mkdir -p "${PATH_CLUSTERS}/acme.example.com"
-  printf %s "${BIND_SECRET_VALUE}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  printf %s "${1:-${BIND_SECRET_VALUE}}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
 }
 
 # _assert_bind_staged_first <work> <first change>: lines 1-3 stage the Secret
@@ -1645,6 +1648,35 @@ _assert_bind_staged_first() {
   assert_output --partial "apply -k ${work}/agent"
 }
 
+@test "apply order (both directions): a khzb_ bind secret is staged as it is, BEFORE the agent changes" {
+  _source_deploy
+  local mode owner access first work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    _stub_kubectl_bind
+    work="${BATS_TEST_TMPDIR}/prefixed${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+    _write_bind_secret "${BIND_SECRET_PREFIXED}"
+    first="apply -k ${work}/agent"
+    [[ "${owner}" == operator ]] || first="delete -k ${work}/live-agent/managed"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_success
+    refute_output --partial "no bind secret"
+    refute_output --partial "${BIND_SECRET_PREFIXED}"
+    _assert_bind_staged_first "${work}" "${first}"
+    run grep -c -e "${BIND_SECRET_PREFIXED}" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+    # The file the Secret comes from keeps its 69 bytes.
+    run cat "${bind_file}"
+    assert_output "${BIND_SECRET_PREFIXED}"
+    run wc -c < "${bind_file}"
+    assert_output "69"
+  done
+}
+
 @test "stage_bind_secret: a failed stage with a bind secret on disk stops before the CronJob agent, in both directions" {
   _source_deploy
   _write_bind_secret
@@ -1696,7 +1728,11 @@ _assert_bind_staged_first() {
 @test "stage_bind_secret: a file that is not a bind secret is never staged, and the deploy says so (F6)" {
   _source_deploy
   local fixture work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
-  for fixture in directory newline upper short unreadable; do
+  local v="${BIND_SECRET_VALUE}" p="${BIND_SECRET_PREFIXED}"
+  # nl69 is the trap of a check per line: 64 hex, a newline and 4 bytes make
+  # 69 bytes, and the first line matches.
+  for fixture in directory newline upper short unreadable cr crlf prefixed-newline prefixed-cr prefixed-crlf \
+    nl64 nl69 nl69-first prefixed-upper prefixed-upper-hex khza long65 prefixed-short68 prefixed-long70; do
     [[ "${fixture}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
     n=$(( n + 1 ))
     _stub_kubectl_log
@@ -1704,10 +1740,24 @@ _assert_bind_staged_first() {
     mkdir -p "${PATH_CLUSTERS}/acme.example.com"
     case "${fixture}" in
       directory) mkdir -p "${bind_file}" ;;
-      newline) printf '%s\n' "${BIND_SECRET_VALUE}" > "${bind_file}" ;;
-      upper) printf %s "${BIND_SECRET_VALUE^^}" > "${bind_file}" ;;
-      short) printf %s "${BIND_SECRET_VALUE:1}" > "${bind_file}" ;;
-      unreadable) printf %s "${BIND_SECRET_VALUE}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+      newline) printf '%s\n' "${v}" > "${bind_file}" ;;
+      upper) printf %s "${v^^}" > "${bind_file}" ;;
+      short) printf %s "${v:1}" > "${bind_file}" ;;
+      unreadable) printf %s "${v}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+      cr) printf '%s\r' "${v}" > "${bind_file}" ;;
+      crlf) printf '%s\r\n' "${v}" > "${bind_file}" ;;
+      prefixed-newline) printf '%s\n' "${p}" > "${bind_file}" ;;
+      prefixed-cr) printf '%s\r' "${p}" > "${bind_file}" ;;
+      prefixed-crlf) printf '%s\r\n' "${p}" > "${bind_file}" ;;
+      nl64) printf '%s\n%s' "${v:0:32}" "${v:33}" > "${bind_file}" ;;
+      nl69) printf '%s\nabcd' "${v}" > "${bind_file}" ;;
+      nl69-first) printf 'abcd\n%s' "${v}" > "${bind_file}" ;;
+      prefixed-upper) printf %s "KHZB_${v}" > "${bind_file}" ;;
+      prefixed-upper-hex) printf %s "khzb_${v^^}" > "${bind_file}" ;;
+      khza) printf %s "khza_${v}" > "${bind_file}" ;;
+      long65) printf %s "${v}a" > "${bind_file}" ;;
+      prefixed-short68) printf %s "khzb_${v:1}" > "${bind_file}" ;;
+      prefixed-long70) printf %s "khzb_${v}a" > "${bind_file}" ;;
     esac
     work="${BATS_TEST_TMPDIR}/malformed${n}"
     mkdir -p "${work}"
@@ -1715,7 +1765,7 @@ _assert_bind_staged_first() {
 
     run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
     assert_success
-    assert_output --partial "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters)."
+    assert_output --partial "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters)."
     assert_output --partial "The announced row stays as it is and gets no heartbeats."
     run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
     assert_output "0"

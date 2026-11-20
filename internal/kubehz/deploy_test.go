@@ -255,33 +255,50 @@ func assertBindStagedFirst(t *testing.T, h *harness, log []string, work, path, f
 	}
 }
 
+// stagedBindSecrets are the two forms of a bind secret that the deploy
+// stages: 64 hex, and khzb_ and 64 hex.
+var stagedBindSecrets = []struct{ name, value string }{
+	{"64 hex", testBindSecret},
+	{"khzb_ and 64 hex", prefixedBindSecretFixture},
+}
+
 // With a bind secret on disk, the operator deploy stages it
 // before the CronJob agent apply, so neither a CronJob tick nor the identity
 // bootstrap Job can register without it.
 func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
-	h := newHarness(t)
-	work := renderInto(t, h, "operator", "managed")
-	p := writeBindSecret(t, h, "acme.example.com", testBindSecret)
-	log := bindStageLogger(h, "")
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
-	assertBindStagedFirst(t, h, *log, work, p, "apply -k "+filepath.Join(work, "agent"))
-	if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 4 {
-		t.Fatalf("the identity read must follow the CronJob apply: %v", *log)
+	for _, s := range stagedBindSecrets {
+		t.Run(s.name, func(t *testing.T) {
+			h := newHarness(t)
+			work := renderInto(t, h, "operator", "managed")
+			p := writeBindSecret(t, h, "acme.example.com", s.value)
+			log := bindStageLogger(h, "")
+			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
+			assertBindStagedFirst(t, h, *log, work, p, "apply -k "+filepath.Join(work, "agent"))
+			mustNotContain(t, strings.Join(*log, "\n"), s.value)
+			if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 4 {
+				t.Fatalf("the identity read must follow the CronJob apply: %v", *log)
+			}
+			mustNotContain(t, h.output(), "no bind secret")
+		})
 	}
-	mustNotContain(t, h.output(), "no bind secret")
 }
 
 // Cronjob mode stages it before anything else too: before the
 // live agent goes and before the CronJob agent apply.
 func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
-	h := newHarness(t)
-	work := renderInto(t, h, "cronjob", "registered")
-	p := writeBindSecret(t, h, "acme.example.com", testBindSecret)
-	log := bindStageLogger(h, "")
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
-	assertBindStagedFirst(t, h, *log, work, p, "delete -k "+filepath.Join(work, "live-agent", "managed"))
-	if agent := indexOf(*log, "apply -k "+filepath.Join(work, "agent")); agent != len(*log)-1 {
-		t.Fatalf("the CronJob agent apply must come last: %v", *log)
+	for _, s := range stagedBindSecrets {
+		t.Run(s.name, func(t *testing.T) {
+			h := newHarness(t)
+			work := renderInto(t, h, "cronjob", "registered")
+			p := writeBindSecret(t, h, "acme.example.com", s.value)
+			log := bindStageLogger(h, "")
+			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
+			assertBindStagedFirst(t, h, *log, work, p, "delete -k "+filepath.Join(work, "live-agent", "managed"))
+			mustNotContain(t, strings.Join(*log, "\n"), s.value)
+			if agent := indexOf(*log, "apply -k "+filepath.Join(work, "agent")); agent != len(*log)-1 {
+				t.Fatalf("the CronJob agent apply must come last: %v", *log)
+			}
+		})
 	}
 }
 
@@ -334,21 +351,23 @@ func TestDeployApplyNoBindSecretWarnsAndContinues(t *testing.T) {
 }
 
 // F6: a file that is not a bind secret (the register check: a readable
-// regular file of exactly 64 lowercase hex) is never staged. The deploy warns
-// that the file holds no bind secret and keeps today's order.
+// regular file of exactly 64 lowercase hex, or of khzb_ and 64 lowercase hex)
+// is never staged. The deploy warns that the file holds no bind secret and
+// keeps today's order.
 func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
-	for name, setup := range map[string]func(t *testing.T, path string){
-		"a directory":          func(t *testing.T, p string) { mustMkdir(t, p) },
-		"64 hex and a newline": func(t *testing.T, p string) { mustWrite(t, p, testBindSecret+"\n", 0o600) },
-		"upper-case hex":       func(t *testing.T, p string) { mustWrite(t, p, strings.ToUpper(testBindSecret), 0o600) },
-		"63 hex":               func(t *testing.T, p string) { mustWrite(t, p, testBindSecret[1:], 0o600) },
+	setups := map[string]func(t *testing.T, path string){
+		"a directory": func(t *testing.T, p string) { mustMkdir(t, p) },
 		"unreadable": func(t *testing.T, p string) {
 			if os.Geteuid() == 0 {
 				t.Skip("root reads a 0000 file")
 			}
 			mustWrite(t, p, testBindSecret, 0o000)
 		},
-	} {
+	}
+	for name, content := range unusableBindSecrets() {
+		setups[name] = func(t *testing.T, p string) { mustWrite(t, p, content, 0o600) }
+	}
+	for name, setup := range setups {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			work := renderInto(t, h, "cronjob", "registered")
@@ -359,7 +378,7 @@ func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
 			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
 			mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
 			mustContain(t, (*log)[0], "delete -k ")
-			mustContain(t, h.output(), "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters).")
+			mustContain(t, h.output(), "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters).")
 			mustContain(t, h.output(), "The announced row stays as it is and gets no heartbeats.")
 		})
 	}

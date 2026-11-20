@@ -1252,7 +1252,10 @@ EOF
   # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
   # value, one with a trailing newline, one in upper case, a valid value in
   # a file nobody may read, a valid value with 200 kB after it, a
-  # directory, a link to a directory, or no file.
+  # directory, a link to a directory, or no file. The khzb_ form too: a
+  # valid one, one with an upper-case prefix, and 64 hex, a newline and 4
+  # bytes (69 bytes with a line of 64 hex).
+  BIND_PREFIXED="khzb_$(printf 'ab%.0s' $(seq 1 32))"
   bind_reset() {
     rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
     : > "${STUB_LOG}"
@@ -1260,6 +1263,9 @@ EOF
       valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
       newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
       upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      prefixed) printf %s "${BIND_PREFIXED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      prefixed-upper) printf %s "KHZB_${BIND_PREFIXED#khzb_}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      prefixed-nl69) printf '%s\nabcd' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
       unreadable)
         printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
         chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
@@ -1288,7 +1294,7 @@ EOF
     } >> "${WORK}/${1}.out"
   }
   bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
-  BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
+  BIND_FIXTURES=(valid newline upper prefixed prefixed-upper prefixed-nl69 oversized directory dirlink missing)
   # root reads a 0000 file, so the case proves nothing there.
   [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
   for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
@@ -1371,7 +1377,7 @@ EOF
     key_check - kubehz deregister --domain "${KEY_DOMAIN}"
   done
   unset KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE KEY_DOMAIN
-  unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
+  unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES BIND_PREFIXED
 fi
 
 report
