@@ -352,21 +352,37 @@ func TestDoctorToolsSectionOlderKindByDomain(t *testing.T) {
 
 // `lo doctor --domain` gives the active domain to the kind line: an older
 // kind on PATH is a failure for a domain of the Lo driver and a warning
-// for a KubeOne domain. The stub kind is the only tool on PATH. Bash twin:
-// "lo doctor reads the active domain for the kind line".
+// for a KubeOne domain. PATH holds only stubs: bash (it prints its
+// version), every required tool and kind. So the exit code comes from the
+// kind line alone, and the minimum kind passes for the Lo domain. Bash
+// twin: "lo doctor reads the active domain for the kind line".
 func TestDoctorKindLineReadsTheActiveDomain(t *testing.T) {
 	p := doctorKindDomains(t)
-	bin := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(bin, "kind"), "#!/bin/sh\necho 'kind v0.17.0 go1.19.4 linux/amd64'\n")
-	if err := os.Chmod(filepath.Join(bin, "kind"), 0o755); err != nil {
-		t.Fatal(err)
+	bin := doctorStubBin(t, "argsh", "yq", "kustomize", "kubectl", "envsubst", "docker", "jq")
+	stub := func(name, body string) {
+		testutil.WriteFile(t, filepath.Join(bin, name), "#!/bin/sh\n"+body+"\n")
+		if err := os.Chmod(filepath.Join(bin, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	stub("bash", "echo 5.2")
 	t.Setenv("PATH", bin)
 	const line = "kind v0.17.0 — local clusters (Lo driver); lo up needs kind v0.18.0 or later for networking.dnsSearch (fix: b update kind)\n"
-	for d, mark := range map[string]string{"lo.dev": "✗", "metal.dev": "!"} {
-		stdout, _, _ := runLo(t, NewRoot(p), "doctor", "--domain", d)
-		if !strings.Contains(stdout, "\n  "+mark+" "+line) {
-			t.Errorf("doctor --domain %s: no line %q in:\n%s", d, mark+" "+line, stdout)
+	for _, tc := range []struct {
+		d, release, want string
+		ok               bool
+	}{
+		{"lo.dev", "v0.17.0", "✗ " + line, false},
+		{"metal.dev", "v0.17.0", "! " + line, true},
+		{"lo.dev", "v0.18.0", "✓ kind — local clusters (Lo driver)\n", true},
+	} {
+		stub("kind", "echo 'kind "+tc.release+" go1.19.4 linux/amd64'")
+		stdout, _, err := runLo(t, NewRoot(p), "doctor", "--domain", tc.d)
+		if (err == nil) != tc.ok || !strings.Contains(stdout, "\n  "+tc.want) {
+			t.Errorf("doctor --domain %s, kind %s: err=%v, want ok=%v and the line %q in:\n%s", tc.d, tc.release, err, tc.ok, tc.want, stdout)
+		}
+		if strings.Contains(stdout, "MISSING (required)") {
+			t.Errorf("doctor --domain %s: a required tool is missing:\n%s", tc.d, stdout)
 		}
 	}
 }

@@ -354,22 +354,31 @@ _kind_domains() {
 
 # main::doctor gives the active domain (DOMAIN_NAME here, as the entrypoint
 # exports it) to the kind line: an older kind is a failure for a domain of
-# the Lo driver and a warning for a KubeOne domain. kubectl, mkcert and
-# docker are stubs that exit 99, so doctor reaches no cluster. Go twin:
+# the Lo driver and a warning for a KubeOne domain. Every required tool
+# but yq is a stub that exits 99, and mkcert too, so doctor reaches no
+# cluster (the domain readers need the real yq, and setup skips without
+# it). So the exit status comes from the kind line alone, and the minimum
+# kind passes for the Lo domain. Go twin:
 # TestDoctorKindLineReadsTheActiveDomain.
 @test "lo doctor reads the active domain for the kind line" {
   _kind_domains
   _kind_stub 'kind v0.17.0 go1.19.4 linux/amd64\n'
   local bin="${BATS_TEST_TMPDIR}/kind-bin" tool
-  for tool in kubectl mkcert docker; do
+  for tool in argsh kustomize kubectl envsubst docker jq mkcert; do
     printf '#!/bin/sh\nexit 99\n' > "${bin}/${tool}"
     chmod +x "${bin}/${tool}"
   done
   :args() { :; }
   local line="kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)"
   DOMAIN_NAME=lo.dev PATH="${bin}:${PATH}" run main::doctor < /dev/null
-  assert_failure
+  assert_failure 1
   assert_line "  ✗ ${line}"
+  refute_line --partial "MISSING (required)"
   DOMAIN_NAME=metal.dev PATH="${bin}:${PATH}" run main::doctor < /dev/null
+  assert_success
   assert_line "  ! ${line}"
+  _kind_stub 'kind v0.18.0 go1.20.2 linux/amd64\n'
+  DOMAIN_NAME=lo.dev PATH="${bin}:${PATH}" run main::doctor < /dev/null
+  assert_success
+  assert_line "  ✓ kind — ${_kind_purpose}"
 }
