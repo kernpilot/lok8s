@@ -1,25 +1,28 @@
 package addons
 
-// guide_versions_test.go: the versions that the guide restates equal the
-// addon pins. The guide names the pinned chart versions in the "Framework
-// addons" table of docs/guide/addons.md, and in the example output of
-// docs/guide/audit.md and docs/guide/inventory.md. Nothing else ties these
-// numbers to the pins, so a chart bump would leave the guide stale while CI
-// stays green.
+// guide_versions_test.go: the versions that the docs restate equal the addon
+// pins. The guide names the pinned chart versions in the "Framework addons"
+// table of docs/guide/addons.md, and in prose and example output elsewhere in
+// docs/. Nothing else ties these numbers to the pins, so a chart bump would
+// leave the docs stale while CI stays green.
 //
 //   - TestGuideAddonTableMatchesThePins: each row of the table against the
-//     ChartRenderer documents of its addon. A pin can be in chart.yaml or in
-//     another file of the addon (webhook.yaml, csi-drivers.yaml).
-//   - TestGuideRestatementsMatchThePins: the other restatements, one entry
-//     each in guideRestatements and guideImageRestatements.
-//   - TestGuideNamesNoUncheckedPin: a scan of docs/guide for a pinned chart
-//     or addon name followed by a version. Each mention must be one that the
-//     two tests above check, or one in guideNotPins. So a new restatement
-//     must join a table here.
+//     ChartRenderer documents of its addon, and the scope of the table.
+//   - TestDocsRestatementsMatchThePins: each other restatement, one entry in
+//     docsRestatements or docsImageRestatements.
+//   - TestDocsHaveNoUncheckedPin: a scan of the Markdown pages of docs/ (not
+//     the release notes) for each pinned version. Each mention must be one
+//     that the two tests above check, or an entry of docsNotPins with its
+//     reason. So a new restatement of a pin must join a table here.
 //
-// The tests read the checkout (testutil.RepoRoot). The release archives hold
-// only the binary and the license, so docs/ is not there, and these tests
-// run only in the repository.
+// The scan looks for the pinned versions, not for chart names. A mention
+// with a version that was never the pin (a typo, or history) cannot go stale
+// on a bump, and the scan does not see it.
+//
+// The tests read the checkout (testutil.RepoRoot) and the embedded addons
+// tree, as the other addon tests do (the tree-drift gate keeps it equal to
+// .lok8s/addons). The release archives hold only the binary and the license,
+// so docs/ is not there.
 
 import (
 	"bytes"
@@ -31,7 +34,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 
@@ -40,81 +42,121 @@ import (
 )
 
 const (
-	guideDir        = "docs/guide"
-	guideAddonsFile = "addons.md"
-	guideTableHead  = "## Framework addons"
+	addonsTree     = "internal/assets/lok8s/addons"
+	docsDir        = "docs"
+	guideAddons    = "guide/addons.md" // relative to docs/, as every file name below
+	guideTableHead = "## Framework addons"
 	// guideTableRows is the number of rows of the table today. It is a
-	// floor, so a new row needs no change here. A table with fewer rows
-	// fails: a row was removed, or the parser does not see it.
+	// floor, so a new row needs no change here.
 	guideTableRows = 12
-	// guideVersion is a version as the guide writes it: an optional v,
+	// guideVersion is a version as the docs write it: an optional v,
 	// major.minor.patch, and an optional pre-release or build suffix.
 	guideVersion = `v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]*[0-9A-Za-z])?`
 )
 
-// guideChartRefRE is one chart of the Chart column: `<repo>/<chart>` or
+// guideChartRefRE is one chart of the Chart column: `<alias>/<chart>` or
 // `<chart>`, a space, then the version.
-var guideChartRefRE = regexp.MustCompile("^`([^`]+)` (" + guideVersion + ")$")
+var guideChartRefRE = regexp.MustCompile("^`(?:([^`/]+)/)?([^`/]+)` (" + guideVersion + ")$")
 
-// guideRestatements are the chart pins that the guide restates outside the
-// table, in the output of a command. re finds the restatement in file (under
-// docs/guide), and its first group is the version as written. Each re must
-// match once. The version must equal the pin exactly: the commands print the
-// version as the ChartRenderer pins it, with or without its v.
-var guideRestatements = []struct {
-	file, re, addon, chart string
-}{
-	{"audit.md", `(?m)^cilium +networking +khelm +(\S+) `, "cilium", "cilium"},
-	{"audit.md", `(?m)^ccm +networking +khelm +(\S+) `, "ccm", "hcloud-cloud-controller-manager"},
-	{"audit.md", `(?m)^cert-manager +infrastructure +khelm +(\S+) `, "cert-manager", "cert-manager"},
-	{"inventory.md", `(?m)^ +cilium (\S+) \(networking\)$`, "cilium", "cilium"},
-	{"inventory.md", `(?m)^ +cert-manager (\S+) \(infrastructure\)$`, "cert-manager", "cert-manager"},
-	{"inventory.md", `"name": "cilium", "chartVersion": "([^"]+)"`, "cilium", "cilium"},
-	{"inventory.md", `"name": "cert-manager", "chartVersion": "([^"]+)"`, "cert-manager", "cert-manager"},
+// guideRepoAliases is the repository alias that the table writes before the
+// chart, for each chart repository of a row. "" means that the table writes
+// the chart name alone. A row with a chart from a repository that is not
+// here fails, so a new repository needs its alias here.
+var guideRepoAliases = map[string]string{
+	"https://helm.cilium.io/":                         "cilium",
+	"https://metallb.github.io/metallb":               "metallb",
+	"https://charts.jetstack.io":                      "jetstack",
+	"https://charts.hetzner.cloud":                    "",
+	"oci://docker.io/envoyproxy":                      "envoyproxy",
+	"https://kubernetes-sigs.github.io/external-dns/": "external-dns",
+	"https://charts.rook.io/release":                  "rook-release",
+	"https://ceph.github.io/ceph-csi-operator":        "",
+	"https://ot-container-kit.github.io/helm-charts/": "ot-container-kit",
+	"https://charts.rancher.io":                       "rancher",
 }
 
-// guideImageRestatements are the image tags that the guide restates, as
+// guideAddonsWithoutRow are the addons with a pinned chart that the table
+// does not list: the guide says that the table lists a part of the addons.
+// A new addon with a pinned chart needs a row or an entry here. An entry
+// that has a row, or that pins no chart, fails.
+var guideAddonsWithoutRow = []string{
+	"autoscaler", "ccm", "cnpg-operator", "fluxcd", "gatus", "loki",
+	"metrics-server", "monitoring", "promtail", "reflector", "tempo",
+}
+
+// docsRestatements are the chart pins that the docs restate outside the
+// table. In re, {v} stands for the version as written. Each re must match
+// once in its file. exact: the text is the output of a command, which prints
+// the version as the ChartRenderer pins it, so the v is compared too. In
+// prose, a leading v is not compared.
+var docsRestatements = []struct {
+	file, re, addon, chart string
+	exact                  bool
+}{
+	{"guide/audit.md", `(?m)^cilium +networking +khelm +{v} `, "cilium", "cilium", true},
+	{"guide/audit.md", `(?m)^ccm +networking +khelm +{v} `, "ccm", "hcloud-cloud-controller-manager", true},
+	{"guide/audit.md", `(?m)^cert-manager +infrastructure +khelm +{v} `, "cert-manager", "cert-manager", true},
+	{"guide/inventory.md", `(?m)^ +cilium {v} \(networking\)$`, "cilium", "cilium", true},
+	{"guide/inventory.md", `(?m)^ +cert-manager {v} \(infrastructure\)$`, "cert-manager", "cert-manager", true},
+	{"guide/inventory.md", `"name": "cilium", "chartVersion": "{v}"`, "cilium", "cilium", true},
+	{"guide/inventory.md", `"name": "cert-manager", "chartVersion": "{v}"`, "cert-manager", "cert-manager", true},
+	// The ceph-csi-operator that rook-ceph installs has the version of the
+	// ceph-csi-drivers chart: the addon keeps the two in lockstep.
+	{"guide/addons.md", `the plugin image of ceph-csi-operator {v}\)`, "rook-ceph", "ceph-csi-drivers", false},
+	{"guide/addons.md", `Redis operator\n\(chart {v}, operator `, "redis-operator", "redis-operator", false},
+	{"guide/addons.md", `installs ExternalDNS \(chart {v}\)`, "external-dns", "external-dns", false},
+	{"reference/specs.md", "MetalLB is pinned to Helm chart version `{v}`", "metallb", "metallb", false},
+}
+
+// docsImageRestatements are the image tags that the docs restate, as
 // `<repository>:<tag>@sha256:…`. The tag must equal the tag of the image at
 // the key path in the addon's values.yaml, without its digest, and the
 // repository must be the same.
-var guideImageRestatements = []struct {
+var docsImageRestatements = []struct {
 	file, repository, addon string
 	values                  []string
 }{
-	{"addons.md", "rancher/system-upgrade-controller", "system-upgrade-controller", []string{"systemUpgradeController", "image"}},
-	{"addons.md", "rancher/kuberlr-kubectl", "system-upgrade-controller", []string{"kubectl", "image"}},
+	{guideAddons, "rancher/system-upgrade-controller", "system-upgrade-controller", []string{"systemUpgradeController", "image"}},
+	{guideAddons, "rancher/kuberlr-kubectl", "system-upgrade-controller", []string{"kubectl", "image"}},
 }
 
-// guideNotPins are mentions of a pinned chart with a version that do not
-// restate the pin. text is a part of the line that holds the mention. Each
-// entry must still find its mention, so a stale entry fails.
-var guideNotPins = []struct{ file, text, why string }{
-	{"addons.md", "measured on cilium 1.19.2", "a measurement on an older release"},
-	{"addons.md", "`envoy-gateway` v1.8.0 or later", "the first release with a feature"},
+// notPin is a mention of a pinned version that does not restate the pin.
+// text is a part of the line that holds the mention. With section, text is
+// a heading, and the entry covers each mention under it, up to the next
+// heading of the same or a higher level.
+type notPin struct {
+	file, text, why string
+	section         bool
+}
+
+// docsNotPins are the mentions in docs/ that do not restate the pin. Each
+// entry must still cover a mention, so a stale entry fails.
+var docsNotPins = []notPin{
+	{guideAddons, "| v1.9.3 | v1.6.1 |", "a row of the release history of envoy-gateway", false},
+	{guideAddons, "#### Upgrading to v1.9.3 {#envoy-gateway-v1-9-3-hazards}", "the upgrade notes of the envoy-gateway v1.9.3 release", true},
 }
 
 // chartPin is one ChartRenderer document of an addon: the chart (a name, or
-// the path of a local chart), its version ("" for a local chart) and the
-// file, relative to the addons tree.
-type chartPin struct{ chart, version, file string }
+// the path of a local chart), its version ("" for a local chart), its
+// repository and its file, relative to the addons tree.
+type chartPin struct{ chart, version, repository, file string }
 
-// guideMention is a pin as the guide writes it: the file (under docs/guide),
-// the line, the names it goes by (the chart, the addon) and the version as
-// written.
-type guideMention struct {
+// docsMention is a pin as the docs write it: the file (under docs/), the line
+// and the version as written.
+type docsMention struct {
 	file    string
 	line    int
-	names   []string
 	version string
 }
 
 // readChartPins reads the ChartRenderer documents of each addon directory
-// under addonsDir, keyed by the addon name. An addon without one has an
-// empty entry. Only a YAML file that names the kind is parsed; such a file
-// that does not parse fails the test.
-func readChartPins(t *testing.T, addonsDir string) map[string][]chartPin {
+// under dir, keyed by the addon name; an addon without one has an empty
+// entry. Each YAML file is parsed, except in a local chart (a directory with
+// a Chart.yaml: its templates are not YAML). A file that does not parse
+// fails the test.
+func readChartPins(t *testing.T, dir string) map[string][]chartPin {
 	t.Helper()
-	entries, err := os.ReadDir(addonsDir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,32 +167,47 @@ func readChartPins(t *testing.T, addonsDir string) map[string][]chartPin {
 		}
 		addon := e.Name()
 		pins[addon] = []chartPin{}
-		err := filepath.WalkDir(filepath.Join(addonsDir, addon), func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || (filepath.Ext(path) != ".yaml" && filepath.Ext(path) != ".yml") {
+		err := filepath.WalkDir(filepath.Join(dir, addon), func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
 				return err
+			}
+			if d.IsDir() {
+				if _, err := os.Stat(filepath.Join(path, "Chart.yaml")); err == nil {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if ext := filepath.Ext(path); ext != ".yaml" && ext != ".yml" {
+				return nil
 			}
 			raw, err := os.ReadFile(path)
-			if err != nil || !bytes.Contains(raw, []byte("kind: ChartRenderer")) {
+			if err != nil {
 				return err
 			}
-			rel, _ := filepath.Rel(addonsDir, path)
+			rel, _ := filepath.Rel(dir, path)
 			dec := yaml.NewDecoder(bytes.NewReader(raw))
 			for {
-				var doc struct {
-					Kind    string `yaml:"kind"`
-					Chart   string `yaml:"chart"`
-					Version string `yaml:"version"`
-				}
-				err := dec.Decode(&doc)
-				if errors.Is(err, io.EOF) {
+				var n yaml.Node
+				if err := dec.Decode(&n); errors.Is(err, io.EOF) {
 					return nil
-				}
-				if err != nil {
+				} else if err != nil {
 					return fmt.Errorf("%s: %w", rel, err)
 				}
-				if doc.Kind == "ChartRenderer" {
-					pins[addon] = append(pins[addon], chartPin{doc.Chart, doc.Version, filepath.ToSlash(rel)})
+				var kind struct {
+					Kind string `yaml:"kind"`
 				}
+				if n.Decode(&kind) != nil || kind.Kind != "ChartRenderer" {
+					continue // not a mapping with a string kind, or another kind
+				}
+				var doc struct {
+					Chart      string `yaml:"chart"`
+					Version    string `yaml:"version"`
+					Repository string `yaml:"repository"`
+				}
+				if err := n.Decode(&doc); err != nil {
+					return fmt.Errorf("%s: %w", rel, err)
+				}
+				pins[addon] = append(pins[addon], chartPin{doc.Chart, doc.Version, doc.Repository, filepath.ToSlash(rel)})
 			}
 		})
 		if err != nil {
@@ -160,10 +217,25 @@ func readChartPins(t *testing.T, addonsDir string) map[string][]chartPin {
 	return pins
 }
 
-// readGuide reads a file under docs/guide.
-func readGuide(t *testing.T, root, file string) string {
+// onePin is the ChartRenderer of chart in the addon. Not one (none, or two
+// of the same chart) is a problem.
+func onePin(pins map[string][]chartPin, addon, chart string) (chartPin, string) {
+	var found []chartPin
+	for _, p := range pins[addon] {
+		if p.chart == chart {
+			found = append(found, p)
+		}
+	}
+	if len(found) != 1 {
+		return chartPin{}, fmt.Sprintf("the addon %s has %d ChartRenderers of the chart %q, want 1: %+v", addon, len(found), chart, found)
+	}
+	return found[0], ""
+}
+
+// readDoc reads a file under docs/.
+func readDoc(t *testing.T, root, file string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(root, guideDir, file))
+	raw, err := os.ReadFile(filepath.Join(root, docsDir, file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,38 +243,43 @@ func readGuide(t *testing.T, root, file string) string {
 }
 
 // checkGuideTable checks the rows of the "Framework addons" table. It
-// returns the chart versions that it checked, the number of rows and a
-// problem for each row that does not match its pins. A Chart cell is one of:
+// returns the chart versions that it checked, the addons with a row and a
+// problem for each mismatch. A Chart cell is one of:
 //
 //   - "local chart": each ChartRenderer of the addon renders a chart from a
 //     path of the addon ("./…"), with no version;
 //   - "raw manifests": the addon has no ChartRenderer;
-//   - a list of "`<repo>/<chart>` <version>", separated by ", ": each chart
-//     has a ChartRenderer in the addon with that version, and each versioned
+//   - a list of "`<alias>/<chart>` <version>", separated by ", ": each chart
+//     has one ChartRenderer in the addon with that version, the alias is the
+//     one of its repository in guideRepoAliases, and each versioned
 //     ChartRenderer of the addon is in the list. The table writes a v before
 //     some versions that the chart pins without one, so a leading v is not
 //     compared.
-func checkGuideTable(t *testing.T, root string, pins map[string][]chartPin) (checked []guideMention, rows int, problems []string) {
+//
+// A table line after the end of the table (before the next heading) is a
+// problem: a row that wraps onto two lines ends the table there.
+func checkGuideTable(t *testing.T, root string, pins map[string][]chartPin) (checked []docsMention, rows []string, problems []string) {
 	t.Helper()
-	lines := strings.Split(readGuide(t, root, guideAddonsFile), "\n")
+	lines := strings.Split(readDoc(t, root, guideAddons), "\n")
 	start := slices.Index(lines, guideTableHead)
 	if start < 0 {
-		t.Fatalf("%s/%s: no line %q", guideDir, guideAddonsFile, guideTableHead)
+		t.Fatalf("%s/%s: no line %q", docsDir, guideAddons, guideTableHead)
 	}
-	inTable := false
-	for i := start + 1; i < len(lines); i++ {
+	state := 0 // 0: before the table, 1: in it, 2: after it
+	for i := start + 1; i < len(lines) && !strings.HasPrefix(lines[i], "#"); i++ {
 		line := lines[i]
-		if strings.HasPrefix(line, "#") {
-			break
-		}
-		if !strings.HasPrefix(line, "|") {
-			if inTable {
-				break
+		where := fmt.Sprintf("%s/%s:%d", docsDir, guideAddons, i+1)
+		switch {
+		case !strings.HasPrefix(line, "|"):
+			if state == 1 {
+				state = 2
 			}
 			continue
+		case state == 2:
+			problems = append(problems, fmt.Sprintf("%s: a table line after the end of the table (a row that wraps onto two lines ends the table)", where))
+			continue
 		}
-		inTable = true
-		where := fmt.Sprintf("%s/%s:%d", guideDir, guideAddonsFile, i+1)
+		state = 1
 		cells := strings.Split(strings.Trim(line, "|"), "|")
 		if len(cells) != 3 {
 			problems = append(problems, fmt.Sprintf("%s: %d cells, want 3 (Addon, What it installs, Chart)", where, len(cells)))
@@ -213,10 +290,10 @@ func checkGuideTable(t *testing.T, root string, pins map[string][]chartPin) (che
 		if addon == "Addon" || strings.HasPrefix(addon, "---") {
 			continue // the header and the separator
 		}
-		rows++
+		rows = append(rows, addon)
 		addonPins, ok := pins[addon]
 		if !ok {
-			problems = append(problems, fmt.Sprintf("%s: the addon %q is not in .lok8s/addons", where, addon))
+			problems = append(problems, fmt.Sprintf("%s: the addon %q is not in %s", where, addon, addonsTree))
 			continue
 		}
 		switch cell {
@@ -232,28 +309,32 @@ func checkGuideTable(t *testing.T, root string, pins map[string][]chartPin) (che
 			}
 		default:
 			named := map[string]bool{}
-			for _, item := range strings.Split(cell, ", ") {
+			for item := range strings.SplitSeq(cell, ", ") {
 				m := guideChartRefRE.FindStringSubmatch(item)
 				if m == nil {
-					problems = append(problems, fmt.Sprintf("%s: the chart %q is not \"`<repo>/<chart>` <version>\", \"local chart\" or \"raw manifests\"", where, item))
+					problems = append(problems, fmt.Sprintf("%s: the chart %q is not \"`<alias>/<chart>` <version>\", \"local chart\" or \"raw manifests\"", where, item))
 					continue
 				}
-				chart := m[1][strings.LastIndex(m[1], "/")+1:]
+				alias, chart, version := m[1], m[2], m[3]
 				named[chart] = true
-				k := slices.IndexFunc(addonPins, func(p chartPin) bool { return p.chart == chart })
-				if k < 0 {
-					problems = append(problems, fmt.Sprintf("%s: %s has no ChartRenderer of the chart %q", where, addon, chart))
+				pin, problem := onePin(pins, addon, chart)
+				if problem != "" {
+					problems = append(problems, where+": "+problem)
 					continue
 				}
-				pin := addonPins[k]
-				checked = append(checked, guideMention{guideAddonsFile, i + 1, []string{chart, addon}, m[2]})
-				if strings.TrimPrefix(m[2], "v") != strings.TrimPrefix(pin.version, "v") {
-					problems = append(problems, fmt.Sprintf("%s: %s %s, but .lok8s/addons/%s pins %s", where, chart, m[2], pin.file, pin.version))
+				checked = append(checked, docsMention{guideAddons, i + 1, version})
+				if want, ok := guideRepoAliases[pin.repository]; !ok {
+					problems = append(problems, fmt.Sprintf("%s: the repository %s of %s has no entry in guideRepoAliases", where, pin.repository, chart))
+				} else if alias != want {
+					problems = append(problems, fmt.Sprintf("%s: %s has the alias %q, want %q (the repository %s)", where, chart, alias, want, pin.repository))
+				}
+				if strings.TrimPrefix(version, "v") != strings.TrimPrefix(pin.version, "v") {
+					problems = append(problems, fmt.Sprintf("%s: %s %s, but %s/%s pins %s", where, chart, version, addonsTree, pin.file, pin.version))
 				}
 			}
 			for _, p := range addonPins {
 				if p.version != "" && !named[p.chart] {
-					problems = append(problems, fmt.Sprintf("%s: the row of %s does not name the chart %s %s (.lok8s/addons/%s)", where, addon, p.chart, p.version, p.file))
+					problems = append(problems, fmt.Sprintf("%s: the row of %s does not name the chart %s %s (%s/%s)", where, addon, p.chart, p.version, addonsTree, p.file))
 				}
 			}
 		}
@@ -272,43 +353,45 @@ func findOnce(re *regexp.Regexp, text string) (group string, line, matches int) 
 	return text[m[2]:m[3]], 1 + strings.Count(text[:m[2]], "\n"), 1
 }
 
-// checkGuideRestatements checks guideRestatements and
-// guideImageRestatements. It returns the versions that it checked and a
-// problem for each entry that does not match.
-func checkGuideRestatements(t *testing.T, root string, pins map[string][]chartPin) (checked []guideMention, problems []string) {
+// checkDocsRestatements checks docsRestatements and docsImageRestatements.
+// It returns the versions that it checked and a problem for each mismatch.
+func checkDocsRestatements(t *testing.T, root string, pins map[string][]chartPin) (checked []docsMention, problems []string) {
 	t.Helper()
-	for _, r := range guideRestatements {
-		where := guideDir + "/" + r.file
-		got, line, n := findOnce(regexp.MustCompile(r.re), readGuide(t, root, r.file))
+	for _, r := range docsRestatements {
+		where := docsDir + "/" + r.file
+		re := regexp.MustCompile(strings.Replace(r.re, "{v}", "("+guideVersion+")", 1))
+		got, line, n := findOnce(re, readDoc(t, root, r.file))
 		if n != 1 {
-			problems = append(problems, fmt.Sprintf("%s: %d matches of %s, want 1: the restatement moved or was reworded, so update guideRestatements", where, n, r.re))
+			problems = append(problems, fmt.Sprintf("%s: %d matches of %s, want 1: the restatement moved or was reworded, so update docsRestatements", where, n, r.re))
 			continue
 		}
-		i := slices.IndexFunc(pins[r.addon], func(p chartPin) bool { return p.chart == r.chart })
-		if i < 0 {
-			problems = append(problems, fmt.Sprintf("%s:%d: the addon %s has no ChartRenderer of the chart %s", where, line, r.addon, r.chart))
+		pin, problem := onePin(pins, r.addon, r.chart)
+		if problem != "" {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s", where, line, problem))
 			continue
 		}
-		pin := pins[r.addon][i]
-		checked = append(checked, guideMention{r.file, line, []string{r.chart, r.addon}, got})
-		if got != pin.version {
-			problems = append(problems, fmt.Sprintf("%s:%d: %s %s, but .lok8s/addons/%s pins %s", where, line, r.addon, got, pin.file, pin.version))
+		checked = append(checked, docsMention{r.file, line, got})
+		want := pin.version
+		if !r.exact {
+			got, want = strings.TrimPrefix(got, "v"), strings.TrimPrefix(want, "v")
+		}
+		if got != want {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s %s, but %s/%s pins %s", where, line, r.chart, got, addonsTree, pin.file, pin.version))
 		}
 	}
-	for _, r := range guideImageRestatements {
-		where := guideDir + "/" + r.file
+	for _, r := range docsImageRestatements {
+		where := docsDir + "/" + r.file
 		re := regexp.MustCompile("`" + regexp.QuoteMeta(r.repository) + ":([^@`]+)@sha256:")
-		got, line, n := findOnce(re, readGuide(t, root, r.file))
+		got, line, n := findOnce(re, readDoc(t, root, r.file))
 		if n != 1 {
-			problems = append(problems, fmt.Sprintf("%s: %d matches of %s, want 1: the restatement moved or was reworded, so update guideImageRestatements", where, n, re))
+			problems = append(problems, fmt.Sprintf("%s: %d matches of %s, want 1: the restatement moved or was reworded, so update docsImageRestatements", where, n, re))
 			continue
 		}
-		repository, tag := valuesImage(t, filepath.Join(root, ".lok8s", "addons", r.addon, "values.yaml"), r.values)
+		repository, tag := valuesImage(t, filepath.Join(root, addonsTree, r.addon, "values.yaml"), r.values)
 		tag, _, _ = strings.Cut(tag, "@")
-		name := r.repository[strings.LastIndex(r.repository, "/")+1:]
-		checked = append(checked, guideMention{r.file, line, []string{name, r.addon}, got})
+		checked = append(checked, docsMention{r.file, line, got})
 		if repository != r.repository || got != tag {
-			problems = append(problems, fmt.Sprintf("%s:%d: %s:%s, but .lok8s/addons/%s/values.yaml %s pins %s:%s", where, line, r.repository, got, r.addon, strings.Join(r.values, "."), repository, tag))
+			problems = append(problems, fmt.Sprintf("%s:%d: %s:%s, but %s/%s/values.yaml %s pins %s:%s", where, line, r.repository, got, addonsTree, r.addon, strings.Join(r.values, "."), repository, tag))
 		}
 	}
 	return checked, problems
@@ -333,10 +416,7 @@ func valuesImage(t *testing.T, path string, keys []string) (repository, tag stri
 		}
 		node = m[k]
 	}
-	image, ok := node.(map[string]any)
-	if !ok {
-		t.Fatalf("%s: %s is not a map", path, strings.Join(keys, "."))
-	}
+	image, _ := node.(map[string]any)
 	repository, _ = image["repository"].(string)
 	tag, _ = image["tag"].(string)
 	if repository == "" || tag == "" {
@@ -345,54 +425,30 @@ func valuesImage(t *testing.T, path string, keys []string) (repository, tag stri
 	return repository, tag
 }
 
-// guideScanNames are the names that the scan looks for: each addon with a
-// versioned ChartRenderer, and each chart that it pins.
-func guideScanNames(pins map[string][]chartPin) []string {
-	set := map[string]bool{}
-	for addon, ps := range pins {
-		for _, p := range ps {
-			if p.version != "" {
-				set[addon] = true
-				set[p.chart] = true
-			}
-		}
-	}
-	names := make([]string, 0, len(set))
-	for n := range set {
-		names = append(names, n)
-	}
-	return names
-}
+// versionTokenRE finds a version-like token: an optional v, then numbers
+// with dots. The longest token wins, so 1.20.45 is not a mention of 1.20.4.
+var versionTokenRE = regexp.MustCompile(`v?[0-9]+(?:\.[0-9]+)+`)
 
-// guideMentionRE finds a name followed by a version: the name, optional
-// quotes or backticks, then a space, an @ or a colon, then the version. The
-// name must not continue a longer name (cert-manager in
-// cert-manager-webhook-hetzner).
-func guideMentionRE(names []string) *regexp.Regexp {
-	q := make([]string, 0, len(names))
-	for _, n := range names {
-		q = append(q, regexp.QuoteMeta(n))
-	}
-	// The longest name first, so that the alternation tries it first.
-	sort.Slice(q, func(i, j int) bool { return len(q[i]) > len(q[j]) || (len(q[i]) == len(q[j]) && q[i] < q[j]) })
-	return regexp.MustCompile("(?:^|[^A-Za-z0-9_-])(" + strings.Join(q, "|") + ")[`'\"]*(?:[ \\t]+|@|:[ \\t]*)(" + guideVersion + ")")
-}
-
-// guideHit is a mention that the scan found.
-type guideHit struct {
-	file          string
-	line          int
-	name, version string
-	text          string // from the name to the end of the version
-}
-
-// scanGuide finds each mention of re in the Markdown files under dir.
-func scanGuide(t *testing.T, dir string, re *regexp.Regexp) []guideHit {
+// scanVersions finds each mention of a version of want (keyed without a
+// leading v) in the Markdown files under dir, except in the release notes
+// and in build output. A mention stands alone: no letter, digit or dot
+// before it, and no letter, digit or underscore after it.
+func scanVersions(t *testing.T, dir string, want map[string]bool) []docsMention {
 	t.Helper()
-	var hits []guideHit
+	var hits []docsMention
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Ext(path) != ".md" {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", "releases", "dist", "cache":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".md" {
+			return nil
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -400,8 +456,20 @@ func scanGuide(t *testing.T, dir string, re *regexp.Regexp) []guideHit {
 		}
 		rel, _ := filepath.Rel(dir, path)
 		for i, line := range strings.Split(string(raw), "\n") {
-			for _, m := range re.FindAllStringSubmatchIndex(line, -1) {
-				hits = append(hits, guideHit{filepath.ToSlash(rel), i + 1, line[m[2]:m[3]], line[m[4]:m[5]], line[m[2]:m[5]]})
+			for _, m := range versionTokenRE.FindAllStringIndex(line, -1) {
+				before, after := byte(' '), byte(' ')
+				if m[0] > 0 {
+					before = line[m[0]-1]
+				}
+				if m[1] < len(line) {
+					after = line[m[1]]
+				}
+				if isAlnum(before) || before == '.' || isAlnum(after) || after == '_' {
+					continue
+				}
+				if v := line[m[0]:m[1]]; want[strings.TrimPrefix(v, "v")] {
+					hits = append(hits, docsMention{filepath.ToSlash(rel), i + 1, v})
+				}
 			}
 		}
 		return nil
@@ -412,24 +480,27 @@ func scanGuide(t *testing.T, dir string, re *regexp.Regexp) []guideHit {
 	return hits
 }
 
-// uncheckedGuideHits returns each hit that no checked mention and no entry of
-// notPins covers, and each entry of notPins that covers no hit. A checked
-// mention covers a hit on its line with one of its names and its version. An
-// entry of notPins covers a hit in its file whose text is a part of the
-// entry's text, on a line that holds the entry's text.
-func uncheckedGuideHits(hits []guideHit, checked []guideMention, notPins []struct{ file, text, why string }, lines func(file string, line int) string) (unchecked []guideHit, stale []string) {
+func isAlnum(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
+// uncheckedMentions returns each hit that no checked mention and no entry of
+// notPins covers, and each entry that covers no hit. A checked mention covers
+// a hit on its line with the same version (a leading v aside). lines returns
+// the lines of a file under docs/.
+func uncheckedMentions(hits, checked []docsMention, notPins []notPin, lines func(file string) []string) (unchecked []docsMention, stale []string) {
+	same := func(a, b docsMention) bool {
+		return a.file == b.file && a.line == b.line && strings.TrimPrefix(a.version, "v") == strings.TrimPrefix(b.version, "v")
+	}
 	used := make([]bool, len(notPins))
 	for _, h := range hits {
-		if slices.ContainsFunc(checked, func(c guideMention) bool {
-			return c.file == h.file && c.line == h.line && c.version == h.version && slices.Contains(c.names, h.name)
-		}) {
+		if slices.ContainsFunc(checked, func(c docsMention) bool { return same(c, h) }) {
 			continue
 		}
 		covered := false
 		for i, np := range notPins {
-			if np.file == h.file && strings.Contains(np.text, h.text) && strings.Contains(lines(h.file, h.line), np.text) {
-				used[i] = true
-				covered = true
+			if np.file == h.file && notPinCovers(lines(h.file), np.text, np.section, h.line) {
+				used[i], covered = true, true
 			}
 		}
 		if !covered {
@@ -444,101 +515,162 @@ func uncheckedGuideHits(hits []guideHit, checked []guideMention, notPins []struc
 	return unchecked, stale
 }
 
+// notPinCovers reports whether an entry of docsNotPins covers the 1-based
+// line: the line holds text, or, with section, the line is the heading text
+// or under it, before the next heading of the same or a higher level. A #
+// line in a code fence is not a heading.
+func notPinCovers(lines []string, text string, section bool, line int) bool {
+	if !section {
+		return strings.Contains(lines[line-1], text)
+	}
+	head := slices.Index(lines, text)
+	if head < 0 || line-1 < head {
+		return false
+	}
+	level := len(text) - len(strings.TrimLeft(text, "#"))
+	fence := false
+	for _, l := range lines[head+1 : line] {
+		if strings.HasPrefix(l, "```") {
+			fence = !fence
+		}
+		if n := len(l) - len(strings.TrimLeft(l, "#")); !fence && n > 0 && n <= level && strings.HasPrefix(l[n:], " ") {
+			return false
+		}
+	}
+	return true
+}
+
 func TestGuideAddonTableMatchesThePins(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
-	pins := readChartPins(t, filepath.Join(root, ".lok8s", "addons"))
+	pins := readChartPins(t, filepath.Join(root, addonsTree))
 	checked, rows, problems := checkGuideTable(t, root, pins)
 	for _, p := range problems {
 		t.Error(p)
 	}
-	if rows < guideTableRows {
-		t.Errorf("%s/%s: %d rows in the %q table, want at least %d. A row was removed, or the parser does not see it. "+
-			"If a row was removed on purpose, lower guideTableRows to %d", guideDir, guideAddonsFile, rows, guideTableHead, guideTableRows, rows)
+	if len(rows) < guideTableRows || len(checked) == 0 {
+		t.Errorf("%s/%s: %d rows and %d chart versions in the %q table, want at least %d rows. A row was removed, or the parser does not see it. "+
+			"If a row was removed on purpose, lower guideTableRows", docsDir, guideAddons, len(rows), len(checked), guideTableHead, guideTableRows)
 	}
-	if len(checked) == 0 {
-		t.Error("the table check compared no chart version")
+	// The scope: each addon with a pinned chart has a row or an entry in
+	// guideAddonsWithoutRow, not both.
+	for addon, ps := range pins {
+		versioned := slices.ContainsFunc(ps, func(p chartPin) bool { return p.version != "" })
+		row, listed := slices.Contains(rows, addon), slices.Contains(guideAddonsWithoutRow, addon)
+		switch {
+		case versioned && !row && !listed:
+			t.Errorf("%s pins a chart and has no row in the %q table: add a row, or add it to guideAddonsWithoutRow", addon, guideTableHead)
+		case listed && (row || !versioned):
+			t.Errorf("guideAddonsWithoutRow: %s has a row or pins no chart: remove the entry", addon)
+		}
+	}
+	for _, addon := range guideAddonsWithoutRow {
+		if _, ok := pins[addon]; !ok {
+			t.Errorf("guideAddonsWithoutRow: %s is not in %s: remove the entry", addon, addonsTree)
+		}
 	}
 }
 
-func TestGuideRestatementsMatchThePins(t *testing.T) {
+func TestDocsRestatementsMatchThePins(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
-	pins := readChartPins(t, filepath.Join(root, ".lok8s", "addons"))
-	_, problems := checkGuideRestatements(t, root, pins)
+	_, problems := checkDocsRestatements(t, root, readChartPins(t, filepath.Join(root, addonsTree)))
 	for _, p := range problems {
 		t.Error(p)
 	}
 }
 
-func TestGuideNamesNoUncheckedPin(t *testing.T) {
+func TestDocsHaveNoUncheckedPin(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
-	pins := readChartPins(t, filepath.Join(root, ".lok8s", "addons"))
+	pins := readChartPins(t, filepath.Join(root, addonsTree))
 	table, _, _ := checkGuideTable(t, root, pins)
-	restated, _ := checkGuideRestatements(t, root, pins)
-	hits := scanGuide(t, filepath.Join(root, guideDir), guideMentionRE(guideScanNames(pins)))
-
-	// The table is in the form that the scan finds: a table entry that the
-	// scan misses means that the scan pattern is broken.
-	for _, c := range table {
-		if !slices.ContainsFunc(hits, func(h guideHit) bool {
-			return h.file == c.file && h.line == c.line && h.version == c.version && slices.Contains(c.names, h.name)
-		}) {
-			t.Errorf("%s/%s:%d: the scan does not find the table entry %s %s, so guideMentionRE is broken", guideDir, c.file, c.line, c.names[0], c.version)
+	restated, _ := checkDocsRestatements(t, root, pins)
+	want := map[string]bool{}
+	for _, ps := range pins {
+		for _, p := range ps {
+			if p.version != "" {
+				want[strings.TrimPrefix(p.version, "v")] = true
+			}
 		}
 	}
-
+	for _, r := range docsImageRestatements {
+		_, tag := valuesImage(t, filepath.Join(root, addonsTree, r.addon, "values.yaml"), r.values)
+		tag, _, _ = strings.Cut(tag, "@")
+		want[strings.TrimPrefix(tag, "v")] = true
+	}
+	hits := scanVersions(t, filepath.Join(root, docsDir), want)
+	checked := append(table, restated...)
+	// Each checked mention is a hit too: a checked mention that the scan
+	// misses means that the scan is broken.
+	for _, c := range checked {
+		if !slices.Contains(hits, c) {
+			t.Errorf("%s/%s:%d: the scan does not find the checked version %s, so scanVersions is broken", docsDir, c.file, c.line, c.version)
+		}
+	}
 	files := map[string][]string{}
-	lines := func(file string, line int) string {
+	lines := func(file string) []string {
 		if _, ok := files[file]; !ok {
-			files[file] = strings.Split(readGuide(t, root, file), "\n")
+			files[file] = strings.Split(readDoc(t, root, file), "\n")
 		}
-		return files[file][line-1]
+		return files[file]
 	}
-	unchecked, stale := uncheckedGuideHits(hits, append(table, restated...), guideNotPins, lines)
+	unchecked, stale := uncheckedMentions(hits, checked, docsNotPins, lines)
 	for _, h := range unchecked {
-		t.Errorf("%s/%s:%d: %q names a pinned chart with a version, and no test checks it. "+
-			"If it restates the pin, add it to guideRestatements (or guideImageRestatements). If not, add it to guideNotPins with the reason",
-			guideDir, h.file, h.line, h.text)
+		t.Errorf("%s/%s:%d: %s is a pinned version, and no test checks this mention. "+
+			"If it restates the pin, add it to docsRestatements (or docsImageRestatements). If not, add it to docsNotPins with the reason",
+			docsDir, h.file, h.line, h.version)
 	}
 	for _, s := range stale {
-		t.Errorf("guideNotPins: %s is not in the guide any more: remove the entry", s)
+		t.Errorf("docsNotPins: %s covers no mention any more: remove the entry", s)
 	}
 }
 
-// The scan logic on a fixture: a new mention of a pinned chart is unchecked,
-// a checked mention and a listed one are not, and a listed mention that is
-// gone is stale.
-func TestGuideScanFindsAnUncheckedMention(t *testing.T) {
+// The scan and the coverage on a fixture: the bounds of a mention, the @ and
+// : forms, the files that the scan skips, a checked mention, a line entry, a
+// section entry that ends at the next heading of its level (a # line in a
+// code fence does not end it), and a stale entry.
+func TestDocsVersionScanFixture(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	testutil.WriteFile(t, filepath.Join(dir, "a.md"), "| `cilium` | CNI | `cilium/cilium` v1.20.4 |\n"+
-		"Upgrade to cilium 1.20.9 first.\n"+
-		"It was measured on cilium 1.19.2.\n"+
-		"`cert-manager-webhook-hetzner` 0.7.0 needs `cert-manager`.\n")
-	hits := scanGuide(t, dir, guideMentionRE([]string{"cilium", "cert-manager", "cert-manager-webhook-hetzner"}))
-	got := make([]string, 0, len(hits))
+	text := "Pinned: cilium 1.20.4.\n" +
+		"Not: go1.20.4 x1.20.4 x.1.20.4 11.20.4 1.20.45 1.20.4.1 1.20.4a 1.20.4_x\n" +
+		"rook @v1.20.4 and image:v1.20.4\n" +
+		"| v1.20.4 | old |\n" +
+		"## Notes on 1.20.4\n" +
+		"### Detail\n" +
+		"```sh\n" +
+		"# a comment, not a heading\n" +
+		"```\n" +
+		"Still 1.20.4 here.\n" +
+		"## Next\n" +
+		"New 1.20.4 here.\n"
+	testutil.WriteFile(t, filepath.Join(dir, "guide", "a.md"), text)
+	testutil.WriteFile(t, filepath.Join(dir, "guide", "a.txt"), "1.20.4\n")
+	testutil.WriteFile(t, filepath.Join(dir, "releases", "v1.md"), "1.20.4\n")
+	hits := scanVersions(t, dir, map[string]bool{"1.20.4": true})
+	var got []string
 	for _, h := range hits {
-		got = append(got, fmt.Sprintf("%s:%d %s %s", h.file, h.line, h.name, h.version))
+		got = append(got, fmt.Sprintf("%s:%d:%s", h.file, h.line, h.version))
 	}
-	want := []string{"a.md:1 cilium v1.20.4", "a.md:2 cilium 1.20.9", "a.md:3 cilium 1.19.2", "a.md:4 cert-manager-webhook-hetzner 0.7.0"}
+	want := []string{"guide/a.md:1:1.20.4", "guide/a.md:3:v1.20.4", "guide/a.md:3:v1.20.4", "guide/a.md:4:v1.20.4",
+		"guide/a.md:5:1.20.4", "guide/a.md:10:1.20.4", "guide/a.md:12:1.20.4"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("hits: got %q, want %q", got, want)
 	}
 
-	raw := strings.Split("| `cilium` | CNI | `cilium/cilium` v1.20.4 |\nUpgrade to cilium 1.20.9 first.\nIt was measured on cilium 1.19.2.\n", "\n")
-	lines := func(_ string, line int) string { return raw[line-1] }
-	checked := []guideMention{{"a.md", 1, []string{"cilium"}, "v1.20.4"}}
-	notPins := []struct{ file, text, why string }{
-		{"a.md", "measured on cilium 1.19.2", "a measurement"},
-		{"a.md", "metallb 0.1.0", "gone"},
+	lines := func(string) []string { return strings.Split(text, "\n") }
+	checked := []docsMention{{"guide/a.md", 1, "1.20.4"}, {"guide/a.md", 3, "1.20.4"}}
+	notPins := []notPin{
+		{"guide/a.md", "| v1.20.4 | old |", "history", false},
+		{"guide/a.md", "## Notes on 1.20.4", "notes", true},
+		{"guide/a.md", "metallb 0.1.0", "gone", false},
 	}
-	unchecked, stale := uncheckedGuideHits(hits[:3], checked, notPins, lines)
-	if len(unchecked) != 1 || unchecked[0].text != "cilium 1.20.9" {
-		t.Errorf("unchecked: got %+v, want only cilium 1.20.9", unchecked)
+	unchecked, stale := uncheckedMentions(hits, checked, notPins, lines)
+	if len(unchecked) != 1 || unchecked[0].line != 12 {
+		t.Errorf("unchecked: got %+v, want only line 12", unchecked)
 	}
-	if !slices.Equal(stale, []string{"a.md: metallb 0.1.0"}) {
+	if !slices.Equal(stale, []string{"guide/a.md: metallb 0.1.0"}) {
 		t.Errorf("stale: got %q, want the metallb entry", stale)
 	}
 }

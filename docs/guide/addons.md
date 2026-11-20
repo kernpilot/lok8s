@@ -386,6 +386,10 @@ underlying cause.
 
 ## Framework addons
 
+The table lists a part of the addons that lok8s ships. `lo addons` lists all
+of them, and the [published addon index](/guide/inventory#the-published-addon-index)
+gives the pinned chart versions.
+
 | Addon | What it installs | Chart |
 |-------|-----------------|-------|
 | `cilium` | Cilium CNI | `cilium/cilium` v1.20.4 |
