@@ -1886,7 +1886,7 @@ bootstrap::_diff_manifest() {
   case "${_drc}" in
     0) echo unchanged; return 0 ;;
     1)
-      [[ -z "${DEBUG:-}" ]] || printf '%s\n' "${_diff}" >&2
+      [[ -z "${DEBUG:-}" ]] || bootstrap::_debug_diff "${label}" "${stem}" "${_diff}"
       # One `--- ` header per object that differs (GNU diff -u -N over the
       # LIVE and MERGED trees); an object the live side lacks shows an
       # empty old side, the hunk `@@ -0,0 `. An external diff tool
@@ -1918,6 +1918,65 @@ bootstrap::_diff_manifest() {
   [[ "${diff_input}" == "${rendered}" ]] || _filtered=1
   error "$(bootstrap::_diff_failed_text "${label}" "${_drc}" "${_kubectl}" "${kubeconfig}" "${bootstrap_render_dir:-}" "${stem}" "${_filtered}")"
   echo error
+  return 0
+}
+
+# bootstrap::_debug_diff <label> <stem> <diff>
+# Prints at debug what a diff with differences (rc 1) found, without the diff
+# text: one line for each object that differs (bootstrap::_diff_objects), then
+# where the text is (${bootstrap_render_dir}/<stem>.diff under --render-dir).
+# The diff text can quote a value of the manifest: kubectl masks only the data
+# of a core v1 Secret. It prints only under LO_SHOW_SENSITIVE_OUTPUT=1, after a
+# [warn] line. The Go twin: Engine.debugDiff (the same bytes).
+bootstrap::_debug_diff() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the diff text can quote a Secret value
+  local _label="${1}" _stem="${2}" _obj
+  while IFS= read -r _obj; do
+    debug "bootstrap dry-run: ${_label}: differs: ${_obj}"
+  done < <(bootstrap::_diff_objects "${3}")
+  if kapply::show_sensitive; then
+    if [[ -n "${3}" ]]; then
+      warn "bootstrap dry-run: ${_label}: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the diff text, which can quote a value of the manifest"
+      printf '%s\n' "${3}" >&2
+    fi
+  elif [[ -n "${bootstrap_render_dir:-}" ]]; then
+    debug "bootstrap dry-run: ${_label}: the diff text is in ${bootstrap_render_dir}/${_stem}.diff. lo does not print it: it can quote a value of the manifest (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)"
+  else
+    debug "bootstrap dry-run: ${_label}: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)"
+  fi
+  return 0
+}
+
+# bootstrap::_diff_objects <diff>
+# Names the objects of a `kubectl diff` from its `--- ` header lines (one for
+# each object that differs), one per line: `<apiVersion> <kind>
+# <namespace>/<name>`, or `<apiVersion> <kind> <name>` for a cluster-scoped
+# object. kubectl names the file of an object in its LIVE and MERGED trees
+# [<group>.]<version>.<Kind>.<namespace>.<name> (k8s.io/kubectl/pkg/cmd/diff,
+# InfoObject.Name). A header names an object only when its path is a file of
+# the LIVE tree of kubectl (a directory whose name starts with LIVE-) with the
+# kubectl file name. Any other header (an external diff tool, a removed line
+# of a hunk that starts with "-- ") names nothing: lo prints a name only,
+# never a line of the diff text. The Go twin: diffObjects (the same regex).
+bootstrap::_diff_objects() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the diff text can quote a Secret value
+  local _re='^(([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^[:space:]/]+)$'
+  local _line _path _dir _api _name
+  while IFS= read -r _line; do
+    [[ "${_line}" == '--- '* ]] || continue
+    _path="${_line#'--- '}"
+    _path="${_path%%$'\t'*}"
+    _dir="${_path%/*}"
+    [[ "${_path}" == */* && "${_dir##*/}" == LIVE-* ]] || continue
+    [[ "${_path##*/}" =~ ${_re} ]] || continue
+    _api="${BASH_REMATCH[3]}"
+    [[ -z "${BASH_REMATCH[2]}" ]] || _api="${BASH_REMATCH[2]}/${_api}"
+    _name="${BASH_REMATCH[6]}"
+    [[ -z "${BASH_REMATCH[5]}" ]] || _name="${BASH_REMATCH[5]}/${_name}"
+    printf '%s %s %s\n' "${_api}" "${BASH_REMATCH[4]}" "${_name}"
+  done < <(printf '%s\n' "${1}")
   return 0
 }
 

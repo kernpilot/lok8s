@@ -34,6 +34,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"gopkg.in/yaml.v3"
 )
@@ -645,8 +646,8 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	case rc == 0:
 		return dryResult{status: dryUnchanged}
 	case rc == 1:
-		if os.Getenv("DEBUG") != "" && diff != "" {
-			_, _ = io.WriteString(stderr, strings.TrimRight(diff, "\n")+"\n")
+		if os.Getenv("DEBUG") != "" {
+			e.debugDiff(stderr, label, stem, diff)
 		}
 		res := dryResult{status: dryDiffers}
 		res.changed, res.added, res.counted = summarizeDiff(diff)
@@ -809,6 +810,77 @@ func writeGuarded(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("refusing to write through a symlink: %s", path)
 	}
 	return os.WriteFile(path, data, perm)
+}
+
+// debugDiff prints at debug what a diff with differences (rc 1) found,
+// without the diff text: one line for each object that differs
+// (diffObjects), then where the text is. The diff text can quote a value of
+// the manifest: kubectl masks only the data of a core v1 Secret. It prints
+// only under LO_SHOW_SENSITIVE_OUTPUT=1, after a [warn] line. The bash twin
+// is the rc 1 branch of bootstrap::_diff_manifest (the same bytes).
+func (e *Engine) debugDiff(stderr io.Writer, label, stem, diff string) {
+	for _, obj := range diffObjects(diff) {
+		ui.DebugTo(stderr, "bootstrap dry-run: %s: differs: %s", label, obj)
+	}
+	switch {
+	case kapply.ShowSensitive():
+		if text := strings.TrimRight(diff, "\n"); text != "" {
+			ui.WarnTo(stderr, "bootstrap dry-run: %s: %s", label, kapply.ShowSensitiveText("the diff text"))
+			_, _ = io.WriteString(stderr, text+"\n")
+		}
+	case e.Options.RenderDir != "":
+		ui.DebugTo(stderr, "bootstrap dry-run: %s: the diff text is in %s. lo does not print it: it can quote a value of the manifest (%s=1 prints it)",
+			label, e.Options.RenderDir+"/"+stem+".diff", kapply.ShowSensitiveEnv)
+	default:
+		ui.DebugTo(stderr, "bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (%s=1 prints it)",
+			label, kapply.ShowSensitiveEnv)
+	}
+}
+
+// diffObjectRe is the name that kubectl diff gives the file of an object in
+// its LIVE and MERGED trees: [<group>.]<version>.<Kind>.<namespace>.<name>
+// (k8s.io/kubectl/pkg/cmd/diff, InfoObject.Name). A cluster-scoped object
+// has an empty namespace. The Kind is the first part that starts with an
+// upper-case letter, so the name parses one way only.
+var diffObjectRe = regexp.MustCompile(`^(?:([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^\s/]+)$`)
+
+// diffObjects names the objects of a `kubectl diff` from its `--- ` header
+// lines (one for each object that differs, as summarizeDiff counts them),
+// in the objectLabel shape: `<apiVersion> <kind> <namespace>/<name>`, or
+// `<apiVersion> <kind> <name>` for a cluster-scoped object. A header names
+// an object only when its path is a file of the LIVE tree of kubectl (a
+// directory whose name starts with LIVE-, os.MkdirTemp("", "LIVE-")) with
+// the kubectl file name. Any other header (an external diff tool, a
+// removed line of a hunk that starts with "-- ") names nothing: lo prints
+// a name only, never a line of the diff text. The bash twin is
+// bootstrap::_diff_objects.
+func diffObjects(diff string) []string {
+	var objs []string
+	for line := range strings.SplitSeq(diff, "\n") {
+		rest, ok := strings.CutPrefix(line, "--- ")
+		if !ok {
+			continue
+		}
+		path, _, _ := strings.Cut(rest, "\t")
+		i := strings.LastIndex(path, "/")
+		if i < 0 || !strings.HasPrefix(path[strings.LastIndex(path[:i], "/")+1:i], "LIVE-") {
+			continue
+		}
+		m := diffObjectRe.FindStringSubmatch(path[i+1:])
+		if m == nil {
+			continue
+		}
+		group, version, kind, ns, name := m[1], m[2], m[3], m[4], m[5]
+		apiVersion := version
+		if group != "" {
+			apiVersion = group + "/" + version
+		}
+		if ns != "" {
+			name = ns + "/" + name
+		}
+		objs = append(objs, apiVersion+" "+kind+" "+name)
+	}
+	return objs
 }
 
 // summarizeDiff counts the objects of a `kubectl diff` (GNU `diff -u -N`

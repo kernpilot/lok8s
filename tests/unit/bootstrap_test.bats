@@ -3155,7 +3155,7 @@ _dry_kubectl_stub() {
 _dry_text_stub() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
   export DRY_OUT="${1}" DRY_ERR="${2}"; shift 2
-  export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"
+  export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"; : > "${DRY_CALLS}.env"
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
@@ -3164,6 +3164,8 @@ _dry_text_stub() {
       return 9
     fi
     echo x >> "${DRY_CALLS}"
+    # The KUBERC each diff ran with (the kubectl user defaults are off).
+    echo "diff KUBERC=${KUBERC-<unset>}" >> "${DRY_CALLS}.env"
     local n rc=0; n="$(wc -l < "${DRY_CALLS}")"
     set -- ${DRY_RCS}
     (( n <= $# )) && rc="${!n}"
@@ -3358,14 +3360,32 @@ STANDIN
   done
 }
 
+# _dry_debug_lines <label> <diff-path> — what a dry run prints at debug for
+# the canned diff of <label>: one line for each object, then the line that
+# names the .diff file at <diff-path> ("" without --render-dir). The Go twin
+# is wantDebugDiffLines.
+_dry_debug_lines() {
+  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap default/%s\n' "${1}" testcni "${1}" extra "${1}" other
+  if [[ -z "${2}" ]]; then
+    printf '[debug] bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}"
+  else
+    printf '[debug] bootstrap dry-run: %s: the diff text is in %s. lo does not print it: it can quote a value of the manifest (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}" "${2}"
+  fi
+}
+
 # A diff with differences (rc 1) still reports as before, also when kubectl
-# prints a message on stderr: "differs" with the counts, rc 1, and the diff
-# text at debug (kubectl masks the data of a Secret in it). The kubectl
-# stderr is not printed, and the .diff file holds the diff text only. The
-# Go twin is TestDryRunDiffersWithKubectlTextStillDiffers.
+# prints a message on stderr: "differs" with the counts, rc 1. The diff text
+# is not printed, also at debug (it can quote a value of the manifest):
+# debug prints one line for each object that differs and the path of the
+# .diff file. The kubectl stderr is not printed, the .diff file holds the
+# diff text only (0600, in the 0700 render dir), and kubectl runs with the
+# user defaults off (KUBERC=off). The Go twins are
+# TestDryRunDiffersWithKubectlTextStillDiffers and
+# TestDryRunDiffFileIsPrivate.
 @test "bootstrap::apply --dry-run: a diff with differences and a kubectl message still differs (rc 1)" {
   write_cluster_spec "testcni"
-  local bootstrap_dry_run=1 lvl rd
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  local bootstrap_dry_run=1 lvl rd line
   for lvl in "" 1; do
     rd="${BATS_TEST_TMPDIR}/out-${lvl:-0}"
     _dry_text_stub "$(_dry_diff_with_canary)" "$(_dry_value_text)" 1
@@ -3374,13 +3394,82 @@ STANDIN
     [ "${status}" -eq 1 ]
     assert_line "bootstrap dry-run: testcni: differs changed=1 new=2"
     assert_line "bootstrap dry-run: entries=1 unchanged=0 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0"
-    if [[ -n "${lvl}" ]]; then assert_line "+  note: diff-text-canary-1111"; else refute_output --partial "diff-text-canary-1111"; fi
+    while IFS= read -r line; do
+      if [[ -n "${lvl}" ]]; then assert_line "${line}"; else refute_line "${line}"; fi
+    done < <(_dry_debug_lines testcni "${rd}/01-testcni.diff")
+    refute_output --partial "diff-text-canary-1111"
+    refute_output --partial "+  foo: bar"
     refute_output --partial "canary-value-0000"
     refute_output --partial "Invalid value"
     refute_output --partial "typed patch"
     refute_output --partial "kubectl diff failed"
     _dry_assert_diff_file "${rd}/01-testcni.diff" "$(_dry_diff_with_canary)"
+    [ "$(stat -c %a "${rd}/01-testcni.diff")" = "600" ]
+    [ "$(stat -c %a "${rd}")" = "700" ]
+    [ "$(grep -cx 'diff KUBERC=off' "${DRY_CALLS}.env")" -eq 1 ]
+    [ "$(wc -l < "${DRY_CALLS}.env")" -eq 1 ]
   done
+}
+
+# At debug without --render-dir the dry run prints the object lines and says
+# how to keep the diff text in a file; it prints no diff text. The Go twin is
+# TestDryRunDebugDiffWithoutRenderDir.
+@test "bootstrap::apply --dry-run at debug without --render-dir names the objects, not the diff text" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  local bootstrap_dry_run=1 line
+  _dry_text_stub "$(_dry_diff_with_canary)" "" 1
+  DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 1 ]
+  while IFS= read -r line; do
+    assert_line "${line}"
+  done < <(_dry_debug_lines testcni "")
+  refute_output --partial "diff-text-canary-1111"
+  refute_output --partial "+  foo: bar"
+  refute_output --partial "@@ "
+}
+
+# LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
+# line, as lo printed it before; without debug it prints nothing more. The
+# kubectl stderr stays private. The Go twin is
+# TestDryRunDiffTextUnderShowSensitive.
+@test "bootstrap::apply --dry-run: LO_SHOW_SENSITIVE_OUTPUT=1 prints the diff text at debug" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 lvl
+  local -r warn_line='[warn] bootstrap dry-run: testcni: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the diff text, which can quote a value of the manifest'
+  for lvl in "" 1; do
+    _dry_text_stub "$(_dry_diff_with_canary)" "$(_dry_value_text)" 1
+    LO_SHOW_SENSITIVE_OUTPUT=1 DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 1 ]
+    if [[ -n "${lvl}" ]]; then
+      assert_line "${warn_line}"
+      assert_line "+  note: diff-text-canary-1111"
+      assert_line "+  foo: bar"
+    else
+      refute_line "${warn_line}"
+      refute_output --partial "diff-text-canary-1111"
+    fi
+    refute_output --partial "canary-value-0000"
+    refute_output --partial "Invalid value"
+  done
+}
+
+# bootstrap::_diff_objects names the objects of the --- headers of the LIVE
+# tree only; any other line names nothing. The Go twin is TestDiffObjects
+# (the same cases).
+@test "bootstrap::_diff_objects names the objects of the LIVE headers only" {
+  local -r ts=$'\t2026-10-12 10:00:00.000000000 +0000'
+  _objs() { run bootstrap::_diff_objects "${1}"; assert_success; assert_output "${2}"; }
+  _objs "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg${ts}"$'\n'"+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg${ts}" "v1 ConfigMap default/cfg"
+  _objs "--- /tmp/LIVE-22/apps.v1.Deployment.web.front${ts}" "apps/v1 Deployment web/front"
+  _objs "--- /tmp/LIVE-3/rbac.authorization.k8s.io.v1.Role.ns.r" "rbac.authorization.k8s.io/v1 Role ns/r"
+  _objs "--- /tmp/LIVE-4/rbac.authorization.k8s.io.v1.ClusterRole..admin${ts}" "rbac.authorization.k8s.io/v1 ClusterRole admin"
+  _objs "--- /tmp/LIVE-5/v1beta1.Ingress.default.a.example.com${ts}" "v1beta1 Ingress default/a.example.com"
+  _objs $'the files differ\n' ""
+  _objs "--- /tmp/MERGED-1/v1.ConfigMap.default.cfg${ts}"$'\n'"--- a/v1.ConfigMap.default.cfg" ""
+  _objs "--- v1.ConfigMap.default.cfg" ""
+  _objs "--- /tmp/LIVE-1/v1.Secret.default.s${ts}"$'\n@@ -1 +1 @@\n--- diff-text-canary-1111\n--- LIVE-9/diff-text-canary-1111' "v1 Secret default/s"
+  _objs "--- /tmp/LIVE-1/configmap-cfg.yaml${ts}"$'\n'"--- /tmp/LIVE-1/V1.ConfigMap.default.cfg" ""
 }
 
 # A clean diff (rc 0) with a kubectl warning on stderr is unchanged, rc 0,

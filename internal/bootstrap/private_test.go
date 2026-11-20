@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -222,6 +223,36 @@ func TestSchedulerCountsFromThePrivateWriter(t *testing.T) {
 			refuteOutput(t, outputOf(e), canaryValue, "serverside-applied")
 		})
 	}
+}
+
+// The .diff file of a dry run is 0600 in the 0700 render dir, and the diff
+// ran with the kubectl user defaults off. bats: "bootstrap::apply
+// --dry-run: a diff with differences and a kubectl message still differs
+// (rc 1)".
+func TestDryRunDiffFileIsPrivate(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "testcni")
+	dir := filepath.Join(t.TempDir(), "out")
+	e.Options.RenderDir = dir
+	var envs [][]string
+	f.handler = func(c execx.Cmd) error {
+		envs = append(envs, c.Env)
+		fmt.Fprint(c.Stdout, diffOutWithCanary)
+		return &rcError{1}
+	}
+	_ = e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	for path, want := range map[string]os.FileMode{dir: 0o700, filepath.Join(dir, "01-testcni.diff"): 0o600} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Errorf("%s: mode %v, want %v", path, fi.Mode().Perm(), want)
+		}
+	}
+	if len(envs) != 1 {
+		t.Errorf("kubectl calls = %d, want 1 (the diff)", len(envs))
+	}
+	assertKubeRCOff(t, envs)
 }
 
 // The restore.d apply runs with the kubectl user defaults off.
