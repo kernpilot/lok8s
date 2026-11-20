@@ -221,8 +221,17 @@ that store does not resolve (the domain directory has no `secrets` directory,
 and the project keeps a store per domain), `add-key` stops before it changes
 `.sops.yaml`. Create the directory, or select a domain that has a store, then
 run the command again. When the command cannot list the store (it is not a
-directory, or you have no read or search permission on it), it also stops
-before it changes `.sops.yaml`.
+directory, you have no read or search permission on it, or the read of the
+directory fails), it also stops before it changes `.sops.yaml`. The command
+lists the store once, and its later steps use that list. With `--all`, it
+lists each other store once. On the first run that is after the write of
+`.sops.yaml`: when such a listing fails, the command names the store and
+stops before it re-encrypts a file.
+
+When `.sops.yaml` (at the end of its links) is the same file as the
+`.gitignore` of the store or as an `.enc` file of the store, `add-key` stops
+before it changes a file: the write of that file would replace `.sops.yaml`.
+Give `.sops.yaml` a file of its own.
 
 `add-key` writes the `.gitignore` of the store before it changes
 `.sops.yaml`. When that write fails, the command stops, and `.sops.yaml` and
@@ -230,18 +239,22 @@ the `.enc` files stay as they were.
 
 When `.sops.yaml` lists the key already, `add-key` does not change
 `.sops.yaml`: it finishes the re-key of an earlier run that stopped (for
-example, after its write of `.sops.yaml`). It reads the sops metadata of the
-`.enc` file of each plaintext of the store. A finished file has metadata
-with a `mac` and a `lastmodified` value, and an `age` entry for the key with
-an `enc` value that is an armored age block (its header line and its footer
-line).
+example, after its write of `.sops.yaml`), as far as it can find that work.
+It reads the sops metadata of the `.enc` file of each plaintext of the
+store. A finished file passes the recipient envelope check: its metadata has
+a `mac` and a `lastmodified` value, and an `age` entry for the key with an
+`enc` value that is an armored age block (its header line and its footer
+line). The check reads only the entries of the key. An entry of another
+key does not change the result.
 
 The command re-encrypts only the plaintexts whose `.enc` file is missing or
 not finished. A finished `.enc` file keeps its bytes and its time, also when
 its plaintext is older. When each file is finished, the command prints
 `nothing to add` and changes no file, but it writes a missing `.gitignore` of
-the store. This check shows that sops added the key to the file. It does not
-show that the key decrypts the file.
+the store. The check is structural: it reads the sops metadata only, and
+does not decrypt the file. It does not show that sops wrote the entry, or
+that the key can decrypt the file. A damaged file whose metadata passes the
+check is not found.
 
 After that re-encrypt, the command reads the metadata again. When a file is
 still not finished, the command names it and stops with an error, and it
@@ -254,12 +267,13 @@ writes a file, in these cases:
 
 - An `.enc` path of the store is a symlink, a directory, a FIFO, a socket or
   a device. The first run refuses these too.
-- An `.enc` file is larger than 16 MiB. The command does not read the
-  metadata of such a file: no `.enc` file that `lo` writes is that large.
-  Restore or remove the file.
-- An `.enc` file has no decrypted twin and does not list the key, and you do
-  not pass `--skip-orphans`. This is the refusal of the first run. An orphan
-  that lists the key needs no re-key.
+- An `.enc` file is larger than 16 MiB, the size limit of the metadata
+  check. The command does not read the metadata of such a file. Restore or
+  remove the file.
+- An `.enc` file has no decrypted twin and does not pass the check, and you
+  do not pass `--skip-orphans`. This is the refusal of the first run. An
+  orphan that passes the check needs no re-key. An `.enc` symlink to a path
+  that does not exist counts as an orphan too, on each run.
 - The bash implementation cannot find `jq`, which reads the metadata. The
   `lo` binary needs no `jq`.
 
@@ -407,7 +421,13 @@ link that appears after that check: through a link to a path that does not
 exist, it can make an empty file. It then stops because the open file is not
 the lock path, and its error says to remove the lock path and the file that
 a link there names. A FIFO that appears after the check makes the bash open
-wait until a program opens the FIFO to read. The directory of the lock must
+wait until a program opens the FIFO to read. When another regular file
+replaces the lock file after the open, both stop with an error that says
+that the lock path changed after its check. The bash implementation keeps
+the lock until its process exits; the `lo` binary releases it when the
+command ends. When `flock` fails for a cause other than a lock that another
+run holds, the bash implementation says that it cannot lock the file and
+gives the exit status of `flock`. The directory of the lock must
 be one that you trust. The lock excludes runs only where no other user can
 change the entries of that directory. When another user can write in that
 directory (for example, the directory of the file that a `.sops.yaml` link
@@ -422,8 +442,9 @@ commands replace `.sops.yaml` through a temporary file and a rename. When
 `.sops.yaml` is a symlink, they replace the file that it names, and the link
 stays a link. Each
 encrypt writes its `.enc` file the same way, so an encrypt that stops leaves
-the old file whole. This holds when a command stops or a signal kills it,
-not for a power loss or a crash of the host: the commands do not sync the files
+the old file whole, and a rerun of `add-key` finishes the work that it can
+find (see the check above). This holds when a command stops or a signal
+kills it, not for a power loss or a crash of the host: the commands do not sync the files
 to the disk (no `fsync`), so after a power loss a write can be lost, or the
 writes can be on the disk in another order.
 
