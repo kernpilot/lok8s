@@ -84,7 +84,7 @@ kapply::escape() {
   for (( i = 0; i < ${#s}; i++ )); do
     c="${s:i:1}"
     case "${c}" in
-      '\') out+='\\' ;;
+      \\) out+="\\\\" ;;
       [[:cntrl:]]) printf -v c '\\x%02x' "'${c}"; out+="${c}" ;;
       *) out+="${c}" ;;
     esac

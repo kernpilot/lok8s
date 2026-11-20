@@ -2000,7 +2000,7 @@ bootstrap::_diff_objects() {
           ' ') _old=$(( _old - 1 )) _new=$(( _new - 1 )) ;;
           -) _old=$(( _old - 1 )) ;;
           +) _new=$(( _new - 1 )) ;;
-          '\') ;;
+          \\) ;;
           *) break ;;
         esac
         (( _old >= 0 && _new >= 0 )) || break
@@ -2018,10 +2018,10 @@ bootstrap::_diff_objects() {
         ;;
       *)
         if [[ "${_line}" == 'diff '* ]]; then
-          _st=diff
+          _st='diff'
         elif [[ "${_line}" == '--- '* ]]; then
           _pending="${_line}" _st=plus
-        elif [[ "${_st}" == next && "${_line}" == '\'* ]]; then
+        elif [[ "${_st}" == next && "${_line}" == \\* ]]; then
           :
         else
           break

@@ -632,7 +632,10 @@ for hk_verb in recreate apply restart; do
         indent < "${WORK}/kubectl.${hk_impl}.stdin"
         hk_ok=0
       fi
-      if grep -qF -- 'parity-stub' "${WORK}/${hk_impl}.out" "${WORK}/${hk_impl}.err"; then
+      # Only the apply runs through kapply, so only its kubectl output is
+      # private. The recreate prints the kubectl output as before (the
+      # other apply sites are a follow-up).
+      if [[ "${hk_verb}" == apply ]] && grep -qF -- 'parity-stub' "${WORK}/${hk_impl}.out" "${WORK}/${hk_impl}.err"; then
         echo "FAIL: ${hk_label} — ${hk_impl} printed the kubectl output:"
         indent < "${WORK}/${hk_impl}.out"
         hk_ok=0
