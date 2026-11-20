@@ -70,7 +70,12 @@
 #     cannot place"; a backslash at the end of a line of the body joins
 #     the next line). A quoted delimiter (<<'EOF', <<"EOF", <<\EOF) makes
 #     the body text: a curl word there is no finding, unless the file ends
-#     before the delimiter line.
+#     before the delimiter line. In an unquoted body, a curl name in
+#     quotes ("curl", 'curl', or a quoted path that ends in /curl) is a
+#     finding too when a $( or a ` of the body comes before it: the shell
+#     runs that command, and the quotes do not change its name. The gate
+#     does not track where the $( ) or `…` ends, so a quoted name after a
+#     $( ) that already ended is a finding as well.
 # In the q mode, a definition of curl is a finding too: an alias
 # (alias curl=…) or a function (curl(), function curl). The gate checks
 # the source text, not the command that a call then runs.
@@ -108,8 +113,14 @@
 # ) and the " of a "$( )" over more lines close what they open. The body
 # of a here-document (<< or <<- and a delimiter word, in code, not <<<
 # and not a shift in (( ))) is no command: it starts at the next line and
-# ends at the line that holds only the delimiter (white space around it
-# does not count, so the body of a script in a YAML block also ends).
+# ends at the line that is the delimiter, compared exactly, as bash does.
+# For <<- the leading tabs of each line go first. In a YAML file (.yaml,
+# .yml) the leading spaces of each line go too (the indentation of a
+# block scalar, which the shell does not see). In a body whose delimiter
+# has no quote and no backslash, a line that ends in an odd number of
+# backslashes is joined to the next line before the test, as bash does:
+# x\<newline>EOF is body text, E\<newline>OF ends the body. A quoted body
+# joins no lines.
 # The first argument of a call is the first word after the curl word that
 # is not a redirection: the operand of a redirection is one shell word,
 # with its quotes and escapes (curl >"a -q " -u … has -u first).
@@ -594,13 +605,14 @@ curl_gate() {
     # hfrom of buf on. A quote or a backslash in the delimiter makes a
     # quoted body (text to the shell); else the shell runs the $( ) and `…`
     # of the body. The bodies start at the next line, in this order.
-    function heredocs(   i, L, j, w, we, t, q) {
+    function heredocs(   i, L, j, w, we, t, q, tabs) {
       lex(buf); L = length(buf)
       for (i = hfrom; i < L; i++) {
         if (substr(buf, i, 2) != "<<" || LS[i] != "c" || LE[i]) continue
         if (substr(buf, i + 2, 1) == "<") { i += 2; continue }
         j = i + 2
-        if (substr(buf, j, 1) == "-") j++
+        tabs = substr(buf, j, 1) == "-"
+        if (tabs) j++
         while (substr(buf, j, 1) ~ /[ \t]/) j++
         if (j > L || substr(buf, j, 1) ~ /[;&|()<>=]/) continue
         t = substr(buf, 1, i - 1)
@@ -609,39 +621,68 @@ curl_gate() {
         w = substr(buf, j, we - j)
         q = w ~ /["\047\\]/
         gsub(/["\047\\]/, "", w)
-        hq_n++; hq_delim[hq_n] = w; hq_quoted[hq_n] = q; hfile = FILENAME
+        hq_n++; hq_delim[hq_n] = w; hq_quoted[hq_n] = q; hq_tabs[hq_n] = tabs; hfile = FILENAME
         i = we - 1
       }
       hfrom = L + 1
     }
-    # A line of a here-document body (FNR, the text $0). A curl word in an
-    # unquoted body is a finding: the gate does not read the $( ) and `…`
-    # there. A quoted body is text: its curl words are findings only when
-    # the body has no end in the file (hd_close). A backslash at the end of
-    # a line of an unquoted body joins the next line, as the shell does.
+    # A line of a here-document body (FNR, the text $0). The body ends at
+    # the line that is the delimiter, compared exactly, as bash does: for
+    # <<- the leading tabs go first, and in a YAML file the leading spaces
+    # (the indentation of the block) go too. A curl word in an unquoted
+    # body is a finding: the gate does not read the $( ) and `…` there. In
+    # an unquoted body, a line that ends in an odd number of backslashes
+    # joins the next line BEFORE the delimiter test, as bash does: a joined
+    # line can be the delimiter, and a line after a joined one is no
+    # delimiter. A quoted body is text and joins no lines: its curl words
+    # are findings only when the body has no end in the file (hd_close).
     function body_line(   t) {
-      t = $0; sub(/^[[:space:]]+/, "", t); sub(/[[:space:]]+$/, "", t)
-      if (t == hq_delim[hq_i]) {
-        body_words(hbuf, hbl, 0); hbuf = ""; hb_n = 0
-        if (++hq_i > hq_n) { hq_n = 0; hq_i = 1 }
+      t = $0
+      if (hfile ~ /\.ya?ml$/) sub(/^ +/, "", t)
+      if (hq_tabs[hq_i]) sub(/^\t+/, "", t)
+      if (hq_quoted[hq_i]) {
+        if (t == hq_delim[hq_i]) body_end()
+        else body_words($0, FNR, 1)
         return
       }
-      if (hq_quoted[hq_i]) { body_words($0, FNR, 1); return }
-      t = $0
       if (hbuf == "") hbl = FNR
       if (match(t, /\\+$/) && RLENGTH % 2 == 1) { hbuf = hbuf substr(t, 1, length(t) - 1); return }
       t = hbuf t; hbuf = ""
-      body_words(t, hbl, 0)
+      if (t == hq_delim[hq_i]) body_end()
+      else body_words(t, hbl, 0)
     }
-    function body_words(t, l, keep,   s, off, k, p) {
+    # The end of a body: the next here-document of the command, if any.
+    function body_end() {
+      hbuf = ""; hb_n = 0; hsub = 0
+      if (++hq_i > hq_n) { hq_n = 0; hq_i = 1 }
+    }
+    # The curl words of the text t of a body (its first line l; keep: a
+    # quoted body, whose lines hd_close reports). In an unquoted body, a
+    # curl name in quotes (quoted_name) is a finding too when a $( or a `
+    # of the body comes before it (hsub: on a line before): the shell runs
+    # that command, and its quotes do not change the name. The gate does
+    # not track where the $( ) or `…` ends.
+    function body_words(t, l, keep,   s, off, k, p, hit) {
       if (mode == "list") return
       s = t; off = 0
       while ((k = index(s, "curl")) > 0) {
         p = off + k; off += k + 3; s = substr(s, k + 4)
-        if (!curl_word(t, p)) continue
+        hit = curl_word(t, p)
+        if (!hit && !keep) hit = quoted_name(t, p) && (hsub || substr(t, 1, p - 1) ~ /\$\(|`/)
+        if (!hit) continue
         if (keep) hb_line[++hb_n] = l
         else printf "%s:%d: %s\n", hfile, l, "a curl word the gate cannot place"
       }
+      if (!keep && t ~ /\$\(|`/) hsub = 1
+    }
+    # A curl name in quotes at position p of s: the text curl with a double
+    # or a single quote just before it or just after it, and on each side
+    # a quote or a bound of a curl word (curl_word).
+    function quoted_name(s, p,   b, a) {
+      b = p > 1 ? substr(s, p - 1, 1) : ""
+      a = substr(s, p + 4, 1)
+      if (b !~ /["\047]/ && a !~ /["\047]/) return 0
+      return (b == "" || b ~ /[[:space:];&|()<>=`\/\\"\047]/) && (a == "" || a ~ /[[:space:];&|()<>=`"\047]/)
     }
     # The end of a file in a here-document body: the curl words of a quoted
     # body that did not end are findings.
@@ -650,7 +691,7 @@ curl_gate() {
         if (hbuf != "") body_words(hbuf, hbl, 0)
         for (i = 1; i <= hb_n; i++) printf "%s:%d: %s\n", hfile, hb_line[i], "a curl word the gate cannot place"
       }
-      hq_n = 0; hq_i = 1; hb_n = 0; hbuf = ""
+      hq_n = 0; hq_i = 1; hb_n = 0; hbuf = ""; hsub = 0
     }
     function check(   s, off, c0, b, adv, prefix, stripped, rest, l, marked, i, hit, cred, manifest, seg, e, a, cb) {
       if (buf == "") { reset(); return }

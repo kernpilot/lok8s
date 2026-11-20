@@ -663,6 +663,113 @@ ${good}:15
 ${good}:16"
 }
 
+# A here-document body ends only at the line that is its delimiter,
+# compared exactly, as bash does: " EOF" and a tab before EOF are body text
+# with << (lines 7 and 11), and <<- strips only the leading tabs (line 16).
+# In an unquoted body, a line that ends in a backslash joins the next line
+# before the test: "x \" then "EOF" is body text (line 19), and "E\" then
+# "OF" ends the body (line 24). In an unquoted body, a curl name in quotes
+# after a $( or a backtick of the body is a call too (lines 2 to 4, and
+# line 29 after a $( on the line before). The controls: the same lines in a
+# quoted body, a curl name in quotes with no $( or backtick before it in its
+# body (also after a body with a $( that ended, and after a file whose body
+# has no end), and a YAML block, whose indentation the shell does not see.
+@test "curl gate: a here-document body ends at its exact delimiter after the line join, and a quoted curl name in a \$( ) of an unquoted body is a finding" {
+  local bad="${BATS_TEST_TMPDIR}/hd-bad.sh" good="${BATS_TEST_TMPDIR}/hd-good.sh"
+  local yaml="${BATS_TEST_TMPDIR}/hd-good.yaml" open="${BATS_TEST_TMPDIR}/hd-open.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+cat <<EOF
+$("curl" -u u:p https://h.example/d1)
+$('curl' -u u:p https://h.example/d2)
+`"/usr/bin/curl" -u u:p https://h.example/d3`
+EOF
+cat <<EOF
+ EOF
+'$(curl -u u:p https://h.example/d4)'
+EOF
+cat <<EOF
+	EOF
+'$(curl -u u:p https://h.example/d5)'
+EOF
+cat <<-'EOF'
+x
+	EOF
+curl -u u:p https://h.example/d6
+cat <<EOF
+x \
+EOF
+'$(curl -u u:p https://h.example/d7)'
+EOF
+cat <<EOF
+E\
+OF
+curl -u u:p https://h.example/d8
+cat <<EOF
+$(f
+"curl" -u u:p https://h.example/d9)
+EOF
+SH
+  printf '%s\n' 'cat <<EOF' '$(date)' > "${open}"
+  cat > "${good}" <<'SH'
+cat <<EOF
+"curl" is a word of this text
+EOF
+cat <<EOF
+$(date)
+EOF
+cat <<EOF
+"curl" is a word of this text
+EOF
+cat <<'EOF'
+	EOF
+curl -u u:p https://h.example/g1
+EOF
+cat <<'EOF'
+ EOF
+curl -u u:p https://h.example/g2
+x \
+EOF
+SH
+  cat > "${yaml}" <<'YAML'
+spec:
+  args:
+    - |
+      cat <<'EOF'
+      curl -u u:p https://h.example/y1
+      EOF
+      ( http::tls_log_vars_unset && curl -q -sS https://h.example/y2 )
+YAML
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place"
+  local want_q="" want_t="" want_l=""
+  for n in 2 3 4 8 12 17 21 26 29; do
+    case "${n}" in
+      17 | 26) want_q+="${bad}:${n}: ${q}"$'\n'; want_t+="${bad}:${n}: ${t}"$'\n'; want_l+="${bad}:${n} credential"$'\n' ;;
+      *) want_q+="${bad}:${n}: ${c}"$'\n'; want_t+="${bad}:${n}: ${c}"$'\n' ;;
+    esac
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want_q%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want_t%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${open}" "${good}" "${yaml}"
+  assert_success
+  assert_output ""
+  run curl_gate tls "${open}" "${good}" "${yaml}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${open}" "${good}" "${yaml}"
+  assert_success
+  assert_output "${yaml}:7"
+}
+
 # The operand of a redirection is one shell word, with its quotes and
 # escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
 # command only in a command position: in "echo if curl" the curl is an
