@@ -188,8 +188,11 @@ lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
 
 Remove a recipient with `lo secrets remove-key`, for example when a teammate
 leaves or a key is lost. It removes the key from every creation rule, then
-re-encrypts each managed `.enc` file of the selected stores that lists the
-key: a `Secret.*.enc` file at the top of a store. Without `--all` that is the
+re-encrypts every managed `.enc` file of the selected stores from its
+plaintext, each with a new data key. A managed file is a `Secret.*.enc` file
+at the top of a store. The labels are not trusted to choose the files: the
+labels (the recipients that the sops metadata of a file lists) count only in
+the summary and in the messages. Without `--all` the selected store is the
 store of the current domain. With `--all` it is every
 `clusters/<domain>/secrets` store. The command does not re-key the flat
 `.secrets/` store. A warning names each other store that still lists the key:
@@ -212,9 +215,6 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
   an alias or a merge key. Remove the key there by hand.
 - The key is the last recipient of a creation rule. Nothing could then decrypt
   the files that the rule matches. Add another recipient first.
-- The key is in no creation rule and in no `.enc` file. A typo then does not
-  look like a removal. The message names the other stores that still list the
-  key.
 - The command cannot stat or read a store path, a directory in a store, or
   an `.enc` file. A symlink whose target is missing counts as a file that it
   cannot read.
@@ -233,9 +233,9 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
   values in one entry). A JSON read keeps the last of two members, so the
   first one could hide a recipient from the check. Encrypt the file again
   with sops from its plaintext.
-- An `.enc` file that lists the key is newer than its plaintext. The re-key
-  encrypts the plaintext, so it would write the old value back over the newer
-  one. Run `lo secrets decrypt` first.
+- A managed `.enc` file is newer than its plaintext. The re-key encrypts the
+  plaintext, so it would write the old value back over the newer one. Run
+  `lo secrets decrypt` first.
 - An `.enc` file matches no creation rule, a rule with a recipient that is not
   age, or a rule with an age recipient that does not parse.
 - An `.enc` file has no decrypted twin. The re-key cannot rewrite that file, so
@@ -255,11 +255,14 @@ warning does not mean that the key is not yours.
 After the re-key the command reads the selected stores again, with the same
 reads and the same walk as before the first write. It fails when a file that
 it re-keyed still lists the removed key, when it cannot read a path, and when
-a file changed during the run: another `.enc` file, a managed `.enc` file that
-was not there at the start, or, without `--skip-orphans`, an `.enc` file with
-no decrypted twin. Each error names the path. If the re-key stops after the
+a file changed during the run: another `.enc` file, a managed `.enc` file with
+a decrypted twin that it did not re-key, or, without `--skip-orphans`, an
+`.enc` file with no decrypted twin. Each error names the path. If the re-key stops after the
 `.sops.yaml` write (for example, when an encrypt fails or this check fails),
 the command prints the command to run again. That run resumes the re-key.
+After each re-encrypt the command makes the plaintext the newer file, as
+`lo secrets decrypt` leaves it, so that the run that resumes does not refuse
+a file that is already re-keyed as a stale cache.
 
 The selected stores must be quiet while the command runs: no other command
 or program may write to them. The lock (below) keeps a second `add-key` or
@@ -268,10 +271,19 @@ a writer that does not take the lock is outside the guarantee below. The
 check after the re-key does not see a file that is replaced in place, under
 the same name, during the run.
 
-When the command ends without an error, no managed `Secret.*.enc` file of
-the selected stores lists the removed key. `--skip-orphans` is the one
-exception: an orphan keeps the removed key, so that key can still decrypt
-it.
+When the key is in no creation rule and in no `.enc` label, the command
+warns and goes on: it re-keys every managed `.enc` file and changes no rule.
+A run that resumes a stopped re-key is such a run. A mistyped key is such a
+run too: it re-keys every file and changes no rule. The cost is churn, a new
+`.enc` file for each secret in the next commit.
+
+When the command ends without an error, every managed `Secret.*.enc` file of
+the selected stores is re-encrypted with a new data key, and none lists the
+removed key. `--skip-orphans` is the one exception: an orphan is not
+re-encrypted and keeps the removed key, so that key can still decrypt it. At
+the end the command prints the number of creation rules that changed, of
+`.enc` files whose labels listed the key, and of `.enc` files that it
+re-keyed. Commit the `.enc` files together with `.sops.yaml`.
 
 `add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
 `.sops.yaml`, for the whole run, so that two runs do not undo each other. A

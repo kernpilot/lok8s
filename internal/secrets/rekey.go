@@ -743,7 +743,11 @@ func dropRecipient(content, recipient string) (edited string, rules, last int) {
 
 // rekeyFiles re-encrypts each .enc file from its plaintext twin, whatever
 // the timestamps say (bash: secrets::_rekey_files), and prints a count per
-// store as Encrypt does.
+// store as Encrypt does. After each encrypt it makes the twin newer than the
+// new .enc (nudgeNewer), as a decrypt leaves it, and fails when the .enc is
+// still the newer file: the .enc and its twin hold the same value, and the
+// run that resumes a stopped re-key (it re-keys every managed file again)
+// must not take the file for a stale cache.
 func (c *Context) rekeyFiles(stores, encs []string) error {
 	for _, store := range stores {
 		count := 0
@@ -751,8 +755,14 @@ func (c *Context) rekeyFiles(stores, encs []string) error {
 			if filepath.Dir(enc) != filepath.Clean(store) {
 				continue
 			}
-			if err := c.encryptFile(strings.TrimSuffix(enc, ".enc")); err != nil {
+			plain := strings.TrimSuffix(enc, ".enc")
+			if err := c.encryptFile(plain); err != nil {
 				return err
+			}
+			nudgeNewer(plain, enc)
+			if newerThan(enc, plain) {
+				ui.ErrorTo(c.ErrOut, "cannot set the time of %s", c.rel(plain))
+				return ErrHandled
 			}
 			count++
 		}
@@ -775,6 +785,22 @@ func (c *Context) rerunRemoveKey(recipient string, all, skipOrphans bool) {
 	}
 	ui.ErrorTo(c.ErrOut, "the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:")
 	ui.ErrorTo(c.ErrOut, "  %s", cmd)
+}
+
+// removeKeySummary prints the summary of a remove-key run that ended (bash:
+// secrets::_rm_summary): the creation rules that changed, the .enc files
+// whose labels listed the recipient, and the .enc files that the run
+// re-keyed, which are every managed .enc of the selected stores but the
+// orphans that skipOrphans accepted.
+func (c *Context) removeKeySummary(rules, listed, rekeyed, orphans int) {
+	fmt.Fprintf(c.Out, "%d creation rule(s) changed\n", rules)
+	fmt.Fprintf(c.Out, "%d .enc file(s) listed the recipient in their labels\n", listed)
+	fmt.Fprintf(c.Out, "%d .enc file(s) re-keyed with a new data key\n", rekeyed)
+	if orphans > 0 {
+		fmt.Fprintf(c.Out, "done — every managed .enc of the selected stores but %d orphan(s) was rewritten: commit them together with .sops.yaml\n", orphans)
+		return
+	}
+	fmt.Fprintln(c.Out, "done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml")
 }
 
 // refuseScan prints the refusal for what the scan before the first write could
@@ -891,27 +917,32 @@ func (c *Context) postCheck(stores []string, recipient string, known []string, s
 // YAML list, a key group, an alias or a merge key), when the edit would drop
 // the last recipient of a rule, and when an .enc file of the stores matches
 // no creation rule, a rule with a recipient that is not age, or a rule with
-// an age recipient that does not parse. It refuses a recipient that is in no
-// rule and no .enc file (a typo must not look like a removal), a store path
-// or an .enc file it cannot stat or read (a dangling symlink included), a
+// an age recipient that does not parse. It refuses a store path or an .enc
+// file it cannot stat or read (a dangling symlink included), a
 // directory below a store that it cannot list or search, a file at any depth
 // of a store whose name ends in .enc and that is not a managed Secret.*.enc
 // at its top (the re-key would not rewrite it: otherEncs), an .enc whose
 // sops metadata holds a member twice (the read keeps the last one,
 // so the first could hide a recipient), an .enc whose sops metadata does not
-// parse or lists no age recipient, an .enc that lists the recipient and is
-// newer than its plaintext (the re-key would write the old value back over
-// the newer one), and, without skipOrphans, an .enc with no decrypted twin:
-// a re-key cannot rewrite that file, so it keeps the removed recipient.
+// parse or lists no age recipient, a managed .enc that is newer than its
+// plaintext (the re-key would write the old value back over the newer one),
+// and, without skipOrphans, an .enc with no decrypted twin: a re-key cannot
+// rewrite that file, so it keeps the removed recipient. A recipient that is
+// in no rule and on no .enc label is a warning, not a refusal: the run then
+// re-keys every managed .enc and changes no rule.
 //
-// It re-encrypts each .enc that lists the recipient from its plaintext, then
-// reads the stores again with the same reads and walk (postCheck) and fails,
-// with the command that resumes the run, when a file still lists it, when a
-// path cannot be read, and when a file changed during the run: another .enc,
-// a managed .enc that was not there at the start, or, without skipOrphans,
-// an orphan. Each read takes the recipients from the parsed sops metadata of
+// It re-encrypts every managed .enc of the selected stores from its
+// plaintext, an orphan that skipOrphans accepts the one exception: the labels
+// are not trusted to choose the files. Then it reads the stores again with
+// the same reads and walk (postCheck) and fails, with the command that
+// resumes the run, when a file still lists it, when a path cannot be read,
+// and when a file changed during the run: another .enc, a managed .enc with
+// a decrypted twin that the run did not re-key, or, without skipOrphans, an
+// orphan. Each read takes the recipients from the parsed sops metadata of
 // the file. Other stores that still list the recipient are named in a
-// warning; they are not re-keyed.
+// warning; they are not re-keyed. The last lines count the rules that
+// changed, the files whose labels listed the recipient, and the files that
+// the run re-keyed (removeKeySummary).
 //
 // A removal does not revoke what the key already read; the last line says
 // so.
@@ -1008,11 +1039,11 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	if c.refuseScan(scan) {
 		return ErrHandled
 	}
+	// The re-key rewrites every managed .enc, so a key in no rule and on no
+	// label is not a refusal: the run that resumes a stopped re-key is
+	// such a run.
 	if rules == 0 && len(scan.listed) == 0 {
-		ui.ErrorTo(c.ErrOut, "not a recipient in .sops.yaml or in any .enc file of the store(s) — nothing to remove")
-		ui.ErrorTo(c.ErrOut, "  %s", agePubkey)
-		c.reportOtherStores(ui.ErrorTo, stores, agePubkey)
-		return ErrHandled
+		ui.WarnTo(c.ErrOut, "%s is in no creation rule and in no .enc label: remove-key re-keys every managed .enc anyway, and changes no rule", agePubkey)
 	}
 	if orphans := c.orphanEncs(stores); len(orphans) > 0 && !skipOrphans {
 		ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the REMOVED", len(orphans))
@@ -1020,12 +1051,14 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
 		return ErrHandled
 	}
-	// The re-key encrypts the plaintext twin. A twin older than its .enc
-	// holds an older value, and the re-key would write it over the newer
-	// one: refuse until the cache is fresh.
+	// The re-key encrypts the plaintext twin of every managed .enc of the
+	// stores, an orphan that skipOrphans accepts the one exception: the
+	// labels are not trusted to choose the files. A twin older than its
+	// .enc holds an older value, and the re-key would write it over the
+	// newer one: refuse until the cache is fresh.
 	var rekey []string
 	stale := 0
-	for _, enc := range scan.listed {
+	for _, enc := range scan.all {
 		plain := strings.TrimSuffix(enc, ".enc")
 		if !fsutil.IsRegular(plain) {
 			continue
@@ -1069,14 +1102,14 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 
 	// The first write. A run that stops after it (a failed encrypt) is
 	// resumed by running the command again: the recipient is then in no
-	// rule, and the .enc files that still list it are re-keyed.
+	// rule, and every managed .enc is re-keyed again.
 	if rules > 0 {
 		if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
 			return err
 		}
 		fmt.Fprintf(c.Out, "removed recipient from .sops.yaml (%d creation rule(s))\n", rules)
 	} else {
-		fmt.Fprintf(c.Out, "recipient not in .sops.yaml; %d .enc file(s) still list it — re-keying them\n", len(scan.listed))
+		fmt.Fprintln(c.Out, "recipient not in .sops.yaml: .sops.yaml is not changed")
 	}
 	fmt.Fprintf(c.Out, "  %s\n", agePubkey)
 
@@ -1087,14 +1120,14 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	}
 
 	// Check the files, not the exit codes: the same reads and walk as before
-	// the first write. A managed file that was not there at the start was
-	// not re-keyed.
-	if !c.postCheck(stores, agePubkey, scan.all, skipOrphans) {
+	// the first write. A managed file with a twin that this run did not
+	// re-key fails it.
+	if !c.postCheck(stores, agePubkey, rekey, skipOrphans) {
 		c.rerunRemoveKey(agePubkey, all, skipOrphans)
 		return ErrHandled
 	}
 	c.reportOtherStores(ui.WarnTo, stores, agePubkey)
-	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
+	c.removeKeySummary(rules, len(scan.listed), len(rekey), len(scan.all)-len(rekey))
 	ui.WarnTo(c.ErrOut, "a removal does not revoke what the key already read (older .enc files in git history included): rotate those secrets")
 	return nil
 }

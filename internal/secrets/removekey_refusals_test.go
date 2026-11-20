@@ -374,7 +374,9 @@ func TestReplaceFile(t *testing.T) {
 }
 
 // A re-key that stops after the .sops.yaml write prints the command that
-// resumes it. Without --all a rerun refuses, and names the store that still
+// resumes it. The re-key sets each twin newer than its new .enc, so the rerun
+// does not take a re-keyed file for a stale cache. Without --all a rerun
+// re-keys the store again and names, in a warning, the store that still
 // lists the recipient; the printed command (with --all) resumes the run.
 func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	skipUnlessPermissionsHold(t)
@@ -414,17 +416,21 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Without --all the key is in no rule and on no label of the store: the
+	// rerun warns, re-keys the store again, ends, and names the store that
+	// still lists the recipient.
 	out.Reset()
 	errOut.Reset()
-	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
-		t.Fatalf("rerun without --all: want ErrHandled, got %v", err)
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("rerun without --all: %v\n%s", err, errOut.String())
 	}
-	want := "[error] not a recipient in .sops.yaml or in any .enc file of the store(s) — nothing to remove\n" +
-		"[error]   " + g + "\n" +
-		"[error] still listed in 1 .enc file(s) of a store this run did not re-key: clusters/b.dev/secrets\n" +
-		"[error]   rerun with --all to re-key every domain store\n"
-	if errOut.String() != want {
-		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	want := "[warn] " + g + " is in no creation rule and in no .enc label: remove-key re-keys every managed .enc anyway, and changes no rule\n" +
+		scopeWarn +
+		"[warn] still listed in 1 .enc file(s) of a store this run did not re-key: clusters/b.dev/secrets\n" +
+		"[warn]   rerun with --all to re-key every domain store\n" +
+		rotateWarn
+	if errOut.String() != want || !strings.HasSuffix(out.String(), rmSummary(0, 0, 1)) {
+		t.Errorf("stdout:\n%q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 	}
 
 	out.Reset()
@@ -432,7 +438,8 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	if err := c.RemoveKey(g, true, false); err != nil {
 		t.Fatalf("rerun with --all: %v\n%s", err, errOut.String())
 	}
-	if !strings.HasPrefix(out.String(), "recipient not in .sops.yaml; 1 .enc file(s) still list it — re-keying them\n") {
+	if !strings.HasPrefix(out.String(), "recipient not in .sops.yaml: .sops.yaml is not changed\n") ||
+		!strings.HasSuffix(out.String(), rmSummary(0, 1, 2)) {
 		t.Errorf("stdout:\n%q", out.String())
 	}
 	if opens(t, b+"/Secret.app.default.K.enc", gone, "w") || !opens(t, b+"/Secret.app.default.K.enc", keep, "w") {

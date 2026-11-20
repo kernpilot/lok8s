@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -265,7 +266,7 @@ const scopeWarn = "[warn] the check for your own decrypt identity reads only SOP
 
 // The removal edits every creation rule and re-keys the store: after it the
 // removed identity cannot open the store, and the one that stays can. Only
-// the .enc files that listed the recipient are re-encrypted: a new plaintext
+// the managed .enc files are re-encrypted: a new plaintext
 // gets no .enc. .sops.yaml is replaced, not rewritten in place: a hard link
 // to the old file keeps the old content.
 func TestRemoveKeyRekeysEveryRule(t *testing.T) {
@@ -295,7 +296,7 @@ func TestRemoveKeyRekeysEveryRule(t *testing.T) {
 		"  " + g + "\n" +
 		"re-keying 1 cache file(s) across 1 store(s)…\n" +
 		"Encrypted 1 secret(s)\n" +
-		"done — commit .sops.yaml and the updated .enc files together\n"
+		rmSummary(2, 1, 1)
 	if out.String() != wantOut {
 		t.Errorf("stdout:\n%q\nwant:\n%q", out.String(), wantOut)
 	}
@@ -357,7 +358,7 @@ func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 				"re-keying 2 cache file(s) across 2 store(s)…\n" +
 				"Encrypted 1 secret(s)\n" +
 				"Encrypted 1 secret(s)\n" +
-				"done — commit .sops.yaml and the updated .enc files together\n"
+				rmSummary(1, 2, 2)
 			if out.String() != wantOut {
 				t.Errorf("stdout:\n%q\nwant:\n%q", out.String(), wantOut)
 			}
@@ -456,23 +457,130 @@ func TestRemoveKeySkipOrphansWarns(t *testing.T) {
 	if !opens(t, a+"/Secret.orphan.default.K.enc", gone, "o") {
 		t.Error("fixture: the orphan was expected to stay open to the removed identity")
 	}
+	wantTail := "1 creation rule(s) changed\n" +
+		"2 .enc file(s) listed the recipient in their labels\n" +
+		"1 .enc file(s) re-keyed with a new data key\n" +
+		"done — every managed .enc of the selected stores but 1 orphan(s) was rewritten: commit them together with .sops.yaml\n"
+	if !strings.HasSuffix(out.String(), wantTail) {
+		t.Errorf("stdout:\n%q\nwant the tail:\n%q", out.String(), wantTail)
+	}
 }
 
-// A recipient in no rule and no .enc is refused: a typo must not look like
-// a removal.
-func TestRemoveKeyRefusesANonRecipient(t *testing.T) {
+// rmSummary is the summary of a remove-key run that ended, with no orphan
+// that --skip-orphans accepted: the rules that changed, the .enc files whose
+// labels listed the recipient, the .enc files re-keyed. The bats twin pins
+// the same text (_summary).
+func rmSummary(rules, listed, rekeyed int) string {
+	return strconv.Itoa(rules) + " creation rule(s) changed\n" +
+		strconv.Itoa(listed) + " .enc file(s) listed the recipient in their labels\n" +
+		strconv.Itoa(rekeyed) + " .enc file(s) re-keyed with a new data key\n" +
+		"done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml\n"
+}
+
+// A recipient in no creation rule and on no .enc label is a warning, not a
+// refusal: the run re-keys every managed .enc of the store and changes no
+// rule. The summary counts no rule and no file that listed it.
+// tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeyWarnsAboutAKeyInNoRuleAndOnNoLabel(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	c.Domain = "a.dev"
-	sopsYAMLWith(t, c, keyA)
-	write(t, c.Paths.Clusters+"/a.dev/secrets/Secret.app.default.K", "v")
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	sopsRules(t, c, k)
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	enc := a + "/Secret.app.default.K.enc"
+	write(t, a+"/Secret.app.default.K", "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
+	yaml, encBefore := readFile(t, c.sopsConfigPath()), readFile(t, enc)
 
-	if err := c.RemoveKey(keyB, false, false); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
 	}
-	want := "[error] not a recipient in .sops.yaml or in any .enc file of the store(s) — nothing to remove\n" +
-		"[error]   " + keyB + "\n"
-	if errOut.String() != want || out.String() != "" {
-		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	wantOut := "recipient not in .sops.yaml: .sops.yaml is not changed\n" +
+		"  " + g + "\n" +
+		"re-keying 1 cache file(s) across 1 store(s)…\n" +
+		"Encrypted 1 secret(s)\n" +
+		rmSummary(0, 0, 1)
+	wantErr := "[warn] " + g + " is in no creation rule and in no .enc label: remove-key re-keys every managed .enc anyway, and changes no rule\n" +
+		scopeWarn + rotateWarn
+	if out.String() != wantOut || errOut.String() != wantErr {
+		t.Errorf("stdout:\n%q\nwant:\n%q\nstderr:\n%q\nwant:\n%q", out.String(), wantOut, errOut.String(), wantErr)
+	}
+	if readFile(t, c.sopsConfigPath()) != yaml {
+		t.Error(".sops.yaml changed")
+	}
+	if readFile(t, enc) == encBefore || !opens(t, enc, keep, "v") {
+		t.Error("the .enc was not re-keyed")
+	}
+}
+
+// labelStore is a store of a.dev with two managed .enc files that the sops
+// library wrote, in the state after a decrypt: app for the recipients k and
+// g (g the one to remove), other for k only, so that its labels do not list
+// g. It returns the two plaintext paths.
+func labelStore(t *testing.T, c *Context, k, g string, out, errOut *bytes.Buffer) (app, other string) {
+	t.Helper()
+	c.Domain = "a.dev"
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	app, other = a+"/Secret.app.default.K", a+"/Secret.other.default.K"
+	sopsRules(t, c, k)
+	write(t, other, "w")
+	encryptStore(t, c, "a.dev", out, errOut)
+	sopsRules(t, c, k+","+g)
+	write(t, app, "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, app, other)
+	return app, other
+}
+
+// Every managed .enc of the store is re-keyed, also a file whose labels do
+// not list the removed key: the labels are not trusted to choose the files.
+// Its bytes change (a new data key) and it still decrypts with the identity
+// that stays. tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeyRekeysAFileWhoseLabelsDoNotListTheKey(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	app, other := labelStore(t, c, k, g, out, errOut)
+	before := readFile(t, other+".enc")
+	if !opens(t, other+".enc", keep, "w") || opens(t, other+".enc", gone, "w") || !opens(t, app+".enc", gone, "v") {
+		t.Fatal("fixture: the labels of the two files are not as expected")
+	}
+
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if readFile(t, other+".enc") == before {
+		t.Error("the .enc whose labels do not list the key was not rewritten")
+	}
+	if !opens(t, other+".enc", keep, "w") {
+		t.Error("the rewritten .enc does not decrypt with the identity that stays")
+	}
+	if opens(t, app+".enc", gone, "v") || !opens(t, app+".enc", keep, "v") {
+		t.Error("the .enc that listed the key was not re-keyed")
+	}
+}
+
+// The summary gives the files whose labels listed the key apart from the
+// files that the run re-keyed: here one and two.
+// tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeySummaryCountsTheListedAndTheRekeyedFiles(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	labelStore(t, c, k, g, out, errOut)
+
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	wantOut := "removed recipient from .sops.yaml (1 creation rule(s))\n" +
+		"  " + g + "\n" +
+		"re-keying 2 cache file(s) across 1 store(s)…\n" +
+		"Encrypted 2 secret(s)\n" +
+		rmSummary(1, 1, 2)
+	if out.String() != wantOut {
+		t.Errorf("stdout:\n%q\nwant:\n%q", out.String(), wantOut)
 	}
 }
 
@@ -519,7 +627,8 @@ func TestRemoveKeyRekeysStaleEncFiles(t *testing.T) {
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
-	if !strings.HasPrefix(out.String(), "recipient not in .sops.yaml; 1 .enc file(s) still list it — re-keying them\n  "+g+"\n") {
+	if !strings.HasPrefix(out.String(), "recipient not in .sops.yaml: .sops.yaml is not changed\n  "+g+"\n") ||
+		!strings.HasSuffix(out.String(), rmSummary(0, 1, 1)) {
 		t.Errorf("stdout:\n%q", out.String())
 	}
 	if opens(t, a+"/Secret.app.default.K.enc", gone, "v") {
@@ -564,6 +673,34 @@ func TestRemoveKeyRefusesAStaleCache(t *testing.T) {
 		if readFile(t, c.sopsConfigPath()) != before || readFile(t, a+"/Secret.app.default.K.enc") != encBefore {
 			t.Errorf("future=%v: a file changed before the refusal", future)
 		}
+	}
+}
+
+// The stale check reads every managed .enc, also a file whose labels do not
+// list the removed key: the re-key rewrites that file too.
+// tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeyRefusesAStaleFileWhoseLabelsDoNotListTheKey(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	_, other := labelStore(t, c, k, g, out, errOut)
+	ts := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other+".enc", ts, ts); err != nil {
+		t.Fatal(err)
+	}
+	before, encBefore := readFile(t, c.sopsConfigPath()), readFile(t, other+".enc")
+
+	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v", err)
+	}
+	want := "[error] newer than its decrypted twin: clusters/a.dev/secrets/Secret.other.default.K.enc\n" +
+		"[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one\n" +
+		"[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written.\n"
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	if readFile(t, c.sopsConfigPath()) != before || readFile(t, other+".enc") != encBefore {
+		t.Error("a file changed before the refusal")
 	}
 }
 

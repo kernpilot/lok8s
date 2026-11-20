@@ -149,6 +149,18 @@ _run_lo() {
 }
 
 _rotate='[warn] a removal does not revoke what the key already read (older .enc files in git history included): rotate those secrets'
+# _summary <rules> <listed> <rekeyed> — the summary of a remove-key run that
+# ended, with no orphan that --skip-orphans accepted (Go twin: rmSummary).
+_summary() {
+  printf '%s\n' "${1} creation rule(s) changed" \
+    "${2} .enc file(s) listed the recipient in their labels" \
+    "${3} .enc file(s) re-keyed with a new data key" \
+    "done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml"
+}
+# _no_label <recipient> — the warning for a key in no rule and on no label.
+_no_label() {
+  echo "[warn] ${1} is in no creation rule and in no .enc label: remove-key re-keys every managed .enc anyway, and changes no rule"
+}
 _not_written='[error]   the re-key encrypts with age through the first matching rule: fix the creation rules first. Nothing was written.'
 # The scope line of the own-identity check: every run that reaches the check
 # prints it, with a match or not (Go twin: scopeWarn).
@@ -202,7 +214,7 @@ _scope='[warn] the check for your own decrypt identity reads only SOPS_AGE_KEY_F
   [[ "$output" == *"[warn] still listed in 1 .enc file(s) of a store this run did not re-key: ${PATH_CLUSTERS}/b.dev/secrets
 [warn]   rerun with --all to re-key every domain store
 [warn] still listed in 1 .enc file(s) of the flat store, which --all does not re-key: .secrets
-done — commit .sops.yaml and the updated .enc files together
+$(_summary 1 1 1)
 ${_rotate}" ]] || { echo "$output" >&2; return 1; }
 }
 
@@ -244,27 +256,62 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   [[ "$output" == *"[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them"* ]]
 }
 
-@test "a recipient in no rule and no .enc is refused" {
+@test "a recipient in no rule and on no .enc label warns, re-keys every managed .enc and changes no rule" {
+  # Go twin: TestRemoveKeyWarnsAboutAKeyInNoRuleAndOnNoLabel.
   _load
   _stub_encrypt
   _rules "${RCPT_A}"
+  _cache a.dev app "${RCPT_A}"
+  local before; before="$(cat "${CFG}")"
   DOMAIN=a.dev run _rm "${RCPT_B}"
-  [ "$status" -eq 1 ]
-  [ "$output" = "[error] not a recipient in .sops.yaml or in any .enc file of the store(s) — nothing to remove
-[error]   ${RCPT_B}" ] || { echo "$output" >&2; return 1; }
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "$(_no_label "${RCPT_B}")
+${_scope}
+recipient not in .sops.yaml: .sops.yaml is not changed
+  ${RCPT_B}
+re-keying 1 cache file(s) across 1 store(s)…
+Encrypted 1 secret(s)
+$(_summary 0 0 1)
+${_rotate}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml changed" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = "a.dev/secrets/Secret.app.default.K" ]
 }
 
-@test "the nothing-to-remove refusal names a store that still lists the recipient" {
+@test "a recipient in no rule and on no label of the store: the end names a store that still lists it" {
   _load
   _stub_encrypt
   _rules "${RCPT_A}"
   _cache b.dev app "${RCPT_B}"
   DOMAIN=a.dev run _rm "${RCPT_B}"
-  [ "$status" -eq 1 ]
-  [ "$output" = "[error] not a recipient in .sops.yaml or in any .enc file of the store(s) — nothing to remove
-[error]   ${RCPT_B}
-[error] still listed in 1 .enc file(s) of a store this run did not re-key: ${PATH_CLUSTERS}/b.dev/secrets
-[error]   rerun with --all to re-key every domain store" ] || { echo "$output" >&2; return 1; }
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "$(_no_label "${RCPT_B}")
+${_scope}
+recipient not in .sops.yaml: .sops.yaml is not changed
+  ${RCPT_B}
+re-keying 0 cache file(s) across 1 store(s)…
+[warn] still listed in 1 .enc file(s) of a store this run did not re-key: ${PATH_CLUSTERS}/b.dev/secrets
+[warn]   rerun with --all to re-key every domain store
+$(_summary 0 0 0)
+${_rotate}" ] || { echo "$output" >&2; return 1; }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "every managed .enc is re-keyed, and the summary counts the files that listed the key apart from the files re-keyed" {
+  # Go twin: TestRemoveKeySummaryCountsTheListedAndTheRekeyedFiles.
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _cache a.dev other "${RCPT_A}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = $'a.dev/secrets/Secret.app.default.K\na.dev/secrets/Secret.other.default.K' ] || {
+    echo "encrypted: $(cat "${ENCRYPT_LOG}")" >&2; return 1; }
+  [[ "$output" == *"removed recipient from .sops.yaml (1 creation rule(s))
+  ${RCPT_B}
+re-keying 2 cache file(s) across 1 store(s)…
+Encrypted 2 secret(s)
+$(_summary 1 1 2)
+${_rotate}" ]] || { echo "$output" >&2; return 1; }
 }
 
 @test "a recipient outside a single-quoted age: list is left to the operator" {
@@ -1022,7 +1069,7 @@ ${want}
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   [[ "$output" == *"Encrypted 1 secret(s)
 [warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them
-done — commit .sops.yaml and the updated .enc files together
+$(_summary 1 1 1)
 ${_rotate}" ]] || { echo "$output" >&2; return 1; }
 }
 
@@ -1263,6 +1310,24 @@ _no_t_run() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+@test "the stale check reads every managed .enc, also one whose labels do not list the key" {
+  # Go twin: TestRemoveKeyRefusesAStaleFileWhoseLabelsDoNotListTheKey.
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _cache a.dev other "${RCPT_A}"
+  touch -t 199901010000 "${PATH_CLUSTERS}/a.dev/secrets/Secret.other.default.K"
+  local before; before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] newer than its decrypted twin: ${PATH_CLUSTERS}/a.dev/secrets/Secret.other.default.K.enc
+[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one
+[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written." ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "while another run holds the lock, remove-key refuses and changes nothing" {
   command -v flock >/dev/null 2>&1 || skip "flock not installed"
   _load
@@ -1311,17 +1376,26 @@ _no_t_run() {
 [error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
 [error]   lo secrets remove-key ${RCPT_B} --domain a.dev --all" ]] || { echo "$output" >&2; return 1; }
 
-  # Without --all the rerun refuses and names the store that still lists it.
+  # The re-key touched the twin of each file that it re-keyed, so a rerun
+  # does not take it for a stale cache. Without --all the key is in no rule
+  # and on no label of the store: the rerun warns, re-keys the store again,
+  # ends, and names the store that still lists it (Go twin:
+  # TestRemoveKeyResumesAStoppedRekey).
   _stub_encrypt
   DOMAIN=a.dev run _rm "${RCPT_B}"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"[error] still listed in 1 .enc file(s) of a store this run did not re-key: ${PATH_CLUSTERS}/b.dev/secrets
-[error]   rerun with --all to re-key every domain store" ]] || { echo "$output" >&2; return 1; }
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "$output" == "$(_no_label "${RCPT_B}")
+${_scope}
+recipient not in .sops.yaml: .sops.yaml is not changed"*"[warn] still listed in 1 .enc file(s) of a store this run did not re-key: ${PATH_CLUSTERS}/b.dev/secrets
+[warn]   rerun with --all to re-key every domain store
+$(_summary 0 0 1)
+${_rotate}" ]] || { echo "$output" >&2; return 1; }
   # The printed command resumes it.
   DOMAIN=a.dev run _rm "${RCPT_B}" 1
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   [[ "$output" == "${_scope}
-recipient not in .sops.yaml; 1 .enc file(s) still list it — re-keying them"* ]] || { echo "$output" >&2; return 1; }
+recipient not in .sops.yaml: .sops.yaml is not changed"*"$(_summary 0 1 2)
+${_rotate}" ]] || { echo "$output" >&2; return 1; }
   ! grep -qF "${RCPT_B}" "${PATH_CLUSTERS}/b.dev/secrets/Secret.app.default.K.enc"
 }
 
@@ -1462,4 +1536,46 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   ! _open gone >/dev/null || { echo "the removed key still decrypts the store" >&2; return 1; }
   [ "$(_open keep)" = "v" ] || { echo "the remaining key cannot decrypt the store" >&2; return 1; }
   ! grep -qF "${gone}" "${store}/Secret.app.default.K.enc"
+}
+
+@test "every managed .enc is re-keyed, also a file whose labels do not list the removed key" {
+  # The labels are not trusted to choose the files. The file whose labels do
+  # not list the key gets new bytes (a new data key) and still decrypts with
+  # the key that stays (Go twin:
+  # TestRemoveKeyRekeysAFileWhoseLabelsDoNotListTheKey).
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" n
+  mkdir -p "${k}"
+  for n in keep gone; do
+    ssh-keygen -q -t ed25519 -N '' -C "${n}" -f "${k}/${n}" </dev/null >/dev/null 2>&1
+    ssh-to-age -private-key -i "${k}/${n}" -o "${k}/${n}.age" 2>/dev/null
+  done
+  local keep gone store="${PATH_CLUSTERS}/a.dev/secrets"
+  keep="$(ssh-to-age -i "${k}/keep.pub")"
+  gone="$(ssh-to-age -i "${k}/gone.pub")"
+  # other for keep only, app for keep and gone: each encrypted under the rule
+  # of its own time.
+  printf 'w' > "${store}/Secret.other.default.K"
+  printf 'v' > "${store}/Secret.app.default.K"
+  _rules "${keep}"
+  secrets::_encrypt_file "${store}/Secret.other.default.K" >/dev/null
+  _rules "${keep},${gone}"
+  secrets::_encrypt_file "${store}/Secret.app.default.K" >/dev/null
+  # The state after a decrypt: the plaintexts are the newer files.
+  touch "${store}/Secret.other.default.K" "${store}/Secret.app.default.K"
+  _open() { SOPS_AGE_KEY_FILE="${k}/${1}.age" sops decrypt --input-type binary --output-type binary "${store}/Secret.${2}.default.K.enc" 2>/dev/null; }
+  ! grep -qF "${gone}" "${store}/Secret.other.default.K.enc" || { echo "fixture: the labels of other list the key to remove" >&2; return 1; }
+  [ "$(_open gone app)" = "v" ] || { echo "fixture: the key to remove cannot open app" >&2; return 1; }
+  cp -p "${store}/Secret.other.default.K.enc" "${BATS_TEST_TMPDIR}/other.saved"
+
+  DOMAIN=a.dev run _rm "${k}/gone.pub"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  ! cmp -s "${store}/Secret.other.default.K.enc" "${BATS_TEST_TMPDIR}/other.saved" || {
+    echo "the .enc whose labels do not list the key was not rewritten" >&2; return 1; }
+  [ "$(_open keep other)" = "w" ] || { echo "the rewritten .enc does not decrypt with the key that stays" >&2; return 1; }
+  ! _open gone app >/dev/null || { echo "the removed key still decrypts app" >&2; return 1; }
+  [ "$(_open keep app)" = "v" ] || { echo "the key that stays cannot decrypt app" >&2; return 1; }
 }
