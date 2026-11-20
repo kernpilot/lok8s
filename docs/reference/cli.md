@@ -132,7 +132,7 @@ The prompt asks when stdin and stderr are both terminals: `lo down | cat` still 
 
 ### Output formats
 
-`-o`, `--output text|json|yaml` on the commands that report state. `text` is the default and prints as before. `json` and `yaml` render one document with the same field names (lowerCamel). `yaml` re-encodes the `json` document, so the keys and their order are the same.
+`-o`, `--output text|json|yaml` on the commands that report state. `text` is the default and prints as before. `json` and `yaml` render one document with the same field names (lowerCamel). `yaml` re-encodes the `json` document, so the keys and their order are the same. In `yaml`, a string that a YAML 1.1 reader (PyYAML, or the go-yaml v2 of kubectl) reads as a bool, a null or a number is in double quotes, a key too: `y`, `n`, `yes`, `no`, `on`, `off`, `true`, `false` and `null` in any case, `~`, the empty string, and the number forms (binary `0b`, octal `0o` and `0777`, hex `0x`, decimal, sexagesimal such as `1:20`, floats such as `1.5`, `.5` and `1e3`, `.inf`, `.nan`, also with `_` separators). A real bool, null or number stays plain. The bash implementation of `lo kubehz space` and `lo kubehz cluster` quotes the same set.
 
 | Command | Document | Example |
 |---|---|---|
@@ -147,7 +147,7 @@ The prompt asks when stdin and stderr are both terminals: `lo down | cat` still 
 | `lo kubehz cluster list -o json` | `{clusters: [{id, domain, hosting, status, region, kubernetesVersion, controlPlaneReplicas, apiEndpoint, health, leaseExpiresAt, createdAt}]}` (`cluster get`: one record.) | `{"clusters":[{"id":"cl-1a2b3c4d","domain":"ci.example.org","hosting":"hosted","status":"Running","region":"fsn1","kubernetesVersion":"v1.34.1","controlPlaneReplicas":1,"apiEndpoint":"https://203.0.113.7:6443","health":"healthy","leaseExpiresAt":null,"createdAt":"2026-10-04T12:00:00.000Z"}]}` |
 | `lo kubehz space\|cluster lease -o json` | `{id, leaseExpiresAt}`. `space delete`: `{id, status}`. `space\|cluster kubeconfig`: `{id, file}`. | `{"id":"sp-1a2b3c4d","leaseExpiresAt":"2026-10-04T18:00:00.000Z"}` |
 
-Both implementations print the same `lo kubehz space` and `lo kubehz cluster` documents. A field that the api leaves out is `null`. Every string from the api loses the characters of an explicit list: the control characters (C0, DEL, C1), U+2028, U+2029, and the bidi, zero-width and invisible characters that [the agent tools guide](../guide/kubehz.md#agent-tools) names. Read these documents as `json` in a script: `yaml` prints a string such as `yes` without quotes ([#246](https://github.com/kernpilot/lok8s/issues/246)).
+Both implementations print the same `lo kubehz space` and `lo kubehz cluster` documents. A field that the api leaves out is `null`. Every string from the api loses the characters of an explicit list: the control characters (C0, DEL, C1), U+2028, U+2029, and the bidi, zero-width and invisible characters that [the agent tools guide](../guide/kubehz.md#agent-tools) names. In `yaml`, both implementations put the strings of the YAML 1.1 set above (such as `yes`, `off`, `0777` or `1:20`) in double quotes.
 
 `lo status -o json` runs `kubectl get nodes -o json` in place of the wide table. `inventory` is the `ClusterInventory/cluster` object, or `null`. `lo doctor -o json` keeps the exit code of the text form. `lo addons <name>` and `lo addons --detail` have no structured form.
 

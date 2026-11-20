@@ -1152,11 +1152,10 @@ sent, and the platform applies its default.
 
 Every command takes `-o text|json|yaml`. `text` prints a table for a list and
 one line per field for one record. `json` and `yaml` print fixed fields (see
-[Output formats](../reference/cli.md#output-formats)). Use `-o json` in a
-script or an agent: `-o yaml` prints a string such as `yes` without quotes,
-and a YAML 1.1 reader takes it for a boolean
-([#246](https://github.com/kernpilot/lok8s/issues/246)). A field that the api
-leaves out is `null`. Before `lo` prints a string from the api, it removes
+[Output formats](../reference/cli.md#output-formats)). In `-o yaml`, a string
+that a YAML 1.1 reader reads as a bool, a null or a number (such as `yes`,
+`off`, `0777` or `1:20`) is in double quotes, so that reader keeps it a
+string. A field that the api leaves out is `null`. Before `lo` prints a string from the api, it removes
 these characters: C0, DEL, C1 (U+0080 to U+009F), the line and paragraph
 separators (U+2028, U+2029), these bidi, zero-width and invisible format
 characters (U+00AD, U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to
