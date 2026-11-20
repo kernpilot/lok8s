@@ -233,9 +233,6 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
   values in one entry). A JSON read keeps the last of two members, so the
   first one could hide a recipient from the check. Encrypt the file again
   with sops from its plaintext.
-- A managed `.enc` file is newer than its plaintext. The re-key encrypts the
-  plaintext, so it would write the old value back over the newer one. Run
-  `lo secrets decrypt` first.
 - An `.enc` file matches no creation rule, a rule with a recipient that is not
   age, or a rule with an age recipient that does not parse.
 - An `.enc` file has no decrypted twin. The re-key cannot rewrite that file, so
@@ -271,9 +268,6 @@ a decrypted twin that it did not re-key, or, without `--skip-orphans`, an
 `.enc` file with no decrypted twin. Each error names the path. If the re-key
 stops after the `.sops.yaml` write (for example, when an encrypt fails or
 this check fails), the command prints the command to run again. That run resumes the re-key.
-After each re-encrypt the command makes the plaintext the newer file, as
-`lo secrets decrypt` leaves it, so that the run that resumes does not refuse
-a file that is already re-keyed as a stale cache.
 
 The selected stores must be quiet while the command runs: no other command
 or program may write to them. The lock (below) keeps a second `add-key` or

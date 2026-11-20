@@ -1301,49 +1301,26 @@ _no_t_run() {
   [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
 }
 
-@test "a stale cache (an .enc newer than its plaintext) is refused before any write" {
-  # The re-key encrypts the plaintext: an older plaintext would overwrite the
-  # newer value of the .enc.
-  _load
-  _stub_encrypt
-  _cache a.dev app "${RCPT_B}"
-  touch -t 199901010000 "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K"
-  local before; before="$(cat "${CFG}")"
-  DOMAIN=a.dev run _rm "${RCPT_B}"
-  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  # PATH_CLUSTERS is outside PATH_BASE here, so the path is printed in full.
-  [ "$output" = "[error] newer than its decrypted twin: ${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc
-[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one
-[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written." ] || {
-    echo "$output" >&2; return 1; }
-  [ "$(cat "${CFG}")" = "${before}" ]
-  [ ! -s "${ENCRYPT_LOG}" ]
-}
-
-@test "the stale check reads every managed .enc, also one whose labels do not list the key" {
-  # Go twin: TestRemoveKeyRefusesAStaleFileWhoseLabelsDoNotListTheKey.
-  _load
-  _stub_encrypt
-  _cache a.dev app "${RCPT_B}"
-  _cache a.dev other "${RCPT_A}"
-  touch -t 199901010000 "${PATH_CLUSTERS}/a.dev/secrets/Secret.other.default.K"
-  local before; before="$(cat "${CFG}")"
-  DOMAIN=a.dev run _rm "${RCPT_B}"
-  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] newer than its decrypted twin: ${PATH_CLUSTERS}/a.dev/secrets/Secret.other.default.K.enc
-[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one
-[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written." ] || {
-    echo "$output" >&2; return 1; }
-  [ "$(cat "${CFG}")" = "${before}" ]
-  [ ! -s "${ENCRYPT_LOG}" ]
-}
-
 _twin_tail='[error]   the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.'
 # _same_store <saved dir> — fails when .sops.yaml or a file of the stores is
 # not byte-equal to the copy in the saved dir.
 _same_store() {
   cmp -s "${CFG}" "${1}/sops.yaml" || { echo ".sops.yaml changed before the refusal" >&2; return 1; }
   diff -r "${1}/clusters" "${PATH_CLUSTERS}" >/dev/null || { echo "a file of the stores changed before the refusal" >&2; return 1; }
+}
+
+# _keep_gone <dir> — two throwaway SSH keys, keep and gone, and their age
+# identities in dir, outside HOME/.ssh; sets the caller's keep and gone to
+# their age recipients. Nothing prints the identities.
+_keep_gone() {
+  local n
+  mkdir -p "${1}"
+  for n in keep gone; do
+    ssh-keygen -q -t ed25519 -N '' -C "${n}" -f "${1}/${n}" </dev/null >/dev/null 2>&1
+    ssh-to-age -private-key -i "${1}/${n}" -o "${1}/${n}.age" 2>/dev/null
+  done
+  keep="$(ssh-to-age -i "${1}/keep.pub")"
+  gone="$(ssh-to-age -i "${1}/gone.pub")"
 }
 
 @test "a twin that differs from its decrypted .enc, an .enc the caller cannot decrypt and a twin it cannot read are refused before any write" {
@@ -1398,6 +1375,105 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
 ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
     _same_store "${saved}"
   fi
+}
+
+@test "a twin with the value of its .enc passes the compare when it is the older file, and is re-keyed" {
+  # The times of the files do not count: app as lo secrets encrypt leaves
+  # it, other set back in time (Go twin:
+  # TestRemoveKeyRekeysATwinThatIsOlderThanItsEnc).
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" keep gone store="${PATH_CLUSTERS}/a.dev/secrets"
+  _keep_gone "${k}"
+  _rules "${keep},${gone}"
+  printf 'v' > "${store}/Secret.app.default.K"
+  printf 'w' > "${store}/Secret.other.default.K"
+  domain=a.dev secrets::encrypt >/dev/null
+  touch -t 199901010000 "${store}/Secret.other.default.K"
+  [[ "${store}/Secret.app.default.K.enc" -nt "${store}/Secret.app.default.K" ]] || {
+    echo "fixture: the twin of app is not the older file" >&2; return 1; }
+  [[ "${store}/Secret.other.default.K.enc" -nt "${store}/Secret.other.default.K" ]] || {
+    echo "fixture: the twin of other is not the older file" >&2; return 1; }
+  _open() { SOPS_AGE_KEY_FILE="${k}/${1}.age" sops decrypt --input-type binary --output-type binary "${store}/Secret.${2}.default.K.enc" 2>/dev/null; }
+
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "$output" == *"$(_summary 1 2 2)
+${_rotate}" ]] || { echo "$output" >&2; return 1; }
+  ! _open gone app >/dev/null || { echo "the removed key still decrypts app" >&2; return 1; }
+  ! _open gone other >/dev/null || { echo "the removed key still decrypts other" >&2; return 1; }
+  [ "$(_open keep app)" = "v" ] || { echo "the key that stays cannot decrypt app" >&2; return 1; }
+  [ "$(_open keep other)" = "w" ] || { echo "the key that stays cannot decrypt other" >&2; return 1; }
+}
+
+@test "a twin with another value than its .enc is refused by the compare when it is the older file, also one whose labels do not list the key" {
+  # The times of the files do not count, and the compare reads every
+  # managed file. .sops.yaml and every file of the stores stay byte-equal
+  # (Go twin: TestRemoveKeyRefusesAnOlderTwinThatDiffersFromItsEnc).
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" keep gone store="${PATH_CLUSTERS}/a.dev/secrets" saved="${BATS_TEST_TMPDIR}/saved"
+  _keep_gone "${k}"
+  mkdir -p "${saved}"
+  # other for keep only, app for keep and gone: each encrypted under the rule
+  # of its own time.
+  printf 'w' > "${store}/Secret.other.default.K"
+  printf 'v' > "${store}/Secret.app.default.K"
+  _rules "${keep}"
+  secrets::_encrypt_file "${store}/Secret.other.default.K" >/dev/null
+  _rules "${keep},${gone}"
+  secrets::_encrypt_file "${store}/Secret.app.default.K" >/dev/null
+  # The twin of other gets another value, and is set back in time.
+  printf 'x' > "${store}/Secret.other.default.K"
+  touch -t 199901010000 "${store}/Secret.other.default.K"
+  [[ "${store}/Secret.other.default.K.enc" -nt "${store}/Secret.other.default.K" ]] || {
+    echo "fixture: the twin of other is not the older file" >&2; return 1; }
+  ! grep -qF "${gone}" "${store}/Secret.other.default.K.enc" || { echo "fixture: the labels of other list the key to remove" >&2; return 1; }
+  cp -p "${CFG}" "${saved}/sops.yaml"
+  cp -a "${PATH_CLUSTERS}" "${saved}/clusters"
+
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/Secret.other.default.K.enc differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first
+${_twin_tail}" ] || { echo "$output" >&2; return 1; }
+  _same_store "${saved}"
+}
+
+@test "after a remove-key the encrypt sweep re-encrypts nothing and the lint check names no secret" {
+  # Each re-keyed .enc is the newer file of its pair, as after
+  # lo secrets encrypt. The store starts in the state after a decrypt (Go
+  # twin: TestRemoveKeyLeavesNothingForTheEncryptSweepOrTheLintCheck).
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" keep gone store="${PATH_CLUSTERS}/a.dev/secrets" saved="${BATS_TEST_TMPDIR}/saved"
+  _keep_gone "${k}"
+  mkdir -p "${saved}"
+  _rules "${keep},${gone}"
+  printf 'v' > "${store}/Secret.app.default.K"
+  printf 'w' > "${store}/Secret.other.default.K"
+  domain=a.dev secrets::encrypt >/dev/null
+  touch "${store}/Secret.app.default.K" "${store}/Secret.other.default.K"
+
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  cp -p "${store}/Secret.app.default.K.enc" "${store}/Secret.other.default.K.enc" "${saved}/"
+  # DEBUG names each skip and each encrypt of the sweep.
+  DEBUG=1 domain=a.dev run secrets::encrypt
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[debug] Skipped 2 (already up to date)" ] || { echo "the encrypt sweep after remove-key: $output" >&2; return 1; }
+  cmp -s "${store}/Secret.app.default.K.enc" "${saved}/Secret.app.default.K.enc" || {
+    echo "the encrypt sweep re-encrypted app" >&2; return 1; }
+  cmp -s "${store}/Secret.other.default.K.enc" "${saved}/Secret.other.default.K.enc" || {
+    echo "the encrypt sweep re-encrypted other" >&2; return 1; }
+  domain=a.dev run secrets::check_unencrypted
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -z "$output" ] || { echo "the lint check after remove-key: $output" >&2; return 1; }
 }
 
 @test "the twin compare keeps the identity and the decrypted value out of a trace" {
@@ -1464,11 +1540,14 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
 [error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
 [error]   lo secrets remove-key ${RCPT_B} --domain a.dev --all" ]] || { echo "$output" >&2; return 1; }
 
-  # The re-key touched the twin of each file that it re-keyed, so a rerun
-  # does not take it for a stale cache. Without --all the key is in no rule
-  # and on no label of the store: the rerun warns, re-keys the store again,
-  # ends, and names the store that still lists it (Go twin:
+  # Each file that the re-key re-keyed is left with the .enc the newer file
+  # of its pair, and the rerun takes it all the same: the compare reads the
+  # values, not the times. Without --all the key is in no rule and on no
+  # label of the store: the rerun warns, re-keys the store again, ends, and
+  # names the store that still lists it (Go twin:
   # TestRemoveKeyResumesAStoppedRekey).
+  [[ "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc" -nt "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K" ]] || {
+    echo "the re-key left the twin the newer file: a later encrypt sweep would encrypt it again" >&2; return 1; }
   _stub_encrypt
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }

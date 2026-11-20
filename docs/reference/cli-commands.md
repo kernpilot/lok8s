@@ -3976,8 +3976,6 @@ Before the first write, the command refuses:
     with sops from its plaintext),
   - an .enc file whose sops metadata does not parse or lists no age
     recipient (the command reads the recipients from that metadata),
-  - a managed .enc file that is newer than its plaintext (run
-    'lo secrets decrypt' first),
   - an .enc file that matches no creation rule, a rule with a recipient that
     is not age, or a rule with an age recipient that does not parse,
   - without --skip-orphans, an .enc file with no decrypted twin: the re-key

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // escaped spells a recipient so that YAML decodes it to the recipient while
@@ -378,10 +379,11 @@ func TestReplaceFile(t *testing.T) {
 }
 
 // A re-key that stops after the .sops.yaml write prints the command that
-// resumes it. The re-key sets each twin newer than its new .enc, so the rerun
-// does not take a re-keyed file for a stale cache. Without --all a rerun
-// re-keys the store again and names, in a warning, the store that still
-// lists the recipient; the printed command (with --all) resumes the run.
+// resumes it. Each file that it re-keyed is left with the .enc the newer file
+// of its pair, and the rerun takes it all the same: the compare reads the
+// values, not the times. Without --all a rerun re-keys the store again and
+// names, in a warning, the store that still lists the recipient; the printed
+// command (with --all) resumes the run.
 func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	skipUnlessPermissionsHold(t)
 	c, out, errOut := testEnv(t)
@@ -416,6 +418,9 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	}
 	if strings.Contains(readFile(t, c.sopsConfigPath()), g) || opens(t, a+"/Secret.app.default.K.enc", gone, "v") {
 		t.Fatal("fixture: the first store was expected to be re-keyed")
+	}
+	if !newerThan(a+"/Secret.app.default.K.enc", a+"/Secret.app.default.K") {
+		t.Error("the re-key left the twin the newer file: a later encrypt sweep would encrypt it again")
 	}
 	if err := os.Chmod(b, 0o700); err != nil {
 		t.Fatal(err)
@@ -480,7 +485,6 @@ func treeBytes(t *testing.T, dir string) map[string]string {
 // printed: stdout and stderr are pinned whole.
 // tests/unit/secrets_remove_key_test.bats runs the same cases.
 func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
-	const tail = "[error]   the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.\n"
 	for _, tc := range []struct {
 		name    string
 		caller  bool // the caller holds the identity that stays
@@ -539,7 +543,7 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 			if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			if want := tc.want + tail; errOut.String() != want || out.String() != "" {
+			if want := tc.want + twinTail; errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
 			if tc.unread {
@@ -553,6 +557,51 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 				t.Error("an .enc was re-keyed before the refusal")
 			}
 		})
+	}
+}
+
+// twinTail is the last line of the refusal of the compare (twinsMatch).
+const twinTail = "[error]   the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.\n"
+
+// A twin that holds another value than its .enc is refused by the compare
+// also when it is the older file of the two, and also for a file whose
+// labels do not list the removed key: the re-key encrypts every managed
+// twin. The times of the files do not count. .sops.yaml and every file of
+// the store stay byte-equal. tests/unit/secrets_remove_key_test.bats runs
+// the same case.
+func TestRemoveKeyRefusesAnOlderTwinThatDiffersFromItsEnc(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	app, other := labelStore(t, c, k, g, out, errOut)
+	write(t, other, "x")
+	info, err := os.Stat(other + ".enc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := info.ModTime().Add(-time.Hour)
+	if err := os.Chtimes(other, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+	if !newerThan(other+".enc", other) {
+		t.Fatal("fixture: the twin is not the older file")
+	}
+	yaml, before := readFile(t, c.sopsConfigPath()), treeBytes(t, c.Paths.Clusters)
+
+	callerIdentity(t, keep)
+	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	want := "[error] clusters/a.dev/secrets/Secret.other.default.K.enc differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first\n" + twinTail
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	unchanged(t, c, yaml)
+	if !maps.Equal(treeBytes(t, c.Paths.Clusters), before) {
+		t.Error("a file of the store changed before the refusal")
+	}
+	if !opens(t, app+".enc", gone, "v") {
+		t.Error("an .enc was re-keyed before the refusal")
 	}
 }
 

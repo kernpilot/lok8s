@@ -255,8 +255,7 @@ func opens(t *testing.T, enc string, id *age.X25519Identity, plain string) bool 
 }
 
 // freshen makes each plaintext one second newer than its .enc: the state
-// after `lo secrets decrypt`. remove-key refuses a cache file older than its
-// .enc.
+// after `lo secrets decrypt`.
 func freshen(t *testing.T, plains ...string) {
 	t.Helper()
 	for _, p := range plains {
@@ -660,11 +659,12 @@ func TestRemoveKeyRekeysStaleEncFiles(t *testing.T) {
 	}
 }
 
-// An .enc that lists the recipient and is newer than its plaintext is
-// refused before any write: the re-key encrypts the plaintext, and would
-// write its older value over the newer one. The state right after
-// `lo secrets encrypt` is the common case; a future mtime is the extreme one.
-func TestRemoveKeyRefusesAStaleCache(t *testing.T) {
+// A twin that holds the value of its .enc passes the compare also when it is
+// the older file of the two, and the run re-keys it: the times of the files
+// do not count. The state right after `lo secrets encrypt` is the common
+// case; an .enc with a time in the future is the extreme one.
+// tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeyRekeysATwinThatIsOlderThanItsEnc(t *testing.T) {
 	for _, future := range []bool{false, true} {
 		c, out, errOut := testEnv(t)
 		c.Domain = "a.dev"
@@ -672,56 +672,69 @@ func TestRemoveKeyRefusesAStaleCache(t *testing.T) {
 		k, g := keep.Recipient().String(), gone.Recipient().String()
 		sopsRules(t, c, k+","+g)
 		a := c.Paths.Clusters + "/a.dev/secrets"
-		write(t, a+"/Secret.app.default.K", "v")
+		plain, enc := a+"/Secret.app.default.K", a+"/Secret.app.default.K.enc"
+		write(t, plain, "v")
 		encryptStore(t, c, "a.dev", out, errOut)
 		if future {
 			ts := time.Now().Add(time.Hour)
-			if err := os.Chtimes(a+"/Secret.app.default.K.enc", ts, ts); err != nil {
+			if err := os.Chtimes(enc, ts, ts); err != nil {
 				t.Fatal(err)
 			}
 		}
-		before, encBefore := readFile(t, c.sopsConfigPath()), readFile(t, a+"/Secret.app.default.K.enc")
+		if !newerThan(enc, plain) {
+			t.Fatalf("future=%v: fixture: the twin is not the older file", future)
+		}
+		encBefore := readFile(t, enc)
 
-		if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
-			t.Fatalf("want ErrHandled, got %v", err)
+		callerIdentity(t, keep)
+		if err := c.RemoveKey(g, false, false); err != nil {
+			t.Fatalf("future=%v: %v\n%s", future, err, errOut.String())
 		}
-		want := "[error] newer than its decrypted twin: clusters/a.dev/secrets/Secret.app.default.K.enc\n" +
-			"[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one\n" +
-			"[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written.\n"
-		if errOut.String() != want || out.String() != "" {
-			t.Errorf("future=%v: stdout %q\nstderr:\n%q\nwant:\n%q", future, out.String(), errOut.String(), want)
+		if !strings.HasSuffix(out.String(), rmSummary(1, 1, 1)) || errOut.String() != scopeWarn+rotateWarn {
+			t.Errorf("future=%v: stdout:\n%q\nstderr:\n%q", future, out.String(), errOut.String())
 		}
-		if readFile(t, c.sopsConfigPath()) != before || readFile(t, a+"/Secret.app.default.K.enc") != encBefore {
-			t.Errorf("future=%v: a file changed before the refusal", future)
+		if readFile(t, enc) == encBefore || opens(t, enc, gone, "v") || !opens(t, enc, keep, "v") {
+			t.Errorf("future=%v: the .enc was not re-keyed", future)
 		}
 	}
 }
 
-// The stale check reads every managed .enc, also a file whose labels do not
-// list the removed key: the re-key rewrites that file too.
-// tests/unit/secrets_remove_key_test.bats runs the same case.
-func TestRemoveKeyRefusesAStaleFileWhoseLabelsDoNotListTheKey(t *testing.T) {
+// After a remove-key each re-keyed .enc is the newer file of its pair, as
+// after `lo secrets encrypt`: the encrypt sweep that follows re-encrypts
+// nothing (each .enc stays byte-equal), and the lint check names no secret.
+// labelStore starts from the state after a decrypt (each twin the newer
+// file). tests/unit/secrets_remove_key_test.bats runs the same case.
+func TestRemoveKeyLeavesNothingForTheEncryptSweepOrTheLintCheck(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
 	k, g := keep.Recipient().String(), gone.Recipient().String()
-	_, other := labelStore(t, c, k, g, out, errOut)
-	ts := time.Now().Add(time.Hour)
-	if err := os.Chtimes(other+".enc", ts, ts); err != nil {
-		t.Fatal(err)
-	}
-	before, encBefore := readFile(t, c.sopsConfigPath()), readFile(t, other+".enc")
+	app, other := labelStore(t, c, k, g, out, errOut)
 
-	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
+	callerIdentity(t, keep)
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
 	}
-	want := "[error] newer than its decrypted twin: clusters/a.dev/secrets/Secret.other.default.K.enc\n" +
-		"[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one\n" +
-		"[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written.\n"
-	if errOut.String() != want || out.String() != "" {
-		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	encs := []string{app + ".enc", other + ".enc"}
+	before := map[string]string{}
+	for _, enc := range encs {
+		before[enc] = readFile(t, enc)
 	}
-	if readFile(t, c.sopsConfigPath()) != before || readFile(t, other+".enc") != encBefore {
-		t.Error("a file changed before the refusal")
+	out.Reset()
+	errOut.Reset()
+	if err := c.Encrypt(""); err != nil {
+		t.Fatalf("encrypt: %v\n%s", err, errOut.String())
+	}
+	if out.String() != "" || errOut.String() != "" {
+		t.Errorf("the encrypt sweep after remove-key: stdout %q, stderr %q; want none", out.String(), errOut.String())
+	}
+	for _, enc := range encs {
+		if readFile(t, enc) != before[enc] {
+			t.Errorf("the encrypt sweep after remove-key re-encrypted %s", enc)
+		}
+	}
+	var lint bytes.Buffer
+	if !CheckUnencrypted(c.Paths.Clusters+"/a.dev/secrets", &lint) || lint.String() != "" {
+		t.Errorf("the lint check after remove-key:\n%s", lint.String())
 	}
 }
 

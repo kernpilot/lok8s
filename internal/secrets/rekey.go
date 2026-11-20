@@ -743,11 +743,9 @@ func dropRecipient(content, recipient string) (edited string, rules, last int) {
 
 // rekeyFiles re-encrypts each .enc file from its plaintext twin, whatever
 // the timestamps say (bash: secrets::_rekey_files), and prints a count per
-// store as Encrypt does. After each encrypt it makes the twin newer than the
-// new .enc (nudgeNewer), as a decrypt leaves it, and fails when the .enc is
-// still the newer file: the .enc and its twin hold the same value, and the
-// run that resumes a stopped re-key (it re-keys every managed file again)
-// must not take the file for a stale cache.
+// store as Encrypt does. Each new .enc is the newer file of its pair, as
+// after Encrypt, so a later encrypt sweep skips it and the lint check does
+// not name it.
 func (c *Context) rekeyFiles(stores, encs []string) error {
 	for _, store := range stores {
 		count := 0
@@ -758,11 +756,6 @@ func (c *Context) rekeyFiles(stores, encs []string) error {
 			plain := strings.TrimSuffix(enc, ".enc")
 			if err := c.encryptFile(plain); err != nil {
 				return err
-			}
-			nudgeNewer(plain, enc)
-			if newerThan(enc, plain) {
-				ui.ErrorTo(c.ErrOut, "cannot set the time of %s", c.rel(plain))
-				return ErrHandled
 			}
 			count++
 		}
@@ -960,14 +953,13 @@ func (c *Context) postCheck(stores []string, recipient string, known []string, s
 // at its top (the re-key would not rewrite it: otherEncs), an .enc whose
 // sops metadata holds a member twice (the read keeps the last one,
 // so the first could hide a recipient), an .enc whose sops metadata does not
-// parse or lists no age recipient, a managed .enc that is newer than its
-// plaintext (the re-key would write the old value back over the newer one),
-// and, without skipOrphans, an .enc with no decrypted twin: a re-key cannot
-// rewrite that file, so it keeps the removed recipient. Last, it decrypts
-// each file that it re-keys, in memory, with the identity of the caller, and
-// refuses a file whose twin holds other bytes, a file that it cannot decrypt
-// and a twin that it cannot read (twinsMatch): the re-key encrypts the twin,
-// so a twin that differs would replace the value of the .enc. A recipient
+// parse or lists no age recipient, and, without skipOrphans, an .enc with no
+// decrypted twin: a re-key cannot rewrite that file, so it keeps the removed
+// recipient. Last, it decrypts each file that it re-keys, in memory, with the
+// identity of the caller, and refuses a file whose twin holds other bytes, a
+// file that it cannot decrypt and a twin that it cannot read (twinsMatch):
+// the re-key encrypts the twin, so a twin that differs would replace the
+// value of the .enc. The times of the files do not count. A recipient
 // that is in no rule and on no .enc label is a warning, not a refusal: the
 // run then re-keys every managed .enc and changes no rule.
 //
@@ -1093,26 +1085,14 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	}
 	// The re-key encrypts the plaintext twin of every managed .enc of the
 	// stores, an orphan that skipOrphans accepts the one exception: the
-	// labels are not trusted to choose the files. A twin older than its
-	// .enc holds an older value, and the re-key would write it over the
-	// newer one: refuse until the cache is fresh.
+	// labels are not trusted to choose the files. The compare below
+	// (twinsMatch) refuses a twin that holds another value than its .enc;
+	// the times of the two files do not count.
 	var rekey []string
-	stale := 0
 	for _, enc := range scan.all {
-		plain := strings.TrimSuffix(enc, ".enc")
-		if !fsutil.IsRegular(plain) {
-			continue
+		if fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
+			rekey = append(rekey, enc)
 		}
-		if newerThan(enc, plain) {
-			ui.ErrorTo(c.ErrOut, "newer than its decrypted twin: %s", c.rel(enc))
-			stale++
-		}
-		rekey = append(rekey, enc)
-	}
-	if stale > 0 {
-		ui.ErrorTo(c.ErrOut, "%d .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one", stale)
-		ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written.")
-		return ErrHandled
 	}
 	// sops picks the first creation rule whose path_regex matches the
 	// plaintext path. A file with no rule, or with a rule this age-only

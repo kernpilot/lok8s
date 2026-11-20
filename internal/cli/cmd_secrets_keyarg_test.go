@@ -94,18 +94,22 @@ func TestGuardPrivateKeyArgv(t *testing.T) {
 }
 
 // The help of remove-key names every refusal, the lock and the revocation
-// caveat.
+// caveat. The compare of each twin with its .enc refuses a twin that holds
+// another value; the times of the files are no refusal.
 func TestSecretsRemoveKeyHelpNamesTheRefusals(t *testing.T) {
 	out, _, err := runSecrets(t, secretsProject(t), "secrets", "remove-key", "--help")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(out, "newer than its plaintext") {
+		t.Error("the help names a refusal by the times of the files")
 	}
 	for _, want := range []string{
 		"looks like a private key (it is not printed)",
 		"outside a single-quoted age: list (an unquoted list",
 		"key_groups, an alias or a merge key",
 		"the last recipient of a rule",
-		"newer than its plaintext",
+		"holds other bytes than its decrypted twin",
 		"matches no creation rule",
 		"without --skip-orphans",
 		"flat store is not re-keyed",
