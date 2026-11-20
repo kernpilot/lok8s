@@ -41,11 +41,11 @@ func buildClusterPayload(clusterYAML string) []byte {
 		{"provider", doc.Or("hetzner", "spec", "provider")},
 		{"region", doc.OrChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
 	}
-	// An unset version (no key, a YAML null, an empty string) is left out
-	// of the payload. The bare read gave the word "null", which went out as
-	// the version string "null" (issue #272). Bash: `// ""` and the jq
-	// branch that adds the key only when it is not empty.
-	if v := doc.Or("", "spec", "kubernetes", "version"); v != "" {
+	// An unset version (kubernetesVersion: "") is left out of the payload.
+	// The bare read gave the word "null", which went out as the version
+	// string "null" (issue #272). Bash: the jq branch that adds the key
+	// only when it is not empty.
+	if v := doc.kubernetesVersion(); v != "" {
 		pairs = append(pairs, jsonPair{"kubernetesVersion", v})
 	}
 	pairs = append(pairs,
@@ -54,6 +54,22 @@ func buildClusterPayload(clusterYAML string) []byte {
 		jsonPair{"access", doc.Or("none", "spec", "kubehz", "access")},
 	)
 	return compactJSON(pairs...)
+}
+
+// kubernetesVersion is spec.kubernetes.version, or "" when it is unset: no
+// key, a YAML null, false or an empty string (yq's
+// `.spec.kubernetes.version // ""`: `//` fires on null and on false). A
+// number keeps its text ("0", "1.30"). The payload and the refusal in
+// ProvisionHosted use this one read. Bash: kubehz::_hosted_version.
+func (d specDoc) kubernetesVersion() string {
+	return d.Or("", "spec", "kubernetes", "version")
+}
+
+// missingVersionLine is the refusal of a hosted spec with no
+// spec.kubernetes.version (bash: kubehz::provision_hosted, the same text).
+func missingVersionLine(clusterYAML string) string {
+	return "kubehz: spec.kubernetes.version is not set in " + clusterYAML +
+		". A hosted cluster needs a Kubernetes version, so no cluster was created. Set it, then run the command again."
 }
 
 // waitForCluster ports kubehz::wait_for_cluster: poll GET /api/clusters/{id}
@@ -207,8 +223,15 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 // written by writePrivateFile (a 0600 temp file and one rename): a failed
 // download or write leaves the old file as it was. The kubeconfig path is
 // checked before the create: a path that the write refuses stops the
-// provision there, so a refusal creates no cluster.
+// provision there, so a refusal creates no cluster. A spec with no
+// spec.kubernetes.version is refused first, before any request: the
+// platform needs the version and refuses a create without it (HTTP 400,
+// a missing field).
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
+	if loadSpec(clusterYAML).kubernetesVersion() == "" {
+		c.errorf("%s", missingVersionLine(clusterYAML))
+		return ErrHandled
+	}
 	apiURL := cfg.APIURL
 	// bash: kubehz::_private_target before the POST.
 	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")

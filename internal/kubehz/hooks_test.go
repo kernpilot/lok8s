@@ -129,7 +129,7 @@ func TestKubeoneDriverBranchesToHostedThroughHooks(t *testing.T) {
 
 func TestCapiDriverBranchesThroughHooks(t *testing.T) {
 	h := newHarness(t)
-	h.writeSpec("test.kubehz.dev", "kind: Capi\nmetadata:\n  name: test-cluster\nspec:\n  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
+	h.writeSpec("test.kubehz.dev", "kind: Capi\nmetadata:\n  name: test-cluster\nspec:\n  kubernetes:\n    version: v1.31.0\n  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
 	h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-c","status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-c", 200, `{"data":{"status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-c/kubeconfig", 200, "kc\n")
