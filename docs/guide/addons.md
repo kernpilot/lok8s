@@ -1206,7 +1206,8 @@ Every object that the addon renders carries two labels:
 The bootstrap applies without prune. When an option goes, or the bindings
 change from cluster-wide to `tenantNamespaces`, the objects of the earlier
 apply stay, and their grants with them. The cleanup selects all the
-addon's objects by `lok8s.dev/name`.
+addon's objects by `lok8s.dev/name`. `lo doctor` finds these objects for
+you (see [change the options](#rook-ceph-csi-kms-change-the-options)).
 
 ::: warning Upgrade note: the entry needs `values.kms`
 An entry without `values.kms` (the form of earlier releases) stops the
@@ -1248,6 +1249,32 @@ Between steps 2 and 3 the plugins have none of these grants. A volume
 operation that needs them fails and is tried again after the apply. Your
 own bindings to the addon's roles (CephFS, below) do not carry the label,
 so they stay.
+
+`lo doctor` compares the cluster with the current values. It renders the
+entry of `spec.bootstrap` as the bootstrap does (offline: the chart is
+local), reads the roles and bindings with the label
+`lok8s.dev/name=rook-ceph-csi-kms`, and prints one line for each object
+that the render does not hold, with the delete command of that object:
+
+```console
+$ lo doctor
+...
+  ! rook-ceph-csi-kms: ClusterRole rook-ceph-csi-kms-vaulttokens (option vaulttokens) is not in the render of the current values. It keeps its grant. Delete it: kubectl --kubeconfig '/path/to/project/.kubeconfig/my-cluster.yaml' delete clusterrole rook-ceph-csi-kms-vaulttokens
+```
+
+So you can also change the options without the gap between steps 2 and 3:
+
+1. Render first, and stop if the render fails:
+   `lo bootstrap --only rook-ceph-csi-kms --dry-run`.
+2. Apply: `lo bootstrap --only rook-ceph-csi-kms`.
+3. Run `lo doctor`, and run each delete command that it prints. Until you
+   delete them, those objects keep their grants.
+
+When you remove the addon from `spec.bootstrap` and keep `rook-ceph`,
+`lo doctor` prints each object with the label as a leftover of the addon.
+Doctor only reads. It prints a name only in the DNS-1123 form, and counts
+the other objects in one line with the command that lists them (see
+[`lo doctor`](../reference/cli.md#lo-doctor)).
 
 The bindings name the RBD ServiceAccounts only. A cluster that also runs
 the CephFS driver with a KMS binds both CephFS ServiceAccounts to the same
@@ -1317,7 +1344,8 @@ no
 ```
 
 After a cleanup, no object of an earlier apply is left: the next command
-lists only the objects of the current options.
+lists only the objects of the current options, and `lo doctor` prints no
+`rook-ceph-csi-kms` line.
 
 ```console
 $ kubectl get clusterrolebinding,clusterrole,rolebinding,role --all-namespaces -l lok8s.dev/name=rook-ceph-csi-kms -L csi-kms.lok8s.dev/option
