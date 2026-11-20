@@ -147,8 +147,12 @@ doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1
 # read runs the credential plugin of that kubeconfig, which can ask for a
 # login. A failed read is a warning with a fixed reason per class. kubectl's
 # stderr can name the server and the user, so the check never prints it. A
-# binding name goes into a printed delete command only when it is a DNS-1123
-# subdomain. Each delete command names the kubeconfig of the reads
+# binding counts when it gives the role to the account in any form: the
+# ServiceAccount, the User name of its token, or a group of the token. A
+# delete command is printed only for a binding of the account alone: a
+# binding that the account shares gets a line that names it, with no
+# command. A binding name goes into a printed delete command only when it is
+# a DNS-1123 subdomain. Each delete command names the kubeconfig of the reads
 # (shell-quoted) and is the rest of its line, so a copy of it deletes in the
 # cluster that the check read and nothing else. Every line is advisory: it
 # always returns 0.
@@ -390,16 +394,25 @@ doctor::_rbac_reason() {
 # doctor::_rbac_records <bindings file> <roles file> <chart_rbac 0|1>
 # The facts the report needs, one TAB-separated record per line, from one jq
 # run (a failed run is a failed check, never an empty pass):
-#   suc-left <role> [<binding>]    a binding of the SUC ServiceAccount to cluster-admin
-#   suc-new 0|1                    a binding of it to lok8s-system-upgrade-controller
-#   redis-left <role> [<binding>]  a binding of the redis-operator ServiceAccount to
-#                                  cluster-admin, redis-operator or (without the
-#                                  opt-in addon) lok8s-redis-operator-chart-rbac
-#   redis-new 0|1                  a binding of it to lok8s-redis-operator
+#   suc-left <role> <form> <arg> [<binding>]
+#                                  a binding that gives the SUC ServiceAccount
+#                                  cluster-admin
+#   suc-new 0|1                    a binding that gives it lok8s-system-upgrade-controller
+#   redis-left <role> <form> <arg> [<binding>]
+#                                  a binding that gives the redis-operator
+#                                  ServiceAccount cluster-admin, redis-operator or
+#                                  (without the opt-in addon)
+#                                  lok8s-redis-operator-chart-rbac
+#   redis-new 0|1                  a binding that gives it lok8s-redis-operator
 #   redis-oldrole 0|1              the chart's ClusterRole redis-operator
 #   redis-agg <labels>             its aggregate-to-* labels with the value "true"
-#   redis-exec 0|1                 a ClusterRole bound to it gives create on pods/exec
-# A binding matches by its subjects and roleRef, never by its name. jq puts
+#   redis-exec 0|1                 a ClusterRole that a binding gives it has create
+#                                  on pods/exec
+# <form> <arg> is "group <group>" when a subject is a group of the account's
+# token (the first one), else "sa <n>": the account is a subject (as the
+# ServiceAccount or as the User name of its token) and <n> subjects are not
+# the account (Go: rbacGrantOf). A binding matches by its subjects and
+# roleRef, never by its name. jq puts
 # the binding name in the record only when it is a DNS-1123 subdomain (at
 # most 253 characters), else it leaves the field out. So no TAB or newline
 # of a name reaches the record parse. The stderr of jq goes to /dev/null:
@@ -407,21 +420,30 @@ doctor::_rbac_reason() {
 doctor::_rbac_records() {
   # shellcheck disable=SC2016 # jq program text
   jq -r --slurpfile cr "${2}" --arg chart "${3}" '
-    def sa($n; $ns): any(.subjects[]?; .kind == "ServiceAccount" and .name == $n and .namespace == $ns);
+    def acct($n; $ns): (.kind == "ServiceAccount" and .name == $n and .namespace == $ns)
+      or (.kind == "User" and .name == "system:serviceaccount:\($ns):\($n)");
+    def grp($ns): .kind == "Group" and (.name as $g
+      | any("system:serviceaccounts:\($ns)", "system:serviceaccounts", "system:authenticated"; . == $g));
+    def holds($n; $ns): any(.subjects[]?; acct($n; $ns) or grp($ns));
     def bound($n; $ns; $roles):
-      .items[] | select(.roleRef.kind == "ClusterRole" and (.roleRef.name as $r | any($roles[]; . == $r)) and sa($n; $ns));
+      .items[] | select(.roleRef.kind == "ClusterRole" and (.roleRef.name as $r | any($roles[]; . == $r)) and holds($n; $ns));
     def anyof($want): . as $list | any($want[]; . as $w | any(($list // [])[]; . == $w));
     def shown: (type == "string") and length <= 253
       and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\z");
-    def left($tag): "\($tag)\t\(.roleRef.name)" + (if (.metadata.name | shown) then "\t\(.metadata.name)" else "" end);
+    def left($tag; $n; $ns):
+      ([.subjects[]? | select(grp($ns)) | .name] | .[0]) as $g
+      | ([.subjects[]? | select(acct($n; $ns) | not)] | length) as $others
+      | "\($tag)\t\(.roleRef.name)\t" + (if $g != null then "group\t\($g)" else "sa\t\($others)" end)
+        + (if (.metadata.name | shown) then "\t\(.metadata.name)" else "" end);
     ($cr[0].items) as $roles
     | ([$roles[] | select(.metadata.name == "redis-operator")] | .[0]) as $old
-    | ([.items[] | select(.roleRef.kind == "ClusterRole" and sa("redis-operator"; "redis-operator")) | .roleRef.name]) as $refs
-    | (bound("system-upgrade-controller"; "cattle-system"; ["cluster-admin"]) | left("suc-left")),
+    | ([.items[] | select(.roleRef.kind == "ClusterRole" and holds("redis-operator"; "redis-operator")) | .roleRef.name]) as $refs
+    | (bound("system-upgrade-controller"; "cattle-system"; ["cluster-admin"])
+        | left("suc-left"; "system-upgrade-controller"; "cattle-system")),
       "suc-new\t\([bound("system-upgrade-controller"; "cattle-system"; ["lok8s-system-upgrade-controller"])] | if length > 0 then 1 else 0 end)",
       (bound("redis-operator"; "redis-operator";
           ["cluster-admin", "redis-operator"] + (if $chart == "1" then [] else ["lok8s-redis-operator-chart-rbac"] end))
-        | left("redis-left")),
+        | left("redis-left"; "redis-operator"; "redis-operator")),
       "redis-new\t\([bound("redis-operator"; "redis-operator"; ["lok8s-redis-operator"])] | if length > 0 then 1 else 0 end)",
       "redis-oldrole\t\(if $old == null then 0 else 1 end)",
       (if $old == null then empty else
@@ -442,14 +464,14 @@ doctor::_rbac_records() {
 # doctor::_rbac_report <records> <suc 0|1> <redis 0|1> <kubeconfig> — the
 # lines, in the order of the Go twin.
 doctor::_rbac_report() {
-  local records="${1}" suc="${2}" redis="${3}" kubeconfig="${4}" rec tag a b
+  local records="${1}" suc="${2}" redis="${3}" kubeconfig="${4}" rec tag a b c d
   local -a suc_left=() redis_left=()
   local suc_new=0 redis_new=0 old_role=0 agg="" has_exec=0
-  while IFS=$'\t' read -r tag a b; do
+  while IFS=$'\t' read -r tag a b c d; do
     case "${tag}" in
-      suc-left)      suc_left+=("${a}"$'\t'"${b}") ;;
+      suc-left)      suc_left+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}") ;;
       suc-new)       suc_new="${a}" ;;
-      redis-left)    redis_left+=("${a}"$'\t'"${b}") ;;
+      redis-left)    redis_left+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}") ;;
       redis-new)     redis_new="${a}" ;;
       redis-oldrole) old_role="${a}" ;;
       redis-agg)     agg="${a}" ;;
@@ -493,23 +515,47 @@ doctor::_rbac_new_missing() {
   doctor::_warn "migration incomplete: no ClusterRoleBinding binds the ${1} ServiceAccount to ${2} yet (apply the bootstrap before the deletes below: lo bootstrap)"
 }
 
-# doctor::_rbac_binding_line <role TAB binding> <account> <kubeconfig>
-# An empty binding field is a name that is not a DNS-1123 subdomain: the
-# line then has no name and no command (Go: rbacBindingLine). The delete
-# command is the rest of its line. A role that an opt-in addon binds the
-# account to gets "Keep it only on purpose" before it: the check finds an
-# opt-in addon only as a bare entry name (Go: rbacOptInRole).
+# doctor::_rbac_binding_line <role TAB form TAB arg TAB binding> <account> <kubeconfig>
+# One old grant (Go: rbacGrantLine). Only a binding of the account alone
+# ("sa 0") gets a delete command, as the rest of its line. A grant through a
+# group (it also gives the role to other accounts) and a binding with other
+# subjects get no command: a delete would also remove the grant of the
+# others. An empty binding field is a name that is not a DNS-1123 subdomain:
+# the line then has no name and no command. A role that an opt-in addon
+# binds the account to gets "Keep it only on purpose" before the command:
+# the check finds an opt-in addon only as a bare entry name (Go:
+# rbacOptInRole).
 doctor::_rbac_binding_line() {
-  local role="${1%%$'\t'*}" name="${1#*$'\t'}" del="Delete it: "
-  if [[ -z "${name}" ]]; then
-    doctor::_warn "migration incomplete: a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain) binds the ${2} ServiceAccount to ${role}. Doctor does not print that name or a delete command: find the binding and delete it"
-    return 0
+  local role="" form="" arg="" name="" what account="the ${2} ServiceAccount" del="Delete it: " line
+  IFS=$'\t' read -r role form arg name <<< "${1}"
+  what="ClusterRoleBinding ${name}"
+  [[ -n "${name}" ]] || what="a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain)"
+  if [[ "${form}" == group ]]; then
+    line="${what} gives ${role} to the group ${arg}, which includes ${account}. "
+    if [[ -n "${name}" ]]; then
+      line+="Doctor prints no delete command for a shared grant: review the binding"
+    else
+      line+="Doctor does not print that name or a delete command: find the binding and review it"
+    fi
+  elif [[ "${arg}" != 0 ]]; then
+    local others="${arg} other subjects"
+    [[ "${arg}" != 1 ]] || others="1 other subject"
+    line="${what} binds ${account} and ${others} to ${role}. "
+    if [[ -n "${name}" ]]; then
+      line+="Doctor prints no delete command for a binding with other subjects: remove ${account} from its subjects (for example with kubectl edit)"
+    else
+      line+="Doctor does not print that name or a delete command: find the binding and remove ${account} from its subjects"
+    fi
+  elif [[ -z "${name}" ]]; then
+    line="${what} binds ${account} to ${role}. Doctor does not print that name or a delete command: find the binding and delete it"
+  else
+    case "${2}:${role}" in
+      system-upgrade-controller:cluster-admin|redis-operator:lok8s-redis-operator-chart-rbac)
+        del="Keep it only on purpose, else delete it: " ;;
+    esac
+    line="${what} binds ${account} to ${role}. ${del}$(doctor::_rbac_delete "${3}" clusterrolebinding "${name}")"
   fi
-  case "${2}:${role}" in
-    system-upgrade-controller:cluster-admin|redis-operator:lok8s-redis-operator-chart-rbac)
-      del="Keep it only on purpose, else delete it: " ;;
-  esac
-  doctor::_warn "migration incomplete: ClusterRoleBinding ${name} binds the ${2} ServiceAccount to ${role}. ${del}$(doctor::_rbac_delete "${3}" clusterrolebinding "${name}")"
+  doctor::_warn "migration incomplete: ${line}"
 }
 
 # doctor::_rbac_delete <kubeconfig> <resource> <name> — the delete command of

@@ -19,8 +19,12 @@ package cli
 // (rbacReadBound). A read runs the credential plugin of that kubeconfig,
 // which can ask for a login. A failed read is a warning with a fixed reason
 // per class. kubectl's stderr can name the server and the user, so the
-// check never prints it. A binding name goes into a printed delete command
-// only when it is a DNS-1123 subdomain. Each delete command names the
+// check never prints it. A binding counts when it gives the role to the
+// account in any form: the ServiceAccount, the User name of its token, or
+// a group of the token. A delete command is printed only for a binding of
+// the account alone: a binding that the account shares gets a line that
+// names it, with no command. A binding name goes into a printed delete
+// command only when it is a DNS-1123 subdomain. Each delete command names the
 // kubeconfig of the reads (shell-quoted) and is the rest of its line, so
 // a copy of it deletes in the cluster that the check read and nothing
 // else. Every line is advisory: the check never changes the doctor exit
@@ -36,6 +40,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -264,17 +269,17 @@ func rbacReadReason(stderr string) string {
 	return rbacReasonOther
 }
 
-// rbacCheckSUC reports each ClusterRoleBinding that binds the controller's
-// ServiceAccount to cluster-admin.
+// rbacCheckSUC reports each ClusterRoleBinding that gives the controller's
+// ServiceAccount cluster-admin.
 func rbacCheckSUC(bindings []rbacBinding, kubeconfig string, out io.Writer) {
-	left := rbacBindingsOf(bindings, rbacSUCAccount, []string{rbacClusterAdmin})
+	left := rbacGrantsTo(bindings, rbacSUCAccount, []string{rbacClusterAdmin})
 	if len(left) == 0 {
 		doctorOK(out, rbacSUCAddon+": no RBAC migration leftovers")
 		return
 	}
 	rbacNewMissing(bindings, rbacSUCAccount, rbacSUCNewRole, out)
-	for _, b := range left {
-		rbacBindingLine(b, rbacSUCAccount, kubeconfig, out)
+	for _, g := range left {
+		rbacGrantLine(g, rbacSUCAccount, kubeconfig, out)
 	}
 }
 
@@ -290,7 +295,7 @@ func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, ku
 		// stays in the cluster (no prune) and keeps the chart's rules.
 		old = append(old, rbacRedisChartRole)
 	}
-	left := rbacBindingsOf(bindings, rbacRedisAccount, old)
+	left := rbacGrantsTo(bindings, rbacRedisAccount, old)
 	var oldRole *rbacRole
 	for i := range roles {
 		if roles[i].Metadata.Name == rbacRedisOldRole {
@@ -302,8 +307,8 @@ func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, ku
 		doctorOK(out, rbacRedisAddon+": no RBAC migration leftovers")
 	} else {
 		rbacNewMissing(bindings, rbacRedisAccount, rbacRedisNewRole, out)
-		for _, b := range left {
-			rbacBindingLine(b, rbacRedisAccount, kubeconfig, out)
+		for _, g := range left {
+			rbacGrantLine(g, rbacRedisAccount, kubeconfig, out)
 		}
 		if oldRole != nil {
 			doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+", the old role of the chart, is still in the cluster. Delete it: "+rbacDeleteCommand(kubeconfig, "clusterrole", rbacRedisOldRole))
@@ -317,14 +322,62 @@ func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, ku
 	}
 }
 
-// rbacBindingsOf returns the ClusterRoleBindings whose subjects include sa
-// and whose roleRef is one of the ClusterRoles in roles, in list order.
-// The match reads the content, never the binding's name.
-func rbacBindingsOf(bindings []rbacBinding, sa rbacSubject, roles []string) []rbacBinding {
-	var out []rbacBinding
+// rbacGrant is a ClusterRoleBinding that gives its role to an account:
+// the account is a subject (direct), or a subject is a group of the
+// account's token (group). Others counts the subjects that are not the
+// account.
+type rbacGrant struct {
+	binding rbacBinding
+	direct  bool
+	group   string
+	others  int
+}
+
+// rbacIsAccount reports a subject that is the account: the ServiceAccount
+// (in its namespace), or the User name of its token,
+// system:serviceaccount:<namespace>:<name>. The authorizer reads neither
+// the apiGroup of a subject nor the namespace of a User.
+func rbacIsAccount(s, sa rbacSubject) bool {
+	if s.Kind == "User" {
+		return s.Name == "system:serviceaccount:"+sa.Namespace+":"+sa.Name
+	}
+	return s == sa
+}
+
+// rbacAccountGroups are the groups of a ServiceAccount token.
+func rbacAccountGroups(sa rbacSubject) []string {
+	return []string{"system:serviceaccounts:" + sa.Namespace, "system:serviceaccounts", "system:authenticated"}
+}
+
+// rbacGrantOf reads the subjects of b for sa: ok when b gives its role to
+// sa in any form. group is the first subject that is a group of sa.
+func rbacGrantOf(b rbacBinding, sa rbacSubject) (rbacGrant, bool) {
+	g := rbacGrant{binding: b}
+	groups := rbacAccountGroups(sa)
+	for _, s := range b.Subjects {
+		if rbacIsAccount(s, sa) {
+			g.direct = true
+			continue
+		}
+		g.others++
+		if g.group == "" && s.Kind == "Group" && slices.Contains(groups, s.Name) {
+			g.group = s.Name
+		}
+	}
+	return g, g.direct || g.group != ""
+}
+
+// rbacGrantsTo returns the ClusterRoleBindings that give sa one of the
+// ClusterRoles in roles, in list order. The match reads the content,
+// never the binding's name.
+func rbacGrantsTo(bindings []rbacBinding, sa rbacSubject, roles []string) []rbacGrant {
+	var out []rbacGrant
 	for _, b := range bindings {
-		if b.RoleRef.Kind == "ClusterRole" && slices.Contains(roles, b.RoleRef.Name) && slices.Contains(b.Subjects, sa) {
-			out = append(out, b)
+		if b.RoleRef.Kind != "ClusterRole" || !slices.Contains(roles, b.RoleRef.Name) {
+			continue
+		}
+		if g, ok := rbacGrantOf(b, sa); ok {
+			out = append(out, g)
 		}
 	}
 	return out
@@ -333,27 +386,61 @@ func rbacBindingsOf(bindings []rbacBinding, sa rbacSubject, roles []string) []rb
 // rbacNewMissing warns when no binding gives sa the new role yet: a delete
 // of the old binding then leaves the workload without access.
 func rbacNewMissing(bindings []rbacBinding, sa rbacSubject, newRole string, out io.Writer) {
-	if len(rbacBindingsOf(bindings, sa, []string{newRole})) == 0 {
+	if len(rbacGrantsTo(bindings, sa, []string{newRole})) == 0 {
 		doctorWarn(out, "migration incomplete: no ClusterRoleBinding binds the "+sa.Name+" ServiceAccount to "+newRole+" yet (apply the bootstrap before the deletes below: lo bootstrap)")
 	}
 }
 
-// rbacBindingLine reports one old binding. A name that is not a DNS-1123
-// subdomain is never printed: the line then has no name and no command.
-// The delete command is the rest of its line: the words before it say
-// when to keep the binding.
-func rbacBindingLine(b rbacBinding, sa rbacSubject, kubeconfig string, out io.Writer) {
-	role := b.RoleRef.Name
-	name := b.Metadata.Name
-	if len(name) > 253 || !rbacNameRe.MatchString(name) {
-		doctorWarn(out, "migration incomplete: a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain) binds the "+sa.Name+" ServiceAccount to "+role+". Doctor does not print that name or a delete command: find the binding and delete it")
-		return
+// rbacGrantLine reports one old grant. Only a binding of the account
+// alone gets a delete command, as the rest of its line (the words before
+// it say when to keep the binding). A grant through a group (it also
+// gives the role to other accounts) and a binding with other subjects
+// get no command: a delete would also remove the grant of the others. A
+// name that is not a DNS-1123 subdomain is never printed: the line then
+// has no name and no command.
+func rbacGrantLine(g rbacGrant, sa rbacSubject, kubeconfig string, out io.Writer) {
+	role := g.binding.RoleRef.Name
+	name := g.binding.Metadata.Name
+	shown := len(name) <= 253 && rbacNameRe.MatchString(name)
+	what := "ClusterRoleBinding " + name
+	if !shown {
+		what = "a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain)"
 	}
-	del := "Delete it: "
-	if rbacOptInRole(sa, role) {
-		del = "Keep it only on purpose, else delete it: "
+	account := "the " + sa.Name + " ServiceAccount"
+	var line string
+	switch {
+	case g.group != "":
+		line = what + " gives " + role + " to the group " + g.group + ", which includes " + account + ". "
+		if shown {
+			line += "Doctor prints no delete command for a shared grant: review the binding"
+		} else {
+			line += "Doctor does not print that name or a delete command: find the binding and review it"
+		}
+	case g.others > 0:
+		line = what + " binds " + account + " and " + rbacOtherSubjects(g.others) + " to " + role + ". "
+		if shown {
+			line += "Doctor prints no delete command for a binding with other subjects: remove " + account + " from its subjects (for example with kubectl edit)"
+		} else {
+			line += "Doctor does not print that name or a delete command: find the binding and remove " + account + " from its subjects"
+		}
+	case !shown:
+		line = what + " binds " + account + " to " + role + ". Doctor does not print that name or a delete command: find the binding and delete it"
+	default:
+		del := "Delete it: "
+		if rbacOptInRole(sa, role) {
+			del = "Keep it only on purpose, else delete it: "
+		}
+		line = what + " binds " + account + " to " + role + ". " + del + rbacDeleteCommand(kubeconfig, "clusterrolebinding", name)
 	}
-	doctorWarn(out, "migration incomplete: ClusterRoleBinding "+name+" binds the "+sa.Name+" ServiceAccount to "+role+". "+del+rbacDeleteCommand(kubeconfig, "clusterrolebinding", name))
+	doctorWarn(out, "migration incomplete: "+line)
+}
+
+// rbacOtherSubjects is "1 other subject" or "<n> other subjects".
+func rbacOtherSubjects(n int) string {
+	if n == 1 {
+		return "1 other subject"
+	}
+	return strconv.Itoa(n) + " other subjects"
 }
 
 // rbacDeleteCommand is the delete command of one object in the cluster of
@@ -400,13 +487,13 @@ func rbacAggregateLabels(role *rbacRole) []string {
 	return labels
 }
 
-// rbacGrantsExec reports whether a ClusterRoleBinding gives sa a
-// ClusterRole with create on pods/exec in every pod: the core group (or
-// *), the resource pods/exec (or *, or */exec), the verb create (or *),
-// and no resourceNames.
+// rbacGrantsExec reports whether a ClusterRoleBinding gives sa (in any
+// form, rbacGrantOf) a ClusterRole with create on pods/exec in every pod:
+// the core group (or *), the resource pods/exec (or *, or */exec), the
+// verb create (or *), and no resourceNames.
 func rbacGrantsExec(bindings []rbacBinding, roles []rbacRole, sa rbacSubject) bool {
 	for _, b := range bindings {
-		if b.RoleRef.Kind != "ClusterRole" || !slices.Contains(b.Subjects, sa) {
+		if _, ok := rbacGrantOf(b, sa); b.RoleRef.Kind != "ClusterRole" || !ok {
 			continue
 		}
 		for _, role := range roles {

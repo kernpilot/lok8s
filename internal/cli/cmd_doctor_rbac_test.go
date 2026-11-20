@@ -147,7 +147,10 @@ func rbacWantReads(t *testing.T, name string) []string {
 }
 
 // TestDoctorRBACCases runs every shared case: (a) a leftover SUC binding
-// under another name than the chart's; (b) a narrowed cluster passes; (c)
+// under another name than the chart's, with another subject (no delete
+// command), and the account as the User name of its token or through a
+// group of its token (a shared grant, no delete command); (b) a narrowed
+// cluster passes; (c)
 // no kubeconfig skips; (d) neither addon in spec.bootstrap skips; (e) each
 // failed read prints its fixed reason and never kubectl's output, one case
 // per classifier word; (f) each redis-operator form (the old binding, the
@@ -311,8 +314,9 @@ func TestDoctorRBACConstantsMatchTheAddons(t *testing.T) {
 	}
 	bound := func(rel string, bindings []rbacBinding, sa rbacSubject, role string) {
 		t.Helper()
-		if len(rbacBindingsOf(bindings, sa, []string{role})) == 0 {
-			t.Errorf("%s: no ClusterRoleBinding binds %+v to %s", rel, sa, role)
+		grants := rbacGrantsTo(bindings, sa, []string{role})
+		if len(grants) == 0 || !grants[0].direct || grants[0].others != 0 || grants[0].group != "" {
+			t.Errorf("%s: no ClusterRoleBinding binds %+v alone to %s", rel, sa, role)
 		}
 	}
 

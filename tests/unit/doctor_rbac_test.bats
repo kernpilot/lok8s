@@ -171,7 +171,9 @@ _hang_case() {
 
 NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
 
-@test "rbac: a leftover SUC binding under another name is found" { _case suc-leftover-under-another-name; }
+@test "rbac: a leftover SUC binding under another name with another subject gets no delete command" { _case suc-leftover-under-another-name; }
+@test "rbac: the User name of the token and the groups of the token count" { _case identity-forms; }
+@test "rbac: the new role and pods/exec count through the User name of the token" { _case user-form; }
 @test "rbac: SUC leftover before the new bindings exist says to apply first" { _case suc-new-bindings-missing; }
 @test "rbac: a narrowed cluster passes" { _case narrowed; }
 @test "rbac: no kubeconfig skips with the skip line" { _case no-kubeconfig; }
