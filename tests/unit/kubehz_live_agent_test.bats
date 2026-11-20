@@ -47,8 +47,9 @@ _make_runner() {
 kubectl() {
   stub_call kubectl "$@"
   case "$*" in
-    # The identity read: the Secret holds both keys (resourceVersion 1).
-    "get secret kubehz-agent -n kubehz-system -o go-template="*) printf '1 AC' ;;
+    # The identity read: the Secret holds both keys with a value
+    # (resourceVersion 1, 2 entries).
+    "get secret kubehz-agent -n kubehz-system -o go-template="*) printf '1 2 AC' ;;
     *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*"claim-code"*)  printf 'khzc_test'   | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*) return 0 ;;

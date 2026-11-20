@@ -782,7 +782,7 @@ func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 		!strings.Contains(script, `[ "${ASSESS_REQ}" != "true" ] || WB_REQ="kubehz.cloud/assess-requested=true"`) {
 		t.Errorf("script line %d: the write-back kubectl %s must put back the old time and the request in one call", back.line, strings.Join(back.args, " "))
 	}
-	if before, _, found := strings.Cut(script, "ASSESSMENT=$(jq "); !found || gate.line >= strings.Count(before, "\n")+1 {
+	if before, _, found := strings.Cut(script, "ASSESSMENT=$(bounded 5 jq "); !found || gate.line >= strings.Count(before, "\n")+1 {
 		t.Errorf("script line %d: the send gate must run before the assessment is put together", gate.line)
 	}
 
@@ -959,7 +959,14 @@ func TestAgentScriptSecretCallsAreGetAndPatchByName(t *testing.T) {
 	if !strings.Contains(script, `printf '{"metadata":{"resourceVersion":"%s"},"stringData":{"agent-token":"%s","claim-code":"%s"}}'`) {
 		t.Error("the fill patch must carry the resourceVersion of the read (a 409 for a second filler)")
 	}
-	if !strings.Contains(script, `if [ -z "${ID_KEYS}" ]; then`) {
-		t.Error("the fill must run only for a Secret that holds neither key (never rotate)")
+	// The fill runs only for a Secret with no entry at all, whatever the
+	// values (never rotate, never write over a key that is there): the
+	// read gives no count for such a Secret, so ID_KEYS is empty.
+	if !strings.Contains(script, "-o '"+agentIdentityRead+"'") {
+		t.Errorf("the identity read must be -o '%s'", agentIdentityRead)
+	}
+	if !strings.Contains(script, "  case \"${ID_KEYS}\" in\n    '')\n      NEW_A=") ||
+		!strings.Contains(script, "    unknown|*' AC') ;;\n    *)\n      echo \"kubehz: Secret kubehz-agent in kubehz-system has data, but not both") {
+		t.Error("the fill must run only for a Secret with no entry (ID_KEYS empty), and a Secret with entries but not A and C gets one line and no write")
 	}
 }

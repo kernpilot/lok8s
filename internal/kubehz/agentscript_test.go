@@ -255,7 +255,7 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 // `timeout -k 2 SECS` only when the call fits in the tick budget.
 const boundedHelper = `bounded() {
   if ! budget_fits $(( $1 + 2 )); then
-    echo "kubehz: tick budget: ${2} ${3} not started: it can take $(( $1 + 2 ))s, and the budget ends in $(( BUDGET_END - $(date -u +%s) ))s" >&4
+    echo "kubehz: tick budget: ${2} ${3} not started: it can take $(( $1 + 2 ))s, and the budget ends in $(( BUDGET_END - $(mono_now) ))s" >&4
     return 124
   fi
   BOUND_SECS="$1"
@@ -406,7 +406,7 @@ func TestAgentTickBudgetEndsBeforeTheJobDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := cj.Spec.JobTemplate.Spec.ActiveDeadlineSeconds
-	tick := budgetNumber(t, script, `\n\s*TICK_END=\$\(\( \$\(date -u \+%s\) \+ (\d+) \)\)\n`)
+	tick := budgetNumber(t, script, `\n\s*TICK_END=\$\(\( \$\(mono_now\) \+ (\d+) \)\)\n`)
 	readReserve := budgetNumber(t, script, `\n\s*READ_END=\$\(\( TICK_END - (\d+) \)\)\n`)
 	probeReserve := budgetNumber(t, script, `\n\s*PROBE_END=\$\(\( TICK_END - (\d+) \)\)\n`)
 	const kill, writeBack, podStart = 2, 5 + 2, 20
@@ -443,6 +443,109 @@ func TestAgentTickBudgetEndsBeforeTheJobDeadline(t *testing.T) {
 	start := strings.Index(script, `BUDGET_END="${READ_END}"`)
 	if start < 0 || gate < start || probesDone < gate || full < probesDone || post < full {
 		t.Errorf("the budget order must be READ_END, then PROBE_END for the gate and the probes, then TICK_END before the heartbeat POST: %d %d %d %d %d", start, gate, probesDone, full, post)
+	}
+}
+
+// monoClock is the clock of the tick budget: the whole seconds of the first
+// field of /proc/uptime, and the wall clock only when that field is not a
+// number.
+const monoClock = `mono_now() {
+  read -r MONO_UP _ < /proc/uptime && echo "${MONO_UP%%.*}"
+}
+case "$(mono_now 2>/dev/null)" in
+  ''|*[!0-9]*)
+    echo "kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move" >&2
+    mono_now() {
+      date -u +%s
+    } ;;
+esac
+`
+
+// TestAgentTickBudgetUsesTheMonotonicClock: the tick budget reads the
+// seconds since boot, which a step of the wall clock does not move. On the
+// wall clock, a clock set back during the tick makes the budget longer, and
+// the probes can run until activeDeadlineSeconds kills the pod after the
+// send gate wrote its time. The wall clock (`date -u +%s`) gives only the
+// time of the send gate, which the next tick compares, and the fallback.
+func TestAgentTickBudgetUsesTheMonotonicClock(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	if !strings.Contains(script, monoClock) {
+		t.Fatal("the script must define mono_now() from /proc/uptime, with the wall clock only as the fallback")
+	}
+	for _, want := range []string{"TICK_END=$(( $(mono_now) + ", "  [ $(( $(mono_now) + $1 )) -le \"${BUDGET_END}\" ]\n"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the budget must read mono_now: no %q", want)
+		}
+	}
+	wall := 0
+	for i, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") || !strings.Contains(line, "date -u +%s") {
+			continue
+		}
+		wall++
+		if trimmed := strings.TrimSpace(line); trimmed != "date -u +%s" && trimmed != "NOW_EPOCH=$(date -u +%s)" {
+			t.Errorf("script line %d reads the wall clock: %s; the budget reads mono_now", i+1, trimmed)
+		}
+	}
+	if wall != 2 {
+		t.Errorf("the wall clock is read on %d lines, want 2 (the fallback of mono_now and NOW_EPOCH)", wall)
+	}
+}
+
+// localTool matches a jq or awk command word.
+var localTool = regexp.MustCompile(`(^|[\s($|;&])(jq|awk)(\s|$)`)
+
+// TestAgentLocalStepsAreBounded: each jq and awk step of the heartbeat
+// script runs under `bounded 5`, so it starts only when it fits in the
+// tick budget, and a step that hangs stops at its bound. The local work on
+// a large answer (the PV list, the services) counts against the budget
+// too. Two steps differ: the jq of the node list reads the stream of its
+// call and starts with it, so it has the bound of the call
+// (`timeout -k 2 30`), and the budget check of the call counts the pipe.
+// The awk of sha256_hex hashes one line, in an image without sha256sum.
+func TestAgentLocalStepsAreBounded(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	bound := regexp.MustCompile(`(^|[\s($|])bounded 5 $`)
+	lines := strings.Split(script, "\n")
+	steps, nodeList, hash := 0, 0, 0
+	for i := 0; i < len(lines); i++ {
+		start := i
+		logical := lines[i]
+		for strings.HasSuffix(logical, `\`) && i+1 < len(lines) {
+			i++
+			logical = strings.TrimSuffix(logical, `\`) + " " + lines[i]
+		}
+		if strings.HasPrefix(strings.TrimSpace(logical), "#") {
+			continue
+		}
+		for _, m := range localTool.FindAllStringSubmatchIndex(logical, -1) {
+			at := m[4]
+			prefix := logical[:at]
+			// A tool name inside a quoted log line is not a call.
+			if strings.Count(prefix, `"`)%2 == 1 {
+				continue
+			}
+			switch {
+			case bound.MatchString(prefix):
+				steps++
+			case strings.HasSuffix(prefix, "bounded 30 kubectl get --raw /api/v1/nodes 2>/dev/null | timeout -k 2 30 "):
+				nodeList++
+			case strings.HasSuffix(prefix, "openssl dgst -sha256 | ") && logical[at:] == "awk '{print $NF}'":
+				hash++
+			default:
+				t.Errorf("script line %d: %s is not bounded by `bounded 5`: %q", start+1, logical[at:m[5]], strings.TrimSpace(prefix))
+			}
+		}
+	}
+	if nodeList != 1 || hash != 1 {
+		t.Errorf("%d node-list jq and %d sha256_hex awk found, want 1 and 1", nodeList, hash)
+	}
+	// The script has more than 20 jq and awk steps. Fewer means the scan
+	// reads nothing.
+	if steps < 20 {
+		t.Fatalf("the scan found %d bounded jq and awk steps, want at least 20", steps)
 	}
 }
 
