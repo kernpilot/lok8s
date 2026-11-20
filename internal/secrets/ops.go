@@ -229,9 +229,9 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	}
 	// A recipient that .sops.yaml lists already is done when the re-key of
 	// the sweep is finished. An .enc that is missing or does not pass the
-	// recipient envelope check is the work of an earlier run that stopped after its write
-	// of .sops.yaml (at the orphan check, or in the encrypt), and this run
-	// finishes that work (rerunLeft, finishReKey).
+	// recipient envelope check is the work of an earlier run that stopped
+	// after its write of .sops.yaml (at the orphan check, or in the
+	// encrypt), and this run finishes that work (rerunLeft, finishReKey).
 	present := strings.Contains(string(raw), agePubkey)
 	var left []string
 	if present {
