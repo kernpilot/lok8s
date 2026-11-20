@@ -59,8 +59,9 @@ type Cmd struct {
 	// pid, so no other group can get the id of its group. Before each
 	// signal to the group, Run checks in /proc that the child is still
 	// there and not reaped (groupCmd). When a check fails, the group gets
-	// no more signals, the child alone gets the signals of a cancel, and
-	// Run returns an error that says the group was not stopped. Then Run
+	// no more signals, the child alone gets the signals of the stop through
+	// a pidfd (no signal without one), and Run returns an error that says
+	// the group was not stopped. Then Run
 	// waits up to WaitDelay for the output pipes, which a process outside
 	// the group can keep open. When the child ends first, a cancel during
 	// the stop does not change the result (see osRunner.Run). On other

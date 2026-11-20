@@ -29,6 +29,9 @@ var (
 	// waitid is unix.Waitid. A test replaces it to inject an error, or a
 	// reap by another waiter.
 	waitid = unix.Waitid
+	// pidfdOpen is unix.PidfdOpen. A test replaces it to run without a
+	// pidfd.
+	pidfdOpen = unix.PidfdOpen
 	// groupSignalHook, when not nil, is called right before each signal
 	// to the group, after the check (group.signal), with the start time
 	// of the leader that Run recorded.
@@ -55,10 +58,25 @@ var (
 // start time, and with the pid as its process group. When a check fails,
 // the group gets no more signals: the stop ends, cmd.Wait reaps, and Run
 // returns errGroupNotStopped in its error. A child that still runs then
-// gets the SIGTERM and SIGKILL of a cancel alone, through os.Process
-// (groupRun.signal). A window stays open: the time between the check and
-// the kill(2). The child is not reaped in that window only while the two
-// invariants hold.
+// gets the SIGTERM, SIGCONT and SIGKILL of the stop alone, through a pidfd
+// that Run opens right after the start (groupRun.signalChild), never
+// through its pid. Without a pidfd (an old kernel, or a seccomp filter),
+// the child alone gets no signal either.
+//
+// Only the two invariants close the first two gaps, and the stop has two
+// limits:
+//   - If another waiter reaps the child before Run opens the pidfd and
+//     reads /proc after the start, a new process with the same pid that
+//     leads its own group becomes the recorded leader, and the checks pass
+//     for it.
+//   - A window stays open between each check and its kill(2): a reap by
+//     another waiter in that window lets the signal reach a new group with
+//     the same id.
+//   - A SIGKILL that does not end the child (a child in uninterruptible
+//     sleep) blocks the wait for waitid, also in the panic guard.
+//   - With a zero WaitDelay, output pipes that a process outside the group
+//     keeps open, or blocking I/O of the caller, block cmd.Wait; then a
+//     panic also waits without a bound.
 func groupCmd(ctx context.Context, path string, args []string, waitDelay time.Duration) (*exec.Cmd, func() error) {
 	cmd := exec.Command(path, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -125,6 +143,9 @@ type groupRun struct {
 	exitSeen  bool       // exited was read, into waitErr
 	waitErr   error
 	termAt    time.Time // the time of the SIGTERM of the stop; zero: not sent
+	// pidfd refers to the child; -1 when the kernel gave none. After a
+	// lost group, the child alone gets signals only through it.
+	pidfd int
 }
 
 // runGroup starts cmd, waits for the end of the child or of ctx, stops the
@@ -139,7 +160,16 @@ func runGroup(ctx context.Context, cmd *exec.Cmd, waitDelay time.Duration) error
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	r := &groupRun{cmd: cmd, g: newGroup(cmd.Process.Pid), waitDelay: waitDelay, exited: make(chan error, 1)}
+	// Right after the start only this runner can reap the child (the
+	// invariants of groupCmd), so the pidfd refers to the child. Its
+	// close is deferred before the panic guard: it runs after abort too.
+	pidfd, pidfdErr := pidfdOpen(cmd.Process.Pid, 0)
+	if pidfdErr != nil {
+		pidfd = -1
+	} else {
+		defer func() { _ = unix.Close(pidfd) }()
+	}
+	r := &groupRun{cmd: cmd, g: newGroup(cmd.Process.Pid), waitDelay: waitDelay, exited: make(chan error, 1), pidfd: pidfd}
 	go func() { r.exited <- waitExited(r.g.pgid) }()
 	// The guard of a panic after the start, for example in ctx.Done (a
 	// method of the context of the caller): abort stops the group with
@@ -203,13 +233,13 @@ func (r *groupRun) wait(ctx context.Context) error {
 // (stopMembers). After a waitid error the end of the child is not known
 // without a reap: the group gets SIGTERM now (when it did not get it), and
 // SIGKILL after the grace (stopGrace). A lost group gets no signal (owned):
-// the child alone gets them then, unless it has gone already.
+// the child alone gets them then (signalChild), while it can get them.
 func (r *groupRun) stop() {
 	if r.waitErr != nil {
 		if r.termAt.IsZero() {
 			_ = r.term()
 		}
-		if !r.g.lost || !r.childGone() {
+		if !r.g.lost || r.childAlive() {
 			time.Sleep(time.Until(r.termAt.Add(stopGrace(r.waitDelay))))
 			_ = r.signal(syscall.SIGKILL)
 		}
@@ -271,23 +301,34 @@ func (r *groupRun) term() error {
 }
 
 // signal sends sig to the group (group.signal). When the group is lost,
-// the child alone gets sig, through cmd.Process: os.Process sends through
-// a pidfd when the kernel has one, and sends nothing after its own Wait.
-// A child that has gone gives no error.
+// the child alone gets sig (signalChild).
 func (r *groupRun) signal(sig syscall.Signal) error {
 	if sent, err := r.g.signal(sig); sent {
 		return err
 	}
-	if err := r.cmd.Process.Signal(sig); !errors.Is(err, os.ErrProcessDone) {
+	return r.signalChild(sig)
+}
+
+// signalChild sends sig to the child alone, through its pidfd: a pidfd
+// refers to one process, so the signal cannot reach a new process with
+// the same pid. A child that has gone (ESRCH) gives no error. Without a
+// pidfd it sends nothing: a pid alone does not show which process gets
+// the signal.
+func (r *groupRun) signalChild(sig syscall.Signal) error {
+	if r.pidfd < 0 {
+		return nil
+	}
+	if err := unix.PidfdSendSignal(r.pidfd, sig, nil, 0); !errors.Is(err, unix.ESRCH) {
 		return err
 	}
 	return nil
 }
 
-// childGone reports whether the child has gone (another waiter reaped it):
-// a signal 0 through cmd.Process gives os.ErrProcessDone.
-func (r *groupRun) childGone() bool {
-	return errors.Is(r.cmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone)
+// childAlive reports whether the child alone can still get a signal: a
+// signal 0 through its pidfd works (also for a zombie). It is false when
+// another waiter reaped the child, and without a pidfd.
+func (r *groupRun) childAlive() bool {
+	return r.pidfd >= 0 && unix.PidfdSendSignal(r.pidfd, 0, nil, 0) == nil
 }
 
 // waitExited waits until the child pid has ended, and does not reap it:
