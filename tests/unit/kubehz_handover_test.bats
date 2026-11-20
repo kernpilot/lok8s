@@ -120,13 +120,15 @@ _mock_node_binaries() {
 # `_node_hook TOOL ARG` prints the remote command of an ssh call or the
 # destination of an scp call. A test redefines it to change one call, or to
 # fail it before it runs (a status that is not 0). For scp, the hook prints
-# to the stdout of scp on fd 3.
+# to the stdout of scp on fd 3. The ssh of the fake node is _node_ssh, so a
+# test can wrap it in its own ssh.
 _fake_node() {
   export NODE_ROOT="${BATS_TEST_TMPDIR}/node"
   mkdir -p "${NODE_ROOT}/etc/kubernetes"
   chmod 755 "${NODE_ROOT}/etc/kubernetes"
   _node_hook() { printf '%s\n' "${2}"; }
-  ssh() {
+  ssh() { _node_ssh "$@"; }
+  _node_ssh() {
     echo "ssh $*" >> "${CALLS}"
     local cmd out rc=0
     cmd="$(_node_hook ssh "${@: -1}")" || return
@@ -140,7 +142,7 @@ _fake_node() {
     { dst="$(_node_hook scp "${@: -1}")"; } 3>&1 || return
     cat -- "${@: -2:1}" > "${NODE_ROOT}${dst#*:}"
   }
-  export -f _node_hook ssh scp
+  export -f _node_hook ssh _node_ssh scp
 }
 
 # The remote command of preseed's stage call, spelled out: a check of each
@@ -1630,6 +1632,90 @@ EOF
   done
 }
 
+@test "handover preseed: a signal after the install call ran makes the state UNKNOWN, also after a chmod step line" {
+  # bash sees a status above 128 for an ssh client that a signal killed and
+  # for a remote command that a signal killed. Both say UNKNOWN: the node
+  # can have run steps after the last line that came back. Exit 0
+  # pre-seeds. The ssh here is a function of this test. A guard ssh first on
+  # PATH fails the test if a program named ssh runs instead.
+  _make_bundle
+  _fake_node
+  local guard="${BATS_TEST_TMPDIR}/guard"
+  mkdir -p "${guard}"
+  printf '#!/bin/sh\necho "ssh on PATH ran: $*" >> "%s"\nexit 99\n' "${guard}/ran" > "${guard}/ssh"
+  chmod 755 "${guard}/ssh"
+  PATH="${guard}:${PATH}"
+  # The stub ssh: the ssh of the fake node. For the install call of a
+  # "killed" case it then sends SIGKILL to its own process (the command
+  # substitution of the lib that runs it), after its output went out.
+  ssh() {
+    local rc=0
+    _node_ssh "$@" || rc=$?
+    [[ "${CLIENT}" != killed* || "${*: -1}" != *" && mv -f -T "* ]] || kill -KILL "${BASHPID}"
+    return "${rc}"
+  }
+  _node_hook() {
+    local cmd="${2}"
+    if [[ "${1}" == ssh && "${cmd}" == *" && mv -f -T "* ]]; then
+      case "${CLIENT}" in
+        # The node runs the whole install, but only the first three step
+        # lines come back.
+        killed) cmd="{ ${cmd}; } | sed -n 1,3p" ;;
+        # The stub dies before the node runs a step.
+        killed-first) cmd=":" ;;
+        # A command on the node dies of a signal after the third step line.
+        remote) cmd="{ ${cmd}; } | sed -n 1,3p; kill -KILL \$\$" ;;
+      esac
+    fi
+    printf '%s\n' "${cmd}"
+  }
+  export -f ssh _node_hook
+  local unknown="handover: the install call on 203.0.113.7 ended with exit 137 (a signal, to ssh or to a command on the node), so the state of the install is UNKNOWN:"
+  local dests="/etc/kubernetes/pki/ca.crt /etc/kubernetes/pki/ca.key /etc/kubernetes/pki/sa.pub /etc/kubernetes/pki/sa.key"
+  dests+=" /etc/kubernetes/pki/front-proxy-ca.crt /etc/kubernetes/pki/front-proxy-ca.key"
+  local third='the last step that arrived is "chmod sa.pub", and later steps can have run'
+  local client want key
+  local -a placed
+  for client in done killed killed-first remote; do
+    rm -rf "${NODE_ROOT}/etc/kubernetes/pki"
+    : > "${CALLS}"
+    export CLIENT="${client}"
+    placed=("${KUBEHZ_HANDOVER_PKI_KEYS[@]}")
+    case "${client}" in
+      done) want="handover: PKI pre-seeded on 203.0.113.7." ;;
+      killed | remote) want="${unknown} ${third}. Check each of these files on 203.0.113.7: ${dests}" ;;
+      killed-first)
+        want="${unknown} no step arrived, but steps can have run. Check each of these files on 203.0.113.7: ${dests}"
+        placed=()
+        ;;
+    esac
+    [ "$(type -t ssh)" = function ] || { echo "${client}: ssh is not the stub: $(type -t ssh)"; return 1; }
+    run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+    [ ! -e "${guard}/ran" ] || { echo "${client}: a program named ssh ran:"; cat "${guard}/ran"; return 1; }
+    grep -q -F -- " && mv -f -T " "${CALLS}" || { echo "${client}: the stub ssh did not get the install call"; return 1; }
+    if [[ "${client}" == done ]]; then
+      assert_success
+      assert_output --partial "${want}"
+      refute_output --partial "UNKNOWN"
+    else
+      assert_failure
+      assert_output --partial "${want}"
+      refute_output --partial "PKI pre-seeded"
+      refute_output --partial "no file was moved"
+      refute_output --partial "could not remove the staging files"
+      run tail -n 1 "${CALLS}"
+      assert_output --regexp '^ssh .* root@203\.0\.113\.7 rm -f -- /etc/kubernetes/pki/\.'
+    fi
+    run _staging_left
+    assert_output ""
+    _assert_installed "${placed[@]}"
+    for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]:${#placed[@]}}"; do
+      [[ ! -e "${NODE_ROOT}/etc/kubernetes/pki/${key}" ]] ||
+        { echo "${client}: ${key} went into place, but the node did not run its mv"; return 1; }
+    done
+  done
+}
+
 @test "handover preseed: an untrusted dir on the path of the pki dir is refused before any scp, and the message names what stat showed" {
   # The stage call refuses before its first mktemp, when a dir on the path
   # is not a dir (a link or a file), has a write bit for the group or others,
@@ -1650,10 +1736,10 @@ EOF
     chmod 755 "${NODE_ROOT}/etc" "${NODE_ROOT}/etc/kubernetes"
     [[ "${uid}" != 0 ]] || chown "${uid}" "${NODE_ROOT}/etc" "${NODE_ROOT}/etc/kubernetes"
     : > "${CALLS}"
-    export CASE="${n}" OTHER_UID="$(( owner + 1 ))"
+    export CASE="${n}" OTHER_UID="$(( owner + 1 ))" SSH_UID="${owner}"
     _node_hook() {
       local cmd="${2}" pki="${NODE_ROOT}/etc/kubernetes/pki"
-      local idu='"$(id -u)"' other="\"${OTHER_UID}\""
+      local idu='"$(id -u)"' other="\"${OTHER_UID}\"" user="\"${SSH_UID}\""
       [[ "${cmd}" == 'umask 077 && echo "check '* ]] || { printf '%s\n' "${cmd}"; return 0; }
       case "${CASE}" in
         file) rm -rf "${pki}" && : > "${pki}" && chmod 600 "${pki}" ;;
@@ -1661,10 +1747,13 @@ EOF
         owner) cmd="${cmd//"${idu}"/"${other}"}" ;;
         # The check of / reads /tmp, a dir of root that others can write.
         rootwrite) cmd="${cmd/"-- /)"/"-- /tmp)"}" && cmd="${cmd/"find / -maxdepth"/"find /tmp -maxdepth"}" ;;
-        # The check of /etc reads NODE_ROOT/etc, a dir of the ssh user.
+        # The check of /etc reads NODE_ROOT/etc, a dir of the ssh user: the
+        # fake node answers id -u with its owner (as root, 4242), so a rule
+        # that lets the ssh user own /etc lets it pass.
         etcuser)
           cmd="${cmd/"-- /etc)"/"-- ${NODE_ROOT}/etc)"}"
           cmd="${cmd/"find /etc -maxdepth"/"find ${NODE_ROOT}/etc -maxdepth"}"
+          cmd="${cmd//"${idu}"/"${user}"}"
           ;;
       esac
       printf '%s\n' "${cmd}"
