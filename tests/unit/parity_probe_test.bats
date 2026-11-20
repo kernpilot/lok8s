@@ -18,8 +18,10 @@ setup() {
   # A stand-in lo for the probe's `lo version`. It writes to FAKE_LO_LOG
   # where each host tool resolves on the PATH that it got, and the answer
   # of `docker --version`. FAKE_LO_CALL="<impl> <argv...>" makes one more
-  # tool call in the run of that implementation. It prints a bash row when
-  # the project file selects bash, as the frozen tree does.
+  # tool call in the run of that implementation. FAKE_LO_BREAK_LOG=1 puts a
+  # directory in place of the stub log first, so a stub cannot write its
+  # line. It prints a bash row when the project file selects bash, as the
+  # frozen tree does.
   cat >"${BATS_TEST_TMPDIR}/lo" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -28,6 +30,9 @@ for tool in docker kubectl kind tilt helm hcloud ssh curl; do
   printf '%s %s %s\n' "${impl}" "${tool}" "$(type -P "${tool}")" >>"${FAKE_LO_LOG}"
 done
 printf '%s docker--version %s\n' "${impl}" "$(docker --version)" >>"${FAKE_LO_LOG}"
+if [[ -n "${FAKE_LO_BREAK_LOG:-}" ]]; then
+  rm -f ../probe-refused.log && mkdir -p ../probe-refused.log
+fi
 read -r -a call <<<"${FAKE_LO_CALL:-}"
 if [[ "${call[0]:-}" == "${impl}" ]]; then
   "${call[@]:1}" >/dev/null 2>&1 || true
@@ -58,6 +63,15 @@ teardown() {
 run_init() {
   run env -u PARITY_KEEP "$@" bash -c 'source "$1" && parity::init "$2" && echo "probe passed"' \
     _ "${LIB}" "${BATS_TEST_TMPDIR}/lo"
+}
+
+# run_case <script>: the library in a child bash, with ROOT, WORK and the
+# stub log set, and a project P whose .bin links the stand-in toolchain (as
+# parity::new_project links the real one). Then <script>.
+run_case() {
+  run bash -c 'source "$1" && ROOT="$2" && WORK="$3" && PARITY_PROBE_LOG="$3/refused.log" &&
+    mkdir -p "$3" "$4" && ln -s "$2/.bin" "$4/.bin" && P="$4" && '"${1}" \
+    _ "${LIB}" "${ROOT_FAKE}" "${BATS_TEST_TMPDIR}/work" "${PROBE}"
 }
 
 # run_lib <script>: the library sourced in a child bash, ROOT set to the
@@ -148,7 +162,7 @@ run_lib() {
 }
 
 @test "probe_selfcheck: docker found past the probe stub exits 2 and names both paths" {
-  run_lib 'parity::probe_bin "$1" "$2" && rm "$1/.bin/docker" && parity::probe_selfcheck "$1" && echo "selfcheck passed"'
+  run_lib 'parity::probe_bin "$1" "$2" && rm "$1/.bin/docker" && parity::probe_selfcheck "$1" "$2" && echo "selfcheck passed"'
   [ "${status}" -eq 2 ]
   [[ "${output}" == *"error: the probe PATH resolves docker to ${BATS_TEST_TMPDIR}/stub-bin/docker, not to its stub ${PROBE}/.bin/docker"* ]]
   [[ "${output}" != *"selfcheck passed"* ]]
@@ -164,4 +178,62 @@ run_lib() {
   [[ "${output}" == *"error: the probe PATH resolves docker to ${BATS_TEST_TMPDIR}/stub-bin/docker, not to its stub "*"/probe/.bin/docker"* ]]
   [[ "${output}" != *"probe passed"* ]]
   [ ! -e "${FAKE_LO_LOG}" ]
+}
+
+@test "prove_switch: a stub log that cannot be written stops with exit 2 before lo runs" {
+  # probe_bin of the library, wrapped: the log becomes a link to /dev/null,
+  # where each write succeeds and nothing stays.
+  run env -u PARITY_KEEP bash -c 'source "$1" &&
+    eval "orig_$(declare -f parity::probe_bin)" &&
+    parity::probe_bin() { orig_parity::probe_bin "$@" && rm -f "$2" && ln -s /dev/null "$2"; } &&
+    parity::init "$2" && echo "probe passed"' _ "${LIB}" "${BATS_TEST_TMPDIR}/lo"
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"error: the probe cannot write its stub log "*"/probe-refused.log: a refused call would leave no line"* ]]
+  [[ "${output}" != *"probe passed"* ]]
+  [ ! -e "${FAKE_LO_LOG}" ]
+}
+
+@test "prove_switch: a refused call whose log line was lost still fails the harness with exit 2" {
+  run_init FAKE_LO_BREAK_LOG=1 FAKE_LO_CALL="bash docker ps"
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"error: the probe cannot write its stub log "*"/probe-refused.log: a refused call would leave no line"* ]]
+  [[ "${output}" != *"probe passed"* ]]
+  [ "$(grep -c '^go ' "${FAKE_LO_LOG}")" -eq 0 ]
+}
+
+@test "probe_case: the case runs with the probe stubs, then the project gets its own .bin and PATH back" {
+  run_case 'count=0
+    case_cmd() {
+      echo "case: $(type -P docker) $(docker --version) $([[ -L "$P/.bin" ]] && echo link || echo dir)"
+      count=$((count + 1))
+    }
+    parity::probe_case "$P" case_cmd
+    echo "after: $(readlink "$P/.bin") $(type -P docker) count=${count}"'
+  [ "${status}" -eq 0 ]
+  grep -qx "case: ${PROBE}/.bin/docker parity-stub v0.0.0 dir" <<<"${output}"
+  # The project link is back, PATH finds the host docker again (here the
+  # net stub), and the case counted in this shell.
+  grep -qx "after: ${ROOT_FAKE}/.bin ${BATS_TEST_TMPDIR}/stub-bin/docker count=1" <<<"${output}"
+}
+
+@test "probe_case: a refused call in the case fails the harness with exit 2 and names the call" {
+  run_case 'case_cmd() { docker ps >/dev/null 2>&1 || true; echo "case ran"; }
+    parity::probe_case "$P" case_cmd
+    echo "after the case"'
+  [ "${status}" -eq 2 ]
+  grep -qx '  docker ps' <<<"${output}"
+  [[ "${output}" == *"case ran"* ]]
+  [[ "${output}" != *"after the case"* ]]
+}
+
+@test "probe_case: a probe bin without the docker stub stops with exit 2 before the case runs" {
+  # The stand-in toolchain has a docker, so the probe .bin keeps the link
+  # to it: the path is the stub's, but the file is not the stub.
+  run_case 'eval "orig_$(declare -f parity::probe_stub)"
+    parity::probe_stub() { [[ "$2" == docker ]] || orig_parity::probe_stub "$@"; }
+    case_cmd() { echo "case ran"; }
+    parity::probe_case "$P" case_cmd'
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"error: the probe PATH resolves docker to ${PROBE}/.bin/docker -> ${ROOT_FAKE}/.bin/docker, not to its stub ${PROBE}/.bin/docker"* ]]
+  [[ "${output}" != *"case ran"* ]]
 }

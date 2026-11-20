@@ -262,6 +262,8 @@ PARITY_ROUTE_GO=bogus expect_rc 1 "${BI}" version
 PARITY_ROUTE_GO=bogus expect_rc 1 "${BI}" lint
 PARITY_ROUTE_GO=assets expect_rc 1 "${BI}" version
 PARITY_ROUTE_GO=r expect_rc 1 "${BI}" version
-PARITY_ROUTE_GO=registry expect_rc 0 "${BI}" version           # a valid entry: the rest stays Go
+# A valid entry: the rest stays Go, and Go's lo version runs each tool that
+# it finds, docker included, so this case runs with the probe stubs.
+PARITY_ROUTE_GO=registry parity::probe_case "${BI}" expect_rc 0 "${BI}" version
 
 report

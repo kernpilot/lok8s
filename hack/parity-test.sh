@@ -27,8 +27,10 @@ check - use nonexistent.dev
 check - use '../evil'
 check - use gamma.app
 
-# lo version — the Go binary intentionally drops the `bash` row.
-check '^bash ' version
+# lo version — the Go binary intentionally drops the `bash` row. It runs
+# each tool that it finds, docker included, so the case runs with the
+# probe stubs (parity::probe_case): the tool rows show the stub line.
+parity::probe_case "${PROJ}" check '^bash ' version
 
 # A project with NO .lok8s whose project file says `default: bash`: a
 # routing needs the tree IN the project, so the binary refuses with the

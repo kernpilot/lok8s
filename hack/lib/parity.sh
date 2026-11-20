@@ -93,15 +93,15 @@ parity::init() {
 # they find, docker included (internal/cli/cmd_version.go versionTools,
 # .lok8s/libs/version). So the probe has its own .bin (parity::probe_bin),
 # first on its PATH (parity::probe_path), with a stub for each host tool.
-# Exit 2 also when the PATH does not resolve a host tool to its stub
-# (parity::probe_selfcheck), or when a stub refused a call
-# (parity::probe_refused).
+# Exit 2 also when the PATH does not resolve a host tool to its stub or
+# the stub log cannot be written (parity::probe_selfcheck), or when a stub
+# refused a call (parity::probe_refused).
 parity::prove_switch() {
   local probe="${WORK}/probe" out
   PARITY_PROBE_LOG="${WORK}/probe-refused.log"
   parity::new_project "${probe}"
   parity::probe_bin "${probe}" "${PARITY_PROBE_LOG}"
-  parity::probe_selfcheck "${probe}"
+  parity::probe_selfcheck "${probe}" "${PARITY_PROBE_LOG}"
   parity::implementation "${probe}" bash
   out="$(cd "${probe}" && PATH="$(parity::probe_path "${probe}")" "${LO_BIN}" version </dev/null 2>&1)" || true
   parity::probe_refused
@@ -173,14 +173,19 @@ parity::probe_path() {
   printf '%s\n' "${1}/.bin:${PATH}"
 }
 
-# parity::probe_selfcheck <dir>: exit 2 unless the probe's PATH resolves
+# parity::probe_selfcheck <dir> <log>: exit 2 unless the stub log <log>
+# can be written (parity::probe_log_check) and the probe's PATH resolves
 # each tool of PARITY_PROBE_TOOLS to its stub in <dir>/.bin. A tool that
 # resolves to a host file (for example /usr/bin/docker) would run for real.
+# The stub is a file: a link there is the toolchain entry that no stub
+# replaced.
 parity::probe_selfcheck() {
   local dir="${1}" entry tool got
+  parity::probe_log_check "${2}"
   for entry in "${PARITY_PROBE_TOOLS[@]}"; do
     tool="${entry%%=*}"
     got="$(PATH="$(parity::probe_path "${dir}")"; type -P "${tool}")" || got=""
+    if [[ -L "${got}" ]]; then got="${got} -> $(readlink "${got}")"; fi
     if [[ "${got}" != "${dir}/.bin/${tool}" ]]; then
       printf 'error: the probe PATH resolves %s to %s, not to its stub %s\n' \
         "${tool}" "${got:-nothing}" "${dir}/.bin/${tool}" >&2
@@ -191,12 +196,51 @@ parity::probe_selfcheck() {
 
 # parity::probe_refused: exit 2 when a probe stub refused a call (its log
 # is not empty). Each line names a host tool call that the probe made.
+# Then the log must still be writable (parity::probe_log_check): if a stub
+# could not write its line, the empty log does not prove that no stub
+# refused a call.
 parity::probe_refused() {
-  if [[ -s "${PARITY_PROBE_LOG}" ]]; then
+  if [[ -f "${PARITY_PROBE_LOG}" && -s "${PARITY_PROBE_LOG}" ]]; then
     echo "error: the probe called a host tool that it must not run (a parity stub refused it):" >&2
     sed 's/^/  /' "${PARITY_PROBE_LOG}" >&2
     exit 2
   fi
+  parity::probe_log_check "${PARITY_PROBE_LOG}"
+}
+
+# parity::probe_log_check <log>: exit 2 unless a line written to <log>
+# reads back and <log> can be emptied again. A stub that cannot write its
+# line refuses a call and leaves no trace, so the guard fails closed: the
+# probe checks the log before lo runs and after each run.
+parity::probe_log_check() {
+  local log="${1}" line="parity probe: the stub log can be written"
+  if { printf '%s\n' "${line}" >>"${log}"; } 2>/dev/null \
+     && [[ -f "${log}" && "$(cat "${log}")" == "${line}" ]] \
+     && { : >"${log}"; } 2>/dev/null; then
+    return 0
+  fi
+  echo "error: the probe cannot write its stub log ${log}: a refused call would leave no line" >&2
+  exit 2
+}
+
+# parity::probe_case <dir> <command...>: one case command (check,
+# expect_rc, ...) that runs `lo version` in <dir>, a project that links
+# the real toolchain (parity::new_project). For that command, <dir>/.bin
+# is a probe .bin (parity::probe_bin), first on PATH, as in the probe.
+# Then the project's own .bin and the PATH come back. The command runs in
+# this shell, so it counts its failure as before. Exit 2 as in the probe.
+parity::probe_case() {
+  local dir="${1}" saved="${WORK}/probe-case.bin" path="${PATH}"
+  shift
+  mv "${dir}/.bin" "${saved}"
+  parity::probe_bin "${dir}" "${PARITY_PROBE_LOG}"
+  parity::probe_selfcheck "${dir}" "${PARITY_PROBE_LOG}"
+  PATH="$(parity::probe_path "${dir}")"
+  "$@"
+  PATH="${path}"
+  parity::probe_refused
+  rm -rf "${dir}/.bin"
+  mv "${saved}" "${dir}/.bin"
 }
 
 # parity::cleanup: the EXIT trap. A harness-defined parity_cleanup hook
