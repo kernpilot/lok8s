@@ -511,7 +511,7 @@ func TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile(t *testing.T) {
 			if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .gitignore was not written — remove it, then run lo secrets encrypt\n"
+			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -704,6 +704,40 @@ func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
 				}
 			}
 			f.rekeyed("app", "v")
+		})
+	}
+}
+
+// add-key checks the .gitignore of the store before its first write, the
+// lock file included: a .gitignore that is a symlink is refused with one
+// line, also for a recipient that is already there, and nothing is
+// written (bash: tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run("present="+strconv.FormatBool(present), func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			gitignore := f.store + "/.gitignore"
+			if err := os.Remove(gitignore); err != nil {
+				t.Fatal(err)
+			}
+			outside := f.c.Paths.Base + "/elsewhere/gitignore"
+			write(t, outside, "# not the rules of lok8s\n")
+			if err := os.Symlink(outside, gitignore); err != nil {
+				t.Fatal(err)
+			}
+			if present {
+				sopsRules(t, f.c, f.keep.Recipient().String()+","+f.gone.Recipient().String())
+			}
+			before := fileStates(t, f.c.Paths.Base)
+
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+			}
+			want := "[error] " + f.c.rel(gitignore) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
+			if f.errOut.String() != want || f.out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, f.c.Paths.Base))
 		})
 	}
 }

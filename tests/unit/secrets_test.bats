@@ -208,10 +208,38 @@ _gitignore_refused() { # <link|dir>
   before="$(_states)"
   run secrets::encrypt
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .gitignore was not written — remove it, then run lo secrets encrypt" ] || {
+  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ ! -s "${log}" ] || { echo "encrypted: $(cat "${log}")" >&2; return 1; }
   [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
+}
+
+# init checks the .gitignore of the store before its first write, and a
+# rerun with a config checks it too. Its status is the refusal's: 1, no
+# .sops.yaml, and the file that the link names keeps its bytes (Go twin:
+# TestInitRefusesABadGitignoreBeforeAnyWrite). ssh-to-age and sops are
+# functions: no crypto tools.
+@test "secrets init: a .gitignore that is a symlink is refused before the config is written, also on a rerun" {
+  ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  sops() { :; }
+  printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  local outside="${BATS_TEST_TMPDIR}/elsewhere/gitignore" line
+  mkdir -p "${outside%/*}"
+  printf '# not the rules of lok8s\n' > "${outside}"
+  ln -s "${outside}" "${PATH_SECRETS}/.gitignore"
+  line="[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote the config" >&2; return 1; }
+  [ "$(cat "${outside}")" = '# not the rules of lok8s' ]
+
+  printf "creation_rules:\n  - path_regex: 'Secret\\\\..*'\n    age: '%s'\n" "$(ssh-to-age)" > "${PATH_BASE}/.sops.yaml"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "the rerun: status $status: $output" >&2; return 1; }
+  [ "$output" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${outside}")" = '# not the rules of lok8s' ]
 }
 
 @test "secrets encrypt: a .gitignore that is a symlink is refused, and the file it names is not written" {

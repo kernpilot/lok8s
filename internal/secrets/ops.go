@@ -50,6 +50,12 @@ func (c *Context) Init(sshKey string) error {
 
 	sopsConfig := c.sopsConfigPath()
 
+	// Before the first write (the config), and on a rerun with a config
+	// too: the .gitignore of the store that init writes (gitignoreOK).
+	if !c.gitignoreOK(c.initStorePath()) {
+		return ErrHandled
+	}
+
 	if fsutil.IsRegular(sopsConfig) {
 		raw, _ := os.ReadFile(sopsConfig)
 		// Check if this key is already present
@@ -128,10 +134,11 @@ func grepQF(content, pattern string) bool {
 // new recipient would appear to be added while some secrets stayed unreadable
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
-// the ordering is part of the observable contract. A store of the context
-// that does not resolve, and an .enc of the store that the encrypt refuses
-// (a symlink, a directory, a FIFO, a socket or a device), are refused
-// BEFORE the write, so the run cannot stop half way at them.)
+// the ordering is part of the observable contract. A .gitignore of the
+// store that is not a regular file, a store of the context that does not
+// resolve, and an .enc of the store that the encrypt refuses (a symlink, a
+// directory, a FIFO, a socket or a device), are refused BEFORE the write,
+// so the run cannot stop half way at them.)
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -144,6 +151,13 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
+		return ErrHandled
+	}
+	// Before the first write (the lock file): the .gitignore of the store
+	// that the encrypt below writes (gitignoreOK). A store that does not
+	// resolve is refused below (encryptTargets), and StorePath names
+	// another store then.
+	if !c.gitignoreOK(c.StorePath()) {
 		return ErrHandled
 	}
 	// The file that the lock, the read and the write use, resolved once

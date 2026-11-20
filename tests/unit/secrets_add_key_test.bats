@@ -157,11 +157,12 @@ _add() { # <key> [all] [skip_orphans]
 @test "without flock, add-key refuses before .sops.yaml is touched and makes no lock file" {
   # A run without the lock can undo another run's change. The PATH has the
   # tools of the run and no flock: a link to each one found on PATH (mv too:
-  # the check for a mv that takes -T comes before the lock).
+  # the check for a mv that takes -T comes before the lock; ls too: the check
+  # of the .gitignore before the lock looks up a path that is absent with it).
   _load
   local bin="${BATS_TEST_TMPDIR}/no-flock" tool path
   mkdir -p "${bin}"
-  for tool in sops grep sed cat mv; do
+  for tool in sops grep sed cat mv ls; do
     path="$(type -P "${tool}")" || continue
     ln -s "${path}" "${bin}/${tool}"
   done
@@ -471,6 +472,28 @@ _ls_then_missing() {
   [ -f "${store}/.gitignore" ] || { echo "the encrypt wrote no .gitignore" >&2; return 1; }
   [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.db.default.KEY" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
   [ "$(cat "${store}/Secret.db.default.KEY.enc")" = "stub-enc w" ]
+}
+
+@test "a .gitignore of the store that is a symlink is refused before any write, also for a recipient that is already there" {
+  # The check comes before the lock file, the .sops.yaml write and the
+  # touch of the plaintexts (Go twin: TestAddKeyRefusesABadGitignoreBeforeAnyWrite).
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" outside="${BATS_TEST_TMPDIR}/elsewhere/gitignore" key before
+  mkdir -p "${outside%/*}"
+  printf '# not the rules of lok8s\n' > "${outside}"
+  ln -s "${outside}" "${store}/.gitignore"
+  printf 'v' > "${store}/Secret.app.default.K"
+  touch -t 200001010000 "${store}/Secret.app.default.K"
+  for key in "${KEY_B}" "${KEY_A}"; do
+    before="$(_state "${PATH_BASE}" "${store}" "${outside%/*}")"
+    DOMAIN=a.dev run _add "${key}"
+    [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${store}/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again" ] || {
+      echo "$output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}" "${store}" "${outside%/*}")" = "${before}" ] || { echo "${key}: a write" >&2; return 1; }
+    [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "${key}: a lock file" >&2; return 1; }
+    [ ! -s "${ENCRYPT_RAN}" ]
+  done
 }
 
 @test "add-key encrypts every file of the list that it checked, also one whose .enc is dated in the future" {

@@ -178,6 +178,11 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
 
+Each store has a `.gitignore` that commits only the `.enc` files. When that
+`.gitignore` is not a regular file (a symlink, a directory, a FIFO, a socket
+or a device), `init`, `add-key` and `encrypt` stop before they change a
+file: remove it, then run the command again.
+
 `encrypt` skips a plaintext whose `.enc` file is newer. No command gives an
 `.enc` file a time after the current time. A plaintext with a time in the
 future stays the newer file: each encrypt writes its `.enc` file again and
