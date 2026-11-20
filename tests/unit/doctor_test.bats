@@ -133,3 +133,102 @@ YAML
   assert_failure
   assert_output "[error] argsh is missing at ${bin}/argsh: lo runs on it (fix: b install)"
 }
+
+# ── doctor::_kind: the minimum kind release ──────────────────────────────────
+# The kind config that lo up renders sets networking.dnsSearch, which needs
+# kind v0.18.0. Go twin: TestDoctorKindMinimumRelease
+# (internal/cli/cmd_doctor_test.go), with the same lines.
+
+_kind_purpose="local clusters (Lo driver)"
+_kind_need="lo up needs kind v0.18.0 or later for networking.dnsSearch"
+
+# _kind_run <kind version output, printf %b> [<kind exit code>] — runs
+# doctor::_kind with a stub kind first on PATH. The stub answers only
+# `kind version`; any other argv exits 98 (a version unknown line).
+_kind_run() {
+  local bin="${BATS_TEST_TMPDIR}/kind-bin"
+  mkdir -p "${bin}"
+  printf '%b' "${1}" > "${bin}/kind.out"
+  printf '#!/usr/bin/env bash\n[[ "$*" == version ]] || exit 98\ncat "%s"\nexit %s\n' \
+    "${bin}/kind.out" "${2:-0}" > "${bin}/kind"
+  chmod +x "${bin}/kind"
+  PATH="${bin}:${PATH}" run doctor::_kind "${_kind_purpose}"
+}
+
+_kind_older() {
+  assert_failure
+  assert_output "  ✗ kind ${1} — ${_kind_purpose}; ${_kind_need} (fix: b update kind)"
+}
+
+_kind_pass() {
+  assert_success
+  assert_output "  ✓ kind — ${_kind_purpose}"
+}
+
+_kind_unknown() {
+  assert_success
+  assert_output "  ! kind — ${_kind_purpose}; version unknown, ${_kind_need}"
+}
+
+@test "doctor::_kind fails on a kind older than v0.18.0" {
+  _kind_run 'kind v0.17.0 go1.19.4 linux/amd64\n'
+  _kind_older v0.17.0
+  # The minor and the patch compare as numbers, not as text.
+  _kind_run 'kind v0.9.0 go1.15.2 linux/amd64\n'
+  _kind_older v0.9.0
+  _kind_run 'kind v0.17.9\n'
+  _kind_older v0.17.9
+  # A pre-release of an older release fails, and the line names only the
+  # matched numbers.
+  _kind_run 'kind v0.17.0-rc.1+abc go1.19 linux/amd64\n'
+  _kind_older v0.17.0
+}
+
+@test "doctor::_kind passes v0.18.0 and later, also a pre-release of a later release" {
+  _kind_run 'kind v0.18.0 go1.20.2 linux/amd64\n'
+  _kind_pass
+  _kind_run 'kind v0.31.0-alpha.12+0123456789abcd go1.25.5 linux/amd64\n'
+  _kind_pass
+  _kind_run 'kind v1.0.0 go1.26.1 linux/amd64\n'
+  _kind_pass
+  # Only major.minor.patch count (the rule of the Go twin).
+  _kind_run 'kind v0.18.0-alpha.1 go1.20 linux/amd64\n'
+  _kind_pass
+  # Leading zeros compare as decimal numbers, not as octal.
+  _kind_run 'kind v0.018.0 go1.20 linux/amd64\n'
+  _kind_pass
+}
+
+@test "doctor::_kind warns when it cannot read the version" {
+  _kind_run 'kind vdev go1.25.5 linux/amd64\n'
+  _kind_unknown
+  _kind_run 'kind v0.18.0rc1 go1.20 linux/amd64\n'
+  _kind_unknown
+  _kind_run 'kind v0.1234567890.0 go1.20 linux/amd64\n'
+  _kind_unknown
+  _kind_run 'v0.18.0\n'
+  _kind_unknown
+  _kind_run 'kindest v0.32.0 go1.25.5 linux/amd64\n'
+  _kind_unknown
+  _kind_run ''
+  _kind_unknown
+  _kind_run '\nkind v0.32.0 go1.25.5 linux/amd64\n'
+  _kind_unknown
+  _kind_run 'kind v0.32.0\r\n'
+  _kind_unknown
+  # A failed `kind version` is a warning, also with a valid line.
+  _kind_run 'kind v0.32.0 go1.25.5 linux/amd64\n' 1
+  _kind_unknown
+}
+
+@test "doctor::_kind without kind is the warning of an optional tool" {
+  local p="" d
+  local -a dirs=()
+  IFS=: read -r -a dirs <<< "${PATH}"
+  for d in "${dirs[@]}"; do
+    [[ -x "${d}/kind" ]] || p+="${p:+:}${d}"
+  done
+  PATH="${p}" run doctor::_kind "${_kind_purpose}"
+  assert_success
+  assert_output "  ! kind not found (optional) — ${_kind_purpose}"
+}

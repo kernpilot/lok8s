@@ -202,11 +202,86 @@ func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io
 		ok = false
 	}
 	for _, t := range doctorToolsPost {
+		if t.name == "kind" {
+			// kind has a minimum release (doctorKind).
+			if !doctorKind(ctx, r, out, path, t.purpose) {
+				ok = false
+			}
+			continue
+		}
 		if !doctorTool(out, path, t.name, t.required, t.purpose) {
 			ok = false
 		}
 	}
 	return ok
+}
+
+// doctorKindMin is the oldest kind release that the Lo driver can use. The
+// kind config that lo up renders sets networking.dnsSearch
+// (internal/driver/lo/render.go), and kind reads that field from v0.18.0.
+// An older kind stops at `kind create` with an unknown-field error. Bash
+// twin: DOCTOR_KIND_MIN in .lok8s/libs/doctor.
+const doctorKindMin = "v0.18.0"
+
+// kindVersionRe matches the version field of `kind version`, which prints
+// "kind v0.32.0 go1.25.5 linux/amd64" (a pre-release:
+// "kind v0.31.0-alpha.12+<commit> ..."). It reads major.minor.patch, and
+// after them only a "-", a "+" or the end. A number has 9 digits at most,
+// so the bash twin compares it with shell arithmetic and gets the same
+// result.
+var kindVersionRe = regexp.MustCompile(`^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+]|$)`)
+
+// doctorKind is the kind line of the tools section (bash: doctor::_kind).
+// kind is optional: when it is absent, the line is a warning. When it is
+// present, it must be doctorKindMin or later: an older kind is a failure
+// (false). Only major.minor.patch counts (toolchain.OlderRelease), so a
+// pre-release of a later release passes. A failed `kind version`, or an
+// output without the version field, is a warning.
+func doctorKind(ctx context.Context, r execx.Runner, w io.Writer, path, purpose string) bool {
+	kind, ok := toolchain.LookPath(path, "kind")
+	if !ok {
+		doctorWarn(w, "kind not found (optional) — "+purpose)
+		return true
+	}
+	need := "lo up needs kind " + doctorKindMin + " or later for networking.dnsSearch"
+	got, older, known := kindRelease(ctx, r, kind)
+	switch {
+	case !known:
+		doctorWarn(w, "kind — "+purpose+"; version unknown, "+need)
+		return true
+	case older:
+		doctorBad(w, "kind "+got+" — "+purpose+"; "+need+" (fix: b update kind)")
+		return false
+	}
+	doctorOK(w, "kind — "+purpose)
+	return true
+}
+
+// kindRelease runs `kind version` and returns the release (vX.Y.Z, the
+// matched numbers only, so no other byte of the output reaches the
+// report), whether it is older than doctorKindMin, and whether the version
+// is known. The fields of the first line are split at spaces and tabs only
+// (as bash `read` splits them); the first field must be "kind".
+func kindRelease(ctx context.Context, r execx.Runner, kind string) (string, bool, bool) {
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: kind, Args: []string{"version"}})
+	if err != nil {
+		return "", false, false
+	}
+	line, _, _ := strings.Cut(string(out), "\n")
+	f := strings.FieldsFunc(line, func(c rune) bool { return c == ' ' || c == '\t' })
+	if len(f) < 2 || f[0] != "kind" {
+		return "", false, false
+	}
+	m := kindVersionRe.FindStringSubmatch(f[1])
+	if m == nil {
+		return "", false, false
+	}
+	release := m[1] + "." + m[2] + "." + m[3]
+	older, err := toolchain.OlderRelease(release, doctorKindMin)
+	if err != nil {
+		return "", false, false
+	}
+	return "v" + release, older, true
 }
 
 // doctorEnvironmentSection is `--- environment ---` plus the toolchain
