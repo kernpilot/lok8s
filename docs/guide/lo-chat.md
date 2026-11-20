@@ -59,7 +59,13 @@ model runtime. Run the steps in the project directory.
    rm -rf "${T}"
    ```
 
-   `lo chat` looks for `.bin/lochat` first, then for `lochat` on PATH.
+   `lo chat` looks for `lochat` in PATH_BIN first, then on PATH. PATH_BIN
+   is the `.bin/` directory of the project. If you export PATH_BIN with
+   another directory, install the engine into that directory. A chat that
+   `lok8s.yaml` routes to the bash implementation (see
+   [Choosing the implementation](/reference/cli#choosing-the-implementation))
+   ignores an exported PATH_BIN and uses the `.bin/` directory of the
+   project.
 
 4. Install a local model runtime and pull a model (see
    [Choosing a model](#choosing-a-model)).

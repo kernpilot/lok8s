@@ -92,8 +92,7 @@ func TestChatPreflightErrors(t *testing.T) {
 	// The hint names the two places that were searched and points at the
 	// install steps of the guide. A user project has no lochat source, so the
 	// hint gives no build command.
-	wantHint := "[error] lochat binary not found in " + p.Bin + " or on PATH.\n" +
-		"[error] To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up\n"
+	wantHint := lochatHint(p.Bin)
 	if !errors.Is(err, ErrHandled) || stderr != wantHint {
 		t.Errorf("missing lochat: err=%v\n got stderr=%q\nwant stderr=%q", err, stderr, wantHint)
 	}
@@ -130,6 +129,102 @@ func TestChatPreflightErrors(t *testing.T) {
 	_, _, _ = runLo(t, NewRoot(p2), "chat")
 	if _, err := os.Stat(filepath.Join(p2.Lok8s, "chat")); err == nil {
 		t.Error("LO_ASSETS_EJECT=never still wrote .lok8s/chat")
+	}
+}
+
+// lochatHint is the hint for a missing lochat when PATH_BIN is bin.
+func lochatHint(bin string) string {
+	return "[error] lochat binary not found in " + bin + " or on PATH.\n" +
+		"[error] To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up\n"
+}
+
+// chatExecBin swaps execProcess for the test and returns the binary that
+// chat execs ("" until it execs).
+func chatExecBin(t *testing.T) *string {
+	t.Helper()
+	var got string
+	saved := execProcess
+	execProcess = func(bin string, _, _ []string) error { got = bin; return nil }
+	t.Cleanup(func() { execProcess = saved })
+	t.Setenv("LO_CHAT_CONFIG", "")
+	return &got
+}
+
+// lochatStub writes an executable lochat into dir and returns its path.
+func lochatStub(t *testing.T, dir string) string {
+	t.Helper()
+	bin := filepath.Join(dir, "lochat")
+	testutil.WriteFile(t, bin, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// The PATH fallback: no lochat in PATH_BIN and a lochat on PATH. The check
+// passes, the hint does not print, and chat runs the lochat from PATH (the
+// bats twin: tests/unit/chat_test.bats).
+func TestChatLochatOnPath(t *testing.T) {
+	p := chatProject(t)
+	if err := os.Remove(filepath.Join(p.Bin, "lochat")); err != nil {
+		t.Fatal(err)
+	}
+	onPath := t.TempDir()
+	want := lochatStub(t, onPath)
+	t.Setenv("PATH", onPath)
+	gotBin := chatExecBin(t)
+
+	_, stderr, err := runLo(t, NewRoot(p), "chat")
+	if err != nil || stderr != "" {
+		t.Errorf("a lochat on PATH: err=%v stderr=%q, want no error and no output", err, stderr)
+	}
+	if *gotBin != want {
+		t.Errorf("exec %q, want the lochat on PATH %q", *gotBin, want)
+	}
+}
+
+// PATH_BIN that is not <base>/.bin: chat looks in paths.Bin (resolved from
+// an exported PATH_BIN), never in a path rebuilt from the base. A decoy
+// lochat in <base>/.bin tells the two apart, when the check passes and in
+// the hint when it fails. A lochat on PATH too: the one in PATH_BIN wins.
+func TestChatLochatInPathBin(t *testing.T) {
+	synth := chatProject(t) // its lochat in <base>/.bin is the decoy
+	custom := t.TempDir()
+	t.Setenv("PATH_BASE", synth.Base)
+	t.Setenv("PATH_BIN", custom)
+	t.Setenv("PATH_LOK8S", "")
+	t.Setenv("PATH_CLUSTERS", "")
+	p, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Bin != custom || p.Lok8s != synth.Lok8s {
+		t.Fatalf("paths: Bin=%q Lok8s=%q, want %q and %q", p.Bin, p.Lok8s, custom, synth.Lok8s)
+	}
+	want := lochatStub(t, custom)
+	testutil.WriteFile(t, filepath.Join(custom, "argsh.so"), "")
+	onPath := t.TempDir()
+	lochatStub(t, onPath)
+	t.Setenv("PATH", onPath)
+	gotBin := chatExecBin(t)
+
+	_, stderr, err := runLo(t, NewRoot(p), "chat")
+	if err != nil || stderr != "" {
+		t.Errorf("a lochat in PATH_BIN: err=%v stderr=%q, want no error and no output", err, stderr)
+	}
+	if *gotBin != want {
+		t.Errorf("exec %q, want the lochat in PATH_BIN %q", *gotBin, want)
+	}
+
+	if err := os.Remove(want); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // no lochat on PATH
+	*gotBin = ""
+	_, stderr, err = runLo(t, NewRoot(p), "chat")
+	wantHint := lochatHint(custom)
+	if !errors.Is(err, ErrHandled) || stderr != wantHint || *gotBin != "" {
+		t.Errorf("no lochat in PATH_BIN: err=%v exec=%q\n got stderr=%q\nwant stderr=%q", err, *gotBin, stderr, wantHint)
 	}
 }
 
