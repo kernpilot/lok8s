@@ -281,8 +281,13 @@ kubehz::_hosted_kubeconfig_get() {
 # cannot be resolved and a directory are refused (one error line).
 # INT, TERM and HUP remove the temp file, then end the shell with that
 # signal. The traps are set before the temp file exists and read its path
-# when they run, so a signal while mktemp runs is covered too. The INT,
-# TERM and HUP traps of the caller come back when the function returns.
+# when they run, so a signal while mktemp runs is covered too. Without
+# mv -T, the rename can move the temp file into a directory that took the
+# place of the file. A signal during that mv runs the traps before the
+# check after the rename (kubehz::_publish_private), so the traps also
+# remove the moved file from that directory (kubehz::_drop_moved_temp).
+# The INT, TERM and HUP traps of the caller come back when the function
+# returns.
 # Not covered: SIGKILL, and a signal to the whole process group while
 # mktemp runs (mktemp then ends before it gives the name). Either can
 # leave the temp file (mode 0600, the name <file>.XXXXXX). A signal during
@@ -296,14 +301,16 @@ kubehz::_write_private() {
   }
   local dest="${1}" target sig saved_traps rc=0
   # The trap reads the temp path at run time: a name of its own, so that no
-  # local of the command (a function in this shell) hides it.
-  local _kubehz_wp_tmp=""
+  # local of the command (a function in this shell) hides it. The same for
+  # the path and the inode that kubehz::_publish_private records before a
+  # mv without -T (kubehz::_drop_moved_temp reads them).
+  local _kubehz_wp_tmp="" _kubehz_wp_moved="" _kubehz_wp_ino=""
   shift
   target=$(kubehz::_private_target "${dest}") || return 1
   saved_traps=$(trap -p INT TERM HUP)
   for sig in INT TERM HUP; do
     # shellcheck disable=SC2064 # the signal name now, the path when the trap runs
-    trap "[[ -z \"\${_kubehz_wp_tmp:-}\" ]] || rm -f -- \"\${_kubehz_wp_tmp}\"; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
+    trap "[[ -z \"\${_kubehz_wp_tmp:-}\" ]] || rm -f -- \"\${_kubehz_wp_tmp}\"; kubehz::_drop_moved_temp; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
   done
   if ! _kubehz_wp_tmp=$(umask 077 && mktemp "${target}.XXXXXX"); then
     _kubehz_wp_tmp=""
@@ -317,7 +324,7 @@ kubehz::_write_private() {
   if (( rc != 0 )) && [[ -n "${_kubehz_wp_tmp}" ]]; then
     rm -f -- "${_kubehz_wp_tmp}"
   fi
-  _kubehz_wp_tmp=""
+  _kubehz_wp_tmp="" _kubehz_wp_moved="" _kubehz_wp_ino=""
   trap - INT TERM HUP
   eval "${saved_traps}"
   return "${rc}"
@@ -374,7 +381,12 @@ kubehz::_mv_exact_ok() {
 # refuses a directory just before the rename. After the rename, <target>
 # must be a regular file. If it is not (a directory took its place between
 # the check and the rename of a mv without -T), the new file is removed
-# from it by its exact path. One error line on each failure, status 1.
+# from it by its exact path. A signal during that mv runs the traps of
+# kubehz::_write_private before this check. So before a mv without -T,
+# the function records the path that the file gets in such a directory
+# and the inode of the temp file, in the locals of kubehz::_write_private
+# (_kubehz_wp_moved, _kubehz_wp_ino), and the traps remove that file
+# (kubehz::_drop_moved_temp). One error line on each failure, status 1.
 kubehz::_publish_private() {
   local tmp="${1}" target="${2}" dest="${3}"
   if kubehz::_mv_exact_ok; then
@@ -391,6 +403,8 @@ kubehz::_publish_private() {
       error "${dest} is a directory, not a file"
       return 1
     }
+    _kubehz_wp_ino=$(kubehz::_inode "${tmp}") || _kubehz_wp_ino=""
+    _kubehz_wp_moved="${target}/${tmp##*/}"
     mv -f -- "${tmp}" "${target}" 2>/dev/null || {
       error "Cannot rename the temp file to ${target}"
       return 1
@@ -401,6 +415,49 @@ kubehz::_publish_private() {
     error "${target} is not a regular file after the rename: the new file is removed"
     return 1
   fi
+}
+
+# kubehz::_drop_moved_temp: a part of the INT, TERM and HUP traps of
+# kubehz::_write_private. It removes the file at _kubehz_wp_moved (the
+# path that the temp file gets when a mv without -T moves it into a
+# directory) only when it is a regular file, not a link, that this run
+# made: its inode is _kubehz_wp_ino (the inode of the temp file before
+# the mv). When that inode could not be read, the file must belong to
+# this user and have mode 0600. In all other cases it removes nothing.
+# Status 0.
+kubehz::_drop_moved_temp() {
+  local f="${_kubehz_wp_moved:-}" ino
+  [[ -n "${f}" && -f "${f}" && ! -L "${f}" ]] || return 0
+  if [[ -n "${_kubehz_wp_ino:-}" ]]; then
+    ino=$(kubehz::_inode "${f}") || return 0
+    [[ "${ino}" == "${_kubehz_wp_ino}" ]] || return 0
+  elif [[ ! -O "${f}" ]] || ! kubehz::_owner_only "${f}"; then
+    return 0
+  fi
+  rm -f -- "${f}"
+}
+
+# kubehz::_inode <file>: the inode number of <file> on stdout (ls -di, the
+# same in GNU and BSD ls; the inode of a link itself). Status 1 when ls
+# cannot read it.
+kubehz::_inode() {
+  local l
+  # shellcheck disable=SC2012 # only the first field (the inode) is read
+  l=$(ls -di -- "${1}" 2>/dev/null) || return 1
+  l="${l#"${l%%[! ]*}"}"
+  l="${l%% *}"
+  [[ "${l}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${l}"
+}
+
+# kubehz::_owner_only <file>: status 0 when the mode of <file> is 0600
+# (ls -ld prints -rw------- first, then a space, or a mark of GNU or BSD
+# ls for an ACL, a security context or extended attributes).
+kubehz::_owner_only() {
+  local l
+  # shellcheck disable=SC2012 # only the first field (the mode) is read
+  l=$(ls -ld -- "${1}" 2>/dev/null) || return 1
+  [[ "${l}" == "-rw-------"[\ .@+]* ]]
 }
 
 # Destroy a hosted cluster via the kubehz API.
