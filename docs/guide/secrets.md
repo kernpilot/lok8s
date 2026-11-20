@@ -181,7 +181,10 @@ lo secrets --domain app.example.com decrypt     # restore plaintext from the .en
 Each store has a `.gitignore` that commits only the `.enc` files. When that
 `.gitignore` is not a regular file (a symlink, a directory, a FIFO, a socket
 or a device), `init`, `add-key` and `encrypt` stop before they change a
-file: remove it, then run the command again.
+file: remove it, then run the command again. A write of the `.gitignore`
+goes to a temp file in the store and a rename, so a hard link to the old
+file keeps its content. When the write fails, the command stops and names
+the file, and the old file stays.
 
 `encrypt` skips a plaintext whose `.enc` file is newer. No command gives an
 `.enc` file a time after the current time. A plaintext with a time in the
