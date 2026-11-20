@@ -1028,10 +1028,11 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	// rename (mv -T) replaces a link or a file there and never writes
 	// through it. A failure removes the staging files, or names them when
 	// that fails too. The bash twin does the same steps.
-	stageCmd := "umask 077"
+	stageSteps := []string{"umask 077"}
 	for _, key := range handoverPKIKeys {
-		stageCmd += " && mktemp " + preseedPKIDir + "/." + key + ".XXXXXXXXXX"
+		stageSteps = append(stageSteps, "mktemp "+preseedPKIDir+"/."+key+".XXXXXXXXXX")
 	}
+	stageCmd := strings.Join(stageSteps, " && ")
 	failed := ""
 	out, err := remote(stageCmd)
 	if err != nil {
