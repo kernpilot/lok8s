@@ -3713,6 +3713,7 @@ lo secrets [flags]
 * [lo secrets list](#lo-secrets-list)	 - List secrets
 * [lo secrets path](#lo-secrets-path)	 - Resolve the secrets path for the current context
 * [lo secrets print](#lo-secrets-print)	 - Print secret(s)
+* [lo secrets remove-key](#lo-secrets-remove-key)	 - Remove an age recipient and re-key the store
 * [lo secrets set](#lo-secrets-set)	 - Write a literal value into the secret cache
 
 ## lo secrets add-key
@@ -3937,6 +3938,68 @@ lo secrets print [pattern...] [flags]
   -c, --copy       Copy secret(s) to clipboard (--only-one is implied)
   -h, --help       help for print
   -o, --only-one   Only print one secret (error if multiple matches)
+```
+
+### SEE ALSO
+
+* [lo secrets](#lo-secrets)	 - Manage secrets (encrypt/decrypt/set)
+
+## lo secrets remove-key
+
+Remove an age recipient and re-key the store
+
+### Synopsis
+
+Remove an age recipient from every creation rule in .sops.yaml, then
+re-encrypt each .enc file of the selected stores that lists it. Without --all
+that is the store of the current domain; with --all, every domain store. The
+flat store is not re-keyed. A warning names each other store that still
+lists the recipient.
+
+Before the first write, the command refuses:
+  - a key argument that looks like a private key (it is not printed),
+  - a YAML tag under creation_rules other than !!str, !!seq or !!map, or a
+    mapping key in .sops.yaml that is not a string,
+  - a recipient outside a single-quoted age: list (an unquoted list, an
+    escaped string, a YAML list, key_groups, an alias or a merge key),
+  - the last recipient of a rule,
+  - a recipient that is in no rule and in no .enc file,
+  - a store path or an .enc file that it cannot stat or read (a dangling
+    symlink included),
+  - an .enc file whose sops metadata does not parse or lists no age
+    recipient (the command reads the recipients from that metadata),
+  - an .enc file that lists the recipient and is newer than its plaintext
+    (run 'lo secrets decrypt' first),
+  - an .enc file that matches no creation rule, a rule with a recipient that
+    is not age, or a rule with an age recipient that does not parse,
+  - without --skip-orphans, an .enc file with no decrypted twin: the re-key
+    cannot rewrite that file, so it keeps the removed recipient.
+
+The command holds the lock .sops.yaml.lock for the whole run, and waits for
+it LO_SECRETS_LOCK_WAIT seconds (60 by default). If the re-key stops after
+the .sops.yaml write, run the same command again to resume it.
+
+A removal does not revoke what the key already read. Its holder can still
+decrypt the older .enc files in the git history, and keeps every value it
+decrypted before. Rotate those secrets after the removal.
+
+```
+lo secrets remove-key <key> [flags]
+```
+
+### Examples
+
+```
+  lo secrets remove-key ~/.ssh/old_ed25519.pub
+  lo secrets remove-key age1<recipient> --all
+```
+
+### Options
+
+```
+  -a, --all            Re-key every domain store, not just the current one
+  -h, --help           help for remove-key
+      --skip-orphans   Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)
 ```
 
 ### SEE ALSO

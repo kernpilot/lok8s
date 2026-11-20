@@ -188,6 +188,8 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
 	"secrets init": `  lo secrets init`,
 	"secrets add-key": `  lo secrets add-key ~/.ssh/id_ed25519.pub
   lo secrets add-key age1<recipient> --all`,
+	"secrets remove-key": `  lo secrets remove-key ~/.ssh/old_ed25519.pub
+  lo secrets remove-key age1<recipient> --all`,
 	"secrets encrypt": `  lo secrets encrypt`,
 	"secrets decrypt": `  lo secrets decrypt`,
 	"secrets allow":   `  lo secrets allow`,

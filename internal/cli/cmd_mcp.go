@@ -64,6 +64,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/secrets"
 )
 
 // Exposure tiers, ordered by the opt-in they need.
@@ -267,7 +268,7 @@ func mcpSelectors(x mcpExposure) []ophis.Selector {
 func mcpNoDashArgs(ctx context.Context, req *mcp.CallToolRequest, in ophis.ToolInput, next ophis.ExecuteFunc) (*mcp.CallToolResult, ophis.ToolOutput, error) {
 	for _, a := range in.Args {
 		if strings.HasPrefix(a, "-") {
-			return nil, ophis.ToolOutput{}, fmt.Errorf("lo mcp: the argument %q starts with a dash. Set flags in \"flags\", not in \"args\". Nothing ran", a)
+			return nil, ophis.ToolOutput{}, fmt.Errorf("lo mcp: the argument %s starts with a dash. Set flags in \"flags\", not in \"args\". Nothing ran", secrets.QuoteArg(a))
 		}
 	}
 	return next(ctx, req, in)

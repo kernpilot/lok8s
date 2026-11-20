@@ -129,16 +129,17 @@ func TestSecretsSubcommandAnnotations(t *testing.T) {
 	paths := secretsProject(t)
 	root := NewRoot(paths)
 	want := map[string]string{
-		"init":    AnnotationIdempotent,
-		"add-key": AnnotationDestructive,
-		"set":     AnnotationDestructive,
-		"encrypt": AnnotationIdempotent,
-		"decrypt": AnnotationIdempotent,
-		"allow":   AnnotationDestructive,
-		"list":    AnnotationReadonly,
-		"print":   AnnotationReadonly,
-		"env":     AnnotationReadonly,
-		"path":    AnnotationReadonly,
+		"init":       AnnotationIdempotent,
+		"add-key":    AnnotationDestructive,
+		"remove-key": AnnotationDestructive,
+		"set":        AnnotationDestructive,
+		"encrypt":    AnnotationIdempotent,
+		"decrypt":    AnnotationIdempotent,
+		"allow":      AnnotationDestructive,
+		"list":       AnnotationReadonly,
+		"print":      AnnotationReadonly,
+		"env":        AnnotationReadonly,
+		"path":       AnnotationReadonly,
 	}
 	aliases := map[string]string{
 		"init": "i", "set": "s", "encrypt": "e", "decrypt": "d",
