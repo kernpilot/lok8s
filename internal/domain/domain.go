@@ -128,9 +128,18 @@ func Driver(clustersDir, domain string) (string, error) {
 // RequireDriver gates a driver-specific operation on the resolved domain
 // actually using that driver, failing with an actionable message naming the
 // mismatch. what names the operation (e.g. "registry management").
+//
+// The layout check runs first: a cluster spec with more than one YAML
+// document gets the CheckSpecLayout line, which names the cause and the
+// lines to remove (the line `lo provision` prints), not "no readable spec".
+// A missing or unreadable spec passes that check and gets the message
+// below. Bash twin: domain::require_driver.
 func RequireDriver(want, clustersDir, domain, what string, errTo io.Writer) error {
 	if what == "" {
 		what = "this operation"
+	}
+	if err := CheckSpecLayout(filepath.Join(clustersDir, domain, "cluster.lok8s.yaml"), errTo); err != nil {
+		return err
 	}
 	got, err := Driver(clustersDir, domain)
 	if err != nil {

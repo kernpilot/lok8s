@@ -239,9 +239,17 @@ domain::driver() {
 # class of confusion).
 #
 #   domain::require_driver lo "${domain}" "registry management"
+#
+# The layout check runs first: a cluster spec with more than one YAML
+# document gets the domain::spec_check line, which names the cause and the
+# lines to remove (the line `lo provision` prints), not "no readable spec".
+# A missing or unreadable spec passes that check and gets the message
+# below. Go twin: domain.RequireDriver.
 domain::require_driver() {
   local want="${1}" domain="${2}" what="${3:-this operation}"
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
   local got
+  domain::spec_check "${path_clusters}/${domain}/cluster.lok8s.yaml" || return 1
   got=$(domain::driver "${domain}") || {
     # Covers both a missing domain dir and a dir whose spec is unreadable —
     # "not found" alone misled when the directory existed but had no spec.

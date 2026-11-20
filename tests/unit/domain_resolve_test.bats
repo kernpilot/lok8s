@@ -140,6 +140,29 @@ teardown() {
   assert_output --partial "no readable cluster/deploy spec"
 }
 
+# Issue #272: a spec with two YAML documents gets the layout line (the line
+# `lo provision` prints), not "no readable spec". The other refusals keep
+# the old message. Go twin: TestRequireDriverNamesTheSpecLayout.
+@test "require_driver names the layout of a spec with two YAML documents" {
+  mkdir -p "${PATH_CLUSTERS}/two-dom"
+  printf 'kind: Lo\n---\nkind: KubeOne\n' > "${PATH_CLUSTERS}/two-dom/cluster.lok8s.yaml"
+  run --separate-stderr domain::require_driver lo "two-dom" "registry management"
+  assert_failure
+  assert_output ""
+  assert_equal "${stderr}" "[error] ${PATH_CLUSTERS}/two-dom/cluster.lok8s.yaml holds more than one YAML document. Remove lines 2 to 3 (the '---' at line 2 and everything after it)."
+}
+
+@test "require_driver keeps the no-readable-spec message for a missing or malformed spec" {
+  mkdir -p "${PATH_CLUSTERS}/bad-dom"
+  printf 'kind: ../lo\n' > "${PATH_CLUSTERS}/bad-dom/cluster.lok8s.yaml"
+  local d
+  for d in missing-dom bad-dom; do
+    run --separate-stderr domain::require_driver lo "${d}" "registry management"
+    assert_failure
+    assert_equal "${stderr}" "error: domain '${d}' has no readable cluster/deploy spec under clusters/ — cannot run registry management"
+  done
+}
+
 @test "driver read failure (unreadable spec kind) fails instead of empty-succeeding" {
   # yq|tr used to mask a yq failure into rc=0 + empty driver (Copilot round 2).
   mkdir -p "${PATH_CLUSTERS}/broken-dom"
