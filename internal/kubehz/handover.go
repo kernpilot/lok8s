@@ -90,17 +90,27 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 			dir = d
 		}
 		if err := c.makePrivate(dir); err != nil {
-			_ = os.RemoveAll(dir)
+			c.removeDir(dir)
 			return "", err
 		}
 		if err := c.extractBundle(bundle, dir); err != nil {
-			_ = os.RemoveAll(dir)
+			c.removeDir(dir)
 			return "", err
 		}
 		return dir, nil
 	}
 	c.errorf("handover: bundle not found: %s", bundle)
 	return "", ErrHandled
+}
+
+// removeDir ports handover::remove_dir: remove a dir that can hold the
+// bundle's keys, and name it when that fails. The bash twin first gives
+// the owner rwx on each dir in it (a tar can leave a dir 0400 or 0500);
+// extractBundle makes every dir 0700, so the Go twin needs no such step.
+func (c *Context) removeDir(dir string) {
+	if err := os.RemoveAll(dir); err != nil {
+		c.errorf("handover: could not remove %s, which can hold the bundle's keys. Delete it yourself.", dir)
+	}
 }
 
 // makePrivate ports handover::make_private: set dir to 0700, then check
@@ -240,13 +250,24 @@ func (c *Context) notArchive(bundle string) error {
 
 // validateBundle ports handover::validate_bundle: every contract §2 key must
 // exist and be non-empty, and every key that is there (an optional one too)
-// must be a regular file, not a link (Lstat). The handover reads and sends
-// each key from the bundle itself, never from a path that a link names,
-// for a .tar.gz and for a directory the user gives. The error NAMES the key.
+// must be a regular file with one name: not a link (Lstat), and not a hard
+// link (the link count). The handover reads and sends each key from the
+// bundle itself, never from a path that a link names or a second name of a
+// file outside the bundle, for a .tar.gz and for a directory the user
+// gives. The error NAMES the key.
 func (c *Context) validateBundle(dir string) error {
 	for _, key := range append(append([]string{}, handoverBundleKeys...), handoverOptionalKeys...) {
-		if info, err := c.lstat(filepath.Join(dir, key)); err == nil && !info.Mode().IsRegular() {
+		info, err := c.lstat(filepath.Join(dir, key))
+		if err != nil {
+			continue
+		}
+		if !info.Mode().IsRegular() {
 			c.errorf("handover: bundle key %s is not a regular file (a link, a directory or a special file): %s/%s", key, dir, key)
+			return ErrHandled
+		}
+		// A link count that cannot be read fails too (singleLink).
+		if !singleLink(info) {
+			c.errorf("handover: bundle key %s has more than one name (a hard link), so it can be a file outside the bundle: %s/%s", key, dir, key)
 			return ErrHandled
 		}
 	}
@@ -262,42 +283,83 @@ func (c *Context) validateBundle(dir string) error {
 
 // placePKI ports handover::place_pki: seed the exported PKI into
 // <k8sDir>/pki (kubeadm reuses EXISTING files instead of minting new ones).
+// The pki dir is set to 0700 and checked before a key lands in it: kubeadm
+// makes it 0755, and a dir of an earlier run can be open. Each file then
+// goes in through installFile (certs and sa.pub 0644, keys 0600). A
+// failure removes the files that this call placed, or names the ones it
+// could not remove.
 func (c *Context) placePKI(bundle, k8sDir string) error {
-	if err := os.MkdirAll(filepath.Join(k8sDir, "pki"), 0o755); err != nil {
+	pki := filepath.Join(k8sDir, "pki")
+	if err := os.MkdirAll(pki, 0o700); err != nil {
 		return err
 	}
+	if err := c.chmod(pki, 0o700); err != nil { // #nosec G302 -- a directory: 0700 is owner-only
+		c.errorf("handover: cannot set %s to mode 700, so the keys would not be private in it", pki)
+		return ErrHandled
+	}
+	if info, err := c.lstat(pki); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		c.errorf("handover: cannot set %s to mode 700, so the keys would not be private in it", pki)
+		return ErrHandled
+	}
+	var placed []string
 	for _, key := range handoverPKIKeys {
-		if err := copyFile(filepath.Join(bundle, key), filepath.Join(k8sDir, "pki", key)); err != nil {
-			c.errorf("handover: could not place %s into %s/pki", key, k8sDir)
+		// The PUBLIC halves (certs, sa.pub) are 0644; the keys are 0600.
+		mode := fs.FileMode(0o644)
+		if strings.HasSuffix(key, ".key") {
+			mode = 0o600
+		}
+		data, err := os.ReadFile(filepath.Join(bundle, key))
+		if err == nil {
+			err = c.installFile(filepath.Join(pki, key), data, mode)
+		}
+		if err != nil {
+			c.errorf("handover: could not place %s into %s with mode %s", key, pki, strconv.FormatUint(uint64(mode), 8))
+			var left []string
+			for _, k := range placed {
+				if rerr := os.Remove(filepath.Join(pki, k)); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+					left = append(left, filepath.Join(pki, k))
+				}
+			}
+			if len(left) > 0 {
+				c.errorf("handover: could not remove the files that this step placed: %s. Delete them yourself.", strings.Join(left, " "))
+			}
 			return ErrHandled
 		}
-	}
-	modes := []struct {
-		file string
-		mode fs.FileMode
-	}{
-		// The PUBLIC halves (certs, sa.pub) are 0644; the keys stay 0600.
-		{"ca.crt", 0o644}, {"front-proxy-ca.crt", 0o644}, {"sa.pub", 0o644},
-		{"ca.key", 0o600}, {"front-proxy-ca.key", 0o600}, {"sa.key", 0o600},
-	}
-	for _, m := range modes {
-		if err := c.chmod(filepath.Join(k8sDir, "pki", m.file), m.mode); err != nil {
-			c.errorf("handover: could not set the modes of the PKI files in %s/pki", k8sDir)
-			return ErrHandled
-		}
+		placed = append(placed, key)
 	}
 	return nil
 }
 
-// copyFile writes dst private (0600) from the first byte: the PKI copies
-// include CA and service-account KEYS, and a 0644 create followed by a
-// chmod leaves a readable window. placePKI widens the public halves after.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+// installFile ports handover::install_file: write data to dst with mode,
+// through a new file in the dir of dst. os.CreateTemp makes it 0600, chmod
+// sets the mode, and the rename replaces dst. Thus the bytes never land in
+// a file with a wider mode, and an existing dst (a run with --force) is
+// replaced: its own mode, a link there or a second name of it does not get
+// the bytes. A dir at dst (or a link to one) fails, as in the bash twin. On
+// a failure the new file goes, and dst is as it was.
+func (c *Context) installFile(dst string, data []byte, mode fs.FileMode) error {
+	if info, err := os.Stat(dst); err == nil && info.IsDir() {
+		return errors.New(dst + " is a directory")
+	}
+	f, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o600)
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = c.chmod(tmp, mode)
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 // stripQuery drops everything from '?' on — for URLs that carry a credential
@@ -326,7 +388,7 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 			return "", err
 		}
 		if err := c.makePrivate(d); err != nil {
-			_ = os.RemoveAll(d)
+			c.removeDir(d)
 			return "", err
 		}
 		workdir = d
@@ -346,18 +408,18 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 			c.errorf("handover: the snapshot lives at %s but no aws CLI is on this node — download it with any s3 client against the platform's object store and re-run with --snapshot <file>", location)
 			return "", ErrHandled
 		}
-		if err := touch600(out); err != nil {
+		if err := c.touch600(out); err != nil {
 			return "", err
 		}
 		if _, err := c.capture(ctx, false, "aws", "s3", "cp", location, out); err != nil {
 			c.errorf("handover: fetching %s via the aws CLI failed — download it yourself and re-run with --snapshot <file>", location)
 			return "", ErrHandled
 		}
-		if err := os.Chmod(out, 0o600); err != nil {
+		if err := c.chmod(out, 0o600); err != nil {
 			return "", err
 		}
 	case strings.HasPrefix(location, "https://"):
-		if err := touch600(out); err != nil {
+		if err := c.touch600(out); err != nil {
 			return "", err
 		}
 		data, err := c.fetch(ctx, "GET", location, bearer{}, nil)
@@ -384,11 +446,11 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 }
 
 // touch600 is `: > out && chmod 600 out` — 0600 BEFORE any bytes land.
-func touch600(path string) error {
+func (c *Context) touch600(path string) error {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	return c.chmod(path, 0o600)
 }
 
 // memberIdentity ports handover::member_identity: the etcd member name +
@@ -549,11 +611,12 @@ func (c *Context) writeEncryptionConfig(bundle, k8sDir string) (string, error) {
 		"            - name: " + keyName + "\n" +
 		"              secret: " + key + "\n" +
 		"      - identity: {}\n"
-	if err := os.WriteFile(out, []byte(content), 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(out, 0o600); err != nil {
-		return "", err
+	// The file holds the key: installFile writes it 0600 from the first
+	// byte, also over a file of an earlier run (os.WriteFile keeps the mode
+	// of a file that is there).
+	if err := c.installFile(out, []byte(content), 0o600); err != nil {
+		c.errorf("handover: could not write %s with mode 600", out)
+		return "", ErrHandled
 	}
 	return out, nil
 }
@@ -792,7 +855,7 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(workdir) }()
+	defer c.removeDir(workdir)
 	if err := c.makePrivate(workdir); err != nil {
 		return err
 	}
@@ -874,7 +937,7 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(workdir) }()
+	defer c.removeDir(workdir)
 	if err := c.makePrivate(workdir); err != nil {
 		return err
 	}
@@ -895,7 +958,12 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	// in the known_hosts file, and every later call uses yes. Never
 	// StrictHostKeyChecking=no or /dev/null here. The bash twin
 	// (handover::preseed) uses the same options.
-	sshOpts := []string{"-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10"}
+	// ControlMaster=no and ControlPath=none: a master connection that the
+	// user's ssh config opens or shares (ControlMaster, ControlPath) would
+	// carry these calls without a new host key check. ssh takes the first
+	// value it gets for an option, so these win over the config.
+	sshOpts := []string{"-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+		"-o", "ControlMaster=no", "-o", "ControlPath=none"}
 	if o.KnownHosts != "" {
 		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts)
 	}
@@ -915,9 +983,11 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	ssh := func(policy, remote string) error {
 		return c.run(ctx, "ssh", append(checked(policy), "-p", portStr, target, remote)...)
 	}
-	// umask 077 → the pki dir is 0700 from the start.
-	if err := ssh(firstContact, "umask 077 && mkdir -p /etc/kubernetes/pki"); err != nil {
-		c.errorf("handover: cannot reach %s over SSH", target)
+	// The pki dir is 0700 before any key lands in it: umask 077 makes a new
+	// dir 0700, and chmod sets a dir that is there already (kubeadm makes it
+	// 0755). A chmod that fails fails the call.
+	if err := ssh(firstContact, "umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki"); err != nil {
+		c.errorf("handover: cannot reach %s over SSH, or cannot set /etc/kubernetes/pki on it to mode 700", target)
 		if o.AcceptNewHostKey {
 			c.errorf("handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
 		} else {

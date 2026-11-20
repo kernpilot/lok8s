@@ -327,18 +327,25 @@ func TestHandoverResolveBundleRefusesLinkEntries(t *testing.T) {
 // (to a file outside the bundle) is refused before anything reads or sends
 // it: by preseed and by receive, for a required key and an optional one.
 func TestHandoverRefusesABundleKeyThatIsALink(t *testing.T) {
-	for _, key := range []string{"ca.key", "encryption-provider"} {
-		t.Run(key, func(t *testing.T) {
+	for _, tc := range []struct {
+		kind, key string
+	}{{"symlink", "ca.key"}, {"symlink", "encryption-provider"}, {"hard link", "ca.key"}, {"hard link", "encryption-provider"}} {
+		key := tc.key
+		t.Run(tc.kind+"/"+key, func(t *testing.T) {
 			ho := newHandover(t)
 			ho.mockNodeBinaries(nil)
 			elsewhere := filepath.Join(ho.base, "elsewhere")
 			_ = os.WriteFile(elsewhere, []byte("outside-secret-content\n"), 0o600)
 			path := filepath.Join(ho.bundle, key)
 			_ = os.Remove(path)
-			if err := os.Symlink(elsewhere, path); err != nil {
+			link, want := os.Symlink, "handover: bundle key "+key+" is not a regular file (a link, a directory or a special file): "+path
+			if tc.kind == "hard link" {
+				// A second name of a file outside the bundle.
+				link, want = os.Link, "handover: bundle key "+key+" has more than one name (a hard link), so it can be a file outside the bundle: "+path
+			}
+			if err := link(elsewhere, path); err != nil {
 				t.Fatal(err)
 			}
-			want := "handover: bundle key " + key + " is not a regular file (a link, a directory or a special file): " + path
 
 			mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
 			mustContain(t, ho.output(), want)
@@ -442,18 +449,262 @@ func TestHandoverPrivateDirsFailClosed(t *testing.T) {
 	}
 }
 
-// placePKI fails when the modes of the files it placed cannot be set.
-func TestHandoverPlacePKIChecksEveryChmod(t *testing.T) {
+// Each chmod of placePKI on its own: the pki dir, then the new file of
+// each of the six PKI files (before its rename). The step stops, and the
+// files that it placed go: no key is left.
+func TestHandoverPlacePKIStopsAtEachChmod(t *testing.T) {
+	t.Parallel()
+	for _, target := range append([]string{"pki"}, handoverPKIKeys...) {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			ho := newHandover(t)
+			pki := filepath.Join(ho.k8sDir, "pki")
+			ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+				if (target == "pki" && p == pki) || (filepath.Dir(p) == pki && strings.HasPrefix(filepath.Base(p), "."+target+".")) {
+					return errors.New("operation not permitted")
+				}
+				return os.Chmod(p, m)
+			}
+			mustErr(t, ho.ctx.placePKI(ho.bundle, ho.k8sDir))
+			if target == "pki" {
+				mustContain(t, ho.output(), "handover: cannot set "+pki+" to mode 700, so the keys would not be private in it")
+			} else {
+				mustContain(t, ho.output(), "handover: could not place "+target+" into "+pki+" with mode")
+			}
+			if entries, err := os.ReadDir(pki); err != nil || len(entries) != 0 {
+				t.Fatalf("left in %s: %v (%v)", pki, entries, err)
+			}
+		})
+	}
+}
+
+// A chmod that returns nil but leaves the pki dir open (a file system that
+// keeps the bits) fails closed too: placePKI reads the mode after it.
+func TestHandoverPlacePKIReadsTheModeOfThePKIDir(t *testing.T) {
 	t.Parallel()
 	ho := newHandover(t)
+	pki := filepath.Join(ho.k8sDir, "pki")
 	ho.ctx.Chmod = func(p string, m fs.FileMode) error {
-		if strings.HasSuffix(p, "/pki/sa.key") {
-			return errors.New("operation not permitted")
+		if p == pki {
+			return os.Chmod(p, 0o755) // #nosec G302 -- a test dir that must stay open
 		}
 		return os.Chmod(p, m)
 	}
 	mustErr(t, ho.ctx.placePKI(ho.bundle, ho.k8sDir))
-	mustContain(t, ho.output(), "handover: could not set the modes of the PKI files in "+ho.k8sDir+"/pki")
+	mustContain(t, ho.output(), "handover: cannot set "+pki+" to mode 700, so the keys would not be private in it")
+	if entries, err := os.ReadDir(pki); err != nil || len(entries) != 0 {
+		t.Fatalf("left in %s: %v (%v)", pki, entries, err)
+	}
+}
+
+// kubeadm makes /etc/kubernetes/pki 0755, and a run with --force finds the
+// files of an earlier run. The dir is 0700 before a key lands in it, and
+// each file is replaced, not written into: a key of mode 0644 ends 0600, a
+// second name of it outside keeps the old bytes, and a link at a key name
+// is replaced, not followed.
+func TestHandoverPlacePKIReplacesAnOpenDirAndItsFiles(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	pki := filepath.Join(ho.k8sDir, "pki")
+	outside := filepath.Join(ho.base, "outside")
+	for _, d := range []string{pki, outside} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldKey := filepath.Join(pki, "ca.key")
+	if err := os.WriteFile(oldKey, []byte("old-ca-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for path, mode := range map[string]fs.FileMode{pki: 0o755, oldKey: 0o644} {
+		if err := os.Chmod(path, mode); err != nil { // #nosec G302 -- the open modes under test
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(oldKey, filepath.Join(outside, "second-name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(pki, "sa.key")); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, ho.ctx.placePKI(ho.bundle, ho.k8sDir), ho.output())
+	if info, err := os.Lstat(pki); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s: %v (%v), want 0700", pki, info.Mode(), err)
+	}
+	for _, key := range handoverPKIKeys {
+		want := fs.FileMode(0o644)
+		if strings.HasSuffix(key, ".key") {
+			want = 0o600
+		}
+		path := filepath.Join(pki, key)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != want || !singleLink(info) {
+			t.Fatalf("%s: %v (%v), want a regular file of mode %o with one name", key, info.Mode(), err, want)
+		}
+		if readFile(t, path) != readFile(t, filepath.Join(ho.bundle, key)) {
+			t.Fatalf("%s does not hold the bytes of the bundle", key)
+		}
+	}
+	if readFile(t, filepath.Join(outside, "second-name")) != "old-ca-key\n" || readFile(t, filepath.Join(outside, "secret")) != "outside-secret\n" {
+		t.Fatal("a file outside the pki dir changed")
+	}
+	if entries, _ := os.ReadDir(pki); len(entries) != len(handoverPKIKeys) {
+		t.Fatalf("a new file is left in %s: %v", pki, entries)
+	}
+}
+
+// The encryption config holds the key: it is written 0600 from the first
+// byte, also over a file of an earlier run with mode 0644. A chmod that
+// fails stops the step and leaves no file.
+func TestHandoverWriteEncryptionConfigReplacesAnOpenFile(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	out := filepath.Join(ho.k8sDir, "kubehz-encryption-config.yaml")
+	if err := os.MkdirAll(ho.k8sDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(out, 0o644); err != nil { // #nosec G302 -- the open mode under test
+		t.Fatal(err)
+	}
+	got, err := ho.ctx.writeEncryptionConfig(ho.bundle, ho.k8sDir)
+	mustOK(t, err, ho.output())
+	if info, err := os.Lstat(got); got != out || err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: %v (%v), want %s with mode 0600", got, info.Mode(), err, out)
+	}
+	// The key comes from the bundle file, so no key-like literal is in the test.
+	mustContain(t, readFile(t, out), "secret: "+readFile(t, filepath.Join(ho.bundle, "encryption-key")))
+
+	_ = os.Remove(out)
+	ho.reset()
+	ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+		if filepath.Dir(p) == ho.k8sDir && strings.HasPrefix(filepath.Base(p), ".kubehz-encryption-config.yaml.") {
+			return errors.New("operation not permitted")
+		}
+		return os.Chmod(p, m)
+	}
+	_, err = ho.ctx.writeEncryptionConfig(ho.bundle, ho.k8sDir)
+	mustErr(t, err)
+	mustContain(t, ho.output(), "handover: could not write "+out+" with mode 600")
+	if entries, _ := os.ReadDir(ho.k8sDir); len(entries) != 0 {
+		t.Fatalf("a file is left in %s: %v", ho.k8sDir, entries)
+	}
+}
+
+// A chmod that fails at the workdir or at the bundle dir of a .tar.gz
+// stops receive and preseed before anything runs, and TMPDIR is empty.
+func TestHandoverStopsAtTheWorkdirOrTheBundleDirChmod(t *testing.T) {
+	for _, at := range []string{"workdir", "bundle"} {
+		for _, cmd := range []string{"receive", "preseed"} {
+			t.Run(at+"/"+cmd, func(t *testing.T) {
+				ho := newHandover(t)
+				ho.mockNodeBinaries(nil)
+				scratch := filepath.Join(ho.base, "scratch")
+				_ = os.MkdirAll(scratch, 0o700)
+				t.Setenv("TMPDIR", scratch)
+				tarball := filepath.Join(ho.base, "bundle.tar.gz")
+				tarBundle(t, ho.bundle, tarball)
+				ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+					if (at == "workdir" && filepath.Dir(p) == scratch) ||
+						(at == "bundle" && filepath.Base(p) == "bundle" && filepath.Dir(filepath.Dir(p)) == scratch) {
+						return errors.New("operation not permitted")
+					}
+					return os.Chmod(p, m)
+				}
+				var err error
+				if cmd == "receive" {
+					err = ho.receive(ReceiveOpts{Bundle: tarball, Snapshot: ho.snapshot})
+				} else {
+					err = ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: tarball, Node: "203.0.113.7"})
+				}
+				mustErr(t, err)
+				mustContain(t, ho.output(), "handover: cannot set "+scratch+"/")
+				mustContain(t, ho.output(), " to mode 700, so the bundle's keys would not be private in it.")
+				if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
+					t.Fatalf("scratch left behind: %v", entries)
+				}
+				if len(ho.calls) != 0 || fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
+					t.Fatalf("ran with a dir that is not private: %v", ho.calls)
+				}
+			})
+		}
+	}
+}
+
+// The downloaded snapshot is 0600 before its first byte (touch600) and
+// after the aws CLI wrote it. A chmod that fails at either stops the
+// receive before the restore, and the scratch goes.
+func TestHandoverReceiveStopsAtEachSnapshotChmod(t *testing.T) {
+	for _, nth := range []int{1, 2} {
+		t.Run(fmt.Sprint(nth), func(t *testing.T) {
+			ho := newHandover(t)
+			ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"aws": func(c execx.Cmd) error {
+				return os.WriteFile(c.Args[len(c.Args)-1], []byte("snapshot-bytes"), 0o600)
+			}})
+			lookPath := ho.ctx.LookPath
+			ho.ctx.LookPath = func(tool string) bool { return tool == "aws" || lookPath(tool) }
+			scratch := filepath.Join(ho.base, "scratch")
+			_ = os.MkdirAll(scratch, 0o700)
+			t.Setenv("TMPDIR", scratch)
+			seen := 0
+			ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+				if filepath.Base(p) == "kubehz-handover-snapshot.db" {
+					if seen++; seen == nth {
+						return errors.New("operation not permitted")
+					}
+				}
+				return os.Chmod(p, m)
+			}
+			mustErr(t, ho.receive(ReceiveOpts{}))
+			if seen != nth {
+				t.Fatalf("the snapshot got %d chmod calls, want %d", seen, nth)
+			}
+			if downloaded := ho.lineIndex("aws ") >= 0; downloaded != (nth == 2) {
+				t.Fatalf("download ran: %v, want %v: %v", downloaded, nth == 2, ho.calls)
+			}
+			for _, tool := range []string{"etcdutl ", "etcdctl ", "kubeadm "} {
+				if ho.lineIndex(tool) >= 0 {
+					t.Fatalf("ran past a failed chmod of the snapshot: %v", ho.calls)
+				}
+			}
+			if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
+				t.Fatalf("scratch left behind: %v", entries)
+			}
+		})
+	}
+}
+
+// A removal that fails names the dir: it can hold the bundle's keys.
+func TestHandoverRemoveDirNamesADirItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a dir without owner write")
+	}
+	t.Parallel()
+	ho := newHandover(t)
+	dir := filepath.Join(ho.base, "work")
+	held := filepath.Join(dir, "bundle")
+	if err := os.MkdirAll(held, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(held, "ca.key"), []byte("k\n"), 0o600)
+	if err := os.Chmod(held, 0o500); err != nil { // #nosec G302 -- a dir without owner write, on purpose
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(held, 0o700) }) // #nosec G302 -- lets t.TempDir remove it
+	ho.ctx.removeDir(dir)
+	mustContain(t, ho.output(), "handover: could not remove "+dir+", which can hold the bundle's keys. Delete it yourself.")
+	ho.reset()
+	_ = os.Chmod(held, 0o700) // #nosec G302 -- a private dir
+	ho.ctx.removeDir(dir)
+	mustNotContain(t, ho.output(), "could not remove")
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("%s is still there (%v)", dir, err)
+	}
 }
 
 // ── receive ──────────────────────────────────────────────
@@ -945,6 +1196,10 @@ func TestHandoverPreseedChecksTheHostKey(t *testing.T) {
 		if !strings.Contains(l, "UserKnownHostsFile="+kh+" ") {
 			t.Fatalf("--known-hosts not passed: %s", l)
 		}
+		noSharedConnection(t, l)
+	}
+	if !strings.HasPrefix(calls[0], "ssh ") || !strings.HasSuffix(calls[0], " "+preseedMkdir) {
+		t.Fatalf("the first call must make the pki dir 0700: %s", calls[0])
 	}
 	if ho.lineIndex("ssh-keygen ") >= 0 {
 		t.Fatalf("the default run checks no record: %v", ho.calls)
@@ -958,6 +1213,21 @@ func TestHandoverPreseedChecksTheHostKey(t *testing.T) {
 		if strings.Contains(l, "UserKnownHostsFile") || !strings.Contains(l, " -o StrictHostKeyChecking=yes ") {
 			t.Fatalf("default run must check against ssh's own known_hosts files: %s", l)
 		}
+		noSharedConnection(t, l)
+	}
+}
+
+// preseedMkdir is the remote command of the first preseed call: the pki
+// dir is 0700 before a key lands in it, also when kubeadm made it 0755.
+const preseedMkdir = "umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki"
+
+// noSharedConnection fails when an ssh or scp line can use a master
+// connection that the user's ssh config opens or shares: such a call
+// would skip the host key check of a new connection.
+func noSharedConnection(t *testing.T, line string) {
+	t.Helper()
+	if !strings.Contains(line, " -o ControlMaster=no ") || !strings.Contains(line, " -o ControlPath=none ") {
+		t.Fatalf("a shared ssh connection could skip the host key check: %s", line)
 	}
 }
 
@@ -990,7 +1260,7 @@ func TestHandoverPreseedAcceptNewHostKeyTrustsTheFirstCallOnly(t *testing.T) {
 			mustOK(t, ho.ctx.HandoverPreseed(t.Context(), o), ho.output())
 			calls := ho.sshCalls()
 			if len(calls) != 10 || !strings.HasPrefix(calls[0], "ssh -o StrictHostKeyChecking=accept-new ") ||
-				!strings.HasSuffix(calls[0], "umask 077 && mkdir -p /etc/kubernetes/pki") {
+				!strings.HasSuffix(calls[0], " "+preseedMkdir) {
 				t.Fatalf("the first call must be the mkdir with accept-new:\n%s", strings.Join(calls, "\n"))
 			}
 			for _, l := range calls[1:] {
@@ -1131,6 +1401,29 @@ func TestHandoverPreseedMidTransferFailure(t *testing.T) {
 	}
 	if ho.runner.anyCall("front-proxy-ca.crt") {
 		t.Fatal("transfer continued past the failure")
+	}
+}
+
+// Each key is set to 0600 on the node right after its copy. A chmod that
+// fails at any key stops the transfer: nothing goes out after it.
+func TestHandoverPreseedStopsAtEachRemoteKeyChmod(t *testing.T) {
+	for _, key := range []string{"ca.key", "sa.key", "front-proxy-ca.key"} {
+		t.Run(key, func(t *testing.T) {
+			ho := newHandover(t)
+			remote := "chmod 600 /etc/kubernetes/pki/" + key
+			ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh": func(c execx.Cmd) error {
+				if c.Args[len(c.Args)-1] == remote {
+					return exitErr(1)
+				}
+				return nil
+			}})
+			mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
+			mustContain(t, ho.output(), "handover: could not chmod 600 /etc/kubernetes/pki/"+key+" on 203.0.113.7")
+			calls := ho.sshCalls()
+			if len(calls) == 0 || !strings.HasSuffix(calls[len(calls)-1], " "+remote) {
+				t.Fatalf("the transfer went on after the failed chmod:\n%s", strings.Join(calls, "\n"))
+			}
+		})
 	}
 }
 
