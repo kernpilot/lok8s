@@ -352,7 +352,7 @@ func dropLines(substr string) func(*testing.T, []byte) ([]byte, int) {
 	return func(_ *testing.T, raw []byte) ([]byte, int) {
 		var kept [][]byte
 		n := 0
-		for _, line := range bytes.Split(raw, []byte("\n")) {
+		for line := range bytes.SplitSeq(raw, []byte("\n")) {
 			if bytes.Contains(line, []byte(substr)) {
 				n++
 				continue
