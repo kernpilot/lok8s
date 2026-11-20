@@ -194,6 +194,7 @@ NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer with
 @test "rbac: another kubectl failure prints the fixed reason" { _case read-other; }
 @test "rbac: an answer that is not a list prints the fixed reason" { _case read-not-a-list; }
 @test "rbac: a failed second read prints the fixed reason" { _case read-second-fails; }
+@test "rbac: a malformed field prints the fixed reason and never its value" { _case read-malformed-field; }
 @test "rbac: redis-operator old binding, old role and aggregation labels" { _case redis-old-role-binding-and-labels; }
 @test "rbac: redis-operator old role without its binding" { _case redis-old-role-alone; }
 @test "rbac: redis-operator leftovers before the new bindings exist" { _case redis-new-bindings-missing; }
@@ -211,6 +212,16 @@ NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer with
 @test "rbac: a deploy domain skips with the skip line" { _case deploy-domain; }
 @test "rbac: a delete command quotes the kubeconfig path" { _case kubeconfig-quote; }
 @test "rbac: a kubeconfig path with a control character skips" { _case kubeconfig-control-char; }
+
+# The records step alone, without the checks of the reads before it: a jq
+# error on a malformed field quotes the value. The step must fail and never
+# print the error (the caller drops the records of a failed step).
+@test "rbac: the records step fails on a malformed field and never prints its value" {
+  run doctor::_rbac_records "${FIX}/json/crb-narrowed.json" "${FIX}/json/cr-malformed-field.json" 0
+  assert_failure
+  refute_output --partial CANARY
+  refute_output --partial "jq:"
+}
 
 @test "rbac: no active domain prints no line (the domain section says it)" {
   run doctor::_rbac_check ""

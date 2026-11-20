@@ -402,7 +402,8 @@ doctor::_rbac_reason() {
 # A binding matches by its subjects and roleRef, never by its name. jq puts
 # the binding name in the record only when it is a DNS-1123 subdomain (at
 # most 253 characters), else it leaves the field out. So no TAB or newline
-# of a name reaches the record parse.
+# of a name reaches the record parse. The stderr of jq goes to /dev/null:
+# an error on a malformed field quotes the value of the field.
 doctor::_rbac_records() {
   # shellcheck disable=SC2016 # jq program text
   jq -r --slurpfile cr "${2}" --arg chart "${3}" '
@@ -435,7 +436,7 @@ doctor::_rbac_records() {
             and (.apiGroups | anyof(["", "*"]))
             and (.resources | anyof(["pods/exec", "*", "*/exec"]))
             and (.verbs | anyof(["create", "*"])))) then 1 else 0 end)"
-  ' "${1}"
+  ' "${1}" 2>/dev/null
 }
 
 # doctor::_rbac_report <records> <suc 0|1> <redis 0|1> <kubeconfig> — the
