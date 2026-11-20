@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -378,6 +379,53 @@ func TestStatusPassesPhaseThrough(t *testing.T) {
 	got, err := d.Status(t.Context(), "test.dev")
 	if err != nil || got != "Provisioned" {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// statusHangRunner is a kubectl whose read against the management cluster
+// does not end: it returns when its context ends, or after fallback with a
+// phase and no error, as a read that ended on its own.
+type statusHangRunner struct {
+	fallback time.Duration
+	cmd      execx.Cmd
+	bounded  bool // the context of the read has a deadline
+}
+
+func (r *statusHangRunner) Run(ctx context.Context, c execx.Cmd) error {
+	r.cmd = c
+	_, r.bounded = ctx.Deadline()
+	select {
+	case <-ctx.Done():
+		return errors.New("signal: terminated")
+	case <-time.After(r.fallback):
+		c.Stdout.Write([]byte("Provisioned"))
+		return nil
+	}
+}
+
+// The whole status read has a bound (statusReadBound): a management
+// cluster that does not answer cannot stop Status (bash twin:
+// capi::_status_bounded). The parent context never ends: only the bound
+// can stop the read, and the read that it stopped gives NotFound.
+func TestStatusReadIsBounded(t *testing.T) {
+	defer func(v time.Duration) { statusReadBound = v }(statusReadBound)
+	statusReadBound = 20 * time.Millisecond
+	const fallback = 5 * time.Second
+	d, _, _ := testDriver(t)
+	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: test-prod}\nspec:\n  managementCluster: {domain: mgmt.dev}\n")
+	r := &statusHangRunner{fallback: fallback}
+	d.deps.Runner = r
+	start := time.Now()
+	got, err := d.Status(context.Background(), "test.dev")
+	if took := time.Since(start); took >= fallback {
+		t.Errorf("Status took %s: the bound did not stop the read", took)
+	}
+	if err != nil || got != "NotFound" {
+		t.Errorf("got %q, %v, want NotFound", got, err)
+	}
+	if !r.bounded || r.cmd.WaitDelay != statusReadGrace || !r.cmd.ProcessGroup {
+		t.Errorf("deadline=%v WaitDelay=%s ProcessGroup=%v, want a deadline, %s and true",
+			r.bounded, r.cmd.WaitDelay, r.cmd.ProcessGroup, statusReadGrace)
 	}
 }
 
