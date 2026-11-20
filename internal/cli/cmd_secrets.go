@@ -248,10 +248,14 @@ func newSecretsRemoveKey(paths *config.Paths) *cobra.Command {
 		Use:   "remove-key <key>",
 		Short: "Remove an age recipient and re-key the store",
 		Long: `Remove an age recipient from every creation rule in .sops.yaml, then
-re-encrypt each .enc file of the selected stores that lists it. Without --all
-that is the store of the current domain; with --all, every domain store. The
-flat store is not re-keyed. A warning names each other store that still
-lists the recipient.
+re-encrypt every managed Secret.*.enc file of the selected stores from its
+plaintext, each with a new data key: the labels are not trusted to choose
+the files. Without --all that is the store of the current domain; with
+--all, every domain store. The flat store is not re-keyed. A warning names
+each other store that still lists the recipient. A recipient that is in no
+rule and on no .enc label is a warning, not a refusal: the command then
+re-keys every managed file and changes no rule, so a mistyped key re-keys
+every file.
 
 Before the first write, the command refuses:
   - a key argument that looks like a private key (it is not printed),
@@ -260,21 +264,30 @@ Before the first write, the command refuses:
   - a recipient outside a single-quoted age: list (an unquoted list, an
     escaped string, a YAML list, key_groups, an alias or a merge key),
   - the last recipient of a rule,
-  - a recipient that is in no rule and in no .enc file,
   - a store path or an .enc file that it cannot stat or read (a dangling
-    symlink included),
+    symlink included), or a directory in a store that it cannot read,
+  - another .enc file in a store: a name that ends in .enc, at any depth,
+    that is not a Secret.*.enc file at the top of the store (the re-key
+    does not rewrite it; re-key or remove it by hand),
+  - an .enc file whose sops metadata holds a member twice (re-encrypt it
+    with sops from its plaintext),
   - an .enc file whose sops metadata does not parse or lists no age
     recipient (the command reads the recipients from that metadata),
-  - an .enc file that lists the recipient and is newer than its plaintext
-    (run 'lo secrets decrypt' first),
   - an .enc file that matches no creation rule, a rule with a recipient that
     is not age, or a rule with an age recipient that does not parse,
   - without --skip-orphans, an .enc file with no decrypted twin: the re-key
-    cannot rewrite that file, so it keeps the removed recipient.
+    cannot rewrite that file, so it keeps the removed recipient,
+  - a managed .enc file that holds other bytes than its decrypted twin, one
+    that your age identity cannot decrypt, or a twin that it cannot read:
+    the command decrypts each file in memory to compare it with its twin,
+    and the re-key encrypts the twin.
 
 The command holds the lock .sops.yaml.lock for the whole run, and waits for
 it LO_SECRETS_LOCK_WAIT seconds (60 by default). If the re-key stops after
-the .sops.yaml write, run the same command again to resume it.
+the .sops.yaml write, run the same command again to resume it. At the end
+it prints the number of creation rules that changed, of .enc files whose
+labels listed the recipient, and of .enc files that it re-keyed. Commit the
+.enc files together with .sops.yaml.
 
 A removal does not revoke what the key already read. Its holder can still
 decrypt the older .enc files in the git history, and keeps every value it

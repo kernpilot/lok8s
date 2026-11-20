@@ -118,13 +118,29 @@ _add() { # <key> [all] [skip_orphans]
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
+@test "--all with every domain store a path it cannot read says that no store was found" {
+  # add-key does not read those paths; remove-key names them (Go twin:
+  # TestAddKeyAllWithEveryStoreUnreadableSaysNoStore).
+  [ "$(id -u)" -ne 0 ] || skip "root reads every file"
+  _load
+  chmod 000 "${PATH_CLUSTERS}/a.dev" "${PATH_CLUSTERS}/b.dev"
+  DOMAIN=a.dev run _add "${KEY_B}" 1
+  chmod 755 "${PATH_CLUSTERS}/a.dev" "${PATH_CLUSTERS}/b.dev"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "added recipient to .sops.yaml (1 creation rule(s))
+  ${KEY_B}
+[error] no secret store found to re-key" ] || { echo "$output" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
+
 @test "without flock, add-key refuses before .sops.yaml is touched and makes no lock file" {
   # A run without the lock can undo another run's change. The PATH has the
-  # tools of the run and no flock: a link to each one found on PATH.
+  # tools of the run and no flock: a link to each one found on PATH (mv too:
+  # the check for a mv that takes -T comes before the lock).
   _load
   local bin="${BATS_TEST_TMPDIR}/no-flock" tool path
   mkdir -p "${bin}"
-  for tool in sops grep sed cat; do
+  for tool in sops grep sed cat mv; do
     path="$(type -P "${tool}")" || continue
     ln -s "${path}" "${bin}/${tool}"
   done

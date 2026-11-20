@@ -9,10 +9,14 @@ package secrets
 
 import (
 	"errors"
+	"io/fs"
+	"maps"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // escaped spells a recipient so that YAML decodes it to the recipient while
@@ -149,6 +153,40 @@ func TestRemoveKeyChecksTheRuleOfEveryEnc(t *testing.T) {
 				t.Error("an .enc was re-keyed before the refusal")
 			}
 		})
+	}
+}
+
+// A managed file whose name holds a newline is one path to every step: the
+// rule check matches the whole name (the first rule matches the part after
+// the newline alone, and is not age), and the re-key rewrites the file.
+// tests/unit/secrets_remove_key_test.bats runs the same case through the bash
+// twin, which hands the paths to yq as one JSON array.
+func TestRemoveKeyRekeysANameWithANewline(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	c.Domain = "a.dev"
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	write(t, c.sopsConfigPath(), "creation_rules:\n"+
+		"  - path_regex: '^x$'\n    age: '"+k+"'\n    pgp: 'FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000'\n"+
+		"  - path_regex: 'Secret\\..*'\n    age: '"+k+","+g+"'\n")
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	plain := a + "/Secret.app.default.K\nx"
+	write(t, plain, "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, plain)
+	if !opens(t, plain+".enc", gone, "v") {
+		t.Fatal("fixture: the identity to remove cannot open the file before the removal")
+	}
+
+	callerIdentity(t, keep)
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if !strings.Contains(out.String(), "re-keying 1 cache file(s) across 1 store(s)…\n") {
+		t.Errorf("stdout:\n%q", out.String())
+	}
+	if opens(t, plain+".enc", gone, "v") || !opens(t, plain+".enc", keep, "v") {
+		t.Error("the .enc whose name holds a newline was not re-keyed")
 	}
 }
 
@@ -341,8 +379,11 @@ func TestReplaceFile(t *testing.T) {
 }
 
 // A re-key that stops after the .sops.yaml write prints the command that
-// resumes it. Without --all a rerun refuses, and names the store that still
-// lists the recipient; the printed command (with --all) resumes the run.
+// resumes it. Each file that it re-keyed is left with the .enc the newer file
+// of its pair, and the rerun takes it all the same: the compare reads the
+// values, not the times. Without --all a rerun re-keys the store again and
+// names, in a warning, the store that still lists the recipient; the printed
+// command (with --all) resumes the run.
 func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	skipUnlessPermissionsHold(t)
 	c, out, errOut := testEnv(t)
@@ -365,11 +406,12 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(b, 0o700) })
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	wantTail := "[error] Failed to encrypt Secret.app.default.K\n" +
-		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:\n" +
+		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:\n" +
 		"[error]   lo secrets remove-key " + g + " --domain a.dev --all\n"
 	if !strings.HasSuffix(errOut.String(), wantTail) {
 		t.Errorf("stderr:\n%q\nwant the tail:\n%q", errOut.String(), wantTail)
@@ -377,21 +419,28 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	if strings.Contains(readFile(t, c.sopsConfigPath()), g) || opens(t, a+"/Secret.app.default.K.enc", gone, "v") {
 		t.Fatal("fixture: the first store was expected to be re-keyed")
 	}
+	if !newerThan(a+"/Secret.app.default.K.enc", a+"/Secret.app.default.K") {
+		t.Error("the re-key left the twin the newer file: a later encrypt sweep would encrypt it again")
+	}
 	if err := os.Chmod(b, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
+	// Without --all the key is in no rule and on no label of the store: the
+	// rerun warns, re-keys the store again, ends, and names the store that
+	// still lists the recipient.
 	out.Reset()
 	errOut.Reset()
-	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
-		t.Fatalf("rerun without --all: want ErrHandled, got %v", err)
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("rerun without --all: %v\n%s", err, errOut.String())
 	}
-	want := "[error] not a recipient in .sops.yaml or in any .enc file of the store(s) — nothing to remove\n" +
-		"[error]   " + g + "\n" +
-		"[error] still listed in 1 .enc file(s) of a store this run did not re-key: clusters/b.dev/secrets\n" +
-		"[error]   rerun with --all to re-key every domain store\n"
-	if errOut.String() != want {
-		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	want := "[warn] " + g + " is in no creation rule and in no .enc label: remove-key re-keys every managed .enc anyway, and changes no rule\n" +
+		scopeWarn +
+		"[warn] still listed in 1 .enc file(s) of a store this run did not re-key: clusters/b.dev/secrets\n" +
+		"[warn]   rerun with --all to re-key every domain store\n" +
+		rotateWarn
+	if errOut.String() != want || !strings.HasSuffix(out.String(), rmSummary(0, 0, 1)) {
+		t.Errorf("stdout:\n%q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 	}
 
 	out.Reset()
@@ -399,11 +448,160 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	if err := c.RemoveKey(g, true, false); err != nil {
 		t.Fatalf("rerun with --all: %v\n%s", err, errOut.String())
 	}
-	if !strings.HasPrefix(out.String(), "recipient not in .sops.yaml; 1 .enc file(s) still list it — re-keying them\n") {
+	if !strings.HasPrefix(out.String(), "recipient not in .sops.yaml: .sops.yaml is not changed\n") ||
+		!strings.HasSuffix(out.String(), rmSummary(0, 1, 2)) {
 		t.Errorf("stdout:\n%q", out.String())
 	}
 	if opens(t, b+"/Secret.app.default.K.enc", gone, "w") || !opens(t, b+"/Secret.app.default.K.enc", keep, "w") {
 		t.Error("the rerun did not re-key the second store")
+	}
+}
+
+// treeBytes reads every regular file under dir, by its path.
+func treeBytes(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			files[path] = readFile(t, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// Before the first write, remove-key decrypts each file that it re-keys, in
+// memory, with the identity of the caller, and compares it with its twin: the
+// re-key encrypts the twin, so a twin with another value would replace the
+// value of the .enc. A twin that differs, a file that the caller cannot
+// decrypt and a twin that it cannot read are refused by their path, and
+// .sops.yaml and every file of the store stay byte-equal. No value is
+// printed: stdout and stderr are pinned whole.
+// tests/unit/secrets_remove_key_test.bats runs the same cases.
+func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		caller  bool // the caller holds the identity that stays
+		differs bool // the twin gets another value, newer than its .enc
+		unread  bool // the twin gets mode 000
+		want    string
+	}{
+		{
+			name:    "a twin that differs",
+			caller:  true,
+			differs: true,
+			want:    "[error] clusters/a.dev/secrets/Secret.app.default.K.enc differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first\n",
+		},
+		{
+			name: "a file that the caller cannot decrypt",
+			want: "[error] cannot decrypt clusters/a.dev/secrets/Secret.app.default.K.enc to compare it with its twin\n" +
+				"[error] cannot decrypt clusters/a.dev/secrets/Secret.other.default.K.enc to compare it with its twin\n",
+		},
+		{
+			name:   "a twin that it cannot read",
+			caller: true,
+			unread: true,
+			want:   "[error] cannot read clusters/a.dev/secrets/Secret.app.default.K\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unread {
+				skipUnlessPermissionsHold(t)
+			}
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+			k, g := keep.Recipient().String(), gone.Recipient().String()
+			sopsRules(t, c, k+","+g)
+			a := c.Paths.Clusters + "/a.dev/secrets"
+			app, other := a+"/Secret.app.default.K", a+"/Secret.other.default.K"
+			write(t, app, "v")
+			write(t, other, "w")
+			encryptStore(t, c, "a.dev", out, errOut)
+			freshen(t, app, other)
+			if tc.caller {
+				callerIdentity(t, keep)
+			}
+			if tc.differs {
+				write(t, app, "x")
+				freshen(t, app)
+			}
+			yaml, before := readFile(t, c.sopsConfigPath()), treeBytes(t, c.Paths.Clusters)
+			if tc.unread {
+				if err := os.Chmod(app, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(app, 0o600) })
+			}
+
+			if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			if want := tc.want + twinTail; errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			if tc.unread {
+				_ = os.Chmod(app, 0o600)
+			}
+			unchanged(t, c, yaml)
+			if !maps.Equal(treeBytes(t, c.Paths.Clusters), before) {
+				t.Error("a file of the store changed before the refusal")
+			}
+			if !opens(t, app+".enc", gone, "v") || !opens(t, other+".enc", gone, "w") {
+				t.Error("an .enc was re-keyed before the refusal")
+			}
+		})
+	}
+}
+
+// twinTail is the last line of the refusal of the compare (twinsMatch).
+const twinTail = "[error]   the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.\n"
+
+// A twin that holds another value than its .enc is refused by the compare
+// also when it is the older file of the two, and also for a file whose
+// labels do not list the removed key: the re-key encrypts every managed
+// twin. The times of the files do not count. .sops.yaml and every file of
+// the store stay byte-equal. tests/unit/secrets_remove_key_test.bats runs
+// the same case.
+func TestRemoveKeyRefusesAnOlderTwinThatDiffersFromItsEnc(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	app, other := labelStore(t, c, k, g, out, errOut)
+	write(t, other, "x")
+	info, err := os.Stat(other + ".enc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := info.ModTime().Add(-time.Hour)
+	if err := os.Chtimes(other, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+	if !newerThan(other+".enc", other) {
+		t.Fatal("fixture: the twin is not the older file")
+	}
+	yaml, before := readFile(t, c.sopsConfigPath()), treeBytes(t, c.Paths.Clusters)
+
+	callerIdentity(t, keep)
+	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	want := "[error] clusters/a.dev/secrets/Secret.other.default.K.enc differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first\n" + twinTail
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	unchanged(t, c, yaml)
+	if !maps.Equal(treeBytes(t, c.Paths.Clusters), before) {
+		t.Error("a file of the store changed before the refusal")
+	}
+	if !opens(t, app+".enc", gone, "v") {
+		t.Error("an .enc was re-keyed before the refusal")
 	}
 }
 
@@ -420,8 +618,11 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 			k := keep.Recipient().String()
 			var g, file string
 			if source == "keys file" {
-				g, file = newAgeIdentity(t).Recipient().String(), os.Getenv("SOPS_AGE_KEY_FILE")
-				write(t, file, "# created: test\n# public key: "+g+"\n")
+				// The keys file of the identity to remove: before the
+				// first write it still decrypts the store.
+				gone := newAgeIdentity(t)
+				g, file = gone.Recipient().String(), os.Getenv("SOPS_AGE_KEY_FILE")
+				write(t, file, "# created: test\n# public key: "+g+"\n"+gone.String()+"\n")
 			} else {
 				_, pub := testSSHKeypair(t, mkdir(t, os.Getenv("HOME")+"/.ssh"))
 				derived, _, err := deriveAgePublicKey(pub)
@@ -439,12 +640,37 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 			if err := c.RemoveKey(g, false, false); err != nil {
 				t.Fatalf("%v\n%s", err, errOut.String())
 			}
-			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files\n" +
-				"[warn] " + ownIdentityScope + "\n" + rotateWarn
+			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file\n" +
+				scopeWarn + rotateWarn
 			if errOut.String() != want {
 				t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 			}
 		})
+	}
+}
+
+// A removal whose recipient matches neither source of the own-identity check
+// prints the scope line of the check all the same: no match warning does not
+// mean that the key is not the caller's. The keys file (of the identity that
+// stays) and the SSH .pub hold other keys.
+func TestRemoveKeyPrintsTheIdentityScopeWithoutAMatch(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	c.Domain = "a.dev"
+	keep := newAgeIdentity(t)
+	k, g := keep.Recipient().String(), newAgeIdentity(t).Recipient().String()
+	write(t, os.Getenv("SOPS_AGE_KEY_FILE"), "# created: test\n# public key: "+k+"\n"+keep.String()+"\n")
+	testSSHKeypair(t, mkdir(t, os.Getenv("HOME")+"/.ssh"))
+	sopsRules(t, c, k+","+g)
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	write(t, a+"/Secret.app.default.K", "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
+
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if errOut.String() != scopeWarn+rotateWarn {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), scopeWarn+rotateWarn)
 	}
 }
 
