@@ -719,6 +719,18 @@ The **agent-token** (the credential that authenticates heartbeats) never
 leaves the cluster, and no command prints it, `lo kubehz claim-code`
 included.
 
+The dashboard can also mint a claim nonce (`khzn_…`). `lo kubehz claim` places
+it for the agent, and the next heartbeat (within 5 minutes) echoes it to the
+platform. Give the nonce on stdin, so that it is not on the command line or in
+the shell history:
+
+```bash
+lo kubehz claim --nonce - < nonce.txt
+```
+
+`--nonce -` reads one line. `lo` removes the white space at its start and at
+its end (also the CR of a file with CRLF line ends), then checks its shape.
+
 ## Choosing an agent
 
 Dashboard visibility comes from an in-cluster agent. lok8s ships two, and
