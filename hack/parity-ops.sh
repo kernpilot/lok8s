@@ -178,7 +178,9 @@ artifact_none()  { rm -f "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
 # with too many arguments: argsh exits 2 there, and the Go binary exits 1
 # with the identical message (cli.argshErrorf). Only these cases tolerate
 # that rc pair, and only when the bash stderr starts with the argsh line
-# "Error: too many arguments: <args>" (PARITY_PARSE_RC=auto).
+# "Error: too many arguments: <args>" (PARITY_PARSE_RC=auto). They also
+# require it: bash rc 2 and Go rc 1. Equal codes fail the case ("the
+# opt-in is not needed"), and so does any other pair.
 parity_normalize() {
   sed -i -E 's/took [0-9]+m [0-9]+s/took Nm Ns/; s/DONE in [0-9]+m [0-9]+s/DONE in Nm Ns/; s/=[0-9]+m[0-9]+s/=NmNs/g' "$@"
 }

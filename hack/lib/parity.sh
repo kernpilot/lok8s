@@ -196,7 +196,9 @@ parity::run_pair() {
 # 1 with the identical message (cli.argshErrorf; the cli-wide convention).
 # PARITY_PARSE_RC=1 tolerates exactly that pair; PARITY_PARSE_RC=auto only
 # when the first line of the bash stderr is the argsh line
-# "Error: too many arguments: <args>".
+# "Error: too many arguments: <args>". In the auto mode, parity::compare
+# also requires that pair: equal codes fail the case (the opt-in is not
+# needed there).
 parity::rc_tolerated() {
   (( bash_rc == 2 && go_rc == 1 )) || return 1
   case "${PARITY_PARSE_RC:-0}" in
@@ -214,7 +216,10 @@ parity::rc_tolerated() {
 parity::compare() {
   local label="${1}" allow="${2:--}"
   local ok=1
-  if (( go_rc != bash_rc )) && ! parity::rc_tolerated; then
+  if [[ "${PARITY_PARSE_RC:-0}" == auto ]] && (( go_rc == bash_rc )); then
+    echo "FAIL: ${label} — the opt-in is not needed: bash and Go exit ${go_rc}"
+    ok=0
+  elif (( go_rc != bash_rc )) && ! parity::rc_tolerated; then
     echo "FAIL: ${label} — rc: bash=${bash_rc} go=${go_rc}"
     ok=0
   fi
