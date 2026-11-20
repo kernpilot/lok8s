@@ -13,7 +13,8 @@
 #   cronjob   CronJob kubehz-heartbeat, manifests/agent/. A POSIX-sh script in
 #             a stock alpine/k8s image. It owns the cluster IDENTITY: it mints
 #             the agent-token A and the claim-code C into Secret kubehz-agent
-#             (create-if-absent, never rotated) and enrolls their SHA-256
+#             (the deploy creates it empty; the agent fills it once with a
+#             patch, never rotated) and enrolls their SHA-256
 #             hashes with the platform. It beats every five minutes with a
 #             schema-1 snapshot: nodes, control-plane component health,
 #             certificate expiry, and the 24 h handover assessment.
@@ -401,10 +402,11 @@ kubehz::deploy_apply() {
     #    and will still POST once. Wait it out, so the live agent's first beat
     #    cannot overlap it.
     kubehz::wait_heartbeat_idle
-    # 2b. The identity Secret. The live agent mounts kubehz-agent, which only
-    #     the CronJob's bootstrap creates, on its next five-minute tick; a
-    #     first deploy that waits for the rollout alone loses that race about
-    #     half the time. Run the bootstrap now and wait for its Job to complete.
+    # 2b. The identity Secret. The live agent mounts the agent-token of
+    #     kubehz-agent, which the apply above creates empty and only the
+    #     CronJob's bootstrap fills, on its next five-minute tick; a first
+    #     deploy that waits for the rollout alone loses that race about half
+    #     the time. Run the bootstrap now and wait for its Job to complete.
     kubehz::ensure_identity_secret || return 1
     # 3. Now the live agent, which becomes the only producer.
     kubectl apply -k "${overlay}" || {
@@ -603,24 +605,43 @@ kubehz::apply_bind_secret() {
   printf '%s\n' "${manifest}" | kubectl apply --server-side --force-conflicts -f -
 }
 
-# Run the CronJob's bootstrap once when the identity Secret kubehz-agent is
-# absent (a first deploy) and wait for that Job to COMPLETE, not only for the
-# Secret: the bootstrap writes the Secret first and attempts the registration
-# after it (best-effort; a refused POST still completes the Job), so a Job cut
-# off at the Secret would skip that attempt until the CronJob's next tick. The
-# Job's own deadline is 120 s; the wait allows a little more.
+# The read of the identity Secret prints the word agent-token when the Secret
+# holds a non-empty agent-token, else nothing. It never gets the value: the
+# deploy needs only to know that the key is there.
+_KUBEHZ_IDENTITY_TOKEN_TEMPLATE='go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}'
+
+# The merged output of that read has the line agent-token (a warning line on
+# stderr can come before it).
+# Usage: kubehz::identity_has_token <output>
+kubehz::identity_has_token() {
+  [[ $'\n'"${1}"$'\n' == *$'\n'agent-token$'\n'* ]]
+}
+
+# Run the CronJob's bootstrap once when the identity Secret kubehz-agent holds
+# no agent-token yet (a first deploy: the apply of the agent kustomization,
+# just before this step, created it empty) and wait for that Job to COMPLETE,
+# not only for the Secret: the bootstrap fills the Secret first and attempts
+# the registration after it (best-effort; a refused POST still completes the
+# Job), so a Job cut off at the Secret would skip that attempt until the
+# CronJob's next tick. The Job's own deadline is 120 s; the wait allows a
+# little more.
 kubehz::ensure_identity_secret() {
   local probe rc
-  if probe=$(kubectl -n kubehz-system get secret kubehz-agent -o name 2>&1); then
-    return 0
+  if probe=$(kubectl -n kubehz-system get secret kubehz-agent -o "${_KUBEHZ_IDENTITY_TOKEN_TEMPLATE}" 2>&1); then
+    ! kubehz::identity_has_token "${probe}" || return 0
   else
     rc=$?
-  fi
-  [[ -n "${probe}" ]] || probe="kubectl exited without output (exit status ${rc})"
-  # Only a NotFound answer means "absent". A refused or unreachable read
-  # says nothing about the Secret, and a bootstrap on top of an existing
-  # identity is not what the operator asked for.
-  if [[ "${probe}" != *NotFound* ]]; then
+    [[ -n "${probe}" ]] || probe="kubectl exited without output (exit status ${rc})"
+    # The agent cannot create the Secret (its RBAC has no create), and the
+    # apply just before this step creates it: an absent Secret stops the
+    # deploy too.
+    if [[ "${probe}" == *NotFound* ]]; then
+      error "kubehz: Secret kubehz-agent does not exist in kubehz-system, but the deploy applied it just before: ${probe}. The agent cannot create it: something deleted it, or an admission webhook refused it. The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
+      return 1
+    fi
+    # A refused or unreachable read says nothing about the Secret, and a
+    # bootstrap on top of an existing identity is not what the operator asked
+    # for.
     error "kubehz: could not read Secret kubehz-agent in kubehz-system: ${probe}. The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until you fix the kubeconfig or the RBAC and re-run 'lo kubehz deploy'."
     return 1
   fi
@@ -629,7 +650,7 @@ kubehz::ensure_identity_secret() {
   # two Jobs.
   local job
   job="kubehz-heartbeat-bootstrap-$(date +%s)-$(printf '%04x' "${RANDOM}")"
-  echo "kubehz: no identity Secret yet — running the CronJob's bootstrap once (job/${job})…"
+  echo "kubehz: the identity Secret holds no agent-token yet — running the CronJob's bootstrap once (job/${job})…"
   kubectl -n kubehz-system create job "${job}" --from=cronjob/kubehz-heartbeat || {
     error "kubehz: could not start the identity bootstrap (job/${job}). The CronJob agent is applied with the live owner: it bootstraps the identity on its next tick but does not beat, and the live agent was NOT applied, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy' (after that tick, or after a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-\$(date +%s) --from=cronjob/kubehz-heartbeat)."
     return 1
@@ -639,8 +660,9 @@ kubehz::ensure_identity_secret() {
     error "kubehz: the identity bootstrap (job/${job}) did not complete within ${wait}s. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause. A Job that failed stays until you delete it. Read its state: kubectl -n kubehz-system describe job ${job}. Read its log: kubectl -n kubehz-system logs job/${job} (after the deadline the pod is gone and this call fails). Delete it after you read them: kubectl -n kubehz-system delete job ${job}. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
     return 1
   }
-  kubectl -n kubehz-system get secret kubehz-agent -o name >/dev/null 2>&1 || {
-    error "kubehz: the identity bootstrap (job/${job}) completed but left no Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/${job}. The live agent was NOT applied."
+  probe=$(kubectl -n kubehz-system get secret kubehz-agent -o "${_KUBEHZ_IDENTITY_TOKEN_TEMPLATE}" 2>&1) \
+    && kubehz::identity_has_token "${probe}" || {
+    error "kubehz: the identity bootstrap (job/${job}) completed but left no agent-token in Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/${job}. The live agent was NOT applied."
     return 1
   }
   kubectl -n kubehz-system delete job "${job}" --ignore-not-found=true >/dev/null 2>&1 || true

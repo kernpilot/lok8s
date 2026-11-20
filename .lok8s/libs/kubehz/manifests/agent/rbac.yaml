@@ -152,17 +152,17 @@ subjects:
 # Agent-identity bootstrap (P0 self-hosted claim). The heartbeat CronJob
 # generates the agent-token (A) + claim-code (C) into Secret kubehz-agent and
 # reads A back to authenticate its heartbeat. Namespaced Role in kubehz-system,
-# scoped to that one Secret's lifecycle. Two rules, least privilege:
-#   (a) `get` is scoped by resourceNames to the single kubehz-agent Secret —
-#       the agent reads A/C back but CANNOT read any OTHER Secret in the
-#       namespace (Kubernetes RBAC honors resourceNames for get).
-#   (b) `create` cannot be name-restricted (a resource has no name until it is
-#       created, so resourceNames never matches a create) — this rule is
-#       unavoidably namespace-wide; it only grants create (bootstrap the Secret
-#       when absent), never read.
-# Deliberately NO update/patch/delete — the Secret is generated once and NEVER
-# rotated, so the agent must not be able to change it. Least privilege that also
-# enforces the never-rotate invariant.
+# with one rule: `get` and `patch`, scoped by resourceNames to that one Secret.
+# The agent reads A/C back but CANNOT read or change any OTHER Secret in the
+# namespace (Kubernetes RBAC honors resourceNames for get and patch).
+# No `create`: RBAC cannot limit a create to one name (an object has no name
+# before it exists), so a create rule would let the holder of this token make
+# a Secret of any name in kubehz-system. The deploy creates kubehz-agent empty
+# (identity-secret.yaml), and the bootstrap fills it with one patch.
+# No update or delete. The patch can change the Secret, so RBAC alone no longer
+# keeps A and C from rotating. The script keeps them: it patches only a Secret
+# that holds neither key, and the patch carries the resourceVersion that its
+# read saw, so the apiserver refuses it when the Secret changed in between.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -180,12 +180,7 @@ rules:
       - kubehz-agent
     verbs:
       - get
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - create
+      - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
