@@ -770,6 +770,115 @@ YAML
   assert_output "${yaml}:7"
 }
 
+# For <<-, bash joins the lines of an unquoted body first and then strips
+# the leading tabs of the joined line: "E\" then "<tab>OF" is body text
+# (line 3), and "<tab>E\" then "OF" ends the body (line 8). In a YAML
+# file, YAML removes the indentation of the block scalar (that of its
+# first line) before the shell sees the text: a delimiter with one more
+# space (line 5 of the YAML file) or with the indentation of a command in
+# the block (line 11) is body text for bash, and the gate reports it. A
+# new block sets its own indentation (lines 15 to 18), and in a quoted
+# body the same holds (line 20). A block with an indentation indicator
+# (|2) has no delimiter that the gate can place (line 24). The control: a
+# here-document whose opener has more indentation than its delimiter,
+# with the delimiter at the indentation of the block, after a comment line
+# that ends in "|" (a comment starts no block).
+@test "curl gate: <<- strips the tabs of the joined line, and a YAML body ends only at the indentation of its block" {
+  local sh="${BATS_TEST_TMPDIR}/tabs-bad.sh" yaml="${BATS_TEST_TMPDIR}/block-bad.yaml"
+  local good="${BATS_TEST_TMPDIR}/block-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${sh}" <<'SH'
+cat <<-EOF
+E\
+	OF
+'$(curl -u u:p https://h.example/t1)'
+EOF
+cat <<-EOF
+	E\
+OF
+curl -u u:p https://h.example/t2
+SH
+  cat > "${yaml}" <<'YAML'
+spec:
+  args:
+    - |
+      cat <<EOF
+       EOF
+      '$(curl -u u:p https://h.example/y1)'
+      EOF
+      if true; then
+        cat <<EOF
+        '$(curl -u u:p https://h.example/y2)'
+        EOF
+      '$(curl -u u:p https://h.example/y3)'
+      EOF
+      fi
+    - |
+          cat <<EOF
+          EOF
+          curl -u u:p https://h.example/y4
+          cat <<'EOF'
+           EOF
+          EOF
+    - |2
+        cat <<EOF
+        EOF
+        echo the end
+YAML
+  cat > "${good}" <<'YAML'
+spec:
+  # the args: |
+    args:
+      - |
+        if true; then
+          cat <<'EOF'
+        curl -u u:p https://h.example/g1
+        EOF
+        fi
+        ( http::tls_log_vars_unset && curl -q -sS https://h.example/g2 )
+YAML
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place" d="a here-document delimiter the gate cannot place"
+  run curl_gate q "${sh}" "${yaml}"
+  assert_failure 1
+  assert_output "${sh}:4: ${c}
+${sh}:9: ${q}
+${yaml}:5: ${d}
+${yaml}:6: ${c}
+${yaml}:10: ${c}
+${yaml}:11: ${d}
+${yaml}:12: ${c}
+${yaml}:18: ${q}
+${yaml}:20: ${d}
+${yaml}:24: ${d}"
+  run curl_gate tls "${sh}" "${yaml}"
+  assert_failure 1
+  assert_output "${sh}:4: ${c}
+${sh}:9: ${t}
+${yaml}:5: ${d}
+${yaml}:6: ${c}
+${yaml}:10: ${c}
+${yaml}:11: ${d}
+${yaml}:12: ${c}
+${yaml}:18: ${t}
+${yaml}:20: ${d}
+${yaml}:24: ${d}"
+  run curl_gate list "${sh}" "${yaml}"
+  assert_success
+  assert_output "${sh}:9 credential
+${yaml}:18 credential"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate tls "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:10"
+}
+
 # The operand of a redirection is one shell word, with its quotes and
 # escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
 # command only in a command position: in "echo if curl" the curl is an

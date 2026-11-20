@@ -114,13 +114,18 @@
 # of a here-document (<< or <<- and a delimiter word, in code, not <<<
 # and not a shift in (( ))) is no command: it starts at the next line and
 # ends at the line that is the delimiter, compared exactly, as bash does.
-# For <<- the leading tabs of each line go first. In a YAML file (.yaml,
-# .yml) the leading spaces of each line go too (the indentation of a
-# block scalar, which the shell does not see). In a body whose delimiter
-# has no quote and no backslash, a line that ends in an odd number of
-# backslashes is joined to the next line before the test, as bash does:
-# x\<newline>EOF is body text, E\<newline>OF ends the body. A quoted body
-# joins no lines.
+# In a body whose delimiter has no quote and no backslash, a line that
+# ends in an odd number of backslashes is joined to the next line first,
+# as bash does: x\<newline>EOF is body text, E\<newline>OF ends the body.
+# A quoted body joins no lines. Then, for <<-, the leading tabs of the
+# (joined) line go: E\<newline><tab>OF is body text, and
+# <tab>E\<newline>OF ends the body. In a YAML file (.yaml, .yml), the
+# indentation of the block scalar goes from each line before that, as
+# YAML removes it before the shell sees the text: the indentation of the
+# first line of the block after its "|" or ">" line. A line of the body
+# that is the delimiter after more white space, or in a block with an
+# indentation indicator (|2), is a finding ("a here-document delimiter
+# the gate cannot place"), and the body goes on.
 # The first argument of a call is the first word after the curl word that
 # is not a redirection: the operand of a redirection is one shell word,
 # with its quotes and escapes (curl >"a -q " -u … has -u first).
@@ -626,30 +631,72 @@ curl_gate() {
       }
       hfrom = L + 1
     }
-    # A line of a here-document body (FNR, the text $0). The body ends at
-    # the line that is the delimiter, compared exactly, as bash does: for
-    # <<- the leading tabs go first, and in a YAML file the leading spaces
-    # (the indentation of the block) go too. A curl word in an unquoted
-    # body is a finding: the gate does not read the $( ) and `…` there. In
-    # an unquoted body, a line that ends in an odd number of backslashes
-    # joins the next line BEFORE the delimiter test, as bash does: a joined
-    # line can be the delimiter, and a line after a joined one is no
-    # delimiter. A quoted body is text and joins no lines: its curl words
-    # are findings only when the body has no end in the file (hd_close).
+    # A line of a here-document body (FNR, the text $0), in the order of
+    # YAML and bash. In a YAML file, the indentation of the block scalar
+    # goes first (yaml_unindent). In an unquoted body, a line that ends in
+    # an odd number of backslashes joins the next line. Then, for <<-, the
+    # leading tabs of the (joined) line go, and the body ends at the line
+    # that is the delimiter, compared exactly. A curl word in an unquoted
+    # body is a finding: the gate does not read the $( ) and `…` there. A
+    # quoted body is text and joins no lines: its curl words are findings
+    # only when the body has no end in the file (hd_close).
     function body_line(   t) {
       t = $0
-      if (hfile ~ /\.ya?ml$/) sub(/^ +/, "", t)
-      if (hq_tabs[hq_i]) sub(/^\t+/, "", t)
+      if (hfile ~ /\.ya?ml$/) t = yaml_unindent(t)
       if (hq_quoted[hq_i]) {
-        if (t == hq_delim[hq_i]) body_end()
-        else body_words($0, FNR, 1)
+        if (hq_tabs[hq_i]) sub(/^\t+/, "", t)
+        if (t == hq_delim[hq_i]) { body_end(); return }
+        hd_near(t, FNR)
+        body_words($0, FNR, 1)
         return
       }
       if (hbuf == "") hbl = FNR
       if (match(t, /\\+$/) && RLENGTH % 2 == 1) { hbuf = hbuf substr(t, 1, length(t) - 1); return }
       t = hbuf t; hbuf = ""
-      if (t == hq_delim[hq_i]) body_end()
-      else body_words(t, hbl, 0)
+      if (hq_tabs[hq_i]) sub(/^\t+/, "", t)
+      if (t == hq_delim[hq_i]) { body_end(); return }
+      hd_near(t, hbl)
+      body_words(t, hbl, 0)
+    }
+    # yaml_unindent(t): the line t of a YAML file without the indentation
+    # of its block scalar (yb_ind, from yaml_line). A blank line with less
+    # indentation is empty. In no block, or in a block whose indentation
+    # the gate does not know, nothing goes.
+    function yaml_unindent(t) {
+      if (yb_ind <= 0) return t
+      if (substr(t, 1, yb_ind) ~ /^ *$/) return substr(t, yb_ind + 1)
+      return t
+    }
+    # hd_near(t, l): in a YAML file, a line t of a body (its first line l)
+    # that is the delimiter after more white space is a finding in the q
+    # and tls modes (fail closed): bash goes on with the body there, but
+    # such a line shows a block that the gate can read wrong.
+    function hd_near(t, l,   s) {
+      if (mode == "list" || hfile !~ /\.ya?ml$/) return
+      s = t; sub(/^[ \t]+/, "", s)
+      if (s == hq_delim[hq_i]) printf "%s:%d: %s\n", hfile, l, "a here-document delimiter the gate cannot place"
+    }
+    # yaml_line(): the block scalars of a YAML file, for each line that is
+    # not blank. Outside a block, a line that ends in "|" or ">" (with its
+    # indicators and a comment) as the value of a key or of a list item
+    # starts a block: the next line that is not blank sets the indentation
+    # of the block (yb_ind), when it has more indentation than that line
+    # (yb_par). The block ends at a line with less indentation. With an
+    # indentation indicator (|2), the gate does not know the indentation
+    # of the block (yb_ind -2). A comment line starts no block.
+    function yaml_line(   ind, h) {
+      if ($0 ~ /^[[:space:]]*$/) return
+      match($0, /^ */); ind = RLENGTH
+      if (yb_wait) {
+        yb_wait = 0
+        if (ind > yb_par) { yb_ind = yb_dig ? -2 : ind; return }
+      }
+      if ((yb_ind >= 0 && ind < yb_ind) || (yb_ind == -2 && ind <= yb_par)) yb_ind = -1
+      if (yb_ind != -1 || $0 ~ /^[[:space:]]*#/) return
+      if (match($0, /(^[[:space:]]*-|:)[[:space:]]+[|>][-+0-9]*[[:space:]]*(#.*)?$/)) {
+        h = substr($0, RSTART, RLENGTH); sub(/^[^|>]*[|>]/, "", h); sub(/[[:space:]#].*$/, "", h)
+        yb_wait = 1; yb_par = ind; yb_dig = h ~ /[1-9]/
+      }
     }
     # The end of a body: the next here-document of the command, if any.
     function body_end() {
@@ -762,9 +809,10 @@ curl_gate() {
       reset()
     }
     FNR == 1 {
-      check(); reset(); hd_close(); IS_top = 0
+      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0
       for (i = 1; i <= na; i++) if (path_is(FILENAME, apath[i])) aseen[i] = 1
     }
+    FILENAME ~ /\.ya?ml$/ { yaml_line() }
     hq_n > 0 { body_line(); next }
     # A comment line neither ends nor continues a command. In a string over
     # more lines it is text of the string.
