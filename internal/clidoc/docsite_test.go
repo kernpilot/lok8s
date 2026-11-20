@@ -2,9 +2,8 @@ package clidoc
 
 import (
 	"bytes"
-	"io"
-	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,130 +12,98 @@ import (
 )
 
 // oldDocsSite is the address of the docs site before it moved to
-// https://lok8s.io/ (docs/public/CNAME). The constant has two parts, so
-// this file does not hold the text that the test looks for.
+// https://lok8s.io/ (docs/public/CNAME), in lower case. The constant has
+// two parts, so this file does not hold the text that the test looks for.
 const oldDocsSite = "kernpilot.github.io" + "/lok8s"
 
-// oldDocsSiteSkips are the paths that the walk does not read. A key with a
-// slash is a path from the repository root. A key without a slash is a
-// file or directory name at any depth. Git does not track these paths, with
-// one exception: docs/releases.
-var oldDocsSiteSkips = map[string]string{
-	".git":                  "the git store",
-	"node_modules":          "installed packages",
-	".claude":               "local agent notes",
-	".secrets":              "a credential store: the test does not open it",
-	".kubeconfig":           "credentials: the test does not open them",
-	".env":                  "credentials: the test does not open them",
-	"docs/releases":         "published release notes keep the links of their release",
-	"docs/.vitepress/dist":  "the docs build output, which renders docs/releases",
-	"docs/.vitepress/cache": "the docs build cache",
+// movedLinkFiles are the files whose links moved from the old docs site
+// to lok8s.io. The test fails when it does not read one of them: then the
+// file list or the read is wrong, and the test checks less than it seems.
+var movedLinkFiles = []string{
+	".github/ISSUE_TEMPLATE/config.yml",
+	".lok8s/drivers/README.md",
+	".lok8s/drivers/lo/utils/registries.sh",
+	".lok8s/providers/README.md",
+	"clusters/lok8s.dev/targets/README.md",
+	"internal/assets/lok8s/drivers/README.md",
+	"internal/assets/lok8s/drivers/lo/utils/registries.sh",
+	"internal/assets/lok8s/providers/README.md",
+	"internal/driver/lo/registries.go",
 }
 
-// oldDocsSiteExceptions are the files that can still hold the old address,
-// each with its reason. An entry whose file does not hold the address fails
-// the test, so that the list cannot go stale in silence.
-var oldDocsSiteExceptions = map[string]string{
-	".lok8s/drivers/lo/utils/registries.sh":                "changes in an open PR; remove this entry when it merges",
-	"internal/assets/lok8s/drivers/lo/utils/registries.sh": "changes in an open PR; remove this entry when it merges",
-	"internal/driver/lo/registries.go":                     "changes in an open PR; remove this entry when it merges",
-}
-
-// minDocsSiteFiles is a floor for the number of text files that the walk
-// reads. The repository has more than 2000. A wrong root or a skip that
+// minDocsSiteFiles is a floor for the number of text files that the test
+// reads. The repository has more than 2000. A wrong root or a read that
 // drops too much reads fewer, and an empty read proves nothing.
 const minDocsSiteFiles = 1000
 
-// TestNoLinkToTheOldDocsSite: no file in the repository links to the old
-// docs site, except the release notes and the files in
-// oldDocsSiteExceptions. The test walks the working tree, because git is
-// not available in a test. Binary files (a NUL byte in the first 8000
-// bytes) and symbolic links are not read.
+// TestNoLinkToTheOldDocsSite: no tracked file links to the old docs site,
+// in any case. The test reads the files that `git ls-files` lists, so an
+// untracked copy (for example the bash tree that an e2e leg leaves below
+// tests/e2e/) does not count. It does not read binary files (a NUL byte in
+// the first 8000 bytes), symbolic links or submodules.
 func TestNoLinkToTheOldDocsSite(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
-	held := map[string]bool{}
-	read := 0
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	// Outside a repository the test cannot run: skip locally, FAIL under
+	// CI=true (a silent skip there would pass an old link).
+	skip := func(format string, a ...any) {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("CI=true: "+format, a...)
+		}
+		t.Skipf(format, a...)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		skip("git not on PATH")
+	}
+	out, err := exec.Command(git, "-C", root, "ls-files", "-z").Output()
+	if err != nil || len(out) == 0 {
+		skip("git ls-files: %v (empty output)", err)
+	}
+	read := map[string]bool{}
+	for rel := range strings.SplitSeq(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		text, ok, err := readText(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
-			return err
+			t.Errorf("%s: cannot read the file: %v", rel, err)
+			continue
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
+		if !ok {
+			continue
 		}
-		rel = filepath.ToSlash(rel)
-		if _, skip := oldDocsSiteSkips[rel]; skip {
-			return skipEntry(d)
-		}
-		if _, skip := oldDocsSiteSkips[d.Name()]; skip && rel != "." {
-			return skipEntry(d)
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		text, ok, err := readText(path)
-		if err != nil || !ok {
-			return err
-		}
-		read++
-		if !strings.Contains(text, oldDocsSite) {
-			return nil
-		}
-		held[rel] = true
-		if _, ok := oldDocsSiteExceptions[rel]; ok {
-			return nil
-		}
+		read[rel] = true
 		for i, line := range strings.Split(text, "\n") {
-			if strings.Contains(line, oldDocsSite) {
+			if strings.Contains(strings.ToLower(line), oldDocsSite) {
 				t.Errorf("%s:%d links to the old docs site %s: link the same page on https://lok8s.io/ (no /lok8s prefix)", rel, i+1, oldDocsSite)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	for rel, reason := range oldDocsSiteExceptions {
-		if !held[rel] {
-			t.Errorf("%s does not hold %s, or the walk does not read it, but oldDocsSiteExceptions names it (%s): remove its entry", rel, oldDocsSite, reason)
+	for _, rel := range movedLinkFiles {
+		if !read[rel] {
+			t.Errorf("%s: the test did not read this file, but movedLinkFiles names it: check the read, or remove the entry if the file is gone", rel)
 		}
 	}
-	if read < minDocsSiteFiles {
-		t.Errorf("the walk read %d text files, want at least %d: check the root and oldDocsSiteSkips", read, minDocsSiteFiles)
+	if len(read) < minDocsSiteFiles {
+		t.Errorf("the test read %d text files, want at least %d: check the root and the read", len(read), minDocsSiteFiles)
 	}
 }
 
-// skipEntry makes the walk step over d: its whole tree for a directory,
-// only d for a file.
-func skipEntry(d fs.DirEntry) error {
-	if d.IsDir() {
-		return filepath.SkipDir
-	}
-	return nil
-}
-
-// readText reads a file. It gives ok=false for a binary file, which has a
-// NUL byte in the first 8000 bytes, and then does not read the remaining
-// bytes.
+// readText reads a regular file. It gives ok=false for a binary file (a
+// NUL byte in the first 8000 bytes), a symbolic link and a directory (a
+// submodule).
 func readText(path string) (text string, ok bool, err error) {
-	f, err := os.Open(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return "", false, err
 	}
-	defer f.Close()
-	head := make([]byte, 8000)
-	n, err := io.ReadFull(f, head)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return "", false, err
-	}
-	head = head[:n]
-	if bytes.IndexByte(head, 0) >= 0 {
+	if !info.Mode().IsRegular() {
 		return "", false, nil
 	}
-	rest, err := io.ReadAll(f)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", false, err
 	}
-	return string(head) + string(rest), true, nil
+	if bytes.IndexByte(raw[:min(len(raw), 8000)], 0) >= 0 {
+		return "", false, nil
+	}
+	return string(raw), true, nil
 }
