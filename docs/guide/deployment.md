@@ -868,10 +868,13 @@ cluster, so keep it private. CI needs no platform token.
 A public repository shows its job logs and job summaries to everyone, so the
 workflow keeps the ticket out of them:
 
-- `lo` prints the ticket only when stdout is a terminal, or with
-  `--print-token`. The stdout of a runner is not a terminal, so `lo` prints
+- Both workflows pipe the output of `lo` into the log filter, and the
+  runner sets `CI`. So the stdout of `lo` is not a terminal, and `lo` prints
   `<hidden: one-time claim ticket>` in place of the ticket. Do not add
-  `--print-token` to a CI job.
+  `--print-token` to a CI job: with it, `lo` prints the ticket on any
+  stdout. A terminal is not a private place either: a pty that a runner
+  gives a job, a terminal recording and the scrollback keep what `lo`
+  prints. In a CI run, `lo` hides the ticket on a terminal too.
 - The workflow also filters the job log, as a second layer. The filter puts
   the same placeholder in place of a ticket that gets through.
   The log also hides every other string with the shape of an MD5 fingerprint

@@ -19,7 +19,8 @@ main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
   local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0 ignore_nondeterministic=0
-  # --print-token reaches kubehz::ensure_claim_key through dynamic scope.
+  # --print-token goes down to kubehz::register_cluster as an argument of
+  # provision::dispatch, not through dynamic scope.
   local print_token=0
   # Review round 2, item E: see bootstrap::_flag_given's doc comment.
   local _only_given=0
@@ -35,7 +36,7 @@ main::provision() {
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'    'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
-    'print-token|:+'     'Also print the one-time claim ticket when stdout is not a terminal'
+    'print-token|:+'     'Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
@@ -59,7 +60,7 @@ main::provision() {
   # frictionless and would otherwise never say which domain it acted on.
   echo "lo provision: domain ${domain}" >&2
   local _rc=0
-  provision::dispatch "${domain}" "${bootstrap}" || _rc=$?
+  provision::dispatch "${domain}" "${bootstrap}" "${print_token}" || _rc=$?
   bootstrap::_dry_run_exit "${_rc}"
 }
 
@@ -76,9 +77,11 @@ main::provision() {
 # NOTE: LOK8S_NONINTERACTIVE means REFUSE here, while recover::_confirm treats
 # it as consent — deliberate: recover is an explicit DR command whose entry
 # already demanded a literal yes; up/provision are ambient and fail closed.
+# The rule of the environment is verbose::noninteractive (Go:
+# ui.NonInteractive); the claim ticket of the kubehz registration uses it
+# too.
 provision::_interactive() {
-  [[ -n "${LOK8S_NONINTERACTIVE:-}" ]] && return 1
-  [[ -n "${CI:-}" && "${CI:-}" != "false" ]] && return 1
+  verbose::noninteractive && return 1
   [[ -t 0 ]]
 }
 
@@ -677,10 +680,13 @@ provision::read_kind() {
 }
 
 # Dispatch provisioning to the appropriate kind contract implementation.
-# Usage: provision::dispatch <domain> [bootstrap_only]
+# <show_ticket> 1 is --print-token of lo provision and lo up: the kubehz
+# registration shows the one-time claim ticket on any stdout. lo recover
+# does not pass it.
+# Usage: provision::dispatch <domain> [bootstrap_only] [show_ticket]
 provision::dispatch() {
   local domain="${1}"
-  local bootstrap_only="${2:-0}"
+  local bootstrap_only="${2:-0}" show_ticket="${3:-0}"
   # Fail fast: a missing/empty/bogus domain must stop here, BEFORE any driver
   # creates a kind cluster or touches infra. (resolve_spec's return was
   # previously ignored, so `lo up` with no active domain half-provisioned.)
@@ -843,7 +849,7 @@ provision::dispatch() {
     # bootstrap (#312): the error names `lo provision --bootstrap`, which
     # registers and then bootstraps.
     if [[ "${LOK8S_KUBEHZ_ACCESS:-none}" != "none" ]]; then
-      kubehz::register_cluster "${domain}" "${cluster_yaml}" "lo provision --bootstrap --domain ${domain}" || return 1
+      kubehz::register_cluster "${domain}" "${cluster_yaml}" "lo provision --bootstrap --domain ${domain}" "${show_ticket}" || return 1
     fi
   fi
 

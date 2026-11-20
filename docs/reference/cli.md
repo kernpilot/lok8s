@@ -175,7 +175,7 @@ With `--remote`: provisions a VM via `spec.provider`, then runs kind on the remo
 | `--open-tilt`, `-o` | Open the Tilt UI in a browser after startup |
 | `--ci` | Headless: after provisioning, run `tilt ci` in the foreground (build + deploy + wait for Ready) instead of a backgrounded `tilt up`. No TTY, no browser. `lo up` exits with `tilt ci`'s status, so a non-zero exit means the stack did not converge |
 | `--timeout`, `-t` | Readiness timeout for `--ci` (e.g. `300s`, `10m`); passed to `tilt ci --timeout` |
-| `--print-token` | Also print the one-time claim ticket of a claim key registration when stdout is not a terminal. See [the claim ticket](../guide/kubehz.md#registration) |
+| `--print-token` | Also print the one-time claim ticket of a claim key registration when stdout is not a terminal or `CI` is set. That output then holds a secret: anyone who has the ticket can claim the cluster. See [the claim ticket](../guide/kubehz.md#registration) |
 
 ### lo down
 
@@ -223,7 +223,7 @@ With `--remote`: loads `spec.provider`, provisions the cloud VM, then either set
 |------|-------------|
 | `--bootstrap`, `-b` | Re-apply `spec.bootstrap` only, on an existing cluster (skip the infra reconcile) |
 | `--force`, `-f` | Global flag: skip the real-infrastructure confirmation prompt (cloud drivers) |
-| `--print-token` | Also print the one-time claim ticket of a claim key registration when stdout is not a terminal. See [the claim ticket](../guide/kubehz.md#registration) |
+| `--print-token` | Also print the one-time claim ticket of a claim key registration when stdout is not a terminal or `CI` is set. That output then holds a secret: anyone who has the ticket can claim the cluster. See [the claim ticket](../guide/kubehz.md#registration) |
 
 ### lo bootstrap
 
@@ -826,7 +826,7 @@ Opt-outs: the global `--no-eject` flag or `LO_ASSETS_EJECT=never` serve every mi
 kubehz platform integration (alias: `lo kh`). Requires `spec.kubehz` in the cluster spec.
 
 ```bash
-lo kubehz register            # register the cluster with the platform; the claim ticket shows only on a terminal (--print-token: on any stdout)
+lo kubehz register            # register the cluster with the platform; the claim ticket shows only on a terminal outside CI (--print-token: on any stdout, a secret)
 lo kubehz deregister          # remove it
 lo kubehz deploy              # deploy the in-cluster agent named by spec.kubehz.agent
 lo kubehz deploy --dry-run    # print the rendered manifests, apply nothing

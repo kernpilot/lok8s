@@ -99,7 +99,8 @@ type Context struct {
 	IsTTY func() bool
 	// PrintToken is --print-token of lo kubehz register, lo provision and
 	// lo up: the claim-key registration also shows the one-time claim
-	// ticket on a stdout that is not a terminal (see claimTicketShown).
+	// ticket on a stdout that is not a terminal and in a CI run (see
+	// claimTicketShown).
 	PrintToken bool
 	// MkdirTemp makes the fresh private directory of a join file (nil =
 	// os.MkdirTemp). Tests return a directory they prepared, to plant a

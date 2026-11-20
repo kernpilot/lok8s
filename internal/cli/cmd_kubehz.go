@@ -116,7 +116,7 @@ func printTokenFlag(c *cobra.Command) {
 
 // claimTicketFlagHelp is the help of --print-token, the same text as the
 // bash twin.
-const claimTicketFlagHelp = "Also print the one-time claim ticket when stdout is not a terminal"
+const claimTicketFlagHelp = "Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret"
 
 func newKubehzDeregister(paths *config.Paths) *cobra.Command {
 	return kubehzSimple(paths, "deregister", "d", "Remove cluster from kubehz", commandSpec{destructive: true},

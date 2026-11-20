@@ -543,12 +543,19 @@ kubehz::claim_key_no_mark() {
 # Call it only when the answer holds a key id. Without a mark (no sha256sum
 # or shasum) no key is ours (kubehz::claim_key_no_mark).
 kubehz::claim_key_own() {
-  local keys="${1}" domain="${2}" verb="${3}" name="${4}" label mark next head
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the key list: a public key and its fingerprint
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq) would get the value. +i and the refusal:
+  # as in kubehz::space_api_call.
+  local +x +i keys || { error "kubehz::claim_key_own: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  keys="${1}"
+  local domain="${2}" verb="${3}" name="${4}" label mark next head
   if ! mark=$(kubehz::claim_key_mark "${domain}"); then
     kubehz::claim_key_no_mark "${name}"
     return 1
   fi
-  label=$(jq -r --arg l "${_KUBEHZ_CLAIM_LABEL}" '.ssh_keys[0].labels[$l] // empty' <<<"${keys}" 2>/dev/null) || label=""
+  label=$(printf '%s' "${keys}" | jq -r --arg l "${_KUBEHZ_CLAIM_LABEL}" '.ssh_keys[0].labels[$l] // empty' 2>/dev/null) || label=""
   [[ "${label}" != "${mark}" ]] || return 0
   head="kubehz: lo does not ${verb} the SSH key '${name}' in your Hetzner Cloud project: "
   if [[ -z "${label}" ]]; then
@@ -561,26 +568,36 @@ kubehz::claim_key_own() {
   return 1
 }
 
-# Usage: kubehz::ensure_claim_key <domain> <api_url> [<next>]
+# Usage: kubehz::ensure_claim_key <domain> <api_url> [<next>] [<show_ticket>]
 # <next> is the command the error of an unavailable platform names (see
 # kubehz::register_post). rc 3: that error, no fall back.
-# The one-time claim ticket (the fingerprint) goes to stdout only when it is
-# a terminal, or with --print-token (print_token, through bash's dynamic
-# scope from kubehz::register, main::provision and main::up). Any signed-in
-# user who has the ticket can claim the cluster: a pipe or a file (a CI log,
-# a captured output) is a copy that nobody asked for. Go: claimTicketShown.
-# The response, the ticket and the Hetzner token stay out of a trace
-# (set -x) and out of the environment of a child (set -a): the guard line
-# turns both off until the function returns.
+# The one-time claim ticket (the fingerprint) goes to stdout only when
+# <show_ticket> is 1, or when stdout is a terminal and the environment is
+# not a CI run (verbose::noninteractive). <show_ticket> is --print-token of
+# lo kubehz register, lo provision and lo up, passed down as an argument,
+# so a print_token in the environment or in the scope of a caller shows
+# nothing. Any signed-in user who has the ticket can claim the cluster: a
+# pipe or a file (a CI log, a captured output) is a copy that nobody asked
+# for. Go: claimTicketShown.
+# The response, the public key, the ticket and the Hetzner token stay out
+# of a trace (set -x), out of a DEBUG, RETURN or ERR trap of the caller
+# (set -T, set -E), and out of the environment of a child (set -a, or a
+# name that the caller exported): the two guard lines (utils/keysonly.sh)
+# and `local +x`.
 kubehz::ensure_claim_key() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the response, the ticket and the Hetzner token
-  local domain="${1}" api_url="${2}" next="${3:-lo kubehz register --domain ${1}}"
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq, curl) would get the value. +i and the refusal:
+  # as in kubehz::space_api_call.
+  local +x +i response public_key fingerprint keys || { error "kubehz::ensure_claim_key: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local domain="${1}" api_url="${2}" next="${3:-lo kubehz register --domain ${1}}" show_ticket="${4:-0}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
   # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
   http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
   http::credential_ok HCLOUD_TOKEN || return 1
 
-  local response rc=0
+  local rc=0
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, claimKey: true}' --arg d "${domain}" |
     kubehz::register_post "${domain}" "${api_url}" "${next}") || rc=$?
@@ -591,21 +608,23 @@ kubehz::ensure_claim_key() {
     return "${rc}"
   fi
 
-  local cluster_id public_key fingerprint key_name
-  cluster_id=$(jq -r '.id // empty' <<<"${response}")
-  public_key=$(jq -r '.claimKey.publicKey // empty' <<<"${response}")
-  fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
-  key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
+  # No here-string: bash can write one to a file in TMPDIR
+  # (utils/keysonly.sh).
+  local cluster_id key_name
+  cluster_id=$(printf '%s' "${response}" | jq -r '.id // empty')
+  public_key=$(printf '%s' "${response}" | jq -r '.claimKey.publicKey // empty')
+  fingerprint=$(printf '%s' "${response}" | jq -r '.claimKey.fingerprint // empty')
+  key_name=$(printf '%s' "${response}" | jq -r '.claimKey.name // empty')
   [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
   # The announce hands out a one-time bind secret; keep it for the deploy.
   # The agent sends it on its register, so the api adopts this row.
-  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
+  kubehz::persist_bind_secret "${domain}" "$(printf '%s' "${response}" | jq -r '.bindSecret // empty')"
 
   # Replace by name, but only our own key: the API rotates the fingerprint on
   # re-runs, so a stale claim key of this cluster must not linger, and a key
   # that someone else made stays (kubehz::claim_key_own).
   # HCLOUD_TOKEN reaches curl in a config (http::curl_config), never on argv.
-  local mark keys existing_id
+  local mark existing_id
   if ! mark=$(kubehz::claim_key_mark "${domain}"); then
     kubehz::claim_key_no_mark "${key_name}"
     return 1
@@ -618,7 +637,7 @@ kubehz::ensure_claim_key() {
       curl -q -K - -fsSL \
         "${hcloud_api}/v1/ssh_keys?name=${key_name}"
   ) ) || keys=""
-  existing_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || existing_id=""
+  existing_id=$(printf '%s' "${keys}" | jq -r '.ssh_keys[0].id // empty' 2>/dev/null) || existing_id=""
   if [[ -n "${existing_id}" ]]; then
     kubehz::claim_key_own "${keys}" "${domain}" replace "${key_name}" || return 1
     http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
@@ -627,8 +646,11 @@ kubehz::ensure_claim_key() {
           "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null
     ) || true
   fi
-  jq -n --arg n "${key_name}" --arg k "${public_key}" --arg l "${_KUBEHZ_CLAIM_LABEL}" --arg m "${mark}" \
-    '{name: $n, public_key: $k, labels: {($l): $m}}' | (
+  # The public key reaches jq on stdin (-Rs: the whole input as one
+  # string), never on argv: its MD5 is the ticket.
+  printf '%s' "${public_key}" |
+    jq -Rs --arg n "${key_name}" --arg l "${_KUBEHZ_CLAIM_LABEL}" --arg m "${mark}" \
+    '{name: $n, public_key: ., labels: {($l): $m}}' | (
       http::tls_log_vars_unset &&
         curl -q -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
           -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
@@ -640,11 +662,11 @@ kubehz::ensure_claim_key() {
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
   echo "kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:"
   echo "  curl -X POST ${api_url}/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\"
-  # A string test, not arithmetic: print_token can come from the
-  # environment. The flag sets it to 1.
-  if [[ ! -t 1 && "${print_token:-}" != 1 ]]; then
+  # A string test of the argument, not arithmetic. A CI run gets the
+  # placeholder also on a terminal (a pty of a runner, a recording).
+  if [[ "${show_ticket}" != 1 ]] && { [[ ! -t 1 ]] || verbose::noninteractive; }; then
     echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"<hidden: one-time claim ticket>\"}'"
-    echo "  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key '${key_name}'; --print-token shows it here)"
+    echo "  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key '${key_name}'; 'lo kubehz register --domain ${domain} --print-token' registers again and shows a new ticket)"
     return 0
   fi
   echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${fingerprint}\"}'"
@@ -668,17 +690,22 @@ kubehz::ensure_claim_key() {
 # the error that names <next>), and the caller must not fall back.
 # Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url> [<next>]
 kubehz::direct_claim() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # KUBEHZ_TOKEN, HCLOUD_TOKEN and the responses
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq, curl) would get the value. +i and the refusal:
+  # as in kubehz::space_api_call.
+  local +x +i response fingerprint cred || { error "kubehz::direct_claim: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   local domain="${1}" cluster_yaml="${2}" api_url="${3}" next="${4:-lo kubehz register --domain ${1}}"
   http::credential_ok KUBEHZ_TOKEN || return 1
 
-  local fingerprint
   fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
     warn "Could not extract SSH fingerprint for ${domain}"
     return 1
   }
 
   # Direct-attributed register: the bearer proves the tenant; the row lands owned.
-  local response rc=0
+  local rc=0
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
@@ -691,8 +718,8 @@ kubehz::direct_claim() {
   fi
 
   local cluster_id claimed
-  cluster_id=$(jq -r '.id // empty' <<<"${response}")
-  claimed=$(jq -r '.claimed // false' <<<"${response}")
+  cluster_id=$(printf '%s' "${response}" | jq -r '.id // empty')
+  claimed=$(printf '%s' "${response}" | jq -r '.claimed // false')
   [[ -n "${cluster_id}" ]] || return 1
 
   if [[ "${claimed}" != "true" ]]; then
@@ -701,7 +728,7 @@ kubehz::direct_claim() {
   fi
   # The announce hands out a one-time bind secret; keep it for the deploy.
   # The agent sends it on its register, so the api adopts this row.
-  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
+  kubehz::persist_bind_secret "${domain}" "$(printf '%s' "${response}" | jq -r '.bindSecret // empty')"
   echo "kubehz: cluster '${domain}' registered and claimed to your account (${cluster_id})."
 
   # Optionally connect the hcloud token for dashboard-driven provisioning.
@@ -717,7 +744,6 @@ kubehz::direct_claim() {
       warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
       return 0
     fi
-    local cred
     # -q first and the subshell with http::tls_log_vars_unset: curl reads
     # no config file of the user and gets no TLS log or trace control
     # (utils/http.sh).
@@ -733,7 +759,7 @@ kubehz::direct_claim() {
       return 0
     }
     # writable:false → stored for pricing but provisioning locked; say so plainly.
-    if [[ "$(jq -r '.data.validation.writable // "unknown"' <<<"${cred}")" == "false" ]]; then
+    if [[ "$(printf '%s' "${cred}" | jq -r '.data.validation.writable // "unknown"')" == "false" ]]; then
       echo "kubehz: hcloud token connected, but it is READ-ONLY — dashboard provisioning stays locked. Use a Read & Write token for worker pools."
     else
       echo "kubehz: hcloud token connected — dashboard provisioning is enabled."
@@ -764,9 +790,18 @@ kubehz::direct_claim() {
 # a platform that still answers 503 or 429 with Retry-After after the retry
 # bound (kubehz::register_post). Then no flow falls back, and the error names
 # <next>, the command that registers again (default: lo kubehz register).
-# Usage: kubehz::register_cluster <domain> <cluster_yaml> [<next>]
+# <show_ticket> 1 shows the one-time claim ticket on any stdout (see
+# kubehz::ensure_claim_key). The guard lines come first: the tests of
+# KUBEHZ_TOKEN and HCLOUD_TOKEN below expand the tokens.
+# Usage: kubehz::register_cluster <domain> <cluster_yaml> [<next>] [<show_ticket>]
 kubehz::register_cluster() {
-  local domain="${1}" cluster_yaml="${2}" next="${3:-lo kubehz register --domain ${1}}"
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the tokens, the responses and the ticket
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq, curl) would get the value. +i and the refusal:
+  # as in kubehz::space_api_call.
+  local +x +i response fingerprint || { error "kubehz::register_cluster: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local domain="${1}" cluster_yaml="${2}" next="${3:-lo kubehz register --domain ${1}}" show_ticket="${4:-0}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   # Defense in depth: the fingerprint travels on this URL; never over plain HTTP.
@@ -804,18 +839,16 @@ kubehz::register_cluster() {
   # Falls through to the legacy server-key fingerprint announce when unavailable.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
     rc=0 _kubehz_answer=""
-    kubehz::ensure_claim_key "${domain}" "${api_url}" "${next}" || rc=$?
+    kubehz::ensure_claim_key "${domain}" "${api_url}" "${next}" "${show_ticket}" || rc=$?
     case "${rc}" in 0) return 0 ;; 3) return 1 ;; esac
     warn "kubehz claim-key registration failed for ${domain}${_kubehz_answer:+ (${_kubehz_answer})}; falling back to the legacy fingerprint announce"
   fi
 
-  local fingerprint
   fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
     warn "Could not extract SSH fingerprint for ${domain}, skipping registration"
     return 0
   }
 
-  local response
   rc=0
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
@@ -836,7 +869,7 @@ kubehz::register_cluster() {
   fi
   # The announce hands out a one-time bind secret; keep it for the deploy.
   # The agent sends it on its register, so the api adopts this row.
-  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
+  kubehz::persist_bind_secret "${domain}" "$(printf '%s' "${response}" | jq -r '.bindSecret // empty')"
 
   debug "Cluster registered with kubehz (pending claim): ${cluster_id}"
   # Surface the claim handshake. The fingerprint is public (not a secret), so it
@@ -860,8 +893,16 @@ kubehz::register_cluster() {
 # idempotent SUCCESS: the desired end state holds. (The old form DELETEd
 # /api/clusters?domain=… — a route+method the api does not serve — and
 # `|| true` swallowed the 404, so the row survived every "deregister".)
+# The guard lines come first: KUBEHZ_TOKEN, HCLOUD_TOKEN and the key list
+# (a public key and its fingerprint) stay out of a trace.
 # Usage: kubehz::deregister_cluster <domain> <cluster_yaml>
 kubehz::deregister_cluster() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the tokens, the response and the key list
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq, curl) would get the value. +i and the refusal:
+  # as in kubehz::space_api_call.
+  local +x +i response keys || { error "kubehz::deregister_cluster: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   local rc=0
@@ -885,7 +926,7 @@ kubehz::deregister_cluster() {
       # -q first and the subshell with http::tls_log_vars_unset: curl reads
       # no config file of the user and gets no TLS log or trace control
       # (utils/http.sh).
-      local response http_code
+      local http_code
       if ! response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
         http::tls_log_vars_unset &&
           curl -q -K - -sSL -w $'\n%{http_code}' -X DELETE \
@@ -899,7 +940,7 @@ kubehz::deregister_cluster() {
           echo "kubehz: cluster ${domain} (${cluster_id}) removed from the platform."
         else
           local msg
-          msg=$(jq -r '.data.message // .message // empty' <<<"${response%$'\n'*}" 2>/dev/null) || msg=""
+          msg=$(printf '%s' "${response%$'\n'*}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
           error "kubehz: delete refused for ${domain} (${cluster_id}) — HTTP ${http_code}${msg:+: ${msg}}. The registration was not removed."
           rc=1
         fi
@@ -913,7 +954,7 @@ kubehz::deregister_cluster() {
   # key with this cluster's label goes (kubehz::claim_key_own); a refused key
   # leaves the return code as it is.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
-    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" keys key_id
+    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
     if http::require_https "${hcloud_api}" "HCLOUD_API_BASE" && http::credential_ok HCLOUD_TOKEN; then
       # -q first and the subshell with http::tls_log_vars_unset (utils/http.sh).
       keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
@@ -921,7 +962,7 @@ kubehz::deregister_cluster() {
           curl -q -K - -fsSL \
             "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}"
       ) ) || keys=""
-      key_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || key_id=""
+      key_id=$(printf '%s' "${keys}" | jq -r '.ssh_keys[0].id // empty' 2>/dev/null) || key_id=""
       if [[ -n "${key_id}" ]] && kubehz::claim_key_own "${keys}" "${domain}" delete "kubehz-claim-${domain}"; then
         http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
           http::tls_log_vars_unset &&
@@ -943,7 +984,7 @@ kubehz::register() {
   local print_token=0
   local -a args=(
     'domain|:^~domain'  'Domain to use'
-    'print-token|:+'    'Also print the one-time claim ticket when stdout is not a terminal'
+    'print-token|:+'    'Also print the one-time claim ticket when stdout is not a terminal or CI is set: that output then holds a secret'
     "${args[@]:-}"
   )
   :args "Register cluster with kubehz" "${@}"
@@ -969,7 +1010,8 @@ kubehz::register() {
   # Resolve spec kind for fingerprint extraction
   provision::resolve_spec "${domain}" 2>/dev/null || true
 
-  kubehz::register_cluster "${domain}" "${cluster_yaml}"
+  # --print-token goes down as an argument, not through dynamic scope.
+  kubehz::register_cluster "${domain}" "${cluster_yaml}" "" "${print_token}"
 }
 
 # Manual cluster deregistration via `lo kubehz deregister`.
@@ -1678,6 +1720,12 @@ kubehz::token_emit() {
 # token plaintext never leaves this machine and is never printed; only its
 # hash is sent, HTTPS-only.
 kubehz::re-enroll() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # KUBEHZ_TOKEN, the agent token, its hash and the response
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq, curl, sha256sum) would get the value. +i and the refusal:
+  # as in kubehz::space_api_call.
+  local +x +i agent_token token_hash response body || { error "kubehz::re-enroll: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local -a args=(
     'domain|:^~domain'  'Domain to use'
@@ -1712,7 +1760,6 @@ kubehz::re-enroll() {
   # The CURRENT in-cluster token — whatever the agent's bootstrap minted —
   # read via the ambient kubeconfig (this runs against the user's cluster;
   # switch with `lo use <domain>` first). Never printed.
-  local agent_token
   agent_token=$(kubectl -n kubehz-system get secret kubehz-agent \
     -o jsonpath='{.data.agent-token}' 2>/dev/null | base64 -d) || agent_token=""
   if [[ -z "${agent_token}" ]]; then
@@ -1722,7 +1769,6 @@ kubehz::re-enroll() {
 
   # sha256, lowercase hex — the exact verifier shape the route stores. The
   # openssl fallback mirrors the agent's own sha256_hex helper.
-  local token_hash
   if command -v sha256sum >/dev/null 2>&1; then
     token_hash=$(printf %s "${agent_token}" | sha256sum | cut -d' ' -f1) || token_hash=""
   else
@@ -1750,7 +1796,7 @@ kubehz::re-enroll() {
   # -q first and the subshell with http::tls_log_vars_unset: curl reads no
   # config file of the user and gets no TLS log or trace control
   # (utils/http.sh).
-  local response http_code body
+  local http_code
   response=$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}' | (
     http::tls_log_vars_unset &&
       curl -q -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
@@ -1766,14 +1812,14 @@ kubehz::re-enroll() {
 
   if [[ "${http_code}" != "200" ]]; then
     local code msg
-    code=$(jq -r '.data.code // empty' <<<"${body}" 2>/dev/null) || code=""
-    msg=$(jq -r '.data.message // empty' <<<"${body}" 2>/dev/null) || msg=""
+    code=$(printf '%s' "${body}" | jq -r '.data.code // empty' 2>/dev/null) || code=""
+    msg=$(printf '%s' "${body}" | jq -r '.data.message // empty' 2>/dev/null) || msg=""
     error "kubehz: re-enroll refused (HTTP ${http_code}${code:+ ${code}})${msg:+: ${msg}}"
     return 1
   fi
 
   local rotated
-  rotated=$(jq -r '.rotated // false' <<<"${body}" 2>/dev/null) || rotated=""
+  rotated=$(printf '%s' "${body}" | jq -r '.rotated // false' 2>/dev/null) || rotated=""
   if [[ "${rotated}" == "true" ]]; then
     echo "kubehz: agent token re-enrolled for ${domain} (${cluster_id})."
     echo "The platform revoked the previous token and armed the in-cluster one;"
