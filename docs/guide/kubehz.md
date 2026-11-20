@@ -1438,10 +1438,16 @@ a rename puts it in place. A link that is already at a destination is
 replaced, and its target never gets a key.
 
 `preseed` keeps the output of the node off your terminal. On success, it
-shows only the stderr of the first call. On a failure, it shows the lines of
-the call that failed, escaped, and at most 20 lines for each stream.
+shows only the stderr of the first call (ssh's error lines). On a failure,
+it shows the lines of the call that failed, escaped, and at most 20 lines
+for each stream.
 
-If a step fails, `preseed` names it and removes the new files. If the install
+The node needs GNU coreutils and findutils: `mv -T`, `stat -c` and
+`find -perm /MODE`.
+
+If a step fails, `preseed` names it and removes the new files. If a rename
+fails, the files before it are already in place, and the message names
+them. If the install
 call fails and its output names no step, the state of the install is unknown:
 `preseed` lists the six destination files to check on the node. If the ssh
 connection of the install call fails (exit 255), the state is unknown too,

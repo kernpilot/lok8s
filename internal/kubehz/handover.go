@@ -929,7 +929,8 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if knownHosts != "" && !strings.HasPrefix(knownHosts, "/") {
 		wd, err := os.Getwd()
 		if err != nil {
-			return err
+			c.errorf("handover: cannot read the working directory for the relative --known-hosts path: %v", err)
+			return ErrHandled
 		}
 		knownHosts = wd + "/" + knownHosts
 	}
@@ -1042,8 +1043,9 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		}
 		return ErrHandled
 	}
-	// The stderr of the first call can hold the line where ssh says that
-	// it recorded the host key (accept-new).
+	// The stderr of the first call holds only what ssh prints at LogLevel
+	// ERROR. ssh does not print the line about a recorded host key at that
+	// level, so the recorded key is checked below.
 	show(preseedStream(firstCall, "stderr", stderr))
 	if o.AcceptNewHostKey {
 		recorded := knownHosts

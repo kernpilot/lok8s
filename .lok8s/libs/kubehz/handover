@@ -970,8 +970,9 @@ handover::preseed() {
     fi
     return 1
   fi
-  # The stderr of the first call can hold the line where ssh says that it
-  # recorded the host key (accept-new).
+  # The stderr of the first call holds only what ssh prints at LogLevel
+  # ERROR. ssh does not print the line about a recorded host key at that
+  # level, so the recorded key is checked below.
   handover::stream "${first_call}" stderr "${err}" >&2
   if (( accept_new_host_key )); then
     handover::host_key_recorded "${node}" "${port}" "${known_hosts:-${HOME}/.ssh/known_hosts}" || return 1
