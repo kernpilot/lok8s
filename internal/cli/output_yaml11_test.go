@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	yaml11 "go.yaml.in/yaml/v2"
 )
@@ -157,6 +158,185 @@ func TestYAML11PatternHoldsTheSet(t *testing.T) {
 	}
 	if n < 100 {
 		t.Fatalf("%d strings checked, want at least 100", n)
+	}
+}
+
+// caseForms returns each form of w in upper and lower case (no: no, nO, No,
+// NO).
+func caseForms(w string) []string {
+	forms := []string{""}
+	for _, r := range w {
+		lower, upper := strings.ToLower(string(r)), strings.ToUpper(string(r))
+		var next []string
+		for _, f := range forms {
+			next = append(next, f+lower)
+			if upper != lower {
+				next = append(next, f+upper)
+			}
+		}
+		forms = next
+	}
+	return forms
+}
+
+// yaml11Grammar returns the strings of the property test, each one time, in
+// a fixed order: the bool and null words, ~, = and the empty string; .inf
+// and .nan with and without a sign; number shapes with and without a sign,
+// each with no _, with one _ or two _ at each place, and with _ at each
+// place; dates and times; each string of one to three characters over a
+// small alphabet; and plain words as controls.
+func yaml11Grammar() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, w := range []string{"y", "n", "yes", "no", "on", "off", "true", "false", "null", "~", "=", ""} {
+		for _, f := range caseForms(w) {
+			add(f)
+		}
+	}
+	for _, sign := range []string{"", "-", "+"} {
+		for _, w := range []string{".inf", ".nan"} {
+			for _, f := range caseForms(w) {
+				add(sign + f)
+			}
+		}
+	}
+	bodies := []string{
+		"0", "7", "08", "0777", "1000", "0b1", "0B10", "0b-1", "0b+1", "0o17", "0O7", "0x1f", "0X1F",
+		"1.5", "1.", ".5", "1e3", "1E+3", "1e-3", "1.5e3", ".5E-3", "1.e3",
+		"1:20", "1:20.5", "0:30", "190:20:30.15",
+		"0x", "0b", "0b2", "0o8", "0x1G", "1e", "e3", ".", ".e3", "1.2.3", "1:60",
+	}
+	for _, sign := range []string{"", "-", "+"} {
+		for _, b := range bodies {
+			s := sign + b
+			add(s)
+			for i := 0; i <= len(s); i++ {
+				for j := i; j <= len(s); j++ {
+					add(s[:i] + "_" + s[i:j] + "_" + s[j:])
+				}
+				add(s[:i] + "_" + s[i:])
+			}
+			add(strings.Join(strings.Split(s, ""), "_"))
+		}
+	}
+	for _, date := range []string{"2026-11-20", "2026-1-2"} {
+		add(date)
+		for _, sep := range []string{"T", "t", " ", "  ", "\t"} {
+			for _, clock := range []string{"10:00:00", "1:2:3"} {
+				for _, frac := range []string{"", ".5", ",5", ".", ".123456789"} {
+					for _, zone := range []string{"", "Z", " Z", "+01:00", "-05:00", " +01:00", "+1", " -5"} {
+						add(date + sep + clock + frac + zone)
+					}
+				}
+			}
+		}
+	}
+	const alphabet = "018_-+.eExXbo:"
+	for _, a := range alphabet {
+		add(string(a))
+		for _, b := range alphabet {
+			add(string(a) + string(b))
+			for _, c := range alphabet {
+				add(string(a) + string(b) + string(c))
+			}
+		}
+	}
+	for _, w := range []string{"word", "yess", "v1.2", "10.0.0.1", "sp-1a2b3c4d", "inf", "nan", "Infinity", "NaN", "0x1p-2", "1_000_x"} {
+		add(w)
+	}
+	return out
+}
+
+// How go-yaml v2 reads a string as a plain value (`v: <s>`).
+const (
+	yaml11NotPlain = iota // an error, a collection or another string
+	yaml11String          // the same string
+	yaml11Value           // a bool, a null or a number
+	yaml11Time            // a time
+)
+
+func yaml11Reads(s string) int {
+	doc := []byte("v: " + s)
+	var m map[string]any
+	if err := yaml11.Unmarshal(doc, &m); err != nil || len(m) != 1 {
+		return yaml11NotPlain
+	}
+	switch v := m["v"].(type) {
+	case string:
+		if v != s {
+			return yaml11NotPlain
+		}
+		// go-yaml v2 reads a time into an any as its text. A time field
+		// shows that it reads a time.
+		var tm struct {
+			V time.Time `yaml:"v"`
+		}
+		if yaml11.Unmarshal(doc, &tm) == nil {
+			return yaml11Time
+		}
+		return yaml11String
+	case bool, int, int64, uint64, float64, nil:
+		return yaml11Value
+	}
+	return yaml11NotPlain
+}
+
+// A property over a grammar of a few thousand strings: each string that
+// go-yaml v2 reads as a bool, a null, a number or a time when it is plain is
+// in the set of the pattern, and writeJSONAsYAML prints it in double quotes,
+// as a value and as a key. Each string of the grammar reads back with
+// go-yaml v2 as the same string. The pattern check covers the bash twin too,
+// whose yq quotes less than yaml.v3. The table holds the forms that only
+// PyYAML reads so (base 60, a time after T without a zone).
+func TestYAML11QuotesEachStringThatGoYAMLv2ReadsAsAValue(t *testing.T) {
+	strs := yaml11Grammar()
+	count := map[int]int{}
+	for _, s := range strs {
+		reads := yaml11Reads(s)
+		count[reads]++
+		js, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var val, key bytes.Buffer
+		if err := writeJSONAsYAML(&val, []byte(`{"v":`+string(js)+`}`)); err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		if err := writeJSONAsYAML(&key, []byte(`{`+string(js)+`:1}`)); err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		var back map[string]any
+		if err := yaml11.Unmarshal(val.Bytes(), &back); err != nil || back["v"] != s {
+			t.Errorf("%q prints %q, and go-yaml v2 reads %#v (%v)", s, val.String(), back["v"], err)
+		}
+		var keys map[any]any
+		if err := yaml11.Unmarshal(key.Bytes(), &keys); err != nil || len(keys) != 1 || keys[s] != 1 {
+			t.Errorf("the key %q prints %q, and go-yaml v2 reads %#v (%v)", s, key.String(), keys, err)
+		}
+		if reads != yaml11Value && reads != yaml11Time {
+			continue
+		}
+		if !yaml11ScalarRe.MatchString(s) {
+			t.Errorf("go-yaml v2 reads %q as a value, and the pattern does not match it", s)
+		}
+		if !strings.HasPrefix(val.String(), `v: "`) {
+			t.Errorf("go-yaml v2 reads %q as a value, and it prints %q", s, val.String())
+		}
+		if !strings.HasPrefix(key.String(), `"`) {
+			t.Errorf("go-yaml v2 reads the key %q as a value, and it prints %q", s, key.String())
+		}
+	}
+	nonStrings := count[yaml11Value] + count[yaml11Time]
+	t.Logf("%d strings, %d non-strings: go-yaml v2 reads %d as a bool, a null or a number and %d as a time when plain; %d cannot be plain",
+		len(strs), nonStrings, count[yaml11Value], count[yaml11Time], count[yaml11NotPlain])
+	if len(strs) < 2000 || count[yaml11Value] < 500 || count[yaml11Time] < 50 {
+		t.Fatalf("%d strings, %d values and %d times, want at least 2000, 500 and 50", len(strs), count[yaml11Value], count[yaml11Time])
 	}
 }
 
