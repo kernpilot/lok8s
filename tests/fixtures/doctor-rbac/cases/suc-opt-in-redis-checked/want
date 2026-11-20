@@ -1,2 +1,2 @@
   ℹ RBAC migration check of system-upgrade-controller skipped: spec.bootstrap has system-upgrade-controller-cluster-admin, which owns the cluster-admin binding
-  ! migration incomplete: ClusterRoleBinding redis-operator binds the redis-operator ServiceAccount to redis-operator (run: kubectl delete clusterrolebinding redis-operator)
+  ! migration incomplete: ClusterRoleBinding redis-operator binds the redis-operator ServiceAccount to redis-operator. Delete it: kubectl --kubeconfig '@BASE@/.kubeconfig/rbac-test.yaml' delete clusterrolebinding redis-operator

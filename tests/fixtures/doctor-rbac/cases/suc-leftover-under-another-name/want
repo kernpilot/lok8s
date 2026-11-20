@@ -1,1 +1,1 @@
-  ! migration incomplete: ClusterRoleBinding system-upgrade binds the system-upgrade-controller ServiceAccount to cluster-admin (run: kubectl delete clusterrolebinding system-upgrade, unless you keep it on purpose)
+  ! migration incomplete: ClusterRoleBinding system-upgrade binds the system-upgrade-controller ServiceAccount to cluster-admin. Keep it only on purpose, else delete it: kubectl --kubeconfig '@BASE@/.kubeconfig/rbac-test.yaml' delete clusterrolebinding system-upgrade

@@ -148,7 +148,10 @@ doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1
 # login. A failed read is a warning with a fixed reason per class. kubectl's
 # stderr can name the server and the user, so the check never prints it. A
 # binding name goes into a printed delete command only when it is a DNS-1123
-# subdomain. Every line is advisory: it always returns 0.
+# subdomain. Each delete command names the kubeconfig of the reads
+# (shell-quoted) and is the rest of its line, so a copy of it deletes in the
+# cluster that the check read and nothing else. Every line is advisory: it
+# always returns 0.
 doctor::_rbac_check() {
   local domain="${1}"
   local skipped="RBAC migration check skipped: "
@@ -218,6 +221,10 @@ doctor::_rbac_check() {
   spec_name=$(yq -r '.metadata.name // ""' "${spec}" 2>/dev/null) || spec_name=""
   [[ -z "${spec_name}" ]] || cluster="${spec_name}"
   local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+  if doctor::_rbac_has_control "${kubeconfig}"; then
+    doctor::_info "${skipped}the kubeconfig path has a control character (the delete commands of the check name that path)"
+    return 0
+  fi
   if [[ ! -f "${kubeconfig}" ]]; then
     doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
     return 0
@@ -230,7 +237,7 @@ doctor::_rbac_check() {
   local result=""
   result=$(doctor::_rbac_fetch "${kubeconfig}" "${chart_rbac}") || result=""
   case "${result}" in
-    ok|ok$'\n'*) doctor::_rbac_report "${result#ok}" "${suc}" "${redis}" ;;
+    ok|ok$'\n'*) doctor::_rbac_report "${result#ok}" "${suc}" "${redis}" "${kubeconfig}" ;;
     fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}" ;;
     *)           doctor::_warn "${not_checked}${invalid}" ;;
   esac
@@ -431,10 +438,10 @@ doctor::_rbac_records() {
   ' "${1}"
 }
 
-# doctor::_rbac_report <records> <suc 0|1> <redis 0|1> — the lines, in the
-# order of the Go twin.
+# doctor::_rbac_report <records> <suc 0|1> <redis 0|1> <kubeconfig> — the
+# lines, in the order of the Go twin.
 doctor::_rbac_report() {
-  local records="${1}" suc="${2}" redis="${3}" rec tag a b
+  local records="${1}" suc="${2}" redis="${3}" kubeconfig="${4}" rec tag a b
   local -a suc_left=() redis_left=()
   local suc_new=0 redis_new=0 old_role=0 agg="" has_exec=0
   while IFS=$'\t' read -r tag a b; do
@@ -455,7 +462,7 @@ doctor::_rbac_report() {
     else
       (( suc_new )) || doctor::_rbac_new_missing system-upgrade-controller lok8s-system-upgrade-controller
       for rec in "${suc_left[@]}"; do
-        doctor::_rbac_binding_line "${rec}" system-upgrade-controller
+        doctor::_rbac_binding_line "${rec}" system-upgrade-controller "${kubeconfig}"
       done
     fi
   fi
@@ -465,12 +472,12 @@ doctor::_rbac_report() {
     else
       (( redis_new )) || doctor::_rbac_new_missing redis-operator lok8s-redis-operator
       for rec in "${redis_left[@]+"${redis_left[@]}"}"; do
-        doctor::_rbac_binding_line "${rec}" redis-operator
+        doctor::_rbac_binding_line "${rec}" redis-operator "${kubeconfig}"
       done
       if (( old_role )); then
-        doctor::_warn "migration incomplete: ClusterRole redis-operator, the old role of the chart, is still in the cluster (run: kubectl delete clusterrole redis-operator)"
+        doctor::_warn "migration incomplete: ClusterRole redis-operator, the old role of the chart, is still in the cluster. Delete it: $(doctor::_rbac_delete "${kubeconfig}" clusterrole redis-operator)"
         if [[ -n "${agg}" ]]; then
-          doctor::_warn "migration incomplete: ClusterRole redis-operator copies its rules into built-in roles (${agg}). The aggregation controller removes the copies after the delete (run: kubectl delete clusterrole redis-operator)"
+          doctor::_warn "migration incomplete: ClusterRole redis-operator copies its rules into built-in roles (${agg}). The aggregation controller removes the copies when the role is deleted (the command above)"
         fi
       fi
     fi
@@ -485,23 +492,47 @@ doctor::_rbac_new_missing() {
   doctor::_warn "migration incomplete: no ClusterRoleBinding binds the ${1} ServiceAccount to ${2} yet (apply the bootstrap before the deletes below: lo bootstrap)"
 }
 
-# doctor::_rbac_binding_line <role TAB binding> <account>
+# doctor::_rbac_binding_line <role TAB binding> <account> <kubeconfig>
 # An empty binding field is a name that is not a DNS-1123 subdomain: the
-# line then has no name and no command (Go: rbacBindingLine). A role that an
-# opt-in addon binds the account to gets "unless you keep it on purpose":
-# the check finds an opt-in addon only as a bare entry name (Go:
-# rbacOptInRole).
+# line then has no name and no command (Go: rbacBindingLine). The delete
+# command is the rest of its line. A role that an opt-in addon binds the
+# account to gets "Keep it only on purpose" before it: the check finds an
+# opt-in addon only as a bare entry name (Go: rbacOptInRole).
 doctor::_rbac_binding_line() {
-  local role="${1%%$'\t'*}" name="${1#*$'\t'}" keep=""
+  local role="${1%%$'\t'*}" name="${1#*$'\t'}" del="Delete it: "
   if [[ -z "${name}" ]]; then
     doctor::_warn "migration incomplete: a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain) binds the ${2} ServiceAccount to ${role}. Doctor does not print that name or a delete command: find the binding and delete it"
     return 0
   fi
   case "${2}:${role}" in
     system-upgrade-controller:cluster-admin|redis-operator:lok8s-redis-operator-chart-rbac)
-      keep=", unless you keep it on purpose" ;;
+      del="Keep it only on purpose, else delete it: " ;;
   esac
-  doctor::_warn "migration incomplete: ClusterRoleBinding ${name} binds the ${2} ServiceAccount to ${role} (run: kubectl delete clusterrolebinding ${name}${keep})"
+  doctor::_warn "migration incomplete: ClusterRoleBinding ${name} binds the ${2} ServiceAccount to ${role}. ${del}$(doctor::_rbac_delete "${3}" clusterrolebinding "${name}")"
+}
+
+# doctor::_rbac_delete <kubeconfig> <resource> <name> — the delete command of
+# one object in the cluster of the kubeconfig that the reads used (Go:
+# rbacDeleteCommand). The name is a DNS-1123 subdomain (a binding name) or a
+# constant role name; the kubeconfig path is shell-quoted.
+doctor::_rbac_delete() {
+  printf 'kubectl --kubeconfig %s delete %s %s' "$(doctor::_rbac_quote "${1}")" "${2}" "${3}"
+}
+
+# doctor::_rbac_quote <s> — s for a POSIX shell: in single quotes, with each
+# single quote as '\'' (Go: rbacShQuote).
+doctor::_rbac_quote() {
+  local q="'\\''"
+  printf "'%s'" "${1//\'/${q}}"
+}
+
+# doctor::_rbac_has_control <s> — 0 when s has an ASCII control character
+# (a byte below 0x20, or DEL; Go: rbacHasControl). The check prints the
+# kubeconfig path in its commands, and such a character can end the line
+# or drive the terminal.
+doctor::_rbac_has_control() {
+  local ctl=$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177'
+  [[ "${1}" == *["${ctl}"]* ]]
 }
 
 # doctor::_provider_section <domain>

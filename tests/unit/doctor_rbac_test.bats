@@ -10,7 +10,8 @@
 #   no-kubeconfig        present: the domain has no kubeconfig
 #   clusterrolebindings  the answer of that read: `json <file in json/>`, or
 #   clusterroles         `fail <rc> <stderr>`. Absent: the read must not run.
-#   want                 the exact output of the check
+#   want                 the exact output of the check; @BASE@ stands for the
+#                        project directory (the kubeconfig in a command)
 # Every failed read carries the word CANARY in its stderr (or its stdout): the
 # check must never print it. kubectl is a stand-in script of this test, first
 # on PATH (the check runs it through timeout(1), which cannot run a shell
@@ -111,7 +112,12 @@ _setup_case() {
 # and no temp dir left.
 _assert_case() {
   assert_success
-  assert_output "$(cat "${CASE}/want")"
+  # The project directory has no single quote, so the case's quoting of the
+  # kubeconfig path is the check's own.
+  [[ "${PATH_BASE}" != *[\'@]* ]] || fail "the project directory ${PATH_BASE} has a quote or an @"
+  local want
+  want="$(cat "${CASE}/want")"
+  assert_output "${want//@BASE@/"${PATH_BASE}"}"
   refute_output --partial CANARY
   local want_calls="" res
   for res in clusterrolebindings clusterroles; do
@@ -203,6 +209,8 @@ NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer with
 @test "rbac: a spec without metadata.name reads the kubeconfig local" { _case spec-without-metadata-name; }
 @test "rbac: a name that is not a DNS-1123 subdomain prints no name and no command" { _case unusual-names; }
 @test "rbac: a deploy domain skips with the skip line" { _case deploy-domain; }
+@test "rbac: a delete command quotes the kubeconfig path" { _case kubeconfig-quote; }
+@test "rbac: a kubeconfig path with a control character skips" { _case kubeconfig-control-char; }
 
 @test "rbac: no active domain prints no line (the domain section says it)" {
   run doctor::_rbac_check ""

@@ -20,8 +20,11 @@ package cli
 // which can ask for a login. A failed read is a warning with a fixed reason
 // per class. kubectl's stderr can name the server and the user, so the
 // check never prints it. A binding name goes into a printed delete command
-// only when it is a DNS-1123 subdomain. Every line is advisory: the check
-// never changes the doctor exit code.
+// only when it is a DNS-1123 subdomain. Each delete command names the
+// kubeconfig of the reads (shell-quoted) and is the rest of its line, so
+// a copy of it deletes in the cluster that the check read and nothing
+// else. Every line is advisory: the check never changes the doctor exit
+// code.
 
 import (
 	"bytes"
@@ -180,6 +183,10 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 		return
 	}
 	kubeconfig := build.AmbientKubeconfig(paths, d, "")
+	if rbacHasControl(kubeconfig) {
+		doctorInfo(out, rbacSkipped+"the kubeconfig path has a control character (the delete commands of the check name that path)")
+		return
+	}
 	if !fsutil.FileExists(kubeconfig) {
 		doctorInfo(out, rbacSkipped+"no kubeconfig at "+config.RelTo(paths.Base, kubeconfig))
 		return
@@ -200,10 +207,10 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 		return
 	}
 	if checkSUC {
-		rbacCheckSUC(bindings, out)
+		rbacCheckSUC(bindings, kubeconfig, out)
 	}
 	if checkRedis {
-		rbacCheckRedis(bindings, roles, enabled[rbacRedisChartAddon], out)
+		rbacCheckRedis(bindings, roles, enabled[rbacRedisChartAddon], kubeconfig, out)
 	}
 }
 
@@ -259,7 +266,7 @@ func rbacReadReason(stderr string) string {
 
 // rbacCheckSUC reports each ClusterRoleBinding that binds the controller's
 // ServiceAccount to cluster-admin.
-func rbacCheckSUC(bindings []rbacBinding, out io.Writer) {
+func rbacCheckSUC(bindings []rbacBinding, kubeconfig string, out io.Writer) {
 	left := rbacBindingsOf(bindings, rbacSUCAccount, []string{rbacClusterAdmin})
 	if len(left) == 0 {
 		doctorOK(out, rbacSUCAddon+": no RBAC migration leftovers")
@@ -267,7 +274,7 @@ func rbacCheckSUC(bindings []rbacBinding, out io.Writer) {
 	}
 	rbacNewMissing(bindings, rbacSUCAccount, rbacSUCNewRole, out)
 	for _, b := range left {
-		rbacBindingLine(b, rbacSUCAccount, out)
+		rbacBindingLine(b, rbacSUCAccount, kubeconfig, out)
 	}
 }
 
@@ -276,7 +283,7 @@ func rbacCheckSUC(bindings []rbacBinding, out io.Writer) {
 // pods/exec grant: a RedisCluster needs it (issue #315). The check cannot
 // see RedisCluster objects (it reads RBAC only), so that line is a note,
 // not a warning.
-func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, out io.Writer) {
+func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, kubeconfig string, out io.Writer) {
 	old := []string{rbacClusterAdmin, rbacRedisOldRole}
 	if !chartRBAC {
 		// The opt-in addon was removed from spec.bootstrap: its binding
@@ -296,12 +303,12 @@ func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, ou
 	} else {
 		rbacNewMissing(bindings, rbacRedisAccount, rbacRedisNewRole, out)
 		for _, b := range left {
-			rbacBindingLine(b, rbacRedisAccount, out)
+			rbacBindingLine(b, rbacRedisAccount, kubeconfig, out)
 		}
 		if oldRole != nil {
-			doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+", the old role of the chart, is still in the cluster (run: kubectl delete clusterrole "+rbacRedisOldRole+")")
+			doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+", the old role of the chart, is still in the cluster. Delete it: "+rbacDeleteCommand(kubeconfig, "clusterrole", rbacRedisOldRole))
 			if labels := rbacAggregateLabels(oldRole); len(labels) > 0 {
-				doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+" copies its rules into built-in roles ("+strings.Join(labels, ", ")+"). The aggregation controller removes the copies after the delete (run: kubectl delete clusterrole "+rbacRedisOldRole+")")
+				doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+" copies its rules into built-in roles ("+strings.Join(labels, ", ")+"). The aggregation controller removes the copies when the role is deleted (the command above)")
 			}
 		}
 	}
@@ -333,18 +340,42 @@ func rbacNewMissing(bindings []rbacBinding, sa rbacSubject, newRole string, out 
 
 // rbacBindingLine reports one old binding. A name that is not a DNS-1123
 // subdomain is never printed: the line then has no name and no command.
-func rbacBindingLine(b rbacBinding, sa rbacSubject, out io.Writer) {
+// The delete command is the rest of its line: the words before it say
+// when to keep the binding.
+func rbacBindingLine(b rbacBinding, sa rbacSubject, kubeconfig string, out io.Writer) {
 	role := b.RoleRef.Name
 	name := b.Metadata.Name
 	if len(name) > 253 || !rbacNameRe.MatchString(name) {
 		doctorWarn(out, "migration incomplete: a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain) binds the "+sa.Name+" ServiceAccount to "+role+". Doctor does not print that name or a delete command: find the binding and delete it")
 		return
 	}
-	keep := ""
+	del := "Delete it: "
 	if rbacOptInRole(sa, role) {
-		keep = ", unless you keep it on purpose"
+		del = "Keep it only on purpose, else delete it: "
 	}
-	doctorWarn(out, "migration incomplete: ClusterRoleBinding "+name+" binds the "+sa.Name+" ServiceAccount to "+role+" (run: kubectl delete clusterrolebinding "+name+keep+")")
+	doctorWarn(out, "migration incomplete: ClusterRoleBinding "+name+" binds the "+sa.Name+" ServiceAccount to "+role+". "+del+rbacDeleteCommand(kubeconfig, "clusterrolebinding", name))
+}
+
+// rbacDeleteCommand is the delete command of one object in the cluster of
+// the kubeconfig that the reads used. The name is a DNS-1123 subdomain (a
+// binding name) or a constant role name; the kubeconfig path is
+// shell-quoted (rbacShQuote).
+func rbacDeleteCommand(kubeconfig, resource, name string) string {
+	return "kubectl --kubeconfig " + rbacShQuote(kubeconfig) + " delete " + resource + " " + name
+}
+
+// rbacShQuote quotes s for a POSIX shell: in single quotes, and each
+// single quote of s ends the quotes, adds a backslash-escaped quote and
+// opens them again (bash: doctor::_rbac_quote).
+func rbacShQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// rbacHasControl reports an ASCII control character (a byte below 0x20,
+// or DEL) in s. The check prints the kubeconfig path in its commands, and
+// such a character can end the line or drive the terminal.
+func rbacHasControl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 // rbacOptInRole reports a role that an opt-in addon binds the account to

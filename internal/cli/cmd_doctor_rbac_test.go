@@ -32,7 +32,8 @@ import (
 //	no-kubeconfig        present: the domain has no kubeconfig
 //	clusterrolebindings  the answer of that read: `json <file in json/>`, or
 //	clusterroles         `fail <rc> <stderr>`. Absent: the read must not run.
-//	want                 the exact output of the check
+//	want                 the exact output of the check; @BASE@ stands for the
+//	                     project directory (the kubeconfig in a command)
 //
 // Every failed read carries the word CANARY in its stderr (or its stdout):
 // the check must never print it. The runner is a fake: nothing runs and no
@@ -119,6 +120,21 @@ func rbacCase(t *testing.T, name string) (*config.Paths, string, *scriptRunner) 
 	return p, bin, r
 }
 
+// rbacWant is the want file of the case, with the project directory for
+// @BASE@. The directory has no single quote, so the case's quoting of the
+// kubeconfig path is the check's own.
+func rbacWant(t *testing.T, p *config.Paths, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(rbacFixtures, "cases", name, "want"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(p.Base, "'@") {
+		t.Fatalf("the project directory %q has a quote or an @", p.Base)
+	}
+	return strings.ReplaceAll(string(raw), "@BASE@", p.Base)
+}
+
 func rbacWantReads(t *testing.T, name string) []string {
 	t.Helper()
 	var reads []string
@@ -155,11 +171,8 @@ func TestDoctorRBACCases(t *testing.T) {
 			var out strings.Builder
 			doctorRBACLeftovers(context.Background(), r, p, rbacTestDomain, bin, bootstrapEntries(p), &out)
 
-			want, err := os.ReadFile(filepath.Join(rbacFixtures, "cases", name, "want"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if out.String() != string(want) {
+			want := rbacWant(t, p, name)
+			if out.String() != want {
 				t.Errorf("output:\n%s\nwant:\n%s", out.String(), want)
 			}
 			if strings.Contains(out.String(), "CANARY") {

@@ -1,2 +1,2 @@
   ! migration incomplete: no ClusterRoleBinding binds the system-upgrade-controller ServiceAccount to lok8s-system-upgrade-controller yet (apply the bootstrap before the deletes below: lo bootstrap)
-  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin (run: kubectl delete clusterrolebinding system-upgrade-controller, unless you keep it on purpose)
+  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin. Keep it only on purpose, else delete it: kubectl --kubeconfig '@BASE@/.kubeconfig/rbac-test.yaml' delete clusterrolebinding system-upgrade-controller

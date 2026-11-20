@@ -1,0 +1,1 @@
+  ℹ RBAC migration check skipped: the kubeconfig path has a control character (the delete commands of the check name that path)
