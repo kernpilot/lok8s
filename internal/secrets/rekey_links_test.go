@@ -510,7 +510,7 @@ func TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile(t *testing.T) {
 			if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO or a device): the .gitignore was not written — remove it, then run lo secrets encrypt\n"
+			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .gitignore was not written — remove it, then run lo secrets encrypt\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}

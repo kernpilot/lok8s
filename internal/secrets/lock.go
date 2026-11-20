@@ -4,10 +4,11 @@ package secrets
 // from the read of .sops.yaml to the last re-encrypted file (bash:
 // secrets::_lock). Both twins take flock(2) on the same file,
 // <project>/.sops.yaml.lock (or the lock beside the file that a .sops.yaml
-// symlink names), so a Go lo and a bash lo exclude each other too. Without it two runs can read the same .sops.yaml, and the second
-// write puts back the recipient the first one removed. The pattern is the
-// one of internal/driver/lo/lock.go, with one difference: a wait that runs
-// out refuses the command instead of going on unlocked.
+// symlink names), so a Go lo and a bash lo exclude each other too. Without
+// it two runs can read the same .sops.yaml, and the second write puts back
+// the recipient the first one removed. The pattern is the one of
+// internal/driver/lo/lock.go, with one difference: a wait that runs out
+// refuses the command instead of going on unlocked.
 
 import (
 	"context"

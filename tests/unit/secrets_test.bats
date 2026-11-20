@@ -208,7 +208,7 @@ _gitignore_refused() { # <link|dir>
   before="$(_states)"
   run secrets::encrypt
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO or a device): the .gitignore was not written — remove it, then run lo secrets encrypt" ] || {
+  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .gitignore was not written — remove it, then run lo secrets encrypt" ] || {
     echo "$output" >&2; return 1; }
   [ ! -s "${log}" ] || { echo "encrypted: $(cat "${log}")" >&2; return 1; }
   [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
