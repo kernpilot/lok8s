@@ -296,7 +296,8 @@ func runKMSCases(t *testing.T, realRender bool) {
 // selector), a selector that the check cannot evaluate, and a failed
 // aggregation read: no delete command; a selector that does not select
 // the role does not count, and neither does the role itself; (p) a render
-// that does not parse is malformed.
+// that does not parse is malformed; (q) the addon and rook-ceph as bare
+// entries with a trailing "/" or "/." count, also rook-ceph alone.
 func TestDoctorKMSCases(t *testing.T) { runKMSCases(t, false) }
 
 // TestDoctorKMSCasesWithTheRealRender runs the cases with the in-process

@@ -261,6 +261,10 @@ _inline_case() {
 @test "kms: a failed read of a leftover check is one warning" { _case disabled-read-fails; }
 @test "kms: without either addon there is no read" { _case neither-addon; }
 @test "kms: the addon as a path entry does not count" { _case path-entry-does-not-count; }
+@test "kms: the addon and rook-ceph with a trailing slash count" { _case trailing-slash; }
+@test "kms: the addon and rook-ceph with a trailing /. count" { _case trailing-dot; }
+@test "kms: rook-ceph alone with a trailing slash counts" { _case disabled-trailing-slash; }
+@test "kms: rook-ceph alone with a trailing /. counts" { _case disabled-trailing-dot; }
 @test "kms: a forbidden read prints the reason that names the four kinds" { _case read-forbidden; }
 @test "kms: a label that is not a string makes the list invalid" { _case read-malformed-label; }
 @test "kms: a failed third read stops the reads, and no finding of an earlier read prints" { _case read-third-fails; }

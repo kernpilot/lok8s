@@ -219,7 +219,8 @@ doctor::_rbac_check() {
   fi
   # The entry parser of libs/bootstrap (the entrypoint loads it). An addon
   # counts only as a bare entry name, never as a path entry (Go: the
-  # Builtin flag of the parsed entry).
+  # Builtin flag of the parsed entry), also with a trailing "/" or "/."
+  # (spec::is_addon), as in Go.
   if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
     doctor::_info "${skipped}the bootstrap entry parser is not loaded"
     return 0
@@ -232,12 +233,10 @@ doctor::_rbac_check() {
     nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
     bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
     [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
-    case "${dr##*/}" in
-      system-upgrade-controller) suc=1 ;;
-      system-upgrade-controller-cluster-admin) suc_admin=1 ;;
-      redis-operator) redis=1 ;;
-      redis-operator-chart-rbac) chart_rbac=1 ;;
-    esac
+    ! spec::is_addon "${dr}" system-upgrade-controller || suc=1
+    ! spec::is_addon "${dr}" system-upgrade-controller-cluster-admin || suc_admin=1
+    ! spec::is_addon "${dr}" redis-operator || redis=1
+    ! spec::is_addon "${dr}" redis-operator-chart-rbac || chart_rbac=1
   done
   if (( ! suc && ! redis )); then
     doctor::_info "${skipped}spec.bootstrap has no system-upgrade-controller and no redis-operator"
@@ -994,8 +993,8 @@ doctor::_kms_check() {
     return 0
   fi
   # An addon counts only as a bare entry name, as in the RBAC migration
-  # check (Go: the Builtin flag of the parsed entry). The check does not
-  # render a path entry.
+  # check (Go: the Builtin flag of the parsed entry), also with a trailing
+  # "/" or "/." (spec::is_addon). The check does not render a path entry.
   local -a entries=() dirs=() inls=() envs=() path_keys=()
   [[ -z "${listed}" ]] || mapfile -t entries <<< "${listed}"
   local e nm dr inl ev wt dp ex key parent=0 enabled=0 i
@@ -1011,10 +1010,11 @@ doctor::_kms_check() {
       path_keys+=("${key}")
       continue
     fi
-    case "${dr##*/}" in
-      "${addon}") dirs+=("${dr}"); inls+=("${inl}"); envs+=("${ev}") ;;
-      rook-ceph) parent=1 ;;
-    esac
+    if spec::is_addon "${dr}" "${addon}"; then
+      dirs+=("${dr}"); inls+=("${inl}"); envs+=("${ev}")
+    elif spec::is_addon "${dr}" rook-ceph; then
+      parent=1
+    fi
   done
   (( ${#dirs[@]} == 0 )) || enabled=1
   (( enabled || parent )) || return 0
@@ -1607,7 +1607,8 @@ doctor::_sso_check() {
     return 0
   fi
   # The addon counts only as a bare entry name, never as a path entry, as in
-  # the RBAC migration check (Go: the Builtin flag of the parsed entry).
+  # the RBAC migration check (Go: the Builtin flag of the parsed entry), also
+  # with a trailing "/" or "/." (spec::is_addon).
   local -a entries=()
   mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
   local e nm dr inl ev wt dp ex key enabled=0
@@ -1616,7 +1617,7 @@ doctor::_sso_check() {
     nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
     bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
     [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
-    [[ "${dr##*/}" != sso-gate ]] || enabled=1
+    ! spec::is_addon "${dr}" sso-gate || enabled=1
   done
   (( enabled )) || return 0
   # The bash twin reads the CRD with jq (the Go twin needs no jq).
@@ -1777,7 +1778,7 @@ doctor::_sso_state() {
 # the version cannot be read or is not vX.Y or vX.Y.Z. A cluster of another
 # kind without a version gets no line: lo knows no default version for its
 # driver, and no lint rule or schema requires the field there. The addon also
-# counts with a trailing "/" or "/." (spec::is_suc_addon), as in Go. Without a
+# counts with a trailing "/" or "/." (spec::is_addon), as in Go. Without a
 # domain, with a deploy domain, without a cluster spec, with a spec whose kind
 # cannot be read, or without yq, it prints nothing: the RBAC migration check
 # above says it. Every line is advisory: it always returns 0.
@@ -1802,7 +1803,7 @@ doctor::_suc_check() {
     nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
     bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
     [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
-    ! spec::is_suc_addon "${dr}" || enabled=1
+    ! spec::is_addon "${dr}" system-upgrade-controller || enabled=1
   done
   (( enabled )) || return 0
   local version verdict
