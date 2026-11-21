@@ -155,42 +155,57 @@ func (c *Context) sopsConfigPath() string {
 
 // gitignoreOK reports whether the .gitignore of dir protects the store or
 // lo can make it do so, and prints the refusal when it cannot (bash:
-// secrets::_gitignore_ok). Init and AddKey check the store that they write
+// secrets::_gitignore_ok). step names the step of the command that the
+// check stops before. Init and AddKey check the store that they write
 // before their first write, so the refusal comes before any change.
-func (c *Context) gitignoreOK(dir string) bool {
-	_, _, ok := c.gitignorePlan(dir)
+func (c *Context) gitignoreOK(dir, step string) bool {
+	_, _, ok := c.gitignorePlan(dir, step)
 	return ok
 }
 
-// gitignorePlan reads the .gitignore of dir and returns the bytes that it
-// must have (planGitignore), and whether they differ from the file (write).
-// It prints the refusal and returns ok false in four cases:
+// gitignorePlan reads the .gitignore of dir once and returns the bytes that
+// it must have (planGitignore), and whether they differ from the file
+// (write). It prints the refusal and returns ok false in these cases:
 //   - The .gitignore is not a regular file and not absent (encDestinationOK):
 //     a symlink, a directory, a FIFO, a socket or a device, or its lookup
 //     fails. The write would go through a link to the file that it names,
 //     and git does not read a .gitignore that is a symlink.
 //   - The file cannot be read: a rewrite would drop the lines of the user.
-//   - A rule conflicts with the block of lo (planGitignore).
-//   - The file has a NUL byte.
-func (c *Context) gitignorePlan(dir string) (want []byte, write, ok bool) {
+//   - The file cannot protect the store (planGitignore).
+//
+// It reads at most gitignoreMaxBytes and one byte more, and the plan
+// refuses a file larger than that. Each refusal names step, the step of the
+// command that the check stops before, and the file with printable bytes
+// only.
+func (c *Context) gitignorePlan(dir, step string) (want []byte, write, ok bool) {
 	gitignore := dir + "/.gitignore"
+	rel := printable(c.rel(gitignore))
 	if !encDestinationOK(gitignore) {
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again", c.rel(gitignore))
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before %s — remove it, then run this command again", rel, step)
 		return nil, false, false
 	}
-	raw, err := os.ReadFile(gitignore)
+	f, err := os.Open(gitignore)
 	if errors.Is(err, fs.ErrNotExist) {
 		return []byte(gitignoreContent), true, true
 	}
-	if err != nil {
-		ui.ErrorTo(c.ErrOut, "cannot read %s: it was not changed, and nothing was written", c.rel(gitignore))
-		return nil, false, false
+	var raw []byte
+	if err == nil {
+		raw, err = io.ReadAll(io.LimitReader(f, gitignoreMaxBytes+1))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
 	}
-	want, problems := planGitignore(raw, c.rel(gitignore))
+	var problems []string
+	if err != nil {
+		problems = []string{"cannot read " + rel}
+	} else {
+		want, problems = planGitignore(raw, rel)
+	}
 	if problems != nil {
 		for _, p := range problems {
 			ui.ErrorTo(c.ErrOut, "%s", p)
 		}
+		ui.ErrorTo(c.ErrOut, "%s", gitignoreFinal(rel, step))
 		return nil, false, false
 	}
 	return want, !bytes.Equal(raw, want), true
@@ -215,10 +230,15 @@ func (c *Context) initStorePath() string {
 // a temp file in the store and a rename over the old name (writeReplacing,
 // mode 0644): it replaces a link or a hard link instead of writing through
 // it. A write that fails leaves the old file as it was, prints the error
-// and one line that names the file, and returns ErrHandled.
-func (c *Context) ensureGitignore(dir string) error {
+// and one line that names the file, and returns ErrHandled. step names the
+// step of the command that a refusal stops before (gitignorePlan).
+//
+// The file gets mode 0644 on each rewrite: the .gitignore is committed, and
+// git reads the same rules for each user of the repository. It holds no
+// secret.
+func (c *Context) ensureGitignore(dir, step string) error {
 	gitignore := dir + "/.gitignore"
-	want, write, ok := c.gitignorePlan(dir)
+	want, write, ok := c.gitignorePlan(dir, step)
 	if !ok {
 		return ErrHandled
 	}
@@ -229,7 +249,7 @@ func (c *Context) ensureGitignore(dir string) error {
 		if !c.reportTempLeft(err) {
 			fmt.Fprintln(c.ErrOut, err)
 		}
-		ui.ErrorTo(c.ErrOut, "cannot write %s: it was not changed", c.rel(gitignore))
+		ui.ErrorTo(c.ErrOut, "cannot write %s: it was not changed", printable(c.rel(gitignore)))
 		return ErrHandled
 	}
 	ui.Debug("Wrote %s", gitignore)

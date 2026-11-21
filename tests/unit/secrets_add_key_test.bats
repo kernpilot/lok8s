@@ -490,7 +490,7 @@ _ls_then_missing() {
     before="$(_state "${PATH_BASE}" "${store}" "${outside%/*}")"
     DOMAIN=a.dev run _add "${key}"
     [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] ${store}/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again" ] || {
+    [ "$output" = "[error] ${store}/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again" ] || {
       echo "$output" >&2; return 1; }
     [ "$(_state "${PATH_BASE}" "${store}" "${outside%/*}")" = "${before}" ] || { echo "${key}: a write" >&2; return 1; }
     [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "${key}: a lock file" >&2; return 1; }
@@ -929,15 +929,15 @@ Encrypted 2 secret(s)
       '# BEGIN lok8s secrets. lo rewrites the lines up to the END line: add your own rules below it.' \
       '# Ignore everything except this file and the SOPS-encrypted secret files.' \
       '# A plaintext secret file must never be committed.' \
-      '*' '!.gitignore' '!Secret.*.enc' '# END lok8s secrets' '!*'; } > "${store}/.gitignore"
+      '*' '!.gitignore' '!Secret.*.enc' '*/' '# END lok8s secrets' '!*'; } > "${store}/.gitignore"
   printf 'v' > "${store}/Secret.app.default.K"
   touch -t 200001010000 "${store}/Secret.app.default.K"
   for key in "${KEY_B}" "${KEY_A}"; do
     before="$(_state "${PATH_BASE}" "${store}")"
     DOMAIN=a.dev run _add "${key}"
     [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] ${store}/.gitignore:8: !*: this rule can re-include a plaintext secret file (the last matching rule wins): remove it
-[error] ${store}/.gitignore was not changed, and nothing was written: fix the lines above, then run this command again" ] || {
+    [ "$output" = "[error] ${store}/.gitignore:9: this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store
+[error] ${store}/.gitignore was not changed, and lo stopped before its first write: fix each cause above, then run this command again" ] || {
       echo "${key}: $output" >&2; return 1; }
     [ "$(_state "${PATH_BASE}" "${store}")" = "${before}" ] || { echo "${key}: a write" >&2; return 1; }
     [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "${key}: a lock file" >&2; return 1; }
@@ -1227,7 +1227,7 @@ done — commit .sops.yaml and the updated .enc files together" ] || { echo "the
   printf 'x' > "${other}/Secret.x.default.K"
   touch -t 200001010000 "${store}/Secret.app.default.K" "${other}/Secret.x.default.K"
   # The .gitignore that the first run writes before .sops.yaml.
-  secrets::_ensure_gitignore "${store}"
+  secrets::_ensure_gitignore "${store}" "the change of .sops.yaml"
   for key in "${KEY_A}" "${KEY_B}"; do
     before="$(_state "${store}" "${other}")"
     cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
@@ -1386,7 +1386,7 @@ ${store}/Secret.db.default.K" ] || { echo "sops ran on: $(cat "${SOPS_LOG}")" >&
   touch -t 200001010000 "${app}"
   printf 'not the value of the .enc' > "${store}/Secret.app.default.K"
   # The .gitignore that a rerun writes when it is missing.
-  secrets::_ensure_gitignore "${store}"
+  secrets::_ensure_gitignore "${store}" "the change of .sops.yaml"
   before="$(_state "${PATH_BASE}/.sops.yaml" "${store}")"
   id="$(_file_id "${PATH_BASE}/.sops.yaml")"
   DOMAIN=a.dev run _add "${KEY_B}"
@@ -1418,7 +1418,7 @@ ${store}/Secret.db.default.K" ] || { echo "sops ran on: $(cat "${SOPS_LOG}")" >&
     touch -t 200001010000 "${app}"
     printf 'not the value of the .enc' > "${store}/Secret.app.default.K"
     # The .gitignore that a rerun writes when it is missing.
-    secrets::_ensure_gitignore "${store}"
+    secrets::_ensure_gitignore "${store}" "the change of .sops.yaml"
     before="$(_state "${PATH_BASE}/.sops.yaml" "${store}")"
     : > "${SOPS_LOG}"
     DOMAIN=a.dev run _add "${KEY_B}"

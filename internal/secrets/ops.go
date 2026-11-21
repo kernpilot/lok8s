@@ -52,7 +52,7 @@ func (c *Context) Init(sshKey string) error {
 
 	// Before the first write (the config), and on a rerun with a config
 	// too: the .gitignore of the store that init writes (gitignoreOK).
-	if !c.gitignoreOK(c.initStorePath()) {
+	if !c.gitignoreOK(c.initStorePath(), stepFirstWrite) {
 		return ErrHandled
 	}
 
@@ -61,7 +61,7 @@ func (c *Context) Init(sshKey string) error {
 		// store and writes it when it needs a change, as the first run
 		// does. A store that does not exist holds no plaintext.
 		if store := c.initStorePath(); fsutil.DirExists(store) {
-			if err := c.ensureGitignore(store); err != nil {
+			if err := c.ensureGitignore(store, stepFirstWrite); err != nil {
 				return err
 			}
 		}
@@ -111,7 +111,7 @@ creation_rules:
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return c.ensureGitignore(dir)
+	return c.ensureGitignore(dir, stepGitignoreWrite)
 }
 
 // grepQF mirrors `grep -qF pattern file` on in-memory content: an empty
@@ -191,7 +191,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// that the encrypt below writes (gitignoreOK). A store that does not
 	// resolve is refused below (encryptTargets), and StorePath names
 	// another store then.
-	if !c.gitignoreOK(c.StorePath()) {
+	if !c.gitignoreOK(c.StorePath(), stepFirstWrite) {
 		return ErrHandled
 	}
 	// The file that the lock, the read and the write use, resolved once
@@ -254,7 +254,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// do writes it too. A store directory that does not exist holds no
 	// plaintext, and the encrypt skips it.
 	if fsutil.DirExists(checked.dir) {
-		if err := c.ensureGitignore(checked.dir); err != nil {
+		if err := c.ensureGitignore(checked.dir, stepSopsConfig); err != nil {
 			ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again")
 			return err
 		}
@@ -439,6 +439,14 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 		ui.ErrorTo(c.ErrOut, "Key argument is required")
 		return ErrHandled
 	}
+	// Before the prompt and any write: a plaintext name that ends in .enc
+	// (reservedPlaintextName). The rule !Secret.*.enc of the .gitignore
+	// re-includes it, and git would commit the plaintext. The refusal names
+	// the key and the file, never the value.
+	if base := "Secret." + name + "." + namespace + "." + key; reservedPlaintextName(base) {
+		ui.ErrorTo(c.ErrOut, "the key '%s' is refused: the plaintext file %s would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc", printable(key), printable(base))
+		return ErrHandled
+	}
 
 	if value == "-" {
 		// argsh's :~stdin type: an explicit `-` reads stdin during parsing.
@@ -483,7 +491,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 		return err
 	}
 	// Before the plaintext: the .gitignore that keeps it out of git.
-	if err := c.ensureGitignore(secretsDir); err != nil {
+	if err := c.ensureGitignore(secretsDir, stepPlaintext); err != nil {
 		return err
 	}
 
@@ -678,7 +686,7 @@ func (c *Context) encryptSweep(secretsDir, name string, force bool, list func() 
 	}
 
 	// Ensure .gitignore blocks plaintext before we create .enc files
-	if err := c.ensureGitignore(secretsDir); err != nil {
+	if err := c.ensureGitignore(secretsDir, stepEncWrites); err != nil {
 		return err
 	}
 
@@ -740,8 +748,13 @@ func (c *Context) Decrypt(sshKey string) error {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
 	}
-	// Before the first plaintext: the .gitignore that keeps it out of git.
-	if err := c.ensureGitignore(secretsDir); err != nil {
+	// Before any write: a ciphertext whose plaintext name ends in .enc
+	// (refuseReservedDestinations). Then, before the first plaintext, the
+	// .gitignore that keeps it out of git.
+	if c.refuseReservedDestinations(secretsDir) {
+		return ErrHandled
+	}
+	if err := c.ensureGitignore(secretsDir, stepDecrypt); err != nil {
 		return err
 	}
 
@@ -859,6 +872,29 @@ func (c *Context) Decrypt(sshKey string) error {
 		fmt.Fprintf(c.Out, "No encrypted secrets found in %s\n", secretsDir)
 	}
 	return nil
+}
+
+// refuseReservedDestinations prints a refusal and returns true when a
+// ciphertext of the store dir would decrypt to a plaintext whose name ends
+// in .enc (reservedPlaintextName; bash: secrets::_decrypt_reserved), for
+// example Secret.app.default.enc.enc. The rule !Secret.*.enc of the
+// .gitignore re-includes that plaintext. Decrypt runs it before its first
+// write. It reads the same entries as the decrypt loop.
+func (c *Context) refuseReservedDestinations(dir string) bool {
+	refused := false
+	for _, base := range storeEntries(dir, "Secret.") {
+		if !strings.HasSuffix(base[len("Secret."):], ".enc") || !fsutil.IsRegular(dir+"/"+base) {
+			continue
+		}
+		if dest := strings.TrimSuffix(base, ".enc"); reservedPlaintextName(dest) {
+			ui.ErrorTo(c.ErrOut, "%s: decrypt would write the plaintext file %s, which ends in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it", printable(c.rel(dir+"/"+base)), printable(dest))
+			refused = true
+		}
+	}
+	if refused {
+		ui.ErrorTo(c.ErrOut, "decrypt wrote no plaintext file: move these .enc files out of the store, then run this command again")
+	}
+	return refused
 }
 
 // decryptEncFile decrypts encFile in memory. Nothing is written: the

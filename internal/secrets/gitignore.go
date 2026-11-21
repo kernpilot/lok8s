@@ -7,25 +7,35 @@ import (
 )
 
 // The .gitignore of a store. lo writes its rules as a block between two
-// marker lines, and it reads the whole file as git does before it reports
-// the store as protected (bash: secrets::_gitignore_plan). Git uses the last
-// rule that matches a name, so a rule after the ignore-all rule of the block
-// can re-include a plaintext secret file. lo refuses such a rule and never
-// rewrites a line of the user.
+// marker lines, and it reads the whole file before it reports the store as
+// protected (bash: secrets::_gitignore_plan). Git uses the last rule that
+// matches a path. The block ignores every path, then re-includes this file
+// and the SOPS-encrypted files, then ignores every directory again. Thus
+// only a negation after the block can re-include a plaintext secret file,
+// and lo refuses each negation there. lo never rewrites a line of the user.
 
 const (
 	gitignoreBegin = "# BEGIN lok8s secrets. lo rewrites the lines up to the END line: add your own rules below it."
 	gitignoreEnd   = "# END lok8s secrets"
 
 	// gitignoreContent is the block: the file that lo writes when the store
-	// has no .gitignore.
+	// has no .gitignore. A pattern with no trailing slash matches a
+	// directory too, so !Secret.*.enc re-includes a directory such as
+	// Secret.x.enc/. Git then reads a .gitignore in it, and a !* there
+	// re-includes each file of that directory. The last rule, */, ignores
+	// every directory again: git does not go into a directory of the store.
 	gitignoreContent = gitignoreBegin + "\n" +
 		"# Ignore everything except this file and the SOPS-encrypted secret files.\n" +
 		"# A plaintext secret file must never be committed.\n" +
 		"*\n" +
 		"!.gitignore\n" +
 		"!Secret.*.enc\n" +
+		"*/\n" +
 		gitignoreEnd + "\n"
+
+	// gitignoreMaxBytes is the largest .gitignore that the check reads. A
+	// larger file is refused (the same limit in the bash twin).
+	gitignoreMaxBytes = 1 << 20
 )
 
 // gitignoreLegacy is the file that lo wrote before the block. A file that
@@ -38,17 +48,36 @@ var gitignoreLegacy = []string{
 	"!Secret.*.enc",
 }
 
-// The refusal texts (the same words in the bash twin).
+// utf8BOM is the byte order mark that git skips at the start of a
+// .gitignore.
+var utf8BOM = []byte{0xef, 0xbb, 0xbf}
+
+// The refusal texts (the same words in the bash twin). A refusal names the
+// file, the line number and the reason. It never prints the rule: a rule
+// can hold a pasted secret.
 const (
 	gitignoreMarkerText   = "the BEGIN and END lines of the lok8s block must occur once each, with BEGIN first"
 	gitignoreInsideText   = "this rule is in the lok8s block, which lo rewrites: move it below the END line"
-	gitignoreNegationText = "this rule can re-include a plaintext secret file (the last matching rule wins): remove it"
+	gitignoreNegationText = "this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store"
+)
+
+// The steps that a .gitignore check stops before. Each refusal of the check
+// names the step of its command: an earlier step of the command can have
+// written a file already.
+const (
+	stepFirstWrite     = "its first write"
+	stepGitignoreWrite = "the .gitignore write"
+	stepSopsConfig     = "the change of .sops.yaml"
+	stepPlaintext      = "the plaintext write"
+	stepEncWrites      = "the .enc writes"
+	stepDecrypt        = "the first plaintext write"
 )
 
 // planGitignore reads raw, the bytes of an existing .gitignore, as git does.
 // It returns the bytes that the file must have (want), or the refusal lines
-// when a rule conflicts with the block (problems; rel names the file). The
-// caller writes want only when it differs from raw.
+// when the file cannot protect the store (problems; rel names the file,
+// with printable bytes only). The caller writes want only when it differs
+// from raw.
 //
 //   - No marker line: a file that starts with the legacy lines gets the
 //     block in their place. Any other file gets the block at the top, and
@@ -57,16 +86,28 @@ const (
 //     block. The lines above and below stay byte for byte.
 //   - Any other marker shape is refused.
 //
-// The lines above the block are dead: the ignore-all rule of the block comes
-// after them. Inside the block, a rule that is not one of the three rules of
-// lo is refused. Below the block (or after the block at the top), a negation
-// that can re-include a plaintext name is refused. A NUL byte is refused,
-// because git ends a rule at that byte.
+// A UTF-8 BOM at the start stays at the start: the plan reads the first
+// line without it, and the block goes after it.
+//
+// The lines above the block have no effect: the ignore-all rule of the
+// block comes after them. Inside the block, a rule that is not one of the
+// four rules of lo is refused. Below the block (or after the block at the
+// top), each negation is refused: a line whose first byte is !. A NUL byte
+// is refused, because git ends a rule at that byte, and so is a file larger
+// than gitignoreMaxBytes.
 func planGitignore(raw []byte, rel string) (want []byte, problems []string) {
-	if bytes.IndexByte(raw, 0) >= 0 {
-		return nil, []string{rel + ": the file has a NUL byte, and git ends a rule at that byte: remove it", gitignoreFinal(rel)}
+	if len(raw) > gitignoreMaxBytes {
+		return nil, []string{rel + ": the file has more than " + strconv.Itoa(gitignoreMaxBytes) + " bytes, and lo does not read a larger .gitignore: make it smaller"}
 	}
-	lines, off := gitignoreLines(raw)
+	if bytes.IndexByte(raw, 0) >= 0 {
+		return nil, []string{rel + ": the file has a NUL byte, and git ends a rule at that byte: remove it"}
+	}
+	var bom []byte
+	body := raw
+	if bytes.HasPrefix(raw, utf8BOM) {
+		bom, body = utf8BOM, raw[len(utf8BOM):]
+	}
+	lines, off := gitignoreLines(body)
 	var markers []int
 	begin, end := -1, -1
 	begins, ends := 0, 0
@@ -83,16 +124,17 @@ func planGitignore(raw []byte, rel string) (want []byte, problems []string) {
 		}
 	}
 	problem := func(i int, text string) {
-		problems = append(problems, rel+":"+strconv.Itoa(i+1)+": "+gitignoreShown(lines[i])+": "+text)
+		problems = append(problems, rel+":"+strconv.Itoa(i+1)+": "+text)
 	}
 	below := func(from int) {
 		for i := from; i < len(lines); i++ {
-			if neg, pat, ok := gitignoreRule(lines[i]); ok && neg && negationUnsafe(pat) {
+			if strings.HasPrefix(lines[i], "!") {
 				problem(i, gitignoreNegationText)
 			}
 		}
 	}
 
+	want = append([]byte{}, bom...)
 	switch {
 	case begins == 0 && ends == 0:
 		from := 0
@@ -100,34 +142,35 @@ func planGitignore(raw []byte, rel string) (want []byte, problems []string) {
 			from = len(gitignoreLegacy)
 		}
 		below(from)
-		want = append([]byte(gitignoreContent), raw[off[from]:]...)
+		want = append(append(want, gitignoreContent...), body[off[from]:]...)
 	case begins == 1 && ends == 1 && begin < end:
 		for i := begin + 1; i < end; i++ {
 			neg, pat, ok := gitignoreRule(lines[i])
 			switch {
 			case !ok || gitignoreOwnRule(neg, pat):
-			case neg && negationUnsafe(pat):
+			case neg:
 				problem(i, gitignoreNegationText)
 			default:
 				problem(i, gitignoreInsideText)
 			}
 		}
 		below(end + 1)
-		want = append(append(append([]byte{}, raw[:off[begin]]...), gitignoreContent...), raw[off[end+1]:]...)
+		want = append(append(append(want, body[:off[begin]]...), gitignoreContent...), body[off[end+1]:]...)
 	default:
 		for _, i := range markers {
 			problem(i, gitignoreMarkerText)
 		}
 	}
 	if len(problems) > 0 {
-		return nil, append(problems, gitignoreFinal(rel))
+		return nil, problems
 	}
 	return want, nil
 }
 
-// gitignoreFinal is the last refusal line.
-func gitignoreFinal(rel string) string {
-	return rel + " was not changed, and nothing was written: fix the lines above, then run this command again"
+// gitignoreFinal is the last refusal line of a check that stops its command
+// before step.
+func gitignoreFinal(rel, step string) string {
+	return rel + " was not changed, and lo stopped before " + step + ": fix each cause above, then run this command again"
 }
 
 // gitignoreLines splits raw at each newline, as bash mapfile -t does: a last
@@ -163,9 +206,9 @@ func gitignoreIsLegacy(lines []string) bool {
 	return true
 }
 
-// gitignoreOwnRule reports whether a rule is one of the three rules of lo.
+// gitignoreOwnRule reports whether a rule is one of the four rules of lo.
 func gitignoreOwnRule(neg bool, pat string) bool {
-	return (!neg && pat == "*") || (neg && (pat == ".gitignore" || pat == "Secret.*.enc"))
+	return (!neg && (pat == "*" || pat == "*/")) || (neg && (pat == ".gitignore" || pat == "Secret.*.enc"))
 }
 
 // gitignoreRule reads one line as git does (dir.c): a line whose first byte
@@ -207,27 +250,14 @@ trim:
 	return false, s, true
 }
 
-// negationUnsafe reports whether a negation of pat, after the ignore-all
-// rule, can re-include a file in the store other than the .gitignore and the
-// SOPS-encrypted files (Secret.*.enc). It is conservative: a pattern that it
-// cannot prove safe is unsafe. A wildcard never matches a slash, so the name
-// of a file that a pattern can re-include matches the last part of the
-// pattern, after its last slash. That part is read, also below the top of the
-// store: restore.d/ and tls/ hold plaintext too. A pattern that matches only
-// a directory (a trailing slash) has an empty last part, and it is unsafe:
-// git then reads a .gitignore in that directory, which the !.gitignore rule
-// of the block re-includes, and lo does not read that file. Letters compare
-// without case (core.ignorecase), ASCII only.
-func negationUnsafe(pat string) bool {
-	p := asciiLower(pat[strings.LastIndexByte(pat, '/')+1:])
-	if !strings.ContainsAny(p, `*?[\`) {
-		safe := p == ".gitignore" ||
-			(strings.HasPrefix(p, "secret.") && strings.HasSuffix(p, ".enc") && len(p) >= 11)
-		return !safe
-	}
-	head := p[:strings.IndexAny(p, `*?[\`)]
-	tail := p[strings.LastIndexAny(p, `*?[]\`)+1:]
-	return !strings.HasPrefix(head, "secret.") || !strings.HasSuffix(tail, ".enc")
+// reservedPlaintextName reports whether base, the name of a plaintext file
+// in a store, ends in .enc in any ASCII letter case (bash:
+// secrets::_enc_reserved). The rule !Secret.*.enc of the block re-includes
+// such a name, and with core.ignorecase also a name that ends in .ENC: git
+// would commit the plaintext. set and decrypt refuse such a name before
+// they write it.
+func reservedPlaintextName(base string) bool {
+	return strings.HasSuffix(asciiLower(base), ".enc")
 }
 
 // asciiLower lowercases the ASCII letters of s only, as git does.
@@ -241,10 +271,10 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-// gitignoreShown is a line as a refusal prints it: without a trailing CR,
-// and each byte outside the printable ASCII range as ?.
-func gitignoreShown(line string) string {
-	b := []byte(strings.TrimSuffix(line, "\r"))
+// printable is s as a refusal prints it: each byte outside the printable
+// ASCII range as ? (no terminal control from a file name or a key).
+func printable(s string) string {
+	b := []byte(s)
 	for i, c := range b {
 		if c < 0x20 || c > 0x7e {
 			b[i] = '?'

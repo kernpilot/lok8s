@@ -515,7 +515,7 @@ func TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile(t *testing.T) {
 			if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
+			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the .enc writes — remove it, then run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -723,14 +723,14 @@ func TestEnsureGitignoreReplacesAHardLink(t *testing.T) {
 	if err := os.Link(outside, dir+"/.gitignore"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ensureGitignore(dir); err != nil {
+	if err := c.ensureGitignore(dir, stepPlaintext); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
 	if got := readFile(t, outside); got != "# old\n" {
 		t.Errorf("the hard link sees %q: the write went through it", got)
 	}
 	// The old file has no block: the block goes on top of its line.
-	if got := readFile(t, dir+"/.gitignore"); got != gitignoreContent+"# old\n" {
+	if got := readFile(t, dir+"/.gitignore"); got != litBlock+"# old\n" {
 		t.Errorf(".gitignore: %q", got)
 	}
 	info, err := os.Stat(dir + "/.gitignore")
@@ -757,7 +757,7 @@ func TestEnsureGitignoreReportsAWriteThatFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	if err := c.ensureGitignore(dir); !errors.Is(err, ErrHandled) {
+	if err := c.ensureGitignore(dir, stepPlaintext); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 	}
 	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
@@ -813,7 +813,7 @@ func TestAddKeyRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 			if err := f.run(); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 			}
-			want := "[error] " + f.c.rel(gitignore) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again\n"
+			want := "[error] " + f.c.rel(gitignore) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again\n"
 			if f.errOut.String() != want || f.out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 			}
@@ -862,7 +862,7 @@ func TestAddKeyWritesTheGitignoreBeforeTheConfig(t *testing.T) {
 	}
 	f.rekeyed("app", "v")
 	f.rekeyed("db", "w")
-	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent+"# old\n" {
+	if got := readFile(t, f.store+"/.gitignore"); got != litBlock+"# old\n" {
 		t.Errorf(".gitignore: %q", got)
 	}
 }
@@ -1218,7 +1218,7 @@ func TestAddKeyRerunWritesAMissingGitignore(t *testing.T) {
 	if want := "recipient already present in .sops.yaml — nothing to add\n  " + f.gone.Recipient().String() + "\n"; f.out.String() != want {
 		t.Errorf("stdout %q", f.out.String())
 	}
-	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent {
+	if got := readFile(t, f.store+"/.gitignore"); got != litBlock {
 		t.Errorf(".gitignore: %q", got)
 	}
 	unchanged(t, f.c, config)
@@ -1345,7 +1345,7 @@ func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 		t.Fatalf("the control: %v\n%s", err, f.errOut.String())
 	}
 	// The old file has no block: the block goes on top of its line.
-	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent+"# old\n" {
+	if got := readFile(t, f.store+"/.gitignore"); got != litBlock+"# old\n" {
 		t.Errorf("the control: .gitignore %q", got)
 	}
 	f.rekeyed("app", "v")

@@ -38,7 +38,7 @@ _block() {
     '# BEGIN lok8s secrets. lo rewrites the lines up to the END line: add your own rules below it.' \
     '# Ignore everything except this file and the SOPS-encrypted secret files.' \
     '# A plaintext secret file must never be committed.' \
-    '*' '!.gitignore' '!Secret.*.enc' '# END lok8s secrets'
+    '*' '!.gitignore' '!Secret.*.enc' '*/' '# END lok8s secrets'
 }
 
 # _legacy prints the lines that lo wrote before the block.
@@ -226,7 +226,7 @@ _gitignore_refused() { # <link|dir>
   before="$(_states)"
   run secrets::encrypt
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again" ] || {
+  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the .enc writes — remove it, then run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ ! -s "${log}" ] || { echo "encrypted: $(cat "${log}")" >&2; return 1; }
   [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
@@ -239,7 +239,7 @@ _gitignore_refused() { # <link|dir>
   local outside="${BATS_TEST_TMPDIR}/elsewhere"
   printf '# old\n' > "${outside}"
   ln "${outside}" "${PATH_SECRETS}/.gitignore"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$(cat "${outside}")" = '# old' ] || { echo "the write went through the hard link" >&2; return 1; }
   cmp -s "${PATH_SECRETS}/.gitignore" <(_block; printf '# old\n') || { cat "${PATH_SECRETS}/.gitignore" >&2; return 1; }
@@ -255,7 +255,7 @@ _gitignore_refused() { # <link|dir>
   [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
   printf '# old\n' > "${PATH_SECRETS}/.gitignore"
   chmod 555 "${PATH_SECRETS}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   chmod 755 "${PATH_SECRETS}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
@@ -296,7 +296,7 @@ _gitignore_refused() { # <link|dir>
     : >> "${marker}"
     return 1
   }
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   unset -f printf
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ -e "${marker}" ] || { echo "fixture: the payload write did not run" >&2; return 1; }
@@ -304,7 +304,7 @@ _gitignore_refused() { # <link|dir>
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ] || { echo "the .gitignore changed: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
   [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
 
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "the control: status $status: $output" >&2; return 1; }
   grep -qxF '!Secret.*.enc' "${PATH_SECRETS}/.gitignore" || { echo "the control: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
   [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "the control left a temp file" >&2; return 1; }
@@ -319,7 +319,7 @@ _gitignore_refused() { # <link|dir>
   printf '# *\n# !Secret.*.enc\n' > "${ignore}"
   run secrets::_gitignore_current "${PATH_SECRETS}"
   [ "$status" -eq 1 ] || { echo "a file with comments only is current" >&2; return 1; }
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(_block; printf '# *\n# !Secret.*.enc\n') || { cat "${ignore}" >&2; return 1; }
 }
@@ -331,18 +331,18 @@ _gitignore_refused() { # <link|dir>
 @test "secrets: a .gitignore with no block gets it, and the legacy lines get it in their place" {
   local ignore="${PATH_SECRETS}/.gitignore"
   printf 'mine\n/tmp/\nlast' > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "no block: status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(_block; printf 'mine\n/tmp/\nlast') || { cat "${ignore}" >&2; return 1; }
 
   { _legacy; printf 'extra\n'; } > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "legacy: status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(_block; printf 'extra\n') || { cat "${ignore}" >&2; return 1; }
 
   _legacy | sed 's/$/\r/' > "${ignore}"
   printf 'extra\r\n' >> "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "legacy with CRLF: status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(_block; printf 'extra\r\n') || { cat -A "${ignore}" >&2; return 1; }
 }
@@ -357,117 +357,250 @@ _gitignore_refused() { # <link|dir>
     _block | head -n 1 | sed 's/$/\r/'
     printf '# an old comment\n*\n!.gitignore\n!Secret.*.enc\n# END lok8s secrets\n'
     printf 'below\n\n# note\nlast'; } > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(printf 'above\r\n'; _block; printf 'below\n\n# note\nlast') || { cat -A "${ignore}" >&2; return 1; }
   inode="$(stat -c %i "${ignore}")"
   run secrets::_gitignore_current "${PATH_SECRETS}"
   [ "$status" -eq 0 ] || { echo "the plan is not current" >&2; return 1; }
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "the second run: status $status: $output" >&2; return 1; }
   [ "$(stat -c %i "${ignore}")" = "${inode}" ] || { echo "the second run wrote the file" >&2; return 1; }
 }
 
-# A negation that can re-include a plaintext name is refused in the block
-# and below it, with the file, the line number and the line, then a final
-# line. Another rule in the block is refused too. The file keeps its bytes
-# (Go twin: TestPlanGitignore).
+# Each negation inside and below the block is refused, with the file, the
+# line number and the reason, then a final line with the step that the
+# check stops before. Another rule in the block is refused too. The file
+# keeps its bytes (Go twin: TestPlanGitignore).
 @test "secrets: a later negation inside and below the block is refused, with its line" {
   local ignore="${PATH_SECRETS}/.gitignore" negation inside
-  negation='this rule can re-include a plaintext secret file (the last matching rule wins): remove it'
+  negation='this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store'
   inside='this rule is in the lok8s block, which lo rewrites: move it below the END line'
-  { printf 'above\n'; _block | head -n 6; printf '!Secret.app.default.K\n*.log\n# END lok8s secrets\nkeep\n!*.yaml\n'; } > "${ignore}"
+  { printf 'above\n'; _block | head -n 7; printf '!Secret.app.default.K\n*.log\n# END lok8s secrets\nkeep\n!*.yaml\n'; } > "${ignore}"
   cp -p -- "${ignore}" "${BATS_TEST_TMPDIR}/before"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] .secrets/.gitignore:8: !Secret.app.default.K: ${negation}
-[error] .secrets/.gitignore:9: *.log: ${inside}
-[error] .secrets/.gitignore:12: !*.yaml: ${negation}
-[error] .secrets/.gitignore was not changed, and nothing was written: fix the lines above, then run this command again" ] || {
+  [ "$output" = "[error] .secrets/.gitignore:9: ${negation}
+[error] .secrets/.gitignore:10: ${inside}
+[error] .secrets/.gitignore:13: ${negation}
+[error] .secrets/.gitignore was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again" ] || {
     echo "$output" >&2; return 1; }
   cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "the file changed" >&2; return 1; }
 
   printf 'x\n!Secret.app.default.K\n' > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "no block: status $status: $output" >&2; return 1; }
-  [ "${lines[0]}" = "[error] .secrets/.gitignore:2: !Secret.app.default.K: ${negation}" ] || { echo "$output" >&2; return 1; }
+  [ "${lines[0]}" = "[error] .secrets/.gitignore:2: ${negation}" ] || { echo "$output" >&2; return 1; }
 
   { _legacy; printf '!*\n'; } > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "legacy: status $status: $output" >&2; return 1; }
-  [ "${lines[0]}" = "[error] .secrets/.gitignore:6: !*: ${negation}" ] || { echo "$output" >&2; return 1; }
+  [ "${lines[0]}" = "[error] .secrets/.gitignore:6: ${negation}" ] || { echo "$output" >&2; return 1; }
 }
 
-# The negations that the check takes as safe (they re-include only the
-# .gitignore or the .enc files) and a later positive rule pass. A negation
-# above the block is dead: the block comes after it. Each negation that can
-# re-include a plaintext name is refused, also with a stars run, an escaped
-# space, a lone backslash at the end, a control byte (shown as ?), a CR, or
-# a slash: a pattern with a slash is read by its last part, and restore.d/
-# and tls/ of a store hold plaintext. A directory-only negation is refused:
-# git then reads a .gitignore in that directory, and the block re-includes
-# that file (Go twin: TestPlanGitignore).
-@test "secrets: the check reads each negation as git does" {
-  local ignore="${PATH_SECRETS}/.gitignore" negation n=8 l
-  negation='this rule can re-include a plaintext secret file (the last matching rule wins): remove it'
-  { printf '!plain\n'; _block
-    printf '%s\n' '!Secret.x.enc' '!/SECRET.*.ENC' '!restore.d/Secret.x.enc' '!**/Secret.*.enc' \
-      '!Secret.*.enc   ' '!.gitignore' '!secret.[ab].enc' '.gitignore' 'Secret.*.enc'; } > "${ignore}"
+# Below the block, each line whose first byte is ! is refused, whatever it
+# matches: with the */ line of the block, nothing else below the block can
+# re-include a path. An escaped !, a leading space and positive rules pass.
+# A rule above the block has no effect, a negation too: the block comes
+# after it. A comment and an empty line count in the line number (Go twin:
+# TestPlanGitignore).
+@test "secrets: each negation below the block is refused, and the rules above it have no effect" {
+  local ignore="${PATH_SECRETS}/.gitignore" negation n=9 l
+  negation='this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store'
+  { printf '!plain\n!*\n'; _block; printf '%s\n' '\!x' ' !x' '*.log' 'Secret.*.enc' '.gitignore'; } > "${ignore}"
   cp -p -- "${ignore}" "${BATS_TEST_TMPDIR}/before"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
-  [ "$status" -eq 0 ] || { echo "the safe rules: status $status: $output" >&2; return 1; }
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "the accepted rules: status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "a current file was written" >&2; return 1; }
 
-  local -a bad=('!Secret.*' '!***/Secret.x' '!*' '!secret.enc' '!*.enc' '!x\ ' '!Secret.*.enc\' '!/**/plain' '!Secret*.enc'
-    '!a/b' '!restore.d/*' '!tls/tls.crt' '!restore.d/' '!*/')
-  { _block; printf '%s\n' "${bad[@]}"; printf '!\033[2Jx\n!plain\r\n'; } > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  local -a bad=('![x/Secret.].enc' '!Secret.*.ENC' '!?' '!README.md' '!Secret.x.enc' '!.gitignore' '!')
+  { _block; printf '%s\n' "${bad[@]}"; } > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "${#lines[@]}" -eq 17 ] || { echo "$output" >&2; return 1; }
-  for l in "${bad[@]}" '!?[2Jx' '!plain'; do
-    [ "${lines[n - 8]}" = "[error] .secrets/.gitignore:${n}: ${l}: ${negation}" ] || { echo "line ${n}: ${lines[n - 8]}" >&2; return 1; }
+  [ "${#lines[@]}" -eq 8 ] || { echo "$output" >&2; return 1; }
+  for l in "${bad[@]}"; do
+    [ "${lines[n - 9]}" = "[error] .secrets/.gitignore:${n}: ${negation}" ] || { echo "line ${n} (${l}): ${lines[n - 9]}" >&2; return 1; }
     n=$(( n + 1 ))
   done
+
+  { _block; printf '# note\n\n!plain\n'; } > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 1 ] || { echo "after a comment: status $status: $output" >&2; return 1; }
+  [ "${lines[0]}" = "[error] .secrets/.gitignore:11: ${negation}" ] || { echo "$output" >&2; return 1; }
 }
 
 # Any marker shape other than one BEGIN line, then one END line, is refused
-# with each marker line, and a NUL byte is refused with one line (git ends a
-# rule at that byte). The file keeps its bytes (Go twin: TestPlanGitignore).
-@test "secrets: a bad marker shape and a NUL byte are refused" {
-  local ignore="${PATH_SECRETS}/.gitignore" marker begin end
+# with each marker line. A NUL byte is refused with one line (git ends a
+# rule at that byte), and so is a file of more than 1048576 bytes. A
+# refused file keeps its bytes, and a file at the limit passes (Go twin:
+# TestPlanGitignore).
+@test "secrets: a bad marker shape, a NUL byte and a large file are refused" {
+  local ignore="${PATH_SECRETS}/.gitignore" marker begin end final
   marker='the BEGIN and END lines of the lok8s block must occur once each, with BEGIN first'
+  final='[error] .secrets/.gitignore was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again'
   begin="$(_block | head -n 1)" end='# END lok8s secrets'
   printf '%s\n' "${begin}" "${begin}" "${end}" > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "two BEGIN lines: status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] .secrets/.gitignore:1: ${begin}: ${marker}
-[error] .secrets/.gitignore:2: ${begin}: ${marker}
-[error] .secrets/.gitignore:3: ${end}: ${marker}
-[error] .secrets/.gitignore was not changed, and nothing was written: fix the lines above, then run this command again" ] || {
-    echo "$output" >&2; return 1; }
+  [ "$output" = "[error] .secrets/.gitignore:1: ${marker}
+[error] .secrets/.gitignore:2: ${marker}
+[error] .secrets/.gitignore:3: ${marker}
+${final}" ] || { echo "$output" >&2; return 1; }
 
   printf '%s\n' "${end}" "${begin}" > "${ignore}"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "END first: status $status: $output" >&2; return 1; }
-  [ "${lines[0]}" = "[error] .secrets/.gitignore:1: ${end}: ${marker}" ] && [ "${lines[1]}" = "[error] .secrets/.gitignore:2: ${begin}: ${marker}" ] || {
+  [ "${lines[0]}" = "[error] .secrets/.gitignore:1: ${marker}" ] && [ "${lines[1]}" = "[error] .secrets/.gitignore:2: ${marker}" ] || {
     echo "$output" >&2; return 1; }
 
   printf 'a\0b\n' > "${ignore}"
   cp -p -- "${ignore}" "${BATS_TEST_TMPDIR}/before"
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "NUL: status $status: $output" >&2; return 1; }
   [ "$output" = "[error] .secrets/.gitignore: the file has a NUL byte, and git ends a rule at that byte: remove it
-[error] .secrets/.gitignore was not changed, and nothing was written: fix the lines above, then run this command again" ] || {
-    echo "$output" >&2; return 1; }
+${final}" ] || { echo "$output" >&2; return 1; }
   cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "the file changed" >&2; return 1; }
+
+  head -c 1048577 /dev/zero | tr '\0' '#' > "${ignore}"
+  cp -p -- "${ignore}" "${BATS_TEST_TMPDIR}/before"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 1 ] || { echo "a large file: status $status" >&2; return 1; }
+  [ "$output" = "[error] .secrets/.gitignore: the file has more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller
+${final}" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "the large file changed" >&2; return 1; }
+
+  head -c 1048576 /dev/zero | tr '\0' '#' > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "a file at the limit: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(_block; head -c 1048576 /dev/zero | tr '\0' '#') || { echo "a file at the limit: wrong bytes" >&2; return 1; }
 }
 
-# _refused_ignore writes a .gitignore that re-includes the plaintext of app
-# (line 8), and sets the caller's refusal to the two lines of its refusal.
+# A refusal prints the file, the line number and the reason. It never
+# prints the rule, which can hold a pasted secret, and a byte of the path
+# outside the printable ASCII range shows as ? (Go twin:
+# TestGitignoreRefusalNeverPrintsTheRule).
+@test "secrets: a refusal names the file, the line and the reason, never the rule" {
+  local negation inside dir store
+  negation='this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store'
+  inside='this rule is in the lok8s block, which lo rewrites: move it below the END line'
+  for store in .secrets "st"$'\033'"[2Jore"; do
+    dir="${PATH_BASE}/${store}"
+    mkdir -p "${dir}"
+    { printf 'above\n'; _block | head -n 1; printf 'PASSWORD=hunter2\n'; _block | sed -n '4,8p'; printf '!API_TOKEN=s3cr3t-value\n'; } > "${dir}/.gitignore"
+    cp -p -- "${dir}/.gitignore" "${BATS_TEST_TMPDIR}/before"
+    run secrets::_ensure_gitignore "${dir}" "the plaintext write"
+    [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+    local rel="${store//$'\033'/?}/.gitignore"
+    [ "$output" = "[error] ${rel}:3: ${inside}
+[error] ${rel}:9: ${negation}
+[error] ${rel} was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again" ] || {
+      echo "$output" >&2; return 1; }
+    [[ "${output}" != *hunter2* && "${output}" != *s3cr3t* && "${output}" != *PASSWORD* && "${output}" != *API_TOKEN* && "${output}" != *$'\033'* ]] || {
+      echo "the refusal prints the rule" >&2; return 1; }
+    cmp -s "${dir}/.gitignore" "${BATS_TEST_TMPDIR}/before" || { echo "the file changed" >&2; return 1; }
+  done
+}
+
+# Git skips a UTF-8 BOM only at the start of a .gitignore. The plan reads
+# the first line without it and keeps it at the start: a BOM before BEGIN
+# still finds the block, and a file with no block gets the block after the
+# BOM (Go twin: TestPlanGitignoreKeepsTheBOMAtTheStart).
+@test "secrets: a BOM stays at the start of the .gitignore" {
+  local ignore="${PATH_SECRETS}/.gitignore" bom=$'\xef\xbb\xbf' negation
+  negation='this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store'
+  printf '%smine\n' "${bom}" > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "no block: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(printf '%s' "${bom}"; _block; printf 'mine\n') || { od -c "${ignore}" | head -3 >&2; return 1; }
+  run secrets::_gitignore_current "${PATH_SECRETS}"
+  [ "$status" -eq 0 ] || { echo "a BOM before BEGIN: the block is not current" >&2; return 1; }
+
+  { printf '%s' "${bom}"; _block | head -n 1; printf '*\n# END lok8s secrets\n'; } > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "a changed block: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(printf '%s' "${bom}"; _block) || { od -c "${ignore}" | head -3 >&2; return 1; }
+
+  { printf '%s' "${bom}"; _legacy; printf 'x\n'; } > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "legacy: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(printf '%s' "${bom}"; _block; printf 'x\n') || { od -c "${ignore}" | head -3 >&2; return 1; }
+
+  printf '%s' "${bom}" > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "a BOM only: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(printf '%s' "${bom}"; _block) || { od -c "${ignore}" | head -3 >&2; return 1; }
+
+  printf '%s!plain\n' "${bom}" > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 1 ] || { echo "a negation on the first line: status $status: $output" >&2; return 1; }
+  [ "${lines[0]}" = "[error] .secrets/.gitignore:1: ${negation}" ] || { echo "$output" >&2; return 1; }
+}
+
+# _git_would_add <ignorecase> — copies the .gitignore of PATH_SECRETS into
+# the store .secrets/ of a new git repository, with the files of a store:
+# a plaintext and its ciphertext, a directory Secret.x.enc/ whose
+# .gitignore re-includes its plaintext child, the restore.d/ and tls/
+# directories, and a file of the user. It prints what `git add --dry-run
+# -A` would add, sorted. The git config of the host is not read
+# (GIT_CONFIG_NOSYSTEM, an empty global config, HOME in a temp dir). A
+# missing git fails the test.
+_git_would_add() {
+  local repo home s
+  command -v git > /dev/null || { echo "this test needs git" >&2; return 1; }
+  repo="$(mktemp -d "${BATS_TEST_TMPDIR}/repo.XXXXXX")" home="$(mktemp -d "${BATS_TEST_TMPDIR}/home.XXXXXX")"
+  s="${repo}/.secrets"
+  mkdir -p "${s}/Secret.x.enc" "${s}/Secret.y.enc" "${s}/restore.d" "${s}/tls"
+  cp -- "${PATH_SECRETS}/.gitignore" "${s}/.gitignore"
+  printf 'plain' > "${s}/Secret.app.default.K"
+  printf 'cipher' > "${s}/Secret.app.default.K.enc"
+  printf '!*\n' > "${s}/Secret.x.enc/.gitignore"
+  printf 'plain' > "${s}/Secret.x.enc/Secret.app.default.P"
+  printf 'cipher' > "${s}/Secret.y.enc/Secret.a.b.c.enc"
+  printf '!*\n' > "${s}/restore.d/.gitignore"
+  printf 'plain' > "${s}/restore.d/app.yaml"
+  printf 'plain' > "${s}/tls/tls.key"
+  printf 'notes' > "${s}/README.md"
+  (
+    cd "${repo}" || exit 1
+    _git() { env -i PATH="${PATH}" HOME="${home}" LC_ALL=C GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git "$@"; }
+    _git init -q || exit 1
+    _git -c "core.ignorecase=${1}" -c core.quotepath=off add --dry-run -A > "${repo}.added" || exit 1
+    sed -e "s/^add '//" -e "s/'\$//" "${repo}.added" | LC_ALL=C sort
+  )
+}
+
+# Git is the oracle: with each .gitignore that lo writes, git would commit
+# only the .gitignore and the ciphertext of the top of the store, with
+# core.ignorecase off and on. The rules above the block (also the negations
+# there) and the accepted rules below it change nothing (Go twin:
+# TestGitignoreKeepsPlaintextOutOfGit).
+@test "secrets: with the .gitignore of lo, git commits only the .gitignore and the ciphertext" {
+  local want=$'.secrets/.gitignore\n.secrets/Secret.app.default.K.enc' input ic got
+  local -a inputs=(
+    ''
+    $'!*\n!Secret.app.default.K\n!restore.d/\n!Secret.x.enc/\n'"$(_block)"$'\n\\!x\n*.log\n# note\n\n'
+    $'\xef\xbb\xbfmine\n'
+    "$(_legacy)"$'\nextra\n'
+  )
+  for input in "${inputs[@]}"; do
+    rm -f -- "${PATH_SECRETS}/.gitignore"
+    [[ -z "${input}" ]] || printf '%s' "${input}" > "${PATH_SECRETS}/.gitignore"
+    run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+    [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+    for ic in false true; do
+      got="$(_git_would_add "${ic}")" || { echo "git failed" >&2; return 1; }
+      [ "${got}" = "${want}" ] || { printf 'core.ignorecase=%s, input %q: git would add\n%s\n' "${ic}" "${input}" "${got}" >&2; return 1; }
+    done
+  done
+}
+
+# _refused_ignore <step> writes a .gitignore that re-includes the plaintext
+# of app (line 9), and sets the caller's refusal to the two lines of its
+# refusal, with the step that the check stops before.
 _refused_ignore() {
   { _block; printf '!Secret.app.default.K\n'; } > "${PATH_SECRETS}/.gitignore"
-  refusal="[error] .secrets/.gitignore:8: !Secret.app.default.K: this rule can re-include a plaintext secret file (the last matching rule wins): remove it
-[error] .secrets/.gitignore was not changed, and nothing was written: fix the lines above, then run this command again"
+  refusal="[error] .secrets/.gitignore:9: this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store
+[error] .secrets/.gitignore was not changed, and lo stopped before ${1}: fix each cause above, then run this command again"
 }
 
 # set checks the .gitignore before it writes the plaintext: a store with no
@@ -485,11 +618,33 @@ _refused_ignore() {
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.K")" = v ]
   rm -f -- "${PATH_SECRETS}/Secret.app.default.K"
 
-  _refused_ignore
+  _refused_ignore "the plaintext write"
   run secrets::set
   [ "$status" -eq 1 ] || { echo "a refused .gitignore: status $status: $output" >&2; return 1; }
   [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
   [ ! -e "${PATH_SECRETS}/Secret.app.default.K" ] || { echo "set wrote the plaintext" >&2; return 1; }
+}
+
+# set refuses a key that makes the plaintext name end in .enc, in any
+# letter case, before any write and before it reads the value: the rule
+# !Secret.*.enc of the .gitignore re-includes that name. The refusal names
+# the key and the file, never the value. A key that ends in ENC without the
+# dot is written (Go twin: TestSetRefusesAKeyThatEndsInEnc).
+@test "secrets set: a key that ends in .enc is refused before any write" {
+  local _k
+  :args() { name=app key="${_k}" value=the-value; }
+  secrets::_live_drift() { :; }
+  for _k in enc ENC password.enc Password.Enc; do
+    run secrets::set
+    [ "$status" -eq 1 ] || { echo "${_k}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] the key '${_k}' is refused: the plaintext file Secret.app.default.${_k} would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc" ] || {
+      echo "${_k}: $output" >&2; return 1; }
+    [ -z "$(ls -A "${PATH_SECRETS}")" ] || { echo "${_k}: set wrote $(ls -A "${PATH_SECRETS}")" >&2; return 1; }
+  done
+  _k=NOT_ENC
+  run secrets::set
+  [ "$status" -eq 0 ] || { echo "the control: status $status: $output" >&2; return 1; }
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.NOT_ENC")" = the-value ]
 }
 
 # decrypt checks the .gitignore before the first plaintext, also before it
@@ -503,7 +658,7 @@ _refused_ignore() {
   export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/no-key"
   unset SOPS_AGE_KEY
   printf 'x' > "${PATH_SECRETS}/Secret.app.default.K.enc"
-  _refused_ignore
+  _refused_ignore "the first plaintext write"
   run secrets::decrypt
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
@@ -513,6 +668,34 @@ _refused_ignore() {
   printf 'mine\n' > "${PATH_SECRETS}/.gitignore"
   run secrets::decrypt
   cmp -s "${PATH_SECRETS}/.gitignore" <(_block; printf 'mine\n') || { cat "${PATH_SECRETS}/.gitignore" >&2; return 1; }
+}
+
+# decrypt refuses, before any write and before it looks for the age key, a
+# ciphertext whose plaintext name ends in .enc in any letter case: the rule
+# !Secret.*.enc of the .gitignore re-includes that name. Each such file has
+# a line, in the order of the store (Go twin:
+# TestDecryptRefusesAPlaintextNameThatEndsInEnc). ssh-to-age and sops are
+# functions that log a call: no crypto tools.
+@test "secrets decrypt: a ciphertext whose plaintext name ends in .enc is refused before any write" {
+  local log="${BATS_TEST_TMPDIR}/tools.log" base rule before
+  ssh-to-age() { echo ssh-to-age >> "${log}"; return 1; }
+  sops() { echo sops >> "${log}"; return 1; }
+  export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/no-keys.txt"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/no-key"
+  unset SOPS_AGE_KEY
+  for base in Secret.app.default.K.enc Secret.app.default.enc.enc Secret.app.default.PW.ENC.enc; do
+    printf 'x' > "${PATH_SECRETS}/${base}"
+  done
+  before="$(ls -A "${PATH_SECRETS}")"
+  rule=', which ends in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it'
+  run secrets::decrypt
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] .secrets/Secret.app.default.PW.ENC.enc: decrypt would write the plaintext file Secret.app.default.PW.ENC${rule}
+[error] .secrets/Secret.app.default.enc.enc: decrypt would write the plaintext file Secret.app.default.enc${rule}
+[error] decrypt wrote no plaintext file: move these .enc files out of the store, then run this command again" ] || {
+    echo "$output" >&2; return 1; }
+  [ ! -e "${log}" ] || { echo "a tool ran: $(cat "${log}")" >&2; return 1; }
+  [ "$(ls -A "${PATH_SECRETS}")" = "${before}" ] || { echo "decrypt wrote $(ls -A "${PATH_SECRETS}")" >&2; return 1; }
 }
 
 # A rerun of init with a config writes no config, but it checks the
@@ -535,7 +718,7 @@ _refused_ignore() {
     cmp -s "${PATH_SECRETS}/.gitignore" <(_block; printf 'mine\n') || { cat "${PATH_SECRETS}/.gitignore" >&2; return 1; }
     cmp -s "${cfg}" "${BATS_TEST_TMPDIR}/cfg" || { echo "${key}: init wrote the config" >&2; return 1; }
 
-    _refused_ignore
+    _refused_ignore "its first write"
     cp -p -- "${PATH_SECRETS}/.gitignore" "${BATS_TEST_TMPDIR}/before"
     run secrets::init
     [ "$status" -eq 1 ] || { echo "${key}: a refused .gitignore: status $status: $output" >&2; return 1; }
@@ -600,7 +783,7 @@ _refused_ignore() {
   sops() { return 1; }
   local re='\[error\] cannot remove the temp file '
 
-  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qxE "${re}\.secrets/\.\.gitignore\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
   [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
@@ -674,7 +857,7 @@ _refused_ignore() {
   mkdir -p "${outside%/*}"
   printf '# not the rules of lok8s\n' > "${outside}"
   ln -s "${outside}" "${PATH_SECRETS}/.gitignore"
-  line="[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written — remove it, then run this command again"
+  line="[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again"
   run secrets::init
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$output" = "${line}" ] || { echo "$output" >&2; return 1; }

@@ -158,6 +158,19 @@ done
 sec_check secrets allow
 sec_state .secrets/.bash-allow
 sec_state .secrets/.gitignore
+# A negation below the block of lo: set refuses before the plaintext, with
+# the line number and not the rule. The .gitignore keeps its bytes.
+for impl in go bash; do
+  cp -p -- "${WORK}/sec-${impl}/.secrets/.gitignore" "${WORK}/sec-${impl}.gitignore.saved"
+  printf '!README.md\n' >> "${WORK}/sec-${impl}/.secrets/.gitignore"
+done
+sec_check secrets set -n app GITIGNORE_REFUSED refused-value
+sec_state .secrets/.gitignore
+for impl in go bash; do
+  [[ ! -e "${WORK}/sec-${impl}/.secrets/Secret.app.default.GITIGNORE_REFUSED" ]] \
+    || fail "secrets set (${impl}): a plaintext despite a refused .gitignore"
+  mv -f -- "${WORK}/sec-${impl}.gitignore.saved" "${WORK}/sec-${impl}/.secrets/.gitignore"
+done
 sec_check secrets add-key /no/such/file
 sec_check secrets add-key age1nope
 KEY2="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key.pub")"
