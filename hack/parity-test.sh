@@ -231,7 +231,10 @@ done
 
 # A plaintext file of decrypt that is a symlink to the .gitignore: each
 # side refuses the run before its first write, and the .gitignore keeps its
-# bytes. The saved plaintext goes back with its file time.
+# bytes. The saved plaintext goes back with its file time. The case needs
+# the plaintext of the --enc set case on both sides: without it, the case
+# records one failure instead of stopping the harness.
+if [[ -e "${WORK}/sec-go/.secrets/Secret.app.default.ENC2" && -e "${WORK}/sec-bash/.secrets/Secret.app.default.ENC2" ]]; then
 for impl in go bash; do
   mv -- "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2" "${WORK}/sec-${impl}.plain.saved"
   ln -s .gitignore "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2"
@@ -247,6 +250,9 @@ for impl in go bash; do
   rm -f -- "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2" "${WORK}/sec-${impl}.gitignore.saved"
   mv -- "${WORK}/sec-${impl}.plain.saved" "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2"
 done
+else
+  fail "secrets decrypt <a symlink to .gitignore>: not run, a side has no Secret.app.default.ENC2"
+fi
 
 # set refuses a name, a namespace or a key that is not one part of a path,
 # before any write. With the directory Secret.app.default.anchor/ in the
