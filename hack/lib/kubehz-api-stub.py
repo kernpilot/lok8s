@@ -57,6 +57,15 @@ NEXT_BIND = "009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecret": NEXT_BIND,
               "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb",
                            "name": "kubehz-claim-bind-reg.dev"}}
+# Register answers whose bindSecret is no bind secret, by the domain of the
+# body: a final LF, a NUL inside, upper case, and a number of 64 digits. lo
+# keeps the stored .kubehz-bind as it is and warns.
+BAD_BIND = {
+    "bad-lf.dev": NEXT_BIND + "\n",
+    "bad-nul.dev": NEXT_BIND[:32] + "\x00" + NEXT_BIND[32:],
+    "bad-upper.dev": NEXT_BIND.upper(),
+    "bad-number.dev": int("1" * 64),
+}
 
 
 # The value of the label lok8s.dev/kubehz-claim on the claim key that lo
@@ -354,7 +363,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    {"Retry-After": retry_after} if retry_after is not None else None)
             domain = body.get("domain") if isinstance(body, dict) else None
             claim = dict(REGISTERED["claimKey"], name="kubehz-claim-" + str(domain))
-            return self.answer(200, dict(REGISTERED, claimKey=claim))
+            answer = dict(REGISTERED, claimKey=claim)
+            if domain in BAD_BIND:
+                answer["bindSecret"] = BAD_BIND[domain]
+            return self.answer(200, answer)
         if path == "/v1/ssh_keys":
             if self.command == "POST":
                 return self.answer(201, {"ssh_key": {"id": 43}})

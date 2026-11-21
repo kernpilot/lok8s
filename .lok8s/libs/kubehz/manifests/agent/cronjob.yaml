@@ -252,12 +252,15 @@ spec:
                     # on the first adoption and every later tick is idempotent.
                     # Absent: the api does not adopt an announced row by
                     # domain alone, so the register gets a separate
-                    # pending row. That is why the deploy stages the Secret
-                    # before it applies this CronJob.
+                    # pending row. The deploy stages the Secret right after
+                    # it applies this CronJob. LC_ALL=C makes the classes
+                    # byte-wise. An env value cannot hold a NUL (execve
+                    # strings end at one), and this grep is BusyBox, so the
+                    # check does not use -a.
                     BIND_FIELD=""
                     if [ -n "${BIND_SECRET}" ] \
-                      && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
-                      && printf %s "${BIND_SECRET}" | grep -Eq '^(khzb_)?[0-9a-f]{64}$'; then
+                      && [ "$(printf %s "${BIND_SECRET}" | LC_ALL=C wc -l)" -eq 0 ] \
+                      && printf %s "${BIND_SECRET}" | LC_ALL=C grep -Eq '^(khzb_)?[0-9a-f]{64}$'; then
                       BIND_FIELD=$(printf ',"bindSecret":"%s"' "${BIND_SECRET}")
                     fi
                     REGISTER_PAYLOAD=$(printf \
@@ -1076,8 +1079,8 @@ spec:
                     name: kubehz-agent-config
               env:
                 # The one-time bind secret `lo kubehz deploy` stages in
-                # kubehz-agent-bind, before it applies this CronJob, when a
-                # register wrote one. Optional: the Secret is absent on any
+                # kubehz-agent-bind, right after it applies this CronJob, when
+                # a register wrote one. Optional: the Secret is absent on any
                 # install with no bind secret in play. The bootstrap then
                 # registers without it and gets a separate pending row, which
                 # the user claims by its claim code.

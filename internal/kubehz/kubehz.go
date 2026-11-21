@@ -311,7 +311,8 @@ func (c *Context) bindSecretPath(domain string) string {
 
 // persistBindSecret stores the announce's one-time bind secret at
 // bindSecretPath, mode 0600, with NO trailing newline (the deploy and every
-// later register read the exact 64 hex). An empty secret writes nothing: an
+// later register read the value byte for byte: 64 lowercase hex characters,
+// or khzb_ and 64 lowercase hex characters). An empty secret writes nothing: an
 // api without bind secrets sends none. The write happens in place under the
 // ignored name (createBindSecret), so no state of the write leaves the secret
 // in a file that .gitignore does not match. A write failure warns but never
@@ -335,6 +336,24 @@ func (c *Context) persistBindSecret(domain, secret string) {
 	if err := createBindSecret(path, secret); err != nil {
 		c.warnf("kubehz: could not store the bind secret: %s", err)
 	}
+}
+
+// persistResponseBindSecret stores the bind secret of the register answer v.
+// No value (no key, null, false or "") writes nothing and prints nothing, as
+// before. Any other value must be a string that bindSecretRe matches, the
+// rule that storedBindSecret applies to the file. Else lo does not change the
+// file and warns. The warning names the file and never the value.
+func (c *Context) persistResponseBindSecret(domain string, v any) {
+	got := jget(v, "bindSecret")
+	if jfalsy(got) || got == "" {
+		return
+	}
+	s, ok := got.(string)
+	if !ok || !bindSecretRe.MatchString(s) {
+		c.warnf("kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/%s/.kubehz-bind. If the platform hands out a newer form, upgrade lok8s.", domain)
+		return
+	}
+	c.persistBindSecret(domain, s)
 }
 
 // syncFile is f.Sync, a variable so a test can fail it.
@@ -377,18 +396,24 @@ const (
 
 var bindSecretRe = regexp.MustCompile(`^(khzb_)?[0-9a-f]{64}$`)
 
+// readFull is io.ReadFull, a variable so a test can fail the read.
+var readFull = io.ReadFull
+
 // storedBindSecret is the bind secret a previous register stored at
 // bindSecretPath: a readable regular file of exactly 64 lowercase hex
 // characters, or of khzb_ and 64 lowercase hex characters. A missing,
 // unreadable, irregular or malformed file gives "". lo changes no byte of
 // the value. Every register call sends the value as bindSecret, so a re-run
-// keeps the same cluster record, and the deploy stages only this value. The
-// api refuses a malformed value, so lo never sends one.
+// keeps the same cluster record. The deploy stages the bytes that this
+// function returns and does not read the file again. The api refuses a
+// malformed value, so lo never sends one.
 //
 // The file is opened once, without blocking (openNonblock: a FIFO in the
 // slot would block a plain open), checked on the open file as a regular file,
 // and read for at most 70 bytes: the count and the anchored pattern each
-// refuse a longer file, and the cap bounds the read.
+// refuse a longer file, and the cap bounds the read. A file shorter than the
+// buffer ends the read with io.EOF or io.ErrUnexpectedEOF. Any other read
+// error gives "".
 func (c *Context) storedBindSecret(domain string) string {
 	f, err := openNonblock(c.bindSecretPath(domain))
 	if err != nil {
@@ -399,7 +424,10 @@ func (c *Context) storedBindSecret(domain string) string {
 		return ""
 	}
 	buf := make([]byte, bindSecretPrefixedLen+1)
-	n, _ := io.ReadFull(f, buf)
+	n, err := readFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return ""
+	}
 	if (n != bindSecretHexLen && n != bindSecretPrefixedLen) || !bindSecretRe.Match(buf[:n]) {
 		return ""
 	}

@@ -340,7 +340,8 @@ kubehz::get_ssh_fingerprint() {
 # announce.
 # Store the announce's one-time bind secret at
 # ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline: the deploy
-# and every later register read the exact 64 hex). An empty secret writes
+# and every later register read the value byte for byte: 64 lowercase hex
+# characters, or khzb_ and 64 lowercase hex characters). An empty secret writes
 # nothing: an api without bind secrets sends none. The write happens in place
 # under the ignored name: rm unlinks the old file (that needs write access to
 # the directory only, so a file that cannot be read is replaced too), then
@@ -373,42 +374,89 @@ kubehz::persist_bind_secret() {
   fi
 }
 
+# Store the bind secret of the register answer <response> (JSON). No value
+# (no key, null, false or "") writes nothing and prints nothing, as before.
+# Any other value must be a string of 64 lowercase hex characters, or of
+# khzb_ and 64 lowercase hex characters. jq checks the value itself, before
+# the shell sees it: command substitution drops a NUL and a final newline, so
+# a check after it would pass a value that the Go twin refuses. jq prints the
+# value, or "-" for a value that fails the check. Then lo does not change the
+# file and warns. The warning names the file and never the value.
+# Usage: kubehz::persist_response_bind_secret <domain> <response>
+kubehz::persist_response_bind_secret() {
+  local domain="${1}" response="${2}" secret
+  secret=$(jq -r '.bindSecret // empty
+    | if . == "" then empty
+      else (select(type == "string" and test("\\A(khzb_)?[0-9a-f]{64}\\z")) // "-") end' <<<"${response}") || return 0
+  [[ -n "${secret}" ]] || return 0
+  if [[ "${secret}" == "-" ]]; then
+    warn "kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/${domain}/.kubehz-bind. If the platform hands out a newer form, upgrade lok8s."
+    return 0
+  fi
+  kubehz::persist_bind_secret "${domain}" "${secret}"
+}
+
 # Succeed when <path> holds a bind secret: a readable regular file of exactly
 # 64 lowercase hex characters, or of khzb_ and 64 lowercase hex characters,
-# with no newline. The register calls and the deploy use this one check. The
-# size comes first, so an oversized file is never read. grep -x checks each
-# line on its own, so the file must have no newline: 64 hex, a newline and 4
-# more bytes make 69 bytes with a line that matches.
+# with no newline. The size comes first, so an oversized file is never read.
+# grep -x checks each line on its own, so the file must have no newline: 64
+# hex, a newline and 4 more bytes make 69 bytes with a line that matches.
+# LC_ALL=C makes each byte one character, and -a keeps grep in text mode: in
+# binary mode GNU grep can read a NUL as a line end, and then 64 hex, a NUL
+# and 4 bytes pass.
+# The register calls and the deploy call it on the private copy that
+# kubehz::bind_secret_snapshot makes, never on the file itself.
 # Usage: kubehz::bind_secret_ok <path>
 kubehz::bind_secret_ok() {
   local path="${1}" size lines
   [[ -f "${path}" && -r "${path}" ]] || return 1
-  size=$(wc -c < "${path}") || return 1
+  size=$(LC_ALL=C wc -c < "${path}") || return 1
   (( size == 64 || size == 69 )) || return 1
-  lines=$(wc -l < "${path}") || return 1
+  lines=$(LC_ALL=C wc -l < "${path}") || return 1
   (( lines == 0 )) || return 1
-  grep -Eqx '(khzb_)?[0-9a-f]{64}' "${path}"
+  LC_ALL=C grep -aEqx '(khzb_)?[0-9a-f]{64}' "${path}"
+}
+
+# Copy at most 70 bytes of <path> into <copy> (mode 0600) and succeed when the
+# copy holds a bind secret (kubehz::bind_secret_ok). <path> must be a readable
+# regular file: a FIFO or any other file type is refused before the read.
+# head opens <path> once. The caller uses the copy for the value and removes
+# it, so a change of <path> after the check does not reach the value.
+# Usage: kubehz::bind_secret_snapshot <path> <copy>
+kubehz::bind_secret_snapshot() {
+  local path="${1}" copy="${2}"
+  [[ -f "${path}" && -r "${path}" ]] || return 1
+  ( umask 077 && head -c 70 -- "${path}" > "${copy}" ) || return 1
+  kubehz::bind_secret_ok "${copy}"
 }
 
 # Print the JSON body of a register call: the object that <filter> builds
 # from the jq arguments, plus bindSecret when clusters/<domain>/.kubehz-bind
-# passes kubehz::bind_secret_ok. Every register call sends it, so a
-# re-run keeps the same cluster record. Any other file adds nothing: the api
-# refuses a malformed value. jq reads the value from the file (--rawfile) and
-# checks it again where it uses it, and the caller pipes the body into curl
-# (--data-binary @-), so the value never reaches argv.
+# holds a bind secret (kubehz::bind_secret_snapshot). Every register call
+# sends it, so a re-run keeps the same cluster record. Any other file adds
+# nothing: the api refuses a malformed value. The check and jq read the same
+# private copy (a mktemp file, removed after jq on every path). jq reads the
+# value from it (--rawfile) and checks it again where it uses it, and the
+# caller pipes the body into curl (--data-binary @-), so the value never
+# reaches argv.
 # Usage: kubehz::register_body <domain> <filter> [jq args...]
 kubehz::register_body() {
   local domain="${1}" filter="${2}"
   shift 2
-  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind"
-  if kubehz::bind_secret_ok "${path}"; then
-    # shellcheck disable=SC2016  # $bind is jq program text
-    jq -n "${@}" --rawfile bind "${path}" \
-      "${filter}"' + (if $bind | test("\\A(khzb_)?[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)'
-  else
-    jq -n "${@}" "${filter}"
+  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind" copy rc=0
+  if ! copy=$(umask 077 && mktemp); then
+    warn "kubehz: could not create a temporary file to read clusters/${domain}/.kubehz-bind, so this register call does not send the bind secret."
+    copy=""
   fi
+  if [[ -n "${copy}" ]] && kubehz::bind_secret_snapshot "${path}" "${copy}"; then
+    # shellcheck disable=SC2016  # $bind is jq program text
+    jq -n "${@}" --rawfile bind "${copy}" \
+      "${filter}"' + (if $bind | test("\\A(khzb_)?[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)' || rc=$?
+  else
+    jq -n "${@}" "${filter}" || rc=$?
+  fi
+  [[ -z "${copy}" ]] || rm -f -- "${copy}"
+  return "${rc}"
 }
 
 # POST a register body (stdin) to <api_url>/api/clusters/register and print
@@ -594,7 +642,7 @@ kubehz::ensure_claim_key() {
   [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
   # The announce hands out a one-time bind secret; keep it for the deploy.
   # The agent sends it on its register, so the api adopts this row.
-  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
+  kubehz::persist_response_bind_secret "${domain}" "${response}"
 
   # Replace by name, but only our own key: the API rotates the fingerprint on
   # re-runs, so a stale claim key of this cluster must not linger, and a key
@@ -689,7 +737,7 @@ kubehz::direct_claim() {
   fi
   # The announce hands out a one-time bind secret; keep it for the deploy.
   # The agent sends it on its register, so the api adopts this row.
-  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
+  kubehz::persist_response_bind_secret "${domain}" "${response}"
   echo "kubehz: cluster '${domain}' registered and claimed to your account (${cluster_id})."
 
   # Optionally connect the hcloud token for dashboard-driven provisioning.
@@ -824,7 +872,7 @@ kubehz::register_cluster() {
   fi
   # The announce hands out a one-time bind secret; keep it for the deploy.
   # The agent sends it on its register, so the api adopts this row.
-  kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
+  kubehz::persist_response_bind_secret "${domain}" "${response}"
 
   debug "Cluster registered with kubehz (pending claim): ${cluster_id}"
   # Surface the claim handshake. The fingerprint is public (not a secret), so it

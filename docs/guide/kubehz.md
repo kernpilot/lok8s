@@ -681,7 +681,9 @@ working. Otherwise the re-run counts as a re-run without the current secret
 (see below). The file holds the bind secret as lo received it: 64 lowercase
 hex characters, or `khzb_` and 64 lowercase hex characters. lo accepts both
 forms, and only from a readable file with nothing else in it. It never puts
-the value on a command line.
+the value on a command line. lo checks the value in a register answer by the
+same rule. It does not store a value of another form: it warns, and the file
+stays as it is.
 
 A re-run without the current secret (on another machine, in CI, where the
 runner does not keep the file, or with an older file) does not change the
@@ -699,20 +701,43 @@ and no new secret.
 The platform does not adopt the announced row by its domain alone. An agent
 that registers without the secret gets a separate pending row, and the
 announced row gets no heartbeats. So `lo kubehz deploy` stages the secret
-before it applies the agent:
+right after it applies the agent CronJob. In the operator mode, that is
+before the identity bootstrap Job and the live agent:
 
 - The deploy applies the namespace `kubehz-system`, then the Secret
   `kubehz-agent-bind` with a server-side apply. The kubeconfig needs `patch`
   on Secrets in `kubehz-system`, and `create` when the Secret is new. It does
   not need `delete`.
-- If the deploy cannot stage the secret, it stops before it changes an agent.
+- The deploy reads `.kubehz-bind` once and stages the bytes that it checked.
+- If the deploy cannot stage the secret, it stops after the CronJob apply.
+  In the operator mode, it then does not apply the live agent.
 - If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on
   another machine) or holds no valid secret, the deploy warns and continues
+  without the secret. A Secret `kubehz-agent-bind` from an earlier deploy
+  stays as it is.
+- The CronJob starts its pods with or without the Secret. A pod that starts
+  in the seconds between the CronJob apply and the Secret apply registers
   without the secret.
 
 To deploy without the secret on purpose, remove `.kubehz-bind`. The agent
 then registers a separate pending row. Claim that row with the code from
 `lo kubehz claim-code`. The announced row gets no heartbeats.
+
+**Upgrade order for the `khzb_` form.** The platform can hand out the bind
+secret as `khzb_` and 64 lowercase hex characters. An older lo and an older
+agent CronJob accept only 64 lowercase hex characters, so they do not send a
+value of the new form. An older `lo kubehz register` does not send it, an
+older `lo kubehz deploy` warns and does not stage it, and an older CronJob
+leaves it out of its register. An agent that is not bound yet then registers
+a separate pending row. Claim that row with the code from
+`lo kubehz claim-code`. So, before the platform hands out the new form:
+
+1. Upgrade lok8s: the `lo` binary and, for a bash install, the synced tree.
+2. Run `lo kubehz deploy` again on each cluster. The deploy applies the new
+   agent CronJob, which accepts both forms.
+
+A deploy that does not stage the secret keeps an existing Secret
+`kubehz-agent-bind` as it is.
 :::
 
 ## Claiming

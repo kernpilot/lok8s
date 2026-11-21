@@ -46,8 +46,12 @@ const (
 	platformAuth = "Bearer khz_test_token"
 	cloudToken   = "hc_test"
 	cloudAuth    = "Bearer " + cloudToken
-	bindValue    = "bind-value-fixture"
 )
+
+// bindValue is the bind secret of a register answer: khzb_ and 64 lowercase
+// hex characters, digits and letters. lo stores only a value of a form that
+// it accepts.
+var bindValue = "khzb_" + strings.Repeat("0123456789abcdef", 4)
 
 // The fall back warnings of the register chain.
 const (

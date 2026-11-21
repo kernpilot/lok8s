@@ -121,7 +121,7 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	}
 	// The announce hands out a one-time bind secret; keep it for the deploy.
 	// The agent sends it on its register, so the api adopts this row.
-	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
+	c.persistResponseBindSecret(domain, v)
 
 	hcloudAuth := withBearer(c.getenv("HCLOUD_TOKEN"))
 	// Replace by name, but only our own key: a stale claim key of this
@@ -181,7 +181,7 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 	}
 	// The announce hands out a one-time bind secret; keep it for the deploy.
 	// The agent sends it on its register, so the api adopts this row.
-	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
+	c.persistResponseBindSecret(domain, v)
 	c.echo("kubehz: cluster '%s' registered and claimed to your account (%s).", domain, clusterID)
 
 	// Optionally connect the hcloud token for dashboard-driven provisioning.
@@ -325,7 +325,7 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 	}
 	// The announce hands out a one-time bind secret; keep it for the deploy.
 	// The agent sends it on its register, so the api adopts this row.
-	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
+	c.persistResponseBindSecret(domain, v)
 
 	c.debugf("Cluster registered with kubehz (pending claim): %s", clusterID)
 	// The fingerprint is public (not a secret), so it is safe to print; the
