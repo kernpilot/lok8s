@@ -133,7 +133,15 @@ sec_check secrets encrypt              # no .sops.yaml yet → error
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"   # idempotent branch
 sec_state .sops.yaml
-sec_check secrets set -n app -e ENC enc-value             # set + single-file encrypt
+sec_check secrets set -n app -e ENC1 enc-value            # set + single-file encrypt
+# The key ENC makes the plaintext Secret.app.default.ENC, a name that ends in
+# .enc in another letter case. The rule !Secret.*.enc can let git commit it,
+# so set refuses the key before it writes a file, also with -e.
+sec_check secrets set -n app -e ENC enc-value
+for impl in go bash; do
+  [[ ! -e "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC" ]] \
+    || fail "secrets set (${impl}): a plaintext with a reserved name"
+done
 sec_check secrets set -n app --enc ENC2 enc-value2        # --enc alias
 sec_check secrets set -n app JWT_SECRET s3cr3t2           # stale-.enc warning path
 sec_check secrets e                                       # sweep (alias)
@@ -158,6 +166,129 @@ done
 sec_check secrets allow
 sec_state .secrets/.bash-allow
 sec_state .secrets/.gitignore
+# A negation below the block of lo: set refuses before the plaintext, with
+# the line number and not the rule. The .gitignore keeps its bytes.
+for impl in go bash; do
+  cp -p -- "${WORK}/sec-${impl}/.secrets/.gitignore" "${WORK}/sec-${impl}.gitignore.saved"
+  printf '!README.md\n' >> "${WORK}/sec-${impl}/.secrets/.gitignore"
+done
+sec_check secrets set -n app GITIGNORE_REFUSED refused-value
+sec_state .secrets/.gitignore
+for impl in go bash; do
+  [[ ! -e "${WORK}/sec-${impl}/.secrets/Secret.app.default.GITIGNORE_REFUSED" ]] \
+    || fail "secrets set (${impl}): a plaintext despite a refused .gitignore"
+  mv -f -- "${WORK}/sec-${impl}.gitignore.saved" "${WORK}/sec-${impl}/.secrets/.gitignore"
+done
+# sec_refused <rc> <stderr> <label> — each implementation of the last
+# sec_check, alone: it exits <rc>, prints no stdout and prints exactly
+# <stderr>. The compare of the two sides passes when both drift together;
+# this check does not.
+sec_refused() {
+  local impl rc
+  for impl in go bash; do
+    rc="${impl}_rc"
+    if (( ${!rc} != ${1} )) || [[ -s "${WORK}/${impl}.out" || "$(< "${WORK}/${impl}.err")" != "${2}" ]]; then
+      fail "${3} (${impl}): rc ${!rc}, stderr: $(head -c 600 "${WORK}/${impl}.err")"
+    fi
+  done
+}
+NOT_REGULAR=' is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: '
+
+# A plaintext file of set that is a symlink, to an .enc file of the store
+# and to the .gitignore: each side refuses it before any write, and the
+# file that the link names keeps its bytes.
+for target in Secret.app.default.JWT_SECRET.enc .gitignore; do
+  for impl in go bash; do
+    cp -p -- "${WORK}/sec-${impl}/.secrets/${target}" "${WORK}/sec-${impl}.target.saved"
+    ln -s "${target}" "${WORK}/sec-${impl}/.secrets/Secret.app.default.LINKED"
+  done
+  sec_check secrets set -n app LINKED link-value
+  sec_refused 1 "[error] .secrets/Secret.app.default.LINKED${NOT_REGULAR}lo stopped before the plaintext write — remove it, then run this command again" \
+    "secrets set <a symlink to ${target}>"
+  for impl in go bash; do
+    cmp -s "${WORK}/sec-${impl}.target.saved" "${WORK}/sec-${impl}/.secrets/${target}" \
+      || fail "secrets set (${impl}): ${target} changed through a symlink"
+    rm -f -- "${WORK}/sec-${impl}/.secrets/Secret.app.default.LINKED" "${WORK}/sec-${impl}.target.saved"
+  done
+done
+
+# A plaintext file of set that is a hard link: each side replaces it as a
+# name (rc 0), and the other name keeps its old content.
+for impl in go bash; do
+  printf 'old' > "${WORK}/sec-${impl}.elsewhere"
+  ln -- "${WORK}/sec-${impl}.elsewhere" "${WORK}/sec-${impl}/.secrets/Secret.app.default.HARD"
+done
+sec_check secrets set -n app HARD hard-value
+for impl in go bash; do
+  rc="${impl}_rc"
+  hard="${WORK}/sec-${impl}/.secrets/Secret.app.default.HARD"
+  if (( ${!rc} != 0 )) || [[ "$(< "${hard}")" != hard-value || "$(< "${WORK}/sec-${impl}.elsewhere")" != old \
+    || "${hard}" -ef "${WORK}/sec-${impl}.elsewhere" ]]; then
+    fail "secrets set (${impl}): a hard link at the plaintext file: rc ${!rc}"
+  fi
+  rm -f -- "${hard}" "${WORK}/sec-${impl}.elsewhere"
+done
+
+# A plaintext file of decrypt that is a symlink to the .gitignore: each
+# side refuses the run before its first write, and the .gitignore keeps its
+# bytes. The saved plaintext goes back with its file time. The case needs
+# the plaintext of the --enc set case on both sides: without it, the case
+# records one failure instead of stopping the harness.
+if [[ -e "${WORK}/sec-go/.secrets/Secret.app.default.ENC2" && -e "${WORK}/sec-bash/.secrets/Secret.app.default.ENC2" ]]; then
+for impl in go bash; do
+  mv -- "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2" "${WORK}/sec-${impl}.plain.saved"
+  ln -s .gitignore "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2"
+  cp -p -- "${WORK}/sec-${impl}/.secrets/.gitignore" "${WORK}/sec-${impl}.gitignore.saved"
+done
+sec_check secrets decrypt
+sec_refused 1 "[error] .secrets/Secret.app.default.ENC2${NOT_REGULAR}decrypt would write the plaintext of Secret.app.default.ENC2.enc there
+[error] decrypt wrote no plaintext file: remove these entries, then run this command again" \
+  "secrets decrypt <a symlink to .gitignore>"
+for impl in go bash; do
+  cmp -s "${WORK}/sec-${impl}.gitignore.saved" "${WORK}/sec-${impl}/.secrets/.gitignore" \
+    || fail "secrets decrypt (${impl}): the .gitignore changed through a symlink"
+  rm -f -- "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2" "${WORK}/sec-${impl}.gitignore.saved"
+  mv -- "${WORK}/sec-${impl}.plain.saved" "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC2"
+done
+else
+  fail "secrets decrypt <a symlink to .gitignore>: not run, a side has no Secret.app.default.ENC2"
+fi
+
+# set refuses a name, a namespace or a key that is not one part of a path,
+# before any write. With the directory Secret.app.default.anchor/ in the
+# store, the key anchor/../.gitignore would name the .gitignore. The tab is
+# a control byte.
+for impl in go bash; do
+  mkdir "${WORK}/sec-${impl}/.secrets/Secret.app.default.anchor"
+  cp -p -- "${WORK}/sec-${impl}/.secrets/.gitignore" "${WORK}/sec-${impl}.gitignore.saved"
+done
+PART_SEP='it has a / or a \, which makes the file name a path'
+PART_DOTS='it is . or .., a part of a path'
+# sec_part <field> <shown> <why> <argv...> — set with <argv...> and a value:
+# each side refuses <field> with its text <shown>.
+sec_part() {
+  local field="${1}" shown="${2}" why="${3}"
+  shift 3
+  sec_check secrets set "$@" part-value
+  sec_refused 1 "[error] the ${field} '${shown}' is refused: ${why}. Nothing was written: use a ${field} without it" \
+    "secrets set <the ${field} ${shown}>"
+}
+sec_part key 'anchor/../.gitignore' "${PART_SEP}" -n app 'anchor/../.gitignore'
+sec_part key '../x' "${PART_SEP}" -n app '../x'
+sec_part key 'a/b' "${PART_SEP}" -n app 'a/b'
+sec_part key 'a\b' "${PART_SEP}" -n app 'a\b'
+sec_part key '.' "${PART_DOTS}" -n app .
+sec_part key '..' "${PART_DOTS}" -n app ..
+sec_part key 'a?b' 'it has a control byte' -n app $'a\tb'
+sec_part name 'a/b' "${PART_SEP}" -n a/b K
+sec_part namespace '..' "${PART_DOTS}" -n app -s .. K
+for impl in go bash; do
+  cmp -s "${WORK}/sec-${impl}.gitignore.saved" "${WORK}/sec-${impl}/.secrets/.gitignore" \
+    || fail "secrets set (${impl}): a key with a path part changed the .gitignore"
+  rmdir -- "${WORK}/sec-${impl}/.secrets/Secret.app.default.anchor" \
+    || fail "secrets set (${impl}): a key with a path part wrote into Secret.app.default.anchor/"
+  rm -f -- "${WORK}/sec-${impl}.gitignore.saved"
+done
 sec_check secrets add-key /no/such/file
 sec_check secrets add-key age1nope
 KEY2="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key.pub")"

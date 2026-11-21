@@ -1319,10 +1319,13 @@ EOF
 # The bash encrypt renames each .enc with a mv that takes -T (GNU mv, else
 # gmv): a mv without -T moves a file INTO a directory at the .enc path. Each
 # command that encrypts refuses before its first write without one, and
-# secrets::_encrypt_file refuses before it stages a file. The binary needs no
-# mv (Go twin: writeReplacing, os.Rename).
+# secrets::_encrypt_file refuses before it stages a file. set and decrypt
+# rename each plaintext the same way, so they refuse too, also set without
+# --encrypt. The binary needs no mv (Go twin: writeReplacing, os.Rename).
 
 _no_t='[error] this mv has no -T, so the encrypt cannot rename onto the .enc safely: install GNU coreutils (gmv) or use the lo binary'
+_no_t_plain='[error] this mv has no -T, so the plaintext write cannot rename onto the plaintext file safely: install GNU coreutils (gmv) or use the lo binary'
+_no_t_decrypt='[error] this mv has no -T, so decrypt cannot rename onto the plaintext file safely: install GNU coreutils (gmv) or use the lo binary'
 
 # _mv_stub <dir> <name> <with_t> — a mv program <dir>/<name> that logs each
 # move to MV_STUB_LOG and moves with the real mv (MV_STUB_REAL). Its help text
@@ -1344,16 +1347,18 @@ EOF
   chmod +x "${1}/${2}"
 }
 
-# _no_t_run <path> <command> — one command that encrypts, with PATH set to
-# <path>: remove-key, add-key, set --encrypt, encrypt, or _encrypt_file (the
-# last guard) on the cache file Secret.new.default.K of a.dev.
+# _no_t_run <path> <command> — one command that renames with a mv -T, with
+# PATH set to <path>: remove-key, add-key, set --encrypt, set-plain (set
+# without --encrypt), decrypt, encrypt, or _encrypt_file (the last guard) on
+# the cache file Secret.new.default.K of a.dev.
 _no_t_run() {
-  local PATH="${1}" _cmd="${2}" domain="a.dev"
+  local PATH="${1}" _cmd="${2}" domain="a.dev" _enc=1
+  [[ "${_cmd}" != set-plain ]] || { _cmd=set _enc=0; }
   :args() {
     case "${FUNCNAME[1]}" in
       secrets::remove-key) key="${RCPT_B}" ;;
       secrets::add-key) key="${RCPT_A}" ;;
-      secrets::set) name=new; key=K; value=w; encrypt=1 ;;
+      secrets::set) name=new; key=K; value=w; encrypt="${_enc}" ;;
     esac
   }
   case "${_cmd}" in
@@ -1362,7 +1367,7 @@ _no_t_run() {
   esac
 }
 
-@test "with a mv without -T and no gmv, each command that encrypts refuses before it writes a file" {
+@test "with a mv without -T and no gmv, each command that encrypts or writes a plaintext refuses before it writes a file" {
   _load
   # A sops stub that writes its --output file: no sops run may come.
   _sops_writes 'new' 0
@@ -1370,7 +1375,7 @@ _no_t_run() {
   printf 'n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.new.default.K"
   # The PATH of the commands: the tools that they run before the encrypt, a
   # mv without -T, and no gmv.
-  local bin="${BATS_TEST_TMPDIR}/mv-without-t" tool path cmd
+  local bin="${BATS_TEST_TMPDIR}/mv-without-t" tool path cmd want
   mkdir -p "${bin}"
   for tool in yq jq flock grep cat mktemp rm cp dirname basename touch readlink find sort chmod; do
     path="$(type -P "${tool}")" || continue
@@ -1386,10 +1391,17 @@ _no_t_run() {
   [ ! -e "${bin}/gmv" ]
   cp -a "${PATH_BASE}" "${BATS_TEST_TMPDIR}/base.saved"
   cp -a "${PATH_CLUSTERS}" "${BATS_TEST_TMPDIR}/clusters.saved"
-  for cmd in remove-key add-key set encrypt _encrypt_file; do
+  for cmd in remove-key add-key set set-plain decrypt encrypt _encrypt_file; do
+    # set renames its plaintext before the .enc, so it names the plaintext
+    # write, also with --encrypt.
+    case "${cmd}" in
+      set | set-plain) want="${_no_t_plain}" ;;
+      decrypt) want="${_no_t_decrypt}" ;;
+      *) want="${_no_t}" ;;
+    esac
     run _no_t_run "${bin}" "${cmd}"
     [ "$status" -eq 1 ] || { echo "${cmd}: status $status: $output" >&2; return 1; }
-    [ "$output" = "${_no_t}" ] || { echo "${cmd}: $output" >&2; return 1; }
+    [ "$output" = "${want}" ] || { echo "${cmd}: $output" >&2; return 1; }
     # .sops.yaml, the plaintexts and every .enc are byte-equal, and no file
     # was added: no lock file, no temp file, no .gitignore.
     diff -r "${BATS_TEST_TMPDIR}/base.saved" "${PATH_BASE}" >&2 || { echo "${cmd}: a file under PATH_BASE changed" >&2; return 1; }
