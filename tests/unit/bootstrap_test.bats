@@ -3703,13 +3703,17 @@ rook-ceph-cluster"
 }
 
 # --- the written forms of a cilium entry -------------------------------------
-# Shared with the Go twin (internal/bootstrap/entryforms_test.go). Each case
-# under tests/fixtures/bare-entry/cases has the cluster spec, the result of a
-# KubeOne full provision (skip: skip or apply) and of --only cilium (only:
-# kept or the error line). A case without them is a form where the two
-# bootstraps stop before they read the dir name. The addon dir goes to
-# .lok8s/addons/cilium and to clusters/test.lok8s.dev/cilium (the dir of a
-# `./cilium` path entry).
+# Shared with the Go twin (internal/bootstrap/entryforms_test.go). Each of the
+# 12 cases under tests/fixtures/bare-entry/cases holds the cluster spec
+# (cluster.lok8s.yaml), the audit status (audit) and the hint of
+# `lo addons --detail` (hint). Nine cases also hold the result of a KubeOne
+# full provision (skip: skip or apply) and of --only cilium (only: kept or the
+# error line). The three cases without skip and only are forms that the two
+# bootstraps resolve differently before they read the dir name: for
+# `a/cilium/.` (nested-trailing-dot) Go applies the addon cilium and bash finds
+# no addon; for `cilium/..` (dot-dot) and `.` (dot) bash goes on with the dir
+# as written and Go finds no addon. The addon dir goes to .lok8s/addons/cilium
+# and to clusters/test.lok8s.dev/cilium (the dir of a `./cilium` path entry).
 _entry_setup() {
   local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry" d
   for d in "${PATH_LOK8S}/addons/cilium" "${PATH_CLUSTERS}/test.lok8s.dev/cilium"; do
@@ -3754,6 +3758,25 @@ _entry_only_case() {
     assert_failure
     assert_output --partial "${ENTRY_WANT}"
     [ ! -s "${BATS_TEST_TMPDIR}/only.log" ]
+  fi
+}
+
+# The case dirs, by name: a lost or an extra case dir fails here (the tests
+# above and their Go twins read only the cases that are there).
+@test "the shared cases of a cilium entry are the 12 expected dirs" {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry/cases" d
+  local -a got=() want=(bare dot dot-dot nested-trailing-dot path
+    path-trailing-dot path-trailing-dot-slash path-trailing-slash trailing-dot
+    trailing-dot-slash trailing-double-slash trailing-slash)
+  for d in "${fx}"/*; do
+    if [[ -d "${d}" ]]; then
+      got+=("${d##*/}")
+    fi
+  done
+  mapfile -t got < <(printf '%s\n' "${got[@]}" | LC_ALL=C sort)
+  if [[ "${got[*]}" != "${want[*]}" ]]; then
+    printf 'case dirs: %s\nwant:      %s\n' "${got[*]}" "${want[*]}" >&2
+    return 1
   fi
 }
 

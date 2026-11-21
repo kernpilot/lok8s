@@ -580,16 +580,29 @@ spec::is_addon() {
 # and resolves "..": `x/`, `x/.`, `x/./`, `x//` and `a/x/.` give "x", and
 # `x/..` and `.` give "addons" (the dir is <lok8s>/addons/<key>). The bash
 # parser keeps every dir as written.
+#
+# The helper splits the dir with parameter expansion only, so a newline in the
+# dir is an ordinary character, as in Go, and it prints with printf, so a name
+# such as `-n` prints as itself. A caller that reads the result through
+# `$( … )` loses a trailing newline of the name.
 spec::entry_base() {
   local key="${1}" dir="${2}"
   if [[ "${key}" == /* || "${key}" == ./* || "${key}" == ../* ]]; then
-    basename "${dir}"
-    return
+    # filepath.Base: drop the trailing slashes, then the last element.
+    local d="${dir%"${dir##*[!/]}"}"
+    if [[ -z "${dir}" ]]; then
+      printf '%s\n' "."
+    elif [[ -z "${d}" ]]; then
+      printf '%s\n' "/"
+    else
+      printf '%s\n' "${d##*/}"
+    fi
+    return 0
   fi
-  local -a parts=() out=()
-  local p
-  IFS=/ read -r -a parts <<< "${dir}"
-  for p in "${parts[@]+"${parts[@]}"}"; do
+  local -a out=()
+  local rest="${dir}" p
+  while :; do
+    p="${rest%%/*}"
     case "${p}" in
       "" | .) ;;
       ..)
@@ -601,13 +614,15 @@ spec::entry_base() {
         ;;
       *) out+=("${p}") ;;
     esac
+    [[ "${rest}" == */* ]] || break
+    rest="${rest#*/}"
   done
   if (( ${#out[@]} > 0 )); then
-    echo "${out[-1]}"
+    printf '%s\n' "${out[-1]}"
   elif [[ "${dir}" == /* ]]; then
-    echo "/"
+    printf '%s\n' "/"
   else
-    echo "."
+    printf '%s\n' "."
   fi
 }
 

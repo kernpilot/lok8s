@@ -45,9 +45,10 @@ func bareEntryCase(t *testing.T, p *config.Paths, name string) (string, string) 
 }
 
 // bareEntryCases lists the shared cases that have the want file <want>,
-// with its content. A case without it is a form where the bootstrap stops
-// before it reads the dir name (Go resolves `a/cilium/.` to the addon
-// cilium and finds no addon for `cilium/..` or `.`).
+// with its content. The three cases without skip and only are forms that
+// the two bootstraps resolve differently before they read the dir name: Go
+// applies the addon cilium for `a/cilium/.` (bash finds no addon), and Go
+// finds no addon for `cilium/..` or `.` (bash goes on).
 func bareEntryCases(t *testing.T, want string) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(bareEntryFixtures, "cases"))
