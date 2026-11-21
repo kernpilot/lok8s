@@ -708,3 +708,140 @@ _suc_case() {
   assert_success
   assert_output ""
 }
+
+# ── doctor::_coreutils: GNU coreutils for the bash implementation ──────────
+# The frozen bash libs (kubehz, bootstrap) use stat -c, mv -T, ln -T and
+# realpath -e, which GNU coreutils and uutils coreutils have. Go twin:
+# TestDoctorCoreutils (internal/cli/cmd_doctor_test.go), with the same
+# cases (except the missing tree, a Go-only state) and the same line.
+
+_cu_warn="  ! bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+_cu_gnu='stat (GNU coreutils) 9.12\nCopyright (C) 2026 Free Software Foundation, Inc.\n'
+_cu_bsd='stat: illegal option -- -\nusage: stat [-FLnq] [-f format | -l | -r | -s | -x] [-t timefmt] [file ...]\n'
+_cu_busybox="stat: unrecognized option '--version'\nBusyBox v1.36.1 (2024-06-10 07:11:47 UTC) multi-call binary.\n\nUsage: stat [-ltf] [-c FMT] FILE...\n"
+_cu_bash='    default: bash\n'
+_cu_mixed='    bash:\n      commands: [version]\n'
+
+# _cu_project <spec.implementation block, printf %b; "" = no block> [<kind>]
+# — a lok8s.yaml of the given kind (default Project) in a new PATH_BASE.
+_cu_project() {
+  export PATH_BASE="${BATS_TEST_TMPDIR}/cu-project"
+  mkdir -p "${PATH_BASE}"
+  {
+    printf 'apiVersion: lok8s.dev/v1\nkind: %s\nmetadata:\n  name: t\n' "${2:-Project}"
+    if [[ -n "${1}" ]]; then printf 'spec:\n  implementation:\n%b' "${1}"; fi
+  } > "${PATH_BASE}/lok8s.yaml"
+}
+
+# _cu_stat <stdout, printf %b> <stderr, printf %b> [<exit code>] — a stub
+# stat in ${BATS_TEST_TMPDIR}/cu-bin. It answers only `stat --version`
+# (any other argv exits 98) and counts its runs in cu-bin/runs.
+_cu_stat() {
+  local bin="${BATS_TEST_TMPDIR}/cu-bin"
+  mkdir -p "${bin}"
+  printf '%b' "${1}" > "${bin}/stat.out"
+  printf '%b' "${2}" > "${bin}/stat.err"
+  : > "${bin}/runs"
+  printf '#!/usr/bin/env bash\necho run >> "%s"\n[[ "$*" == --version ]] || exit 98\ncat "%s"\ncat "%s" >&2\nexit %s\n' \
+    "${bin}/runs" "${bin}/stat.out" "${bin}/stat.err" "${3:-0}" > "${bin}/stat"
+  chmod +x "${bin}/stat"
+}
+
+# _cu_run [nostat] — runs doctor::_coreutils with a PATH of two test
+# directories only: the stub stat (left out with nostat) and a link to
+# the yq of the suite. env and bash come from their absolute paths.
+_cu_run() {
+  local tools="${BATS_TEST_TMPDIR}/cu-tools" yq
+  yq="$(command -v yq)"
+  [[ -n "${yq}" ]] || fail "no yq"
+  mkdir -p "${tools}"
+  ln -sf "${yq}" "${tools}/yq"
+  ln -sf "$(command -v env)" "${tools}/env"
+  ln -sf "$(command -v bash)" "${tools}/bash"
+  ln -sf "$(command -v cat)" "${tools}/cat"
+  if [[ "${1:-}" == nostat ]]; then
+    PATH="${tools}" run doctor::_coreutils
+  else
+    PATH="${BATS_TEST_TMPDIR}/cu-bin:${tools}" run doctor::_coreutils
+  fi
+}
+
+# _cu_runs — the number of runs of the stub stat.
+_cu_runs() { wc -l < "${BATS_TEST_TMPDIR}/cu-bin/runs" | tr -d ' '; }
+
+@test "doctor::_coreutils prints nothing for GNU or uutils coreutils" {
+  _cu_stat "${_cu_gnu}" ""
+  _cu_project "${_cu_bash}"
+  _cu_run
+  assert_success
+  assert_output ""
+  [[ "$(_cu_runs)" == 1 ]] || fail "stat ran $(_cu_runs) times, want 1"
+  _cu_project "${_cu_mixed}"
+  _cu_run
+  assert_success
+  assert_output ""
+  # The literal decides, not the exit code.
+  _cu_stat "${_cu_gnu}" "" 1
+  _cu_project "${_cu_bash}"
+  _cu_run
+  assert_success
+  assert_output ""
+  # uutils coreutils has the GNU forms too.
+  _cu_stat 'stat (uutils coreutils) 0.2.2\n' ""
+  _cu_run
+  assert_success
+  assert_output ""
+  [[ "$(_cu_runs)" == 1 ]] || fail "stat ran $(_cu_runs) times, want 1"
+}
+
+@test "doctor::_coreutils warns for a BSD-like and a BusyBox answer" {
+  _cu_project "${_cu_bash}"
+  _cu_stat "" "${_cu_bsd}" 1
+  _cu_run
+  assert_success
+  assert_output "${_cu_warn}"
+  _cu_stat "" "${_cu_busybox}" 1
+  _cu_run
+  assert_success
+  assert_output "${_cu_warn}"
+  # Only the first line counts.
+  _cu_stat 'stat 1.0\nGNU coreutils\n' ""
+  _cu_run
+  assert_success
+  assert_output "${_cu_warn}"
+  # A mixed route selects bash for its commands.
+  _cu_project "${_cu_mixed}"
+  _cu_stat "" "${_cu_bsd}" 1
+  _cu_run
+  assert_success
+  assert_output "${_cu_warn}"
+}
+
+@test "doctor::_coreutils warns when no stat is on PATH" {
+  _cu_project "${_cu_bash}"
+  _cu_run nostat
+  assert_success
+  assert_output "${_cu_warn}"
+}
+
+@test "doctor::_coreutils prints nothing and runs no stat with the Go implementation" {
+  _cu_stat "" "${_cu_bsd}" 1
+  local block
+  for block in "" '    default: go\n' '    default: go\n    bash:\n      commands: []\n' '    default: Bash\n'; do
+    _cu_project "${block}"
+    _cu_run
+    assert_success
+    assert_output ""
+  done
+  # A lok8s.yaml that is not a kind: Project document (a service file).
+  _cu_project "${_cu_bash}" Service
+  _cu_run
+  assert_success
+  assert_output ""
+  # No lok8s.yaml.
+  rm -f "${PATH_BASE}/lok8s.yaml"
+  _cu_run
+  assert_success
+  assert_output ""
+  [[ "$(_cu_runs)" == 0 ]] || fail "stat ran $(_cu_runs) times, want 0"
+}

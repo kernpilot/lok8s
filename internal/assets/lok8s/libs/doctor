@@ -83,6 +83,7 @@ main::doctor() {
   else
     doctor::_warn "secrets.lok8s.dev plugin not built (run: lo kustomize build)"
   fi
+  doctor::_coreutils
 
   echo
   echo "--- dev TLS (cert: CA) ---"
@@ -150,6 +151,57 @@ doctor::_bad()  { if doctor::_color; then printf '  \033[31m✗\033[0m %s\n' "${
 # A neutral fact, neither a pass nor a finding (the Go binary's ℹ line): the
 # whole line is dim on a terminal.
 doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1}"; else printf '  ℹ %s\n' "${1}"; fi; }
+
+# doctor::_coreutils — the coreutils line of the bash implementation. Go
+# twin: doctorCoreutils (internal/cli/cmd_doctor.go), with the same text.
+# The frozen bash libs (kubehz, bootstrap) use forms that GNU coreutils
+# and uutils coreutils have, BSD and BusyBox do not: stat -c, mv -T, ln -T,
+# realpath -e. On a BSD or BusyBox userland they fail mid-run. The line is
+# a warning, printed only when lok8s.yaml routes commands to bash
+# (doctor::_bash_selected) and the first line of `stat --version` contains
+# neither "GNU coreutils" nor "uutils coreutils" (doctor::_stat_gnu).
+# Otherwise it prints nothing.
+doctor::_coreutils() {
+  doctor::_bash_selected || return 0
+  if doctor::_stat_gnu; then
+    return 0
+  fi
+  doctor::_warn "bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+}
+
+# doctor::_bash_selected — true when lok8s.yaml routes commands to bash. It
+# reads the file as the Go twin does (config.LoadImplementation): the first
+# document of ${PATH_BASE}/lok8s.yaml, only when it is a `kind: Project`
+# document. spec.implementation.default "bash" routes every command;
+# "" or "go" with a nonempty list spec.implementation.bash.commands routes
+# those commands. An other default, a file that yq cannot read, or no yq
+# selects nothing here. (The Go twin then prints its implementation
+# warning, and the tools section reports the missing yq.)
+doctor::_bash_selected() {
+  local file="${PATH_BASE:-.}/lok8s.yaml" sel=""
+  [[ -f "${file}" ]] || return 1
+  command -v yq >/dev/null 2>&1 || return 1
+  sel="$(yq -r 'select(documentIndex == 0 and .kind == "Project") | .spec.implementation | (.default // "") + " " + ((.bash.commands // []) | select(tag == "!!seq") | length | tostring)' "${file}" 2>/dev/null)" || return 1
+  case "${sel}" in
+    "bash "[0-9]*) return 0 ;;
+    " "[1-9]* | "go "[1-9]*) return 0 ;;
+  esac
+  return 1
+}
+
+# doctor::_stat_gnu — probes stat as template::envsubst_flavor probes
+# envsubst: true (the GNU forms work) when the first line of
+# `stat --version` (stdout) contains "GNU coreutils" (GNU: "stat (GNU
+# coreutils) 9.5") or "uutils coreutils" (uutils: "stat (uutils coreutils)
+# 0.2.2"). BSD and macOS stat answer "illegal option" on stderr, BusyBox
+# "unrecognized option" and its usage on stderr: both print nothing on
+# stdout, as a missing stat does. The exit code does not decide.
+doctor::_stat_gnu() {
+  local out="" line=""
+  out="$(stat --version 2>/dev/null)" || :
+  line="${out%%$'\n'*}"
+  [[ "${line}" == *"GNU coreutils"* || "${line}" == *"uutils coreutils"* ]]
+}
 
 # doctor::_rbac_check <domain>
 # The RBAC migration check (issues #311 and #315). Go twin:

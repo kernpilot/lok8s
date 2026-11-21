@@ -131,7 +131,7 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	if !doctorToolsSection(ctx, r, paths, d, path, out) {
 		fail = true
 	}
-	if !doctorEnvironmentSection(ctx, paths, d, path, toolchainFlag, out) {
+	if !doctorEnvironmentSection(ctx, r, paths, d, path, toolchainFlag, out) {
 		fail = true
 	}
 	doctorTLSSection(ctx, r, path, d, out)
@@ -316,7 +316,7 @@ func kindRelease(ctx context.Context, r execx.Runner, kind string) (string, bool
 
 // doctorEnvironmentSection is `--- environment ---` plus the toolchain
 // section it decides on.
-func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, d, path string, toolchainFlag bool, out io.Writer) bool {
+func doctorEnvironmentSection(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, toolchainFlag bool, out io.Writer) bool {
 	fmt.Fprintln(out)
 	ui.Section(out, "environment")
 	doctorDir(out, "PATH_BASE", paths.Base)
@@ -350,6 +350,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, d, path 
 	doctorAssets(out, paths)
 	doctorImplementation(out, paths)
 	ok := doctorBashMode(out, paths, d)
+	doctorCoreutils(ctx, r, out, paths, path)
 
 	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
 		return doctorToolchain(ctx, out, paths, pluginHome, path) && ok
@@ -518,6 +519,52 @@ func doctorBashMode(w io.Writer, paths *config.Paths, d string) bool {
 	}
 	doctorOK(w, "bash mode (spec.implementation, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")
 	return true
+}
+
+// doctorCoreutilsWarning is the warning of doctorCoreutils. The bash twin
+// (doctor::_coreutils in libs/doctor) prints the same text.
+const doctorCoreutilsWarning = "bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+
+// doctorCoreutils is the coreutils line of the bash implementation. The
+// frozen bash libs (kubehz, bootstrap) use forms that GNU coreutils and
+// uutils coreutils have, BSD and BusyBox do not: stat -c, mv -T, ln -T,
+// realpath -e. On a BSD or BusyBox userland they fail mid-run. The line is
+// a warning, printed only when lok8s.yaml routes commands to bash (default
+// bash, or bash.commands; also a route of one command such as version:
+// lint, audit and provision load libs/bootstrap too) and the first line of
+// `stat --version` contains neither "GNU coreutils" nor "uutils
+// coreutils". Otherwise it prints nothing, so the doctor output stays
+// byte-identical to the bash twin (doctor::_coreutils), which runs the
+// same probe.
+func doctorCoreutils(ctx context.Context, r execx.Runner, w io.Writer, paths *config.Paths, path string) {
+	if rt := newRouting(paths); rt.problem() != nil || !rt.active() {
+		return
+	}
+	if doctorStatFlavor(ctx, r, path) == "gnu" {
+		return
+	}
+	doctorWarn(w, doctorCoreutilsWarning)
+}
+
+// doctorStatFlavor probes stat as doctorEnvsubstFlavor probes envsubst:
+// "gnu" (the GNU forms work) when the first line of `stat --version`
+// (stdout) contains "GNU coreutils" (GNU: "stat (GNU coreutils) 9.5") or
+// "uutils coreutils" (uutils: "stat (uutils coreutils) 0.2.2"), else
+// "other". BSD and macOS stat answer "illegal option" on stderr, BusyBox
+// "unrecognized option" and its usage on stderr: both print nothing on
+// stdout. The exit code does not decide. It runs the stat that LookPath
+// found, the first on PATH.
+func doctorStatFlavor(ctx context.Context, r execx.Runner, path string) string {
+	stat, ok := toolchain.LookPath(path, "stat")
+	if !ok {
+		return "other"
+	}
+	out, _ := execx.Output(ctx, r, execx.Cmd{Name: stat, Args: []string{"--version"}})
+	line, _, _ := strings.Cut(string(out), "\n")
+	if strings.Contains(line, "GNU coreutils") || strings.Contains(line, "uutils coreutils") {
+		return "gnu"
+	}
+	return "other"
 }
 
 // bashModeNeeds names what in the project runs on the bash tree: the
