@@ -570,6 +570,62 @@ spec::is_addon() {
   [[ "${d##*/}" == "${want}" ]]
 }
 
+# spec::entry_base <key> <dir> — prints the last element of the dir of a
+# spec.bootstrap entry as the Go parser reads it (filepath.Base of the parsed
+# dir). <key> is the entry as written, <dir> is the dir that
+# bootstrap::_parse_entry gives for it. Go keeps the dir of a path entry (a
+# key that starts with "/", "./" or "../") as written, so the helper prints
+# its basename: `./x/.` gives ".". Go cleans the dir of a bare entry
+# (assets.Peek, path.Clean), so the helper ignores the empty and "." elements
+# and resolves "..": `x/`, `x/.`, `x/./`, `x//` and `a/x/.` give "x", and
+# `x/..` and `.` give "addons" (the dir is <lok8s>/addons/<key>). The bash
+# parser keeps every dir as written.
+#
+# The helper splits the dir with parameter expansion only, so a newline in the
+# dir is an ordinary character, as in Go, and it prints with printf, so a name
+# such as `-n` prints as itself. A caller that reads the result through
+# `$( … )` loses a trailing newline of the name.
+spec::entry_base() {
+  local key="${1}" dir="${2}"
+  if [[ "${key}" == /* || "${key}" == ./* || "${key}" == ../* ]]; then
+    # filepath.Base: drop the trailing slashes, then the last element.
+    local d="${dir%"${dir##*[!/]}"}"
+    if [[ -z "${dir}" ]]; then
+      printf '%s\n' "."
+    elif [[ -z "${d}" ]]; then
+      printf '%s\n' "/"
+    else
+      printf '%s\n' "${d##*/}"
+    fi
+    return 0
+  fi
+  local -a out=()
+  local rest="${dir}" p
+  while :; do
+    p="${rest%%/*}"
+    case "${p}" in
+      "" | .) ;;
+      ..)
+        if (( ${#out[@]} > 0 )) && [[ "${out[-1]}" != .. ]]; then
+          unset 'out[-1]'
+        elif [[ "${dir}" != /* ]]; then
+          out+=("..")
+        fi
+        ;;
+      *) out+=("${p}") ;;
+    esac
+    [[ "${rest}" == */* ]] || break
+    rest="${rest#*/}"
+  done
+  if (( ${#out[@]} > 0 )); then
+    printf '%s\n' "${out[-1]}"
+  elif [[ "${dir}" == /* ]]; then
+    printf '%s\n' "/"
+  else
+    printf '%s\n' "."
+  fi
+}
+
 # spec::suc_kubectl_range — the range as the lines name it: "1.33 to 1.37".
 spec::suc_kubectl_range() {
   echo "1.${_SPEC_SUC_KUBECTL_MIN} to 1.${_SPEC_SUC_KUBECTL_MAX}"

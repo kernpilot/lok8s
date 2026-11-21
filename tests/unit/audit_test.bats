@@ -226,6 +226,35 @@ YAML
   assert_equal "$(_status_of cilium-policy-enforcement)" "pass"
 }
 
+# The written forms of a cilium entry, shared with the Go twin
+# (internal/audit/entryforms_test.go). Each case under
+# tests/fixtures/bare-entry/cases has the cluster spec and the status of the
+# check (audit). The addon dir goes to .lok8s/addons/cilium and to
+# clusters/test.lok8s.dev/cilium (the dir of a `./cilium` path entry).
+_entry_case() {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry" d
+  for d in "${PATH_LOK8S}/addons/cilium" "${PATH_CLUSTERS}/test.lok8s.dev/cilium"; do
+    mkdir -p "${d}"
+    cp "${fx}/addon/chart.yaml" "${fx}/addon/values.yaml" "${d}/"
+  done
+  cp "${fx}/cases/${1}/cluster.lok8s.yaml" "${PATH_CLUSTERS}/test.lok8s.dev/cluster.lok8s.yaml"
+  audit::run_domain test.lok8s.dev
+  assert_equal "$(_status_of cilium-policy-enforcement)" "$(cat "${fx}/cases/${1}/audit")"
+}
+
+@test "cilium entry: a bare name counts" { _entry_case bare; }
+@test "cilium entry: a bare name with a trailing slash counts" { _entry_case trailing-slash; }
+@test "cilium entry: a bare name with a trailing /. counts" { _entry_case trailing-dot; }
+@test "cilium entry: a bare name with a trailing /./ counts" { _entry_case trailing-dot-slash; }
+@test "cilium entry: a bare name with a trailing // counts" { _entry_case trailing-double-slash; }
+@test "cilium entry: a/cilium/. counts, and its values are absent" { _entry_case nested-trailing-dot; }
+@test "cilium entry: cilium/.. names addons and does not count" { _entry_case dot-dot; }
+@test "cilium entry: . names addons and does not count" { _entry_case dot; }
+@test "cilium entry: a path entry counts" { _entry_case path; }
+@test "cilium entry: a path entry with a trailing slash counts" { _entry_case path-trailing-slash; }
+@test "cilium entry: a path entry with a trailing /. does not count" { _entry_case path-trailing-dot; }
+@test "cilium entry: a path entry with a trailing /./ does not count" { _entry_case path-trailing-dot-slash; }
+
 # =============================================================================
 # Encryption at rest
 # =============================================================================

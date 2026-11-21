@@ -3702,6 +3702,146 @@ b wait="
 rook-ceph-cluster"
 }
 
+# --- the written forms of a cilium entry -------------------------------------
+# Shared with the Go twin (internal/bootstrap/entryforms_test.go). Each of the
+# 12 cases under tests/fixtures/bare-entry/cases holds the cluster spec
+# (cluster.lok8s.yaml), the audit status (audit) and the hint of
+# `lo addons --detail` (hint). Nine cases also hold the result of a KubeOne
+# full provision (skip: skip or apply) and of --only cilium (only: kept or the
+# error line). The three cases without skip and only are forms that the two
+# bootstraps resolve differently before they read the dir name: for
+# `a/cilium/.` (nested-trailing-dot) Go applies the addon cilium and bash finds
+# no addon; for `cilium/..` (dot-dot) and `.` (dot) bash goes on with the dir
+# as written and Go finds no addon. The addon dir goes to .lok8s/addons/cilium
+# and to clusters/test.lok8s.dev/cilium (the dir of a `./cilium` path entry).
+_entry_setup() {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry" d
+  for d in "${PATH_LOK8S}/addons/cilium" "${PATH_CLUSTERS}/test.lok8s.dev/cilium"; do
+    mkdir -p "${d}"
+    cp "${fx}/addon/chart.yaml" "${fx}/addon/values.yaml" "${d}/"
+  done
+  cp "${fx}/cases/${1}/cluster.lok8s.yaml" "${CLUSTER_YAML}"
+  ENTRY_WANT="$(cat "${fx}/cases/${1}/${2}")"
+}
+
+_entry_skip_case() {
+  _entry_setup "${1}" skip
+  export LOK8S_BOOTSTRAP_ONLY=0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  case "${ENTRY_WANT}" in
+    skip)
+      assert_output --partial "[bootstrap] cilium is applied by the KubeOne driver on a full provision — skipping"
+      [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+      ;;
+    apply)
+      refute_output --partial "is applied by the KubeOne driver on a full provision"
+      [ -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+      ;;
+    *)
+      echo "bad want: ${ENTRY_WANT}" >&2
+      return 1
+      ;;
+  esac
+}
+
+_entry_only_case() {
+  _entry_setup "${1}" only
+  : > "${BATS_TEST_TMPDIR}/only.log"
+  bootstrap::_apply_one() { echo "$1" >> "${BATS_TEST_TMPDIR}/only.log"; return 0; }
+  local bootstrap_select="cilium"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  if [[ "${ENTRY_WANT}" == kept ]]; then
+    assert_success
+    [ "$(wc -l < "${BATS_TEST_TMPDIR}/only.log")" -eq 1 ]
+  else
+    assert_failure
+    assert_output --partial "${ENTRY_WANT}"
+    [ ! -s "${BATS_TEST_TMPDIR}/only.log" ]
+  fi
+}
+
+# The case dirs, by name: a lost or an extra case dir fails here (the tests
+# above and their Go twins read only the cases that are there).
+@test "the shared cases of a cilium entry are the 12 expected dirs" {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry/cases" d
+  local -a got=() want=(bare dot dot-dot nested-trailing-dot path
+    path-trailing-dot path-trailing-dot-slash path-trailing-slash trailing-dot
+    trailing-dot-slash trailing-double-slash trailing-slash)
+  for d in "${fx}"/*; do
+    if [[ -d "${d}" ]]; then
+      got+=("${d##*/}")
+    fi
+  done
+  mapfile -t got < <(printf '%s\n' "${got[@]}" | LC_ALL=C sort)
+  if [[ "${got[*]}" != "${want[*]}" ]]; then
+    printf 'case dirs: %s\nwant:      %s\n' "${got[*]}" "${want[*]}" >&2
+    return 1
+  fi
+}
+
+@test "KubeOne full provision: a bare cilium is left to the driver" { _entry_skip_case bare; }
+@test "KubeOne full provision: a bare cilium/ is left to the driver" { _entry_skip_case trailing-slash; }
+@test "KubeOne full provision: a bare cilium/. is left to the driver" { _entry_skip_case trailing-dot; }
+@test "KubeOne full provision: a bare cilium/./ is left to the driver" { _entry_skip_case trailing-dot-slash; }
+@test "KubeOne full provision: a bare cilium// is left to the driver" { _entry_skip_case trailing-double-slash; }
+@test "KubeOne full provision: a path entry ./cilium is left to the driver" { _entry_skip_case path; }
+@test "KubeOne full provision: a path entry ./cilium/ is left to the driver" { _entry_skip_case path-trailing-slash; }
+@test "KubeOne full provision: a path entry ./cilium/. is not cilium and renders" { _entry_skip_case path-trailing-dot; }
+@test "KubeOne full provision: a path entry ./cilium/./ is not cilium and renders" { _entry_skip_case path-trailing-dot-slash; }
+
+@test "bootstrap::apply --only cilium selects a bare cilium" { _entry_only_case bare; }
+@test "bootstrap::apply --only cilium selects a bare cilium/" { _entry_only_case trailing-slash; }
+@test "bootstrap::apply --only cilium selects a bare cilium/." { _entry_only_case trailing-dot; }
+@test "bootstrap::apply --only cilium selects a bare cilium/./" { _entry_only_case trailing-dot-slash; }
+@test "bootstrap::apply --only cilium selects a bare cilium//" { _entry_only_case trailing-double-slash; }
+@test "bootstrap::apply --only cilium selects a path entry ./cilium" { _entry_only_case path; }
+@test "bootstrap::apply --only cilium selects a path entry ./cilium/" { _entry_only_case path-trailing-slash; }
+@test "bootstrap::apply --only cilium does not select a path entry ./cilium/." { _entry_only_case path-trailing-dot; }
+@test "bootstrap::apply --only cilium does not select a path entry ./cilium/./" { _entry_only_case path-trailing-dot-slash; }
+
+# The dry run passes the key to the skip too.
+@test "bootstrap::apply --dry-run: a bare cilium/. is skipped on a KubeOne full provision" {
+  _entry_setup trailing-dot skip
+  export LOK8S_BOOTSTRAP_ONLY=0
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line "bootstrap dry-run: cilium/.: skipped"
+}
+
+# Without the key (a direct call, as before the key existed), the skip reads
+# the dir name as written. With the key of a bare entry it reads it as Go
+# does (spec::entry_base); with the key of a path entry it reads the dir as
+# written.
+@test "bootstrap::_skip_reason reads the dir name with the key, and as written without it" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_ONLY=0
+  run bootstrap::_skip_reason "/x/addons/cilium/." kubeone
+  assert_failure
+  assert_output ""
+  run bootstrap::_skip_reason "/x/addons/cilium/." kubeone "cilium/."
+  assert_success
+  assert_output --partial "[bootstrap] cilium is applied by the KubeOne driver on a full provision"
+  run bootstrap::_skip_reason "/x/clusters/d/./cilium/." kubeone "./cilium/."
+  assert_failure
+  assert_output ""
+}
+
+@test "bootstrap::_apply_one without the key reads the dir name as written" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  addons::render() { echo "RENDER_CALLED" >&2; return 1; }
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium/." "capi" "hetzner" "/kc" "" "" ""
+  assert_failure
+  assert_output --partial "RENDER_CALLED"
+  refute_output --partial "platform-owned"
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium/." "capi" "hetzner" "/kc" "" "" "" "cilium/."
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
 # Two entries may share a name (a basename collision nothing depends on).
 # Their report lines add the key as written, so the two lines differ and each
 # names the --only value that selects that one entry.

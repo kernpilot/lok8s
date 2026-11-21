@@ -76,6 +76,41 @@ YAML
   assert_output --partial "nothing to inventory"
 }
 
+# The written forms of a cilium entry, shared with the Go twin
+# (internal/cli/cmd_addons_entryforms_test.go). Each case under
+# tests/fixtures/bare-entry/cases has the cluster spec and the CONFIGURE cell
+# of its row (hint). The addon dir goes to .lok8s/addons/cilium and to
+# clusters/test.lok8s.dev/cilium (the dir of a `./cilium` path entry).
+_entry_hint_case() {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry" d hint
+  for d in "${PATH_LOK8S}/addons/cilium" "${PATH_CLUSTERS}/test.lok8s.dev/cilium"; do
+    mkdir -p "${d}"
+    cp "${fx}/addon/chart.yaml" "${fx}/addon/values.yaml" "${d}/"
+  done
+  cp "${fx}/cases/${1}/cluster.lok8s.yaml" "${PATH_CLUSTERS}/test.lok8s.dev/cluster.lok8s.yaml"
+  hint="$(cat "${fx}/cases/${1}/hint")"
+  run addons::detail test.lok8s.dev
+  assert_success
+  [[ $'\n'"${output}"$'\n' == *"  ${hint}"$'\n'* ]] || {
+    echo "no row ends with '${hint}' in:" >&2
+    echo "${output}" >&2
+    return 1
+  }
+}
+
+@test "detail: a bare cilium gets the hint of cilium" { _entry_hint_case bare; }
+@test "detail: a bare cilium/ gets the hint of cilium" { _entry_hint_case trailing-slash; }
+@test "detail: a bare cilium/. gets the hint of cilium" { _entry_hint_case trailing-dot; }
+@test "detail: a bare cilium/./ gets the hint of cilium" { _entry_hint_case trailing-dot-slash; }
+@test "detail: a bare cilium// gets the hint of cilium" { _entry_hint_case trailing-double-slash; }
+@test "detail: a bare a/cilium/. gets the hint of cilium" { _entry_hint_case nested-trailing-dot; }
+@test "detail: a bare cilium/.. names addons and gets the default hint" { _entry_hint_case dot-dot; }
+@test "detail: a bare . names addons and gets the default hint" { _entry_hint_case dot; }
+@test "detail: a path entry ./cilium is a target" { _entry_hint_case path; }
+@test "detail: a path entry ./cilium/ is a target" { _entry_hint_case path-trailing-slash; }
+@test "detail: a path entry ./cilium/. is a target" { _entry_hint_case path-trailing-dot; }
+@test "detail: a path entry ./cilium/./ is a target" { _entry_hint_case path-trailing-dot-slash; }
+
 # PATH-TRAVERSAL GUARD (Copilot review round 1): addons::detail builds a
 # filesystem path from the caller-provided domain, so it must reject a
 # traversal/injected name (same guard as bootstrap::dispatch) BEFORE touching
