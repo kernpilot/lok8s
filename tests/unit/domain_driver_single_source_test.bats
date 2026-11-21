@@ -251,6 +251,7 @@ _allowed_kind_reads() {
 .lok8s/libs/lint|spec_runtime=$(yq -r '.spec.kind // .kind // ""' "${spec_file}")
 .lok8s/libs/kubehz/hosted|kind=$(yq -r '.kind' "${cluster_yaml}")
 .lok8s/utils/kapply.sh|yq -r 'select(.kind == "Deployment"
+.lok8s/libs/doctor|select(documentIndex == 0 and .kind == "Project")
 ALLOW
 }
 # Reasons, in the same order:
@@ -280,6 +281,8 @@ ALLOW
 #                       and third `.kind` in that select (each preceded by a
 #                       space, not by `(`). The row is the price of catching
 #                       `yq -r .kind` and `| .kind`, and it is a cheap one.
+#   libs/doctor       — the kind of lok8s.yaml (a Project document), read to
+#                       find the selected implementation. Not a cluster spec.
 
 # Every spelling the sweep is claimed to cover, as a line it must match. This
 # is the gate's real anti-vacuity check: it does not depend on any particular
