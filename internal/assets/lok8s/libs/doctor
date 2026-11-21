@@ -154,12 +154,13 @@ doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1
 
 # doctor::_coreutils — the coreutils line of the bash implementation. Go
 # twin: doctorCoreutils (internal/cli/cmd_doctor.go), with the same text.
-# The frozen bash libs (kubehz, bootstrap) use forms that only GNU
-# coreutils has: stat -c, mv -T, ln -T, realpath -e. On a BSD or BusyBox
-# userland they fail mid-run. The line is a warning, printed only when
-# lok8s.yaml routes commands to bash (doctor::_bash_selected) and the first
-# line of `stat --version` does not contain the literal "GNU coreutils"
-# (doctor::_stat_gnu). Otherwise it prints nothing.
+# The frozen bash libs (kubehz, bootstrap) use forms that GNU coreutils
+# and uutils coreutils have, BSD and BusyBox do not: stat -c, mv -T, ln -T,
+# realpath -e. On a BSD or BusyBox userland they fail mid-run. The line is
+# a warning, printed only when lok8s.yaml routes commands to bash
+# (doctor::_bash_selected) and the first line of `stat --version` contains
+# neither "GNU coreutils" nor "uutils coreutils" (doctor::_stat_gnu).
+# Otherwise it prints nothing.
 doctor::_coreutils() {
   doctor::_bash_selected || return 0
   if doctor::_stat_gnu; then
@@ -189,15 +190,17 @@ doctor::_bash_selected() {
 }
 
 # doctor::_stat_gnu — probes stat as template::envsubst_flavor probes
-# envsubst: true when the first line of `stat --version` (stdout) contains
-# "GNU coreutils" (GNU: "stat (GNU coreutils) 9.5"). BSD and macOS stat
-# answer "illegal option" on stderr, BusyBox "unrecognized option" and its
-# usage on stderr: both print nothing on stdout, as a missing stat does.
-# The exit code does not decide.
+# envsubst: true (the GNU forms work) when the first line of
+# `stat --version` (stdout) contains "GNU coreutils" (GNU: "stat (GNU
+# coreutils) 9.5") or "uutils coreutils" (uutils: "stat (uutils coreutils)
+# 0.2.2"). BSD and macOS stat answer "illegal option" on stderr, BusyBox
+# "unrecognized option" and its usage on stderr: both print nothing on
+# stdout, as a missing stat does. The exit code does not decide.
 doctor::_stat_gnu() {
-  local out=""
+  local out="" line=""
   out="$(stat --version 2>/dev/null)" || :
-  [[ "${out%%$'\n'*}" == *"GNU coreutils"* ]]
+  line="${out%%$'\n'*}"
+  [[ "${line}" == *"GNU coreutils"* || "${line}" == *"uutils coreutils"* ]]
 }
 
 # doctor::_rbac_check <domain>

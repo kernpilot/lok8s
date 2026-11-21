@@ -711,8 +711,9 @@ _suc_case() {
 
 # ── doctor::_coreutils: GNU coreutils for the bash implementation ──────────
 # The frozen bash libs (kubehz, bootstrap) use stat -c, mv -T, ln -T and
-# realpath -e, which only GNU coreutils has. Go twin: TestDoctorCoreutils
-# (internal/cli/cmd_doctor_test.go), with the same cases and the same line.
+# realpath -e, which GNU coreutils and uutils coreutils have. Go twin:
+# TestDoctorCoreutils (internal/cli/cmd_doctor_test.go), with the same
+# cases (except the missing tree, a Go-only state) and the same line.
 
 _cu_warn="  ! bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
 _cu_gnu='stat (GNU coreutils) 9.12\nCopyright (C) 2026 Free Software Foundation, Inc.\n'
@@ -768,7 +769,7 @@ _cu_run() {
 # _cu_runs — the number of runs of the stub stat.
 _cu_runs() { wc -l < "${BATS_TEST_TMPDIR}/cu-bin/runs" | tr -d ' '; }
 
-@test "doctor::_coreutils prints nothing for GNU coreutils" {
+@test "doctor::_coreutils prints nothing for GNU or uutils coreutils" {
   _cu_stat "${_cu_gnu}" ""
   _cu_project "${_cu_bash}"
   _cu_run
@@ -785,19 +786,21 @@ _cu_runs() { wc -l < "${BATS_TEST_TMPDIR}/cu-bin/runs" | tr -d ' '; }
   _cu_run
   assert_success
   assert_output ""
+  # uutils coreutils has the GNU forms too.
+  _cu_stat 'stat (uutils coreutils) 0.2.2\n' ""
+  _cu_run
+  assert_success
+  assert_output ""
+  [[ "$(_cu_runs)" == 1 ]] || fail "stat ran $(_cu_runs) times, want 1"
 }
 
-@test "doctor::_coreutils warns for a BSD-like, a BusyBox and a uutils answer" {
+@test "doctor::_coreutils warns for a BSD-like and a BusyBox answer" {
   _cu_project "${_cu_bash}"
   _cu_stat "" "${_cu_bsd}" 1
   _cu_run
   assert_success
   assert_output "${_cu_warn}"
   _cu_stat "" "${_cu_busybox}" 1
-  _cu_run
-  assert_success
-  assert_output "${_cu_warn}"
-  _cu_stat 'stat (uutils coreutils) 0.2.2\n' ""
   _cu_run
   assert_success
   assert_output "${_cu_warn}"

@@ -409,11 +409,14 @@ func statVersionRunner(stdout, stderr string, err error) *scriptRunner {
 }
 
 // The frozen bash libs (kubehz, bootstrap) use stat -c, mv -T, ln -T and
-// realpath -e, which only GNU coreutils has. Doctor warns when lok8s.yaml
-// routes commands to bash and the first line of `stat --version` does not
-// contain "GNU coreutils". With the Go implementation selected it prints
-// nothing and runs no stat. The bash twin (doctor::_coreutils,
-// tests/unit/doctor_test.bats) has the same cases.
+// realpath -e, which GNU coreutils and uutils coreutils have. Doctor warns
+// when lok8s.yaml routes commands to bash and the first line of
+// `stat --version` contains neither "GNU coreutils" nor "uutils
+// coreutils". With the Go implementation selected, or a routing whose tree
+// is missing (doctorImplementation warns about that), it prints nothing
+// and runs no stat. The probe runs the stat that LookPath found (its
+// absolute path). The bash twin (doctor::_coreutils,
+// tests/unit/doctor_test.bats) has the same cases, except the missing tree.
 func TestDoctorCoreutils(t *testing.T) {
 	warn := "  ! " + doctorCoreutilsWarning + "\n"
 	exit1 := errors.New("exit status 1")
@@ -426,6 +429,7 @@ func TestDoctorCoreutils(t *testing.T) {
 		name           string
 		block          string
 		noProject      bool // a lok8s.yaml that is not a kind: Project document
+		noTree         bool // no .lok8s/lo: the routing has a problem
 		bin            string
 		stdout, stderr string
 		err            error
@@ -438,7 +442,7 @@ func TestDoctorCoreutils(t *testing.T) {
 		{name: "a BSD-like answer", block: bash, bin: withStat, stderr: statBSD, err: exit1, want: warn, probe: true},
 		{name: "a BSD-like answer, a mixed route", block: mixed, bin: withStat, stderr: statBSD, err: exit1, want: warn, probe: true},
 		{name: "a BusyBox answer", block: bash, bin: withStat, stderr: statBusyBox, err: exit1, want: warn, probe: true},
-		{name: "uutils coreutils", block: bash, bin: withStat, stdout: statUutils, want: warn, probe: true},
+		{name: "uutils coreutils: the GNU forms work", block: bash, bin: withStat, stdout: statUutils, probe: true},
 		{name: "GNU coreutils only on the second line", block: bash, bin: withStat, stdout: "stat 1.0\nGNU coreutils\n", want: warn, probe: true},
 		{name: "no stat on PATH", block: bash, bin: t.TempDir(), want: warn},
 		{name: "the Go implementation: no block", block: "", bin: withStat, stderr: statBSD, err: exit1},
@@ -446,9 +450,10 @@ func TestDoctorCoreutils(t *testing.T) {
 		{name: "the Go implementation: an empty command list", block: "    default: go\n    bash:\n      commands: []\n", bin: withStat, stderr: statBSD, err: exit1},
 		{name: "the Go implementation: not a Project document", block: bash, noProject: true, bin: withStat, stderr: statBSD, err: exit1},
 		{name: "an unknown default selects nothing", block: "    default: Bash\n", bin: withStat, stderr: statBSD, err: exit1},
+		{name: "the tree is missing: nothing selected", block: bash, noTree: true, bin: withStat, stderr: statBSD, err: exit1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := routedProject(t, tc.block, true)
+			p := routedProject(t, tc.block, !tc.noTree)
 			if tc.noProject {
 				testutil.WriteFile(t, filepath.Join(p.Base, config.ProjectFile), "kind: Service\nspec:\n  implementation:\n"+tc.block)
 			}
@@ -460,6 +465,10 @@ func TestDoctorCoreutils(t *testing.T) {
 			}
 			if ran := len(r.calls) > 0; ran != tc.probe {
 				t.Errorf("stat --version ran: %v, want %v (calls %q)", ran, tc.probe, r.calls)
+			}
+			// The probe runs the stat that LookPath found, not a bare name.
+			if want := filepath.Join(tc.bin, "stat") + " --version"; tc.probe && (len(r.calls) != 1 || r.calls[0] != want) {
+				t.Errorf("calls %q, want [%q]", r.calls, want)
 			}
 		})
 	}
