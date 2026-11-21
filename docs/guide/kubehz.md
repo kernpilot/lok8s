@@ -756,33 +756,62 @@ working. With the fingerprint announce, the platform returns the same record
 and no new secret.
 
 The platform does not adopt the announced row by its domain alone. An agent
-that registers without the secret gets a separate pending row, and the
-announced row gets no heartbeats. So `lo kubehz deploy` stages the secret
-right after it applies the agent CronJob. In the operator mode, that is
-before the identity bootstrap Job and the live agent:
+that has no binding yet and registers without the secret gets a separate
+pending row, and the announced row gets no heartbeats. So no agent pod may
+run between the CronJob apply and the Secret apply. `lo kubehz deploy` does
+these steps in this order, in both modes:
 
-- The deploy applies the namespace `kubehz-system`, then the Secret
-  `kubehz-agent-bind` with a server-side apply. The kubeconfig needs `patch`
-  on Secrets in `kubehz-system`, and `create` when the Secret is new. It does
-  not need `delete`.
-- The deploy reads `.kubehz-bind` once and stages the bytes that it checked.
-- In the operator mode, the apply of the CronJob stops its heartbeat. So,
-  before that apply, the deploy applies the namespace and does a server-side
-  dry run of the Secret apply. If the dry run fails, the deploy stops before
-  the CronJob apply, and no agent changes.
-- If the deploy cannot stage the secret, it stops after the CronJob apply.
-  In the operator mode, it then does not apply the live agent.
+1. In the operator mode only, the preflight: the deploy applies the
+   namespace `kubehz-system` and does a server-side dry run of the Secret
+   apply. If the preflight fails, the deploy stops before the CronJob apply.
+2. The deploy applies the agent CronJob with `spec.suspend: true`. A
+   suspended CronJob starts no new Jobs.
+3. The deploy deletes the Jobs of the CronJob
+   (`-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent`).
+4. The deploy waits until the pods with these labels have ended
+   (`KUBEHZ_AGENT_JOBS_DRAIN_SECONDS`, default 130 s). A Job pod ends within
+   the Job's deadline of 120 s.
+5. The deploy stages the secret: it applies the namespace, then the Secret
+   `kubehz-agent-bind` with a server-side apply. It reads `.kubehz-bind` once
+   and stages the bytes that it checked.
+6. The deploy sets `spec.suspend` to `false`. The CronJob then starts its
+   next Job on its schedule.
+7. In the operator mode, the deploy then runs the identity bootstrap Job and
+   applies the live agent.
+
+The kubeconfig needs `delete` on Jobs, `list` on Pods and `patch` on CronJobs
+in `kubehz-system`. For the Secret it needs `patch` on Secrets in
+`kubehz-system`, and `create` when the Secret is new. It does not need
+`delete` on Secrets.
+
+- If a step from 2 to 6 fails, the deploy stops. The CronJob can stay
+  suspended, so heartbeats can stop until the deploy runs again. The error
+  says what the step can have changed.
+- If the pods do not end in time, the deploy stops and does not delete them.
+  See them with
+  `kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent`,
+  and run `lo kubehz deploy` again after they are gone.
 - If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on
   another machine) or holds no valid secret, the deploy warns and continues
-  without the secret. A Secret `kubehz-agent-bind` from an earlier deploy
-  stays as it is.
-- The CronJob starts its pods with or without the Secret. A pod that starts
-  in the seconds between the CronJob apply and the Secret apply registers
-  without the secret.
+  without the secret: it skips step 5 only. A Secret `kubehz-agent-bind` from
+  an earlier deploy stays as it is. The agent can then register a separate
+  pending row if it has no binding and no staged value yet.
+- The deploy owns `spec.suspend`. If you suspended the CronJob by hand, the
+  next deploy sets it back to `false`.
+- An apply of the agent manifests without `lo kubehz deploy` leaves the
+  CronJob suspended.
 
-To deploy without the secret on purpose, remove `.kubehz-bind`. The agent
-then registers a separate pending row. Claim that row with the code from
-`lo kubehz claim-code`. The announced row gets no heartbeats.
+To deploy without the secret on purpose, remove `.kubehz-bind` and the
+Secret:
+
+```bash
+kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found
+```
+
+A pod that runs at that time keeps the value in its environment until it
+ends. An agent that has no binding yet then registers a separate pending
+row. Claim that row with the code from `lo kubehz claim-code`. The announced
+row gets no heartbeats.
 
 **Upgrade order for the `khzb_` form.** The platform can hand out the bind
 secret as `khzb_` and 64 lowercase hex characters. An older lo and an older
@@ -799,6 +828,19 @@ a separate pending row. Claim that row with the code from
 
 A deploy that does not stage the secret keeps an existing Secret
 `kubehz-agent-bind` as it is.
+
+If the deploy stopped with the CronJob suspended, fix the cause that the
+error names, then run `lo kubehz deploy` again. The next deploy deletes the
+Jobs, waits for their pods, stages the secret and ends the suspend. To see
+the state:
+
+```bash
+kubectl -n kubehz-system get cronjob kubehz-heartbeat   # SUSPEND
+```
+
+An agent that registered a separate pending row before the upgrade stays on
+that row: lo has no command that moves it to the announced row. Claim that
+row with the code from `lo kubehz claim-code`.
 :::
 
 ## Claiming
@@ -1729,7 +1771,9 @@ line that came back.
 ## Troubleshooting
 
 **No heartbeats arriving?** Check the CronJob is present, not suspended,
-and actually firing, then read the last run's logs:
+and actually firing, then read the last run's logs. A `lo kubehz deploy`
+that stopped can leave the CronJob suspended: fix the cause that its error
+names, then run `lo kubehz deploy` again.
 
 ```bash
 kubectl -n kubehz-system get cronjob kubehz-heartbeat   # SUSPEND + LAST SCHEDULE
