@@ -296,15 +296,17 @@ audit::check_cilium() {
   local id="cilium-policy-enforcement" title="Cilium network-policy enforcement"
 
   # Is cilium deployed? Resolve spec.bootstrap through the SAME parser the apply
-  # path uses, then find the entry whose resolved dir basename is 'cilium'.
+  # path uses, then find the entry whose resolved dir basename is 'cilium', as
+  # Go reads it (spec::entry_base): a bare `cilium/.` counts, a path entry
+  # `./targets/cilium/.` does not.
   local -a entries=()
   mapfile -t entries < <(bootstrap::_resolve_entries "${spec_file}" "${kind}" 2>/dev/null)
-  local e nm dr inl ev wt dp cil_dir="" cil_inline="" found=0
+  local e nm dr inl ev wt dp ex key cil_dir="" cil_inline="" found=0
   for e in "${entries[@]+"${entries[@]}"}"; do
     [[ -n "${e}" ]] || continue
-    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
-    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
-    if [[ "$(basename "${dr}")" == "cilium" ]]; then
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    if [[ "$(spec::entry_base "${key}" "${dr}")" == "cilium" ]]; then
       cil_dir="${dr}"; cil_inline="${inl}"; found=1; break
     fi
   done

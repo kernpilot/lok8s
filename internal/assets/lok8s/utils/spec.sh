@@ -570,6 +570,47 @@ spec::is_addon() {
   [[ "${d##*/}" == "${want}" ]]
 }
 
+# spec::entry_base <key> <dir> — prints the last element of the dir of a
+# spec.bootstrap entry as the Go parser reads it (filepath.Base of the parsed
+# dir). <key> is the entry as written, <dir> is the dir that
+# bootstrap::_parse_entry gives for it. Go keeps the dir of a path entry (a
+# key that starts with "/", "./" or "../") as written, so the helper prints
+# its basename: `./x/.` gives ".". Go cleans the dir of a bare entry
+# (assets.Peek, path.Clean), so the helper ignores the empty and "." elements
+# and resolves "..": `x/`, `x/.`, `x/./`, `x//` and `a/x/.` give "x", and
+# `x/..` and `.` give "addons" (the dir is <lok8s>/addons/<key>). The bash
+# parser keeps every dir as written.
+spec::entry_base() {
+  local key="${1}" dir="${2}"
+  if [[ "${key}" == /* || "${key}" == ./* || "${key}" == ../* ]]; then
+    basename "${dir}"
+    return
+  fi
+  local -a parts=() out=()
+  local p
+  IFS=/ read -r -a parts <<< "${dir}"
+  for p in "${parts[@]+"${parts[@]}"}"; do
+    case "${p}" in
+      "" | .) ;;
+      ..)
+        if (( ${#out[@]} > 0 )) && [[ "${out[-1]}" != .. ]]; then
+          unset 'out[-1]'
+        elif [[ "${dir}" != /* ]]; then
+          out+=("..")
+        fi
+        ;;
+      *) out+=("${p}") ;;
+    esac
+  done
+  if (( ${#out[@]} > 0 )); then
+    echo "${out[-1]}"
+  elif [[ "${dir}" == /* ]]; then
+    echo "/"
+  else
+    echo "."
+  fi
+}
+
 # spec::suc_kubectl_range — the range as the lines name it: "1.33 to 1.37".
 spec::suc_kubectl_range() {
   echo "1.${_SPEC_SUC_KUBECTL_MIN} to 1.${_SPEC_SUC_KUBECTL_MAX}"

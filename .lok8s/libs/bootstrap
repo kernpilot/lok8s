@@ -42,6 +42,7 @@ import ^utils/verbose
 import ^utils/kapply
 import ^libs/addons
 import ^utils/keysonly
+import ^utils/spec
 
 # ── CLI entry point ──────────────────────────────────────
 
@@ -613,11 +614,13 @@ bootstrap::inline_values() {
   return 0
 }
 
-# bootstrap::_skip_reason <addon_dir> <kind>
+# bootstrap::_skip_reason <addon_dir> <kind> [<key>]
 # Decide whether an entry is left alone and print why (the stderr line of the
 # real run). Returns 0 when it is skipped, 1 when it applies. Shared by
 # _apply_one and the dry run, so the dry run reports exactly what the real
-# run would not touch.
+# run would not touch. <key> is the entry as written in spec.bootstrap: with
+# it, the dir name is read as Go reads it (spec::entry_base), so a bare
+# `cilium/.` is cilium. Without it, the dir name is its basename as written.
 #
 # HOSTED clusters: the CNI + cloud integration belong to the PLATFORM — the
 # hosted control plane manages cilium as a system application in the user
@@ -642,7 +645,11 @@ bootstrap::inline_values() {
 # can't defeat the skip and double-apply the driver's own.
 bootstrap::_skip_reason() {
   local _ad_base _kind="${2}"
-  _ad_base="$(basename "${1}")"
+  if (( $# >= 3 )); then
+    _ad_base="$(spec::entry_base "${3}" "${1}")"
+  else
+    _ad_base="$(basename "${1}")"
+  fi
   if [[ "${LOK8S_BOOTSTRAP_HOSTED:-false}" == "true" ]]; then
     local _po
     for _po in ${BOOTSTRAP_PLATFORM_OWNED}; do
@@ -661,7 +668,7 @@ bootstrap::_skip_reason() {
 }
 
 # bootstrap::_apply_one <name> <dir> <kind> <provider> <kubeconfig> \
-#                       <inline-values> <wait> [env-lines]
+#                       <inline-values> <wait> [env-lines [key]]
 # Apply ONE resolved bootstrap entry: the KubeOne cilium/ccm skip, addons::render
 # (value-stacking + kustomize build + envsubst), kapply::apply, the
 # immutable/terminating fail-fast, the CRD/webhook race-retry, and — only when
@@ -683,6 +690,9 @@ bootstrap::_skip_reason() {
 # up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
 # convention the addons reference; other names reach the render but are not
 # whitelisted.
+#
+# <key> (optional) is the entry as written in spec.bootstrap. The skip reads
+# the dir name with it (bootstrap::_skip_reason).
 bootstrap::_apply_one() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
@@ -692,7 +702,7 @@ bootstrap::_apply_one() {
   # The skips shared with the dry run (bootstrap::_skip_reason): the entry is
   # left alone, the reason is on stderr, the entry counts as done.
   local _skip
-  if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}")"; then
+  if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}" "${@:9:1}")"; then
     echo "${_skip}" >&2
     return 0
   fi
@@ -1153,7 +1163,7 @@ bootstrap::_resolve_parked() {
       local _rc=0
       ( export LOK8S_FORCE_RECREATE=1
         bootstrap::_apply_one "${_names[_pi]}" "${_dirs[_pi]}" "${kind}" "${provider_name}" \
-          "${kubeconfig}" "${_inlines[_pi]}" "${_wflag}" "${_envs[_pi]}" ) || _rc=$?
+          "${kubeconfig}" "${_inlines[_pi]}" "${_wflag}" "${_envs[_pi]}" ${_rawkeys[_pi]+"${_rawkeys[_pi]}"} ) || _rc=$?
       _BS_COMPLETED["${_pi}"]=1
       _BS_DONE=$(( _BS_DONE + 1 ))
       if (( _rc != 0 )); then
@@ -1306,7 +1316,8 @@ bootstrap::_derive_edges() {
 # arrays and edge set, then re-derive the scheduler fields. A name matches the
 # entry identity (`name:` override, else the basename / map key), the key as
 # written in spec.bootstrap (`./targets/flux`, the _rawkeys array) or the addon
-# directory's name, so a renamed framework addon answers to each. The key also
+# directory's name (as Go reads it, spec::entry_base: a bare `cilium/.` answers
+# to cilium), so a renamed framework addon answers to each. The key also
 # tells apart a target and an addon with the same basename. dependsOn is NOT
 # expanded: only the edges among the kept entries survive. An unknown name is
 # an error that lists the valid entry names.
@@ -1321,7 +1332,7 @@ bootstrap::_select_only() {
     _found=0
     for (( _k3 = 0; _k3 < n; _k3++ )); do
       if [[ "${_names[_k3]}" == "${_want}" || "${_rawkeys[_k3]:-}" == "${_want}" \
-            || "$(basename "${_dirs[_k3]}")" == "${_want}" ]]; then
+            || "$(spec::entry_base "${_rawkeys[_k3]:-}" "${_dirs[_k3]}")" == "${_want}" ]]; then
         _keep[_k3]=1; _found=1
       fi
     done
@@ -1518,7 +1529,7 @@ bootstrap::_reserved_env_name() {
 }
 
 # bootstrap::_dry_run_one <name> <dir> <kind> <provider> <kubeconfig> \
-#                         <inline-values> <env-lines> <stem>
+#                         <inline-values> <env-lines> <stem> [key]
 # Render ONE entry exactly as _apply_one would and diff it against the cluster
 # (`kubectl diff --server-side --force-conflicts`, a read-only server-side dry
 # run); apply nothing. Prints the entry's status field on the first line:
@@ -1530,7 +1541,8 @@ bootstrap::_reserved_env_name() {
 # (regenerated on every apply). With bootstrap_render_dir set it writes
 # <stem>.yaml (the manifests) and <stem>.diff (the diff text, empty when
 # unchanged). Runs in a subshell (`$( … )` in _run_dry). Always returns 0;
-# the status is the result. The Go twin: Engine.dryRunOne.
+# the status is the result. The Go twin: Engine.dryRunOne. <key> (optional)
+# is the entry as written in spec.bootstrap, for the skip, as in _apply_one.
 bootstrap::_dry_run_one() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
@@ -1538,7 +1550,7 @@ bootstrap::_dry_run_one() {
   local kubeconfig="${5}" inline_values="${6}" env_lines="${7:-}" stem="${8}"
 
   local _skip
-  if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}")"; then
+  if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}" "${@:9:1}")"; then
     echo "${_skip}" >&2
     echo skipped
     return 0
@@ -2068,7 +2080,8 @@ bootstrap::_run_dry() {
     # further line an object regenerated on every apply.
     _ndlines=()
     _one="$( bootstrap::_dry_run_one "${_names[_pick]}" "${_dirs[_pick]}" "${kind}" \
-      "${provider_name}" "${kubeconfig}" "${_inlines[_pick]}" "${_envs[_pick]}" "${_stem}" )" || true
+      "${provider_name}" "${kubeconfig}" "${_inlines[_pick]}" "${_envs[_pick]}" "${_stem}" \
+      ${_rawkeys[_pick]+"${_rawkeys[_pick]}"} )" || true
     _status="${_one%%$'\n'*}"
     if [[ "${_one}" == *$'\n'* ]]; then
       mapfile -t _ndlines <<< "${_one#*$'\n'}"
@@ -2572,7 +2585,8 @@ bootstrap::apply() {
       ( export LOK8S_NONINTERACTIVE=1
         _arc=0
         bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
-          "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" > "${_out}" 2>&1 || _arc=$?
+          "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" \
+          ${_rawkeys[_i2]+"${_rawkeys[_i2]}"} > "${_out}" 2>&1 || _arc=$?
         echo "${_arc}" > "${_rcf}" ) &
       _BS_INFLIGHT+=("$!")
       _BS_RCFILES+=("${_rcf}")
