@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"bytes"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -94,7 +95,8 @@ const (
 // four rules of lo is refused. Below the block (or after the block at the
 // top), each negation is refused: a line whose first byte is !. A NUL byte
 // is refused, because git ends a rule at that byte, and so is a file larger
-// than gitignoreMaxBytes.
+// than gitignoreMaxBytes. A plan larger than gitignoreMaxBytes is refused
+// too: the next run would refuse the file that it writes.
 func planGitignore(raw []byte, rel string) (want []byte, problems []string) {
 	if len(raw) > gitignoreMaxBytes {
 		return nil, []string{rel + ": the file has more than " + strconv.Itoa(gitignoreMaxBytes) + " bytes, and lo does not read a larger .gitignore: make it smaller"}
@@ -163,6 +165,9 @@ func planGitignore(raw []byte, rel string) (want []byte, problems []string) {
 	}
 	if len(problems) > 0 {
 		return nil, problems
+	}
+	if len(want) > gitignoreMaxBytes {
+		return nil, []string{rel + ": with the lok8s block the file would have more than " + strconv.Itoa(gitignoreMaxBytes) + " bytes, and lo does not read a larger .gitignore: make it smaller"}
 	}
 	return want, nil
 }
@@ -258,6 +263,40 @@ trim:
 // they write it.
 func reservedPlaintextName(base string) bool {
 	return strings.HasSuffix(asciiLower(base), ".enc")
+}
+
+// setPartProblem is the reason why set refuses s, a name, a namespace or a
+// key, as a part of the name of a plaintext file, or "" when it accepts it
+// (bash: secrets::_set_part_ok). The file is Secret.<name>.<namespace>.<key>
+// in the store. A part with a / or a \ can make that name a path into
+// another directory (key = anchor/../.gitignore writes the .gitignore), and
+// . and .. are parts of a path. A control byte (a NUL too) is refused: lo
+// prints the file name. Every other byte stays accepted: the names and keys
+// of Kubernetes use letters, digits, ., - and _ only.
+func setPartProblem(s string) string {
+	switch {
+	case s == "." || s == "..":
+		return "it is . or .., a part of a path"
+	case strings.ContainsAny(s, "/\\"):
+		return "it has a / or a \\, which makes the file name a path"
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			return "it has a control byte"
+		}
+	}
+	return ""
+}
+
+// setDestination is the plaintext file of set: base in the store dir. It
+// reports false when the file is not one entry of dir itself (bash:
+// secrets::_set_destination): its last part is not base, or its directory
+// is not dir. filepath.Split does not clean the path, so a base with a /
+// in it fails, also when a .. in it leads back to dir.
+func setDestination(dir, base string) (string, bool) {
+	dest := dir + "/" + base
+	parent, file := filepath.Split(dest)
+	return dest, file == base && filepath.Clean(parent) == filepath.Clean(dir)
 }
 
 // asciiLower lowercases the ASCII letters of s only, as git does.

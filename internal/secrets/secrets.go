@@ -29,7 +29,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -229,9 +228,10 @@ func (c *Context) initStorePath() string {
 // is not changed, and ensureGitignore returns ErrHandled. The write goes to
 // a temp file in the store and a rename over the old name (writeReplacing,
 // mode 0644): it replaces a link or a hard link instead of writing through
-// it. A write that fails leaves the old file as it was, prints the error
-// and one line that names the file, and returns ErrHandled. step names the
-// step of the command that a refusal stops before (gitignorePlan).
+// it. A write that fails leaves the old file as it was, prints one line
+// that names the file (reportFailedWrite: no error text of the file
+// system), and returns ErrHandled. step names the step of the command that
+// a refusal stops before (gitignorePlan).
 //
 // The file gets mode 0644 on each rewrite: the .gitignore is committed, and
 // git reads the same rules for each user of the repository. It holds no
@@ -246,14 +246,26 @@ func (c *Context) ensureGitignore(dir, step string) error {
 		return nil
 	}
 	if err := writeReplacing(gitignore, 0o644, func(w io.Writer) error { return writeGitignore(w, want) }); err != nil {
-		if !c.reportTempLeft(err) {
-			fmt.Fprintln(c.ErrOut, err)
-		}
-		ui.ErrorTo(c.ErrOut, "cannot write %s: it was not changed", printable(c.rel(gitignore)))
+		c.reportFailedWrite(err, "cannot write "+printable(c.rel(gitignore))+": it was not changed")
 		return ErrHandled
 	}
-	ui.Debug("Wrote %s", gitignore)
+	ui.Debug("Wrote %s", printable(gitignore))
 	return nil
+}
+
+// reportFailedWrite prints the lines of a write through writeReplacing that
+// failed, on a file that lo checks before it writes it (the .gitignore of a
+// store, a plaintext file of set and decrypt): the temp file that stays, if
+// its remove failed too, then final (bash: the same lines in
+// secrets::_ensure_gitignore and secrets::_plain_write_failed). It prints
+// no error text of the file system, because that text has the raw path. A
+// path prints with printable bytes only.
+func (c *Context) reportFailedWrite(err error, final string) {
+	var left *tempLeftError
+	if errors.As(err, &left) {
+		ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", printable(c.rel(left.name)))
+	}
+	ui.ErrorTo(c.ErrOut, "%s", final)
 }
 
 // writeGitignore fills the temp file of the .gitignore write of

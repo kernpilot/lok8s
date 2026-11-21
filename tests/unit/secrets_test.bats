@@ -248,8 +248,9 @@ _gitignore_refused() { # <link|dir>
   [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ]
 }
 
-# A .gitignore that it cannot write (the store is read-only): status 1, the
-# last line names the file, and the old file stays (Go twin:
+# A .gitignore that it cannot write (the store is read-only): status 1, one
+# line names the file (no message of mktemp, chmod or mv: it has the raw
+# path), and the old file stays (Go twin:
 # TestEnsureGitignoreReportsAWriteThatFails).
 @test "secrets: a .gitignore write that fails gives status 1 and keeps the old file" {
   [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
@@ -258,7 +259,7 @@ _gitignore_refused() { # <link|dir>
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   chmod 755 "${PATH_SECRETS}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "${output}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
 }
 
@@ -300,7 +301,7 @@ _gitignore_refused() { # <link|dir>
   unset -f printf
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ -e "${marker}" ] || { echo "fixture: the payload write did not run" >&2; return 1; }
-  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "${output}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ] || { echo "the .gitignore changed: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
   [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
 
@@ -469,10 +470,38 @@ ${final}" ] || { echo "$output" >&2; return 1; }
 ${final}" ] || { echo "$output" >&2; return 1; }
   cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "the large file changed" >&2; return 1; }
 
+  # The plan must fit the limit too: the next run would refuse a larger
+  # file. A file at the limit is read, and its plan with the block is
+  # refused, and so is a short block that grows past the limit. A plan at
+  # the limit is written (the test of set below runs it twice).
+  local grow blen
+  grow='[error] .secrets/.gitignore: with the lok8s block the file would have more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller'
+  blen="$(_block | wc -c)"
   head -c 1048576 /dev/zero | tr '\0' '#' > "${ignore}"
+  cp -p -- "${ignore}" "${BATS_TEST_TMPDIR}/before"
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
-  [ "$status" -eq 0 ] || { echo "a file at the limit: status $status: $output" >&2; return 1; }
-  cmp -s "${ignore}" <(_block; head -c 1048576 /dev/zero | tr '\0' '#') || { echo "a file at the limit: wrong bytes" >&2; return 1; }
+  [ "$status" -eq 1 ] || { echo "a file at the limit: status $status: $output" >&2; return 1; }
+  [ "$output" = "${grow}
+${final}" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "the file at the limit changed" >&2; return 1; }
+
+  { printf '%s\n' "${begin}" "${end}"; head -c $(( 1048576 - blen + 1 )) /dev/zero | tr '\0' '#'; } > "${ignore}"
+  cp -p -- "${ignore}" "${BATS_TEST_TMPDIR}/before"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 1 ] || { echo "a short block that grows: status $status: $output" >&2; return 1; }
+  [ "$output" = "${grow}
+${final}" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${ignore}" "${BATS_TEST_TMPDIR}/before" || { echo "the short block changed" >&2; return 1; }
+
+  head -c $(( 1048576 - blen + 1 )) /dev/zero | tr '\0' '#' > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 1 ] || { echo "a plan one byte over the limit: status $status: $output" >&2; return 1; }
+
+  head -c $(( 1048576 - blen )) /dev/zero | tr '\0' '#' > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "a plan at the limit: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(_block; head -c $(( 1048576 - blen )) /dev/zero | tr '\0' '#') || { echo "a plan at the limit: wrong bytes" >&2; return 1; }
+  [ "$(wc -c < "${ignore}")" -eq 1048576 ]
 }
 
 # A refusal prints the file, the line number and the reason. It never
@@ -534,6 +563,13 @@ ${final}" ] || { echo "$output" >&2; return 1; }
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 1 ] || { echo "a negation on the first line: status $status: $output" >&2; return 1; }
   [ "${lines[0]}" = "[error] .secrets/.gitignore:1: ${negation}" ] || { echo "$output" >&2; return 1; }
+
+  # A BOM on line 3 is bytes of that line, not a second start: the line
+  # starts with the BOM, not with !, so it is no negation.
+  printf 'a\nb\n%s!plain\n' "${bom}" > "${ignore}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "a BOM on line 3: status $status: $output" >&2; return 1; }
+  cmp -s "${ignore}" <(_block; printf 'a\nb\n%s!plain\n' "${bom}") || { od -c "${ignore}" | head -3 >&2; return 1; }
 }
 
 # _git_would_add <ignorecase> — copies the .gitignore of PATH_SECRETS into
@@ -581,6 +617,7 @@ _git_would_add() {
     $'!*\n!Secret.app.default.K\n!restore.d/\n!Secret.x.enc/\n'"$(_block)"$'\n\\!x\n*.log\n# note\n\n'
     $'\xef\xbb\xbfmine\n'
     "$(_legacy)"$'\nextra\n'
+    "$(_block)"$'\na\nb\n\xef\xbb\xbf!Secret.app.default.K\n'
   )
   for input in "${inputs[@]}"; do
     rm -f -- "${PATH_SECRETS}/.gitignore"
@@ -698,6 +735,229 @@ _refused_ignore() {
   [ "$(ls -A "${PATH_SECRETS}")" = "${before}" ] || { echo "decrypt wrote $(ls -A "${PATH_SECRETS}")" >&2; return 1; }
 }
 
+# _store_state <dir> — prints each entry under <dir>: its type, its name,
+# its link target and, for a regular file, its sha256. Any write shows in
+# it.
+_store_state() {
+  local f
+  while IFS= read -r -d '' f; do
+    builtin printf '%s %s %s' "$(stat -c %F -- "${f}")" "${f}" "$(readlink -- "${f}" || true)"
+    [[ -L "${f}" || ! -f "${f}" ]] || builtin printf ' %s' "$(sha256sum < "${f}")"
+    builtin printf '\n'
+  done < <(find "${1}" -print0 | LC_ALL=C sort -z)
+}
+
+# _not_regular is the middle of each refusal of a destination that is not a
+# regular file.
+_not_regular=' is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: '
+
+# set refuses a name, a namespace or a key that is not one part of a path,
+# before it reads the value (cat is a function that logs a call) and before
+# any write. The refusal names the field and its text with printable bytes
+# only. With the directory Secret.app.default.anchor/ in the store, the key
+# anchor/../.gitignore would write the value into the .gitignore (Go twin:
+# TestSetRefusesAPathPartBeforeItReadsTheValue). A shell argument cannot
+# hold a NUL, so the Go test has that case only.
+@test "secrets set: a name, a namespace or a key with a path part is refused before it reads the value" {
+  local log="${BATS_TEST_TMPDIR}/read.log" before row _n _s _k field shown why
+  local sep='it has a / or a \, which makes the file name a path' dots='it is . or .., a part of a path'
+  cat() { echo cat >> "${log}"; }
+  secrets::_live_drift() { :; }
+  :args() { name="${_n}" namespace="${_s}" key="${_k}" value=""; }
+  _block > "${PATH_SECRETS}/.gitignore"
+  mkdir "${PATH_SECRETS}/Secret.app.default.anchor"
+  before="$(_store_state "${PATH_SECRETS}")"
+  local -a rows=(
+    "app|default|anchor/../.gitignore|key|anchor/../.gitignore|${sep}"
+    "app|default|../x|key|../x|${sep}"
+    "app|default|a/b|key|a/b|${sep}"
+    "app|default|a\\b|key|a\\b|${sep}"
+    "app|default|.|key|.|${dots}"
+    "app|default|..|key|..|${dots}"
+    "app|default|a"$'\e'"[2Jb|key|a?[2Jb|it has a control byte"
+    "a/b|default|K|name|a/b|${sep}"
+    "app|..|K|namespace|..|${dots}"
+  )
+  for row in "${rows[@]}"; do
+    IFS='|' read -r _n _s _k field shown why <<< "${row}"
+    run secrets::set < /dev/null
+    [ "$status" -eq 1 ] || { echo "${row}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] the ${field} '${shown}' is refused: ${why}. Nothing was written: use a ${field} without it" ] || {
+      echo "${row}: $output" >&2; return 1; }
+    [ "$(_store_state "${PATH_SECRETS}")" = "${before}" ] || { echo "${row}: a store entry changed" >&2; return 1; }
+    [ ! -e "${log}" ] || { echo "${row}: set read the value" >&2; return 1; }
+  done
+}
+
+# The plaintext file of set is one entry of the store itself
+# (secrets::_set_destination): a base with a / in it is refused, also when
+# a .. in it leads back to the store (Go twin: TestSetDestination).
+@test "secrets set: the plaintext file is an entry of the store itself" {
+  local dest="" base
+  secrets::_set_destination /p/.secrets Secret.app.default.K
+  [ "${dest}" = /p/.secrets/Secret.app.default.K ]
+  for base in Secret.app.default.anchor/../.gitignore Secret.app.default.a/b Secret.app.default.K/; do
+    run secrets::_set_destination /p/.secrets "${base}"
+    [ "$status" -eq 1 ] || { echo "${base}: status $status" >&2; return 1; }
+    [ "$output" = "[error] the plaintext file ${base} is refused: it is not a file of the store directory itself. Nothing was written: use a name, a namespace and a key without a path part" ] || {
+      echo "${base}: $output" >&2; return 1; }
+  done
+}
+
+# set refuses a plaintext file that is a symlink (to a file that git
+# commits) or a directory: nothing is written, and the file that the link
+# names keeps its bytes (Go twin: TestSetRefusesALinkedPlaintextFile).
+@test "secrets set: a plaintext file that is a symlink or a directory is refused" {
+  local target before
+  :args() { name=app key=K value=the-value; }
+  secrets::_live_drift() { :; }
+  _block > "${PATH_SECRETS}/.gitignore"
+  printf 'ciphertext-bytes' > "${PATH_SECRETS}/Secret.leak.enc"
+  for target in Secret.leak.enc .gitignore ''; do
+    rm -rf -- "${PATH_SECRETS}/Secret.app.default.K"
+    if [[ -z "${target}" ]]; then
+      mkdir "${PATH_SECRETS}/Secret.app.default.K"
+    else
+      ln -s "${target}" "${PATH_SECRETS}/Secret.app.default.K"
+    fi
+    before="$(_store_state "${PATH_SECRETS}")"
+    run secrets::set
+    [ "$status" -eq 1 ] || { echo "${target:-a directory}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] .secrets/Secret.app.default.K${_not_regular}lo stopped before the plaintext write — remove it, then run this command again" ] || {
+      echo "${target:-a directory}: $output" >&2; return 1; }
+    [ "$(_store_state "${PATH_SECRETS}")" = "${before}" ] || { echo "${target:-a directory}: a store entry changed" >&2; return 1; }
+  done
+}
+
+# _hard_link_replaced <want> — the plaintext file Secret.app.default.K was a
+# hard link of elsewhere: it holds <want> with mode 600, elsewhere holds
+# old, the two are different files, and no temp file is left (Go twin:
+# hardLinkReplaced).
+_hard_link_replaced() {
+  local dest="${PATH_SECRETS}/Secret.app.default.K" other="${BATS_TEST_TMPDIR}/elsewhere"
+  [ "$(< "${dest}")" = "${1}" ] || { echo "the plaintext file: $(< "${dest}")" >&2; return 1; }
+  [ "$(< "${other}")" = old ] || { echo "the other name of the hard link: $(< "${other}")" >&2; return 1; }
+  [ ! "${dest}" -ef "${other}" ] || { echo "the plaintext file is still a hard link" >&2; return 1; }
+  [ "$(stat -c %a -- "${dest}")" = 600 ] || { echo "mode $(stat -c %a -- "${dest}")" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '.Secret.app.default.K.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+}
+
+# set replaces a hard link at the plaintext file as a name: the other name
+# keeps its old content (Go twin: TestSetReplacesAHardLinkedPlaintextFile).
+@test "secrets set: a hard link at the plaintext file is replaced as a name" {
+  :args() { name=app key=K value=new; }
+  secrets::_live_drift() { :; }
+  _block > "${PATH_SECRETS}/.gitignore"
+  printf 'old' > "${BATS_TEST_TMPDIR}/elsewhere"
+  ln "${BATS_TEST_TMPDIR}/elsewhere" "${PATH_SECRETS}/Secret.app.default.K"
+  run secrets::set
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  _hard_link_replaced new
+}
+
+# decrypt refuses a plaintext file that is a symlink (to a file that git
+# commits) before its first write and before the key lookup: nothing is
+# written, and the file that the link names keeps its bytes. ssh-to-age and
+# sops are functions that log a call (Go twin:
+# TestDecryptRefusesALinkedPlaintextFile).
+@test "secrets decrypt: a plaintext file that is a symlink is refused before any write" {
+  local log="${BATS_TEST_TMPDIR}/tools.log" target before
+  ssh-to-age() { echo ssh-to-age >> "${log}"; return 1; }
+  sops() { echo sops >> "${log}"; return 1; }
+  export SOPS_AGE_KEY=stub-identity
+  _block > "${PATH_SECRETS}/.gitignore"
+  printf 'x' > "${PATH_SECRETS}/Secret.app.default.K.enc"
+  printf 'ciphertext-bytes' > "${PATH_SECRETS}/Secret.leak.enc"
+  for target in Secret.leak.enc .gitignore; do
+    rm -f -- "${PATH_SECRETS}/Secret.app.default.K"
+    ln -s "${target}" "${PATH_SECRETS}/Secret.app.default.K"
+    before="$(_store_state "${PATH_SECRETS}")"
+    run secrets::decrypt < /dev/null
+    [ "$status" -eq 1 ] || { echo "${target}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] .secrets/Secret.app.default.K${_not_regular}decrypt would write the plaintext of Secret.app.default.K.enc there
+[error] decrypt wrote no plaintext file: remove these entries, then run this command again" ] || {
+      echo "${target}: $output" >&2; return 1; }
+    [ "$(_store_state "${PATH_SECRETS}")" = "${before}" ] || { echo "${target}: a store entry changed" >&2; return 1; }
+    [ ! -e "${log}" ] || { echo "${target}: a tool ran: $(< "${log}")" >&2; return 1; }
+  done
+}
+
+# decrypt replaces a hard link at the plaintext file as a name: the other
+# name keeps its old content, and the plaintext file holds the decrypted
+# value. The plaintext is older than its .enc, so decrypt writes it. sops
+# is a function that prints the value (Go twin:
+# TestDecryptReplacesAHardLinkedPlaintextFile).
+@test "secrets decrypt: a hard link at the plaintext file is replaced as a name" {
+  sops() { [ "${1}" = decrypt ] || return 1; builtin printf 'decrypted-value'; }
+  export SOPS_AGE_KEY=stub-identity
+  _block > "${PATH_SECRETS}/.gitignore"
+  printf 'x' > "${PATH_SECRETS}/Secret.app.default.K.enc"
+  printf 'old' > "${BATS_TEST_TMPDIR}/elsewhere"
+  touch -t 202001010000 "${BATS_TEST_TMPDIR}/elsewhere"
+  ln "${BATS_TEST_TMPDIR}/elsewhere" "${PATH_SECRETS}/Secret.app.default.K"
+  run secrets::decrypt < /dev/null
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = 'Decrypted 1 secret(s)' ] || { echo "$output" >&2; return 1; }
+  _hard_link_replaced decrypted-value
+}
+
+# A path of a refusal prints with printable bytes only: a file name and a
+# store name with a control byte show it as ? (Go twin:
+# TestPlaintextRefusalsPrintAPathAsPrintable).
+@test "secrets: a refused plaintext file prints its path with printable bytes only" {
+  local name=$'Secret.app.default.K\e[2J'
+  export SOPS_AGE_KEY=stub-identity
+  _block > "${PATH_SECRETS}/.gitignore"
+  printf 'x' > "${PATH_SECRETS}/${name}.enc"
+  ln -s Secret.leak.enc "${PATH_SECRETS}/${name}"
+  run secrets::decrypt < /dev/null
+  [ "$status" -eq 1 ] || { echo "decrypt: status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] .secrets/Secret.app.default.K?[2J${_not_regular}decrypt would write the plaintext of Secret.app.default.K?[2J.enc there
+[error] decrypt wrote no plaintext file: remove these entries, then run this command again" ] || {
+    echo "decrypt: $output" >&2; return 1; }
+
+  :args() { name=app key=K value=the-value; }
+  secrets::_live_drift() { :; }
+  PATH_SECRETS="${PATH_BASE}/st"$'\e'"[2Jore"
+  mkdir -p "${PATH_SECRETS}/Secret.app.default.K"
+  _block > "${PATH_SECRETS}/.gitignore"
+  run secrets::set
+  [ "$status" -eq 1 ] || { echo "set: status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] st?[2Jore/Secret.app.default.K${_not_regular}lo stopped before the plaintext write — remove it, then run this command again" ] || {
+    echo "set: $output" >&2; return 1; }
+}
+
+# At the size limit, a run writes a .gitignore that the next run reads: the
+# plan of a file with no block is exactly 1048576 bytes, set writes it, and
+# a second set passes and does not write it again. One byte more is refused
+# before any write, also by the second run (Go twin:
+# TestGitignoreAtTheSizeLimitPassesTwice).
+@test "secrets set: a .gitignore plan at the size limit passes twice, and one byte more is refused twice" {
+  local blen run before
+  :args() { name=app key=K value=v; }
+  secrets::_live_drift() { :; }
+  blen="$(_block | wc -c)"
+  head -c $(( 1048576 - blen )) /dev/zero | tr '\0' '#' > "${PATH_SECRETS}/.gitignore"
+  for run in 1 2; do
+    run secrets::set
+    [ "$status" -eq 0 ] || { echo "run ${run}: status $status: $output" >&2; return 1; }
+    cmp -s "${PATH_SECRETS}/.gitignore" <(_block; head -c $(( 1048576 - blen )) /dev/zero | tr '\0' '#') || {
+      echo "run ${run}: the .gitignore has $(wc -c < "${PATH_SECRETS}/.gitignore") bytes" >&2; return 1; }
+  done
+
+  rm -f -- "${PATH_SECRETS}/Secret.app.default.K"
+  head -c $(( 1048576 - blen + 1 )) /dev/zero | tr '\0' '#' > "${PATH_SECRETS}/.gitignore"
+  for run in 1 2; do
+    before="$(_store_state "${PATH_SECRETS}")"
+    run secrets::set
+    [ "$status" -eq 1 ] || { echo "one byte more, run ${run}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] .secrets/.gitignore: with the lok8s block the file would have more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller
+[error] .secrets/.gitignore was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again" ] || {
+      echo "one byte more, run ${run}: $output" >&2; return 1; }
+    [ "$(_store_state "${PATH_SECRETS}")" = "${before}" ] || { echo "one byte more, run ${run}: a store entry changed" >&2; return 1; }
+  done
+}
+
 # A rerun of init with a config writes no config, but it checks the
 # .gitignore of the store and writes it when it needs a change, with the key
 # in the config and with another key; a refused .gitignore stops it (Go
@@ -787,6 +1047,25 @@ _refused_ignore() {
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qxE "${re}\.secrets/\.\.gitignore\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
   [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [[ "${output}" != *'rm: '* ]] || { echo "the message of rm is printed: $output" >&2; return 1; }
+
+  # The plaintext writes of set and decrypt print the same line. mv fails
+  # for a temp file, so the rename of set fails.
+  _block > "${PATH_SECRETS}/.gitignore"
+  mv() { [[ "${*}" != *.tmp-* ]] || return 1; command mv "$@"; }
+  :args() { name=app key=P value=the-value; }
+  secrets::_live_drift() { :; }
+  run secrets::set
+  unset -f mv
+  [ "$status" -eq 1 ] || { echo "set: status $status: $output" >&2; return 1; }
+  local want="^${re}\.secrets/\.Secret\.app\.default\.P\.tmp-[[:alnum:]]{6}: remove it by hand"$'\n'"\[error\] set cannot write \.secrets/Secret\.app\.default\.P: it was not changed$"
+  [[ "${output}" =~ ${want} ]] || { echo "set: $output" >&2; return 1; }
+  [ ! -e "${PATH_SECRETS}/Secret.app.default.P" ] || { echo "set wrote the plaintext" >&2; return 1; }
+  printf 'x' > "${PATH_SECRETS}/Secret.app.default.D.enc"
+  SOPS_AGE_KEY=stub-identity run secrets::decrypt < /dev/null
+  [ "$status" -eq 1 ] || { echo "decrypt: status $status: $output" >&2; return 1; }
+  want="^${re}\.secrets/\.Secret\.app\.default\.D\.tmp-[[:alnum:]]{6}: remove it by hand"$'\n'"\[error\] Failed to decrypt Secret\.app\.default\.D\.enc$"
+  [[ "${output}" =~ ${want} ]] || { echo "decrypt: $output" >&2; return 1; }
 
   printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
   run secrets::_replace "${PATH_BASE}/.sops.yaml" 'new'

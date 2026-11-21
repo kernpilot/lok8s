@@ -131,9 +131,18 @@ func TestPlanGitignore(t *testing.T) {
 		{name: "a NUL byte is refused",
 			raw:      "a\x00b\n",
 			problems: []string{testGitignoreRel + ": the file has a NUL byte, and git ends a rule at that byte: remove it"}},
-		{name: "a file at the size limit passes",
-			raw:  strings.Repeat("#", 1048576),
-			want: litBlock + strings.Repeat("#", 1048576)},
+		{name: "a plan at the size limit passes",
+			raw:  strings.Repeat("#", 1048576-len(litBlock)),
+			want: litBlock + strings.Repeat("#", 1048576-len(litBlock))},
+		{name: "a plan one byte over the size limit is refused",
+			raw:      strings.Repeat("#", 1048576-len(litBlock)+1),
+			problems: []string{testGitignoreRel + ": with the lok8s block the file would have more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller"}},
+		{name: "a file at the size limit is read, and its plan with the block is refused",
+			raw:      strings.Repeat("#", 1048576),
+			problems: []string{testGitignoreRel + ": with the lok8s block the file would have more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller"}},
+		{name: "a short block that grows past the size limit is refused",
+			raw:      litBegin + "\n" + litEnd + "\n" + strings.Repeat("#", 1048576-len(litBlock)+1),
+			problems: []string{testGitignoreRel + ": with the lok8s block the file would have more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller"}},
 		{name: "a file larger than the size limit is refused",
 			raw:      strings.Repeat("#", 1048577),
 			problems: []string{testGitignoreRel + ": the file has more than 1048576 bytes, and lo does not read a larger .gitignore: make it smaller"}},
@@ -190,6 +199,9 @@ func TestPlanGitignoreKeepsTheBOMAtTheStart(t *testing.T) {
 		{name: "a BOM before a negation on the first line",
 			raw:      litBOM + "!plain\n",
 			problems: []string{lineRefusal("1", litNegation)}},
+		{name: "a BOM on line 3 is bytes of that line, not a second start",
+			raw:  "a\nb\n" + litBOM + "!plain\n",
+			want: litBlock + "a\nb\n" + litBOM + "!plain\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			planCase(t, tc.raw, tc.want, tc.problems)
@@ -303,6 +315,7 @@ func TestGitignoreKeepsPlaintextOutOfGit(t *testing.T) {
 			"!*\n!Secret.app.default.K\n!restore.d/\n!Secret.x.enc/\n" + litBlock + "\\!x\n*.log\n# note\n\n"},
 		{"a BOM and a file with no block", litBOM + "mine\n"},
 		{"the legacy lines", litLegacy + "extra\n"},
+		{"a BOM on line 3 below the block", litBlock + "a\nb\n" + litBOM + "!Secret.app.default.K\n"},
 	} {
 		plan, problems := planGitignore([]byte(tc.raw), testGitignoreRel)
 		if problems != nil {

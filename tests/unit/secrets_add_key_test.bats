@@ -636,7 +636,7 @@ _ls_then_missing() {
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   tail="[error] cannot write ${store}/.gitignore: it was not changed
 [error]   add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again"
-  [[ "${output}" == *$'\n'"${tail}" && "${output}" != *"added recipient"* ]] || { echo "$output" >&2; return 1; }
+  [[ "${output}" == "${tail}" ]] || { echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ "$(_state "${store}")" = "${before}" ] || { echo "a store file changed" >&2; return 1; }
   [ ! -s "${SOPS_LOG}" ]

@@ -228,7 +228,9 @@ commands refuse these files:
 
 - A NUL byte, because git ends a rule at that byte.
 
-- A file larger than 1 MiB (1048576 bytes), or a file that lo cannot read.
+- A file larger than 1 MiB (1048576 bytes), a file that would be larger
+  than 1 MiB with the block of lo, or a file that lo cannot read. Thus a
+  run never writes a `.gitignore` that the next run refuses.
 
 A rule above the block has no effect, because the `*` of the block comes
 after it. A rule below the block that ignores more files passes.
@@ -252,8 +254,35 @@ a ciphertext: `encrypt`, `list` and `print` read it as a ciphertext, and
 `decrypt` fails on it. Move such a file out of the store, and set the value
 again with a key that does not end in `.enc`.
 
-The secret generator of `lo build` writes its plaintext files without these
-checks, and it does not refuse a key that ends in `.enc`.
+`set` writes its plaintext file to `Secret.<name>.<namespace>.<key>` at the
+top of the store. Before it reads the value (from the argument, a prompt or
+stdin) and before any write, it refuses a name, a namespace or a key that
+contains a `/`, a `\` or a control byte, or that is `.` or `..`. Such a part
+can make the file name a path into another directory: with a directory
+`Secret.app.default.anchor/` in the store, the key `anchor/../.gitignore`
+names the `.gitignore`. The error names the field and its text, never the
+value. Letters, digits, `.`, `-` and `_` (the characters of the names and
+keys of Kubernetes) pass, and so does each other byte.
+
+`set` and `decrypt` write a plaintext file only to a regular file or to a
+path that does not exist yet. When the plaintext path is a symlink (for
+example, to an `.enc` file or to the `.gitignore`), a directory, a FIFO, a
+socket or a device, or when its lookup fails, the command stops with an
+error that names the path. It writes nothing there or through it. `decrypt`
+checks the plaintext path of each `.enc` file before its first write, also
+for a plaintext that it would keep. Remove the entry, then run the command
+again. The plaintext goes to a new private temp file in the store (mode
+0600), then a rename puts it at the plaintext path. Thus a hard link to the
+old file keeps the old content. When the write fails, the command names the
+plaintext file and removes the temp file, and the old file stays. The check
+and the rename are two steps: lo does not stop a program that replaces the
+path between them, and `set` and `decrypt` do not lock the store. In the
+bash implementation, `set` and `decrypt` need a `mv` that takes `-T` (see the
+encrypt below), also without `--encrypt`.
+
+The secret generator of `lo build` writes plaintext into the store with no
+`.gitignore` check and no `.enc` reservation: it does not refuse a key that
+ends in `.enc`.
 
 The `.gitignore` of the store does not cover these cases:
 
@@ -271,6 +300,10 @@ The `.gitignore` of the store does not cover these cases:
 
 - lo trusts the store directory and its parent directories. It follows a
   symlink to the store or to a parent directory.
+
+- lo checks only the files that it writes. A plaintext file that a user
+  renames (for example, to a name that ends in `.enc`) is outside these
+  checks.
 
 A rewrite of the `.gitignore` goes to a temp file in the store and a rename,
 so a hard link to the old file keeps its content. The new file gets mode

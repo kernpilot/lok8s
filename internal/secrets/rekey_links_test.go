@@ -746,8 +746,9 @@ func TestEnsureGitignoreReplacesAHardLink(t *testing.T) {
 }
 
 // A .gitignore that it cannot write (the store is read-only): the old file
-// stays, and ensureGitignore prints the error and a last line that names the
-// file, and returns ErrHandled (bash: tests/unit/secrets_test.bats).
+// stays, and ensureGitignore prints one line that names the file, with no
+// error text of the file system, and returns ErrHandled (bash:
+// tests/unit/secrets_test.bats).
 func TestEnsureGitignoreReportsAWriteThatFails(t *testing.T) {
 	skipUnlessPermissionsHold(t)
 	c, _, errOut := testEnv(t)
@@ -760,7 +761,7 @@ func TestEnsureGitignoreReportsAWriteThatFails(t *testing.T) {
 	if err := c.ensureGitignore(dir, stepPlaintext); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 	}
-	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
+	if errOut.String() != "[error] cannot write .secrets/.gitignore: it was not changed\n" {
 		t.Errorf("stderr:\n%s", errOut.String())
 	}
 	if got := readFile(t, dir+"/.gitignore"); got != "# old\n" {
@@ -783,7 +784,7 @@ func TestInitReturnsAGitignoreWriteThatFails(t *testing.T) {
 	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 	}
-	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
+	if errOut.String() != "[error] cannot write .secrets/.gitignore: it was not changed\n" {
 		t.Errorf("stderr:\n%s", errOut.String())
 	}
 }
@@ -846,10 +847,10 @@ func TestAddKeyWritesTheGitignoreBeforeTheConfig(t *testing.T) {
 	if err := f.run(); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 	}
-	want := "\n[error] cannot write " + f.c.rel(f.store) + "/.gitignore: it was not changed\n" +
+	want := "[error] cannot write " + f.c.rel(f.store) + "/.gitignore: it was not changed\n" +
 		"[error]   add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again\n"
-	if !strings.HasSuffix(f.errOut.String(), want) || f.out.String() != "" {
-		t.Errorf("stdout %q\nstderr:\n%q\nwant the end:\n%q", f.out.String(), f.errOut.String(), want)
+	if f.errOut.String() != want || f.out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 	}
 	unchanged(t, f.c, before)
 	if err := os.Chmod(f.store, mode); err != nil {
@@ -1300,10 +1301,11 @@ func TestAddKeyRerunRefusesAnEncLargerThanTheLimit(t *testing.T) {
 
 // A write of the .gitignore that stops part way (the writeGitignore seam
 // writes half the content, then fails): add-key stops before .sops.yaml, the
-// old .gitignore stays, and no temp file is left. The error comes first,
-// then the line that names the file. The seam counts its calls, so the test
-// knows that the write ran. The control: with the real write, the run
-// passes and writes the .gitignore (bash: tests/unit/secrets_test.bats).
+// old .gitignore stays, and no temp file is left. Only the line that names
+// the file is printed, not the error of the write. The seam counts its
+// calls, so the test knows that the write ran. The control: with the real
+// write, the run passes and writes the .gitignore (bash:
+// tests/unit/secrets_test.bats).
 func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 	f := newLinkFixture(t, "add-key")
 	write(t, f.store+"/.gitignore", "# old\n")
@@ -1323,8 +1325,7 @@ func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 	if err := f.run(); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 	}
-	want := "no space left on device\n" +
-		"[error] cannot write " + f.c.rel(f.store) + "/.gitignore: it was not changed\n" +
+	want := "[error] cannot write " + f.c.rel(f.store) + "/.gitignore: it was not changed\n" +
 		"[error]   add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again\n"
 	if f.errOut.String() != want || f.out.String() != "" {
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)

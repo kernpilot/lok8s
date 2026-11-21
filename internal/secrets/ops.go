@@ -439,11 +439,26 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 		ui.ErrorTo(c.ErrOut, "Key argument is required")
 		return ErrHandled
 	}
-	// Before the prompt and any write: a plaintext name that ends in .enc
-	// (reservedPlaintextName). The rule !Secret.*.enc of the .gitignore
-	// re-includes it, and git would commit the plaintext. The refusal names
-	// the key and the file, never the value.
-	if base := "Secret." + name + "." + namespace + "." + key; reservedPlaintextName(base) {
+	// Before the prompt and any write: each part of the name of the
+	// plaintext file is one part of a path (setPartProblem), and the file is
+	// an entry of the store itself (setDestination). The store of this check
+	// is StorePath: the write below checks the resolved store again. Each
+	// refusal names the field and its text, never the value.
+	for _, part := range []struct{ field, text string }{{"name", name}, {"namespace", namespace}, {"key", key}} {
+		if why := setPartProblem(part.text); why != "" {
+			ui.ErrorTo(c.ErrOut, "the %s '%s' is refused: %s. Nothing was written: use a %s without it", part.field, printable(part.text), why, part.field)
+			return ErrHandled
+		}
+	}
+	base := "Secret." + name + "." + namespace + "." + key
+	if _, ok := setDestination(c.StorePath(), base); !ok {
+		c.refuseSetDestination(base)
+		return ErrHandled
+	}
+	// A plaintext name that ends in .enc (reservedPlaintextName). The rule
+	// !Secret.*.enc of the .gitignore re-includes it, and git would commit
+	// the plaintext.
+	if reservedPlaintextName(base) {
 		ui.ErrorTo(c.ErrOut, "the key '%s' is refused: the plaintext file %s would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc", printable(key), printable(base))
 		return ErrHandled
 	}
@@ -490,19 +505,37 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		return err
 	}
+	cacheFile, ok := setDestination(secretsDir, base)
+	if !ok {
+		c.refuseSetDestination(base)
+		return ErrHandled
+	}
+	// The plaintext file is a regular file or absent (encDestinationOK): a
+	// symlink, a directory, a FIFO, a socket or a device is refused, and
+	// nothing is written. The write below renames over the name, so it
+	// never writes through a link at it.
+	if !encDestinationOK(cacheFile) {
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before %s — remove it, then run this command again", printable(c.rel(cacheFile)), stepPlaintext)
+		return ErrHandled
+	}
 	// Before the plaintext: the .gitignore that keeps it out of git.
 	if err := c.ensureGitignore(secretsDir, stepPlaintext); err != nil {
 		return err
 	}
 
-	cacheFile := secretsDir + "/Secret." + name + "." + namespace + "." + key
-	if err := os.WriteFile(cacheFile, []byte(value), 0o600); err != nil {
+	// A new private temp file in the store (mode 0600, made with an
+	// exclusive create) and a rename onto cacheFile (writeReplacing). A
+	// symlink or a hard link at cacheFile is replaced as a name: the file
+	// that it names, or the other name of a hard link, keeps its old
+	// content.
+	if err := writeReplacing(cacheFile, 0o600, func(w io.Writer) error {
+		_, err := io.WriteString(w, value)
 		return err
+	}); err != nil {
+		c.reportFailedWrite(err, "set cannot write "+printable(c.rel(cacheFile))+": it was not changed")
+		return ErrHandled
 	}
-	if err := os.Chmod(cacheFile, 0o600); err != nil {
-		return err
-	}
-	ui.Debug("Wrote %s", cacheFile)
+	ui.Debug("Wrote %s", printable(cacheFile))
 
 	if doEncrypt {
 		// Encrypt ONLY this one file — never a whole-store sweep (a sweep
@@ -530,6 +563,13 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	c.liveDrift(ctx, name, namespace, key, value)
 	fmt.Fprintf(c.Out, "Set %s/%s/%s\n", name, namespace, key)
 	return nil
+}
+
+// refuseSetDestination prints the refusal of a plaintext file of set that is
+// not an entry of the store itself (setDestination; bash: the same line in
+// secrets::set).
+func (c *Context) refuseSetDestination(base string) {
+	ui.ErrorTo(c.ErrOut, "the plaintext file %s is refused: it is not a file of the store directory itself. Nothing was written: use a name, a namespace and a key without a path part", printable(base))
 }
 
 // ── Encrypt ──────────────────────────────────────────────
@@ -749,9 +789,10 @@ func (c *Context) Decrypt(sshKey string) error {
 		return nil
 	}
 	// Before any write: a ciphertext whose plaintext name ends in .enc
-	// (refuseReservedDestinations). Then, before the first plaintext, the
-	// .gitignore that keeps it out of git.
-	if c.refuseReservedDestinations(secretsDir) {
+	// (refuseReservedDestinations), and a plaintext name that is not a
+	// regular file and not absent (refuseLinkedDestinations). Then, before
+	// the first plaintext, the .gitignore that keeps it out of git.
+	if c.refuseReservedDestinations(secretsDir) || c.refuseLinkedDestinations(secretsDir) {
 		return ErrHandled
 	}
 	if err := c.ensureGitignore(secretsDir, stepDecrypt); err != nil {
@@ -807,7 +848,7 @@ func (c *Context) Decrypt(sshKey string) error {
 		if fsutil.IsRegular(plaintext) && newerThan(plaintext, encFile) {
 			cur, err := os.ReadFile(plaintext)
 			if err != nil {
-				ui.ErrorTo(c.ErrOut, "Failed to read %s", filepath.Base(plaintext))
+				ui.ErrorTo(c.ErrOut, "Failed to read %s", printable(filepath.Base(plaintext)))
 				return ErrHandled
 			}
 			dec, err := decryptEncFile(encFile, ageKey)
@@ -815,35 +856,40 @@ func (c *Context) Decrypt(sshKey string) error {
 				// No library error on this path: a sops error can carry
 				// digests of the plaintext (bash discards the CLI's stderr
 				// here for the same reason).
-				ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
+				ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", printable(base))
 				return ErrHandled
 			}
 			if bytes.Equal(dec, cur) {
 				skippedEqual++
 			} else {
-				ui.WarnTo(c.ErrOut, "%s: the plaintext is newer than %s and differs from it. Decrypt kept the plaintext.", filepath.Base(plaintext), base)
+				ui.WarnTo(c.ErrOut, "%s: the plaintext is newer than %s and differs from it. Decrypt kept the plaintext.", printable(filepath.Base(plaintext)), printable(base))
 				skippedDiffer++
 			}
 			continue
 		}
 
-		ui.Debug("Decrypting %s", base)
+		ui.Debug("Decrypting %s", printable(base))
 		raw, err := os.ReadFile(encFile)
+		var dec []byte
 		if err == nil {
-			var dec []byte
-			if dec, err = sopsDecryptData(raw, ageKey); err == nil {
-				err = os.WriteFile(plaintext, dec, 0o600)
-			}
+			dec, err = sopsDecryptData(raw, ageKey)
 		}
 		if err != nil {
 			// The [error] line names the file only. The bash path discards
 			// the sops CLI's stderr: a MAC mismatch prints two unkeyed
 			// SHA-512 digests of the plaintext. Both print this one line.
-			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
+			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", printable(base))
 			return ErrHandled
 		}
-		if err := os.Chmod(plaintext, 0o600); err != nil {
+		// A new private temp file in the store (mode 0600) and a rename onto
+		// the plaintext file (writeReplacing): a hard link there is replaced
+		// as a name, and its other name keeps its old content.
+		if err := writeReplacing(plaintext, 0o600, func(w io.Writer) error {
+			_, err := w.Write(dec)
 			return err
+		}); err != nil {
+			c.reportFailedWrite(err, "decrypt cannot write "+printable(c.rel(plaintext))+": it was not changed")
+			return ErrHandled
 		}
 		// An .enc dated in the future keeps the plaintext the older file,
 		// as in the bash twin, which sets no time. On an equal time the
@@ -893,6 +939,31 @@ func (c *Context) refuseReservedDestinations(dir string) bool {
 	}
 	if refused {
 		ui.ErrorTo(c.ErrOut, "decrypt wrote no plaintext file: move these .enc files out of the store, then run this command again")
+	}
+	return refused
+}
+
+// refuseLinkedDestinations prints a refusal and returns true when the
+// plaintext file of a ciphertext of the store dir is not a regular file
+// and not absent (encDestinationOK; bash: secrets::_decrypt_links): a
+// symlink, a directory, a FIFO, a socket or a device, or its lookup fails.
+// A symlink there can name a file that git commits (Secret.x.enc, the
+// .gitignore). Decrypt runs it before its first write, also for a
+// plaintext that it would keep. It reads the same entries as the decrypt
+// loop.
+func (c *Context) refuseLinkedDestinations(dir string) bool {
+	refused := false
+	for _, base := range storeEntries(dir, "Secret.") {
+		if !strings.HasSuffix(base[len("Secret."):], ".enc") || !fsutil.IsRegular(dir+"/"+base) {
+			continue
+		}
+		if dest := dir + "/" + strings.TrimSuffix(base, ".enc"); !encDestinationOK(dest) {
+			ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: decrypt would write the plaintext of %s there", printable(c.rel(dest)), printable(base))
+			refused = true
+		}
+	}
+	if refused {
+		ui.ErrorTo(c.ErrOut, "decrypt wrote no plaintext file: remove these entries, then run this command again")
 	}
 	return refused
 }
