@@ -29,6 +29,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // binaryStore is the store the sops CLI uses for --input-type/--output-type
@@ -114,57 +115,22 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 	return nil
 }
 
-// writeReplacing writes path through a temp file in the same directory, mode
-// perm, and a rename over path; write fills the temp file. A write that
-// fails leaves the old file as it was, and the temp file is removed. The
-// rename replaces a symlink or a hard link at path instead of writing
-// through it. The temp name starts with a dot, so the store reads
-// (Secret.*) never list it.
+// writeReplacing is storeguard.WriteReplacing: a temp file in the same
+// directory (dot-named, so the store reads never list it), mode perm, a
+// sync and a rename over path. A write that fails leaves the old file as
+// it was. The rename replaces a symlink or a hard link at path instead of
+// writing through it.
 func writeReplacing(path string, perm fs.FileMode, write func(io.Writer) error) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	err = tmp.Chmod(perm)
-	if err == nil {
-		err = write(tmp)
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(name, path)
-	}
-	if err != nil {
-		err = removeTemp(err, name)
-	}
-	return err
+	return storeguard.WriteReplacing(path, perm, write)
 }
 
-// removeTemp removes name, the temp file of a write that failed. A remove
-// that fails too gives a *tempLeftError: the temp file stays, and
-// reportTempLeft names it. A temp file that is gone already is no error.
-func removeTemp(err error, name string) error {
-	if rerr := os.Remove(name); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
-		return &tempLeftError{err: err, name: name, rm: rerr}
-	}
-	return err
-}
+// removeTemp is storeguard.RemoveTemp: it removes name, the temp file of a
+// write that failed, and gives a *tempLeftError when that remove fails too.
+func removeTemp(err error, name string) error { return storeguard.RemoveTemp(err, name) }
 
 // tempLeftError is the error of a write through a temp file that failed,
 // and whose temp file stays because its remove failed too.
-type tempLeftError struct {
-	err  error  // the error of the write
-	name string // the temp file that stays
-	rm   error  // the error of the remove
-}
-
-func (e *tempLeftError) Error() string {
-	return fmt.Sprintf("%v; cannot remove the temp file %s: %v", e.err, e.name, e.rm)
-}
-
-func (e *tempLeftError) Unwrap() []error { return []error{e.err, e.rm} }
+type tempLeftError = storeguard.TempLeftError
 
 // reportTempLeft prints the error of a write whose temp file stays: the
 // write error and the remove error (in bash, the tools print them), then
@@ -177,9 +143,9 @@ func (c *Context) reportTempLeft(err error) bool {
 	if !errors.As(err, &left) {
 		return false
 	}
-	fmt.Fprintln(c.ErrOut, left.err)
-	fmt.Fprintln(c.ErrOut, left.rm)
-	ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", c.rel(left.name))
+	fmt.Fprintln(c.ErrOut, left.Err)
+	fmt.Fprintln(c.ErrOut, left.Rm)
+	ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", c.rel(left.Name))
 	return true
 }
 

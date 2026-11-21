@@ -356,9 +356,9 @@ func TestReportFailedWritePrintsNoErrorText(t *testing.T) {
 	c, _, errOut := testEnv(t)
 	tmp := c.Paths.Base + "/.secrets/.Secret.app.default.K\x1b[2J.tmp-123"
 	left := &tempLeftError{
-		err:  fmt.Errorf("write %s: no space left on device", tmp),
-		name: tmp,
-		rm:   fmt.Errorf("remove %s: permission denied", tmp),
+		Err:  fmt.Errorf("write %s: no space left on device", tmp),
+		Name: tmp,
+		Rm:   fmt.Errorf("remove %s: permission denied", tmp),
 	}
 	c.reportFailedWrite(left, "set cannot write .secrets/Secret.app.default.K?[2J: it was not changed")
 	want := "[error] cannot remove the temp file .secrets/.Secret.app.default.K?[2J.tmp-123: remove it by hand\n" +

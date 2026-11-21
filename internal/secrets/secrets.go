@@ -26,11 +26,9 @@
 package secrets
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,6 +44,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // ErrHandled marks an error whose message was already printed in the bash
@@ -156,58 +155,48 @@ func (c *Context) sopsConfigPath() string {
 // lo can make it do so, and prints the refusal when it cannot (bash:
 // secrets::_gitignore_ok). step names the step of the command that the
 // check stops before. Init and AddKey check the store that they write
-// before their first write, so the refusal comes before any change.
+// before their first write, so the refusal comes before any change. The
+// plan and its refusals are storeguard's (Guard.GitignorePlan).
 func (c *Context) gitignoreOK(dir, step string) bool {
-	_, _, ok := c.gitignorePlan(dir, step)
-	return ok
+	if _, _, err := c.guard().GitignorePlan(dir, step); err != nil {
+		_ = c.printStop(err)
+		return false
+	}
+	return true
 }
 
-// gitignorePlan reads the .gitignore of dir once and returns the bytes that
-// it must have (planGitignore), and whether they differ from the file
-// (write). It prints the refusal and returns ok false in these cases:
-//   - The .gitignore is not a regular file and not absent (encDestinationOK):
-//     a symlink, a directory, a FIFO, a socket or a device, or its lookup
-//     fails. The write would go through a link to the file that it names,
-//     and git does not read a .gitignore that is a symlink.
-//   - The file cannot be read: a rewrite would drop the lines of the user.
-//   - The file cannot protect the store (planGitignore).
-//
-// It reads at most gitignoreMaxBytes and one byte more, and the plan
-// refuses a file larger than that. Each refusal names step, the step of the
-// command that the check stops before, and the file with printable bytes
-// only.
-func (c *Context) gitignorePlan(dir, step string) (want []byte, write, ok bool) {
-	gitignore := dir + "/.gitignore"
-	rel := printable(c.rel(gitignore))
-	if !encDestinationOK(gitignore) {
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before %s — remove it, then run this command again", rel, step)
-		return nil, false, false
+// guard is the storeguard.Guard of this context: a path in a message is
+// relative to the project, and the .gitignore write goes through the
+// writeGitignore seam.
+func (c *Context) guard() storeguard.Guard {
+	return storeguard.Guard{
+		Rel:           c.rel,
+		FillGitignore: func(w io.Writer, want []byte) error { return writeGitignore(w, want) },
 	}
-	f, err := os.Open(gitignore)
-	if errors.Is(err, fs.ErrNotExist) {
-		return []byte(gitignoreContent), true, true
+}
+
+// printStop prints each line of a *storeguard.Stop as an [error] line and
+// returns ErrHandled. Any other error comes back as it is.
+func (c *Context) printStop(err error) error {
+	s, ok := errors.AsType[*storeguard.Stop](err)
+	if !ok {
+		return err
 	}
-	var raw []byte
-	if err == nil {
-		raw, err = io.ReadAll(io.LimitReader(f, gitignoreMaxBytes+1))
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
+	for _, l := range s.Lines {
+		ui.ErrorTo(c.ErrOut, "%s", l)
 	}
-	var problems []string
-	if err != nil {
-		problems = []string{"cannot read " + rel}
-	} else {
-		want, problems = planGitignore(raw, rel)
+	return ErrHandled
+}
+
+// writePlaintext writes data into the plaintext file p of a store through
+// storeguard (Guard.WritePlaintext: the name checks, the link check and the
+// .gitignore before the write, then a temp file and a rename). It prints a
+// refusal or a failed write and returns ErrHandled.
+func (c *Context) writePlaintext(p storeguard.Plaintext, data []byte) error {
+	if err := c.guard().WritePlaintext(p, data); err != nil {
+		return c.printStop(err)
 	}
-	if problems != nil {
-		for _, p := range problems {
-			ui.ErrorTo(c.ErrOut, "%s", p)
-		}
-		ui.ErrorTo(c.ErrOut, "%s", gitignoreFinal(rel, step))
-		return nil, false, false
-	}
-	return want, !bytes.Equal(raw, want), true
+	return nil
 }
 
 // initStorePath is the store whose .gitignore Init writes, read before its
@@ -222,49 +211,35 @@ func (c *Context) initStorePath() string {
 }
 
 // ensureGitignore makes sure the secrets dir has a .gitignore that blocks
-// plaintext but allows .enc files (bash: secrets::_ensure_gitignore). It
-// writes the file only when its bytes differ from the plan (gitignorePlan):
-// no file, no block, the legacy lines, or a changed block. A refused file
-// is not changed, and ensureGitignore returns ErrHandled. The write goes to
-// a temp file in the store and a rename over the old name (writeReplacing,
-// mode 0644): it replaces a link or a hard link instead of writing through
-// it. A write that fails leaves the old file as it was, prints one line
-// that names the file (reportFailedWrite: no error text of the file
-// system), and returns ErrHandled. step names the step of the command that
-// a refusal stops before (gitignorePlan).
-//
-// The file gets mode 0644 on each rewrite: the .gitignore is committed, and
-// git reads the same rules for each user of the repository. It holds no
-// secret.
+// plaintext but allows .enc files (bash: secrets::_ensure_gitignore;
+// storeguard: Guard.EnsureGitignore). It writes the file only when its
+// bytes differ from the plan: no file, no block, the legacy lines, or a
+// changed block. A refused file is not changed. The write goes to a temp
+// file in the store and a rename over the old name: it replaces a link or
+// a hard link instead of writing through it. A write that fails leaves the
+// old file as it was and prints one line that names the file (no error
+// text of the file system). A refusal and a failed write return
+// ErrHandled. step names the step of the command that a refusal stops
+// before.
 func (c *Context) ensureGitignore(dir, step string) error {
-	gitignore := dir + "/.gitignore"
-	want, write, ok := c.gitignorePlan(dir, step)
-	if !ok {
-		return ErrHandled
+	wrote, err := c.guard().EnsureGitignore(dir, step)
+	if err != nil {
+		return c.printStop(err)
 	}
-	if !write {
-		return nil
+	if wrote {
+		ui.Debug("Wrote %s", printable(dir+"/.gitignore"))
 	}
-	if err := writeReplacing(gitignore, 0o644, func(w io.Writer) error { return writeGitignore(w, want) }); err != nil {
-		c.reportFailedWrite(err, "cannot write "+printable(c.rel(gitignore))+": it was not changed")
-		return ErrHandled
-	}
-	ui.Debug("Wrote %s", printable(gitignore))
 	return nil
 }
 
 // reportFailedWrite prints the lines of a write through writeReplacing that
-// failed, on a file that lo checks before it writes it (the .gitignore of a
-// store, a plaintext file of set and decrypt): the temp file that stays, if
-// its remove failed too, then final (bash: the same lines in
-// secrets::_ensure_gitignore and secrets::_plain_write_failed). It prints
-// no error text of the file system, because that text has the raw path. A
-// path prints with printable bytes only.
+// failed, on a file that lo checks before it writes it (bash: the same
+// lines in secrets::_ensure_gitignore and secrets::_plain_write_failed):
+// the temp file that stays, if its remove failed too, then final
+// (storeguard: Guard.FailedWrite). It prints no error text of the file
+// system, because that text has the raw path.
 func (c *Context) reportFailedWrite(err error, final string) {
-	if left, ok := errors.AsType[*tempLeftError](err); ok {
-		ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", printable(c.rel(left.name)))
-	}
-	ui.ErrorTo(c.ErrOut, "%s", final)
+	_ = c.printStop(c.guard().FailedWrite(err, final))
 }
 
 // writeGitignore fills the temp file of the .gitignore write of
