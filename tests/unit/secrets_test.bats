@@ -609,8 +609,12 @@ _git_would_add() {
 # only the .gitignore and the ciphertext of the top of the store, with
 # core.ignorecase off and on. The rules above the block (also the negations
 # there) and the accepted rules below it change nothing (Go twin:
-# TestGitignoreKeepsPlaintextOutOfGit).
+# TestGitignoreKeepsPlaintextOutOfGit). The argsh container of CI has no
+# git, so the test skips there; CI runs the real-git tag again on the
+# runner, where a skip fails the step.
+# bats test_tags=real-git
 @test "secrets: with the .gitignore of lo, git commits only the .gitignore and the ciphertext" {
+  command -v git >/dev/null 2>&1 || skip "git not installed"
   local want=$'.secrets/.gitignore\n.secrets/Secret.app.default.K.enc' input ic got
   local -a inputs=(
     ''
