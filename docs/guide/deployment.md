@@ -868,7 +868,15 @@ cluster, so keep it private. CI needs no platform token.
 A public repository shows its job logs and job summaries to everyone, so the
 workflow keeps the ticket out of them:
 
-- The job log shows `<hidden: one-time claim ticket>` in place of the ticket.
+- Both workflows pipe the output of `lo` into the log filter, and the
+  runner sets `CI`. So the stdout of `lo` is not a terminal, and `lo` prints
+  `<hidden: one-time claim ticket>` in place of the ticket. Do not add
+  `--print-token` to a CI job: with it, `lo` prints the ticket on any
+  stdout. A terminal is not a private place either: a pty that a runner
+  gives a job, a terminal recording and the scrollback keep what `lo`
+  prints. In a CI run, `lo` hides the ticket on a terminal too.
+- The workflow also filters the job log, as a second layer. The filter puts
+  the same placeholder in place of a ticket that gets through.
   The log also hides every other string with the shape of an MD5 fingerprint
   (16 or more pairs of hex digits, with a colon between each two), for example
   the server-key fingerprint of the legacy registration. A longer run of such
@@ -879,9 +887,10 @@ workflow keeps the ticket out of them:
   (**Security → SSH keys**, the key `kubehz-claim-<domain>`). People with
   access to that Hetzner Cloud project can read it there.
 
-The log filter covers what `lo` prints today: the ticket on one line. It is a
-text filter, not a guarantee for any encoding: a ticket split over two lines,
-or in another form, would pass it.
+The log filter covers the ticket as an older `lo`, or `lo` with
+`--print-token`, prints it: on one line. It is a text filter, not a guarantee
+for any encoding: a ticket split over two lines, or in another form, would
+pass it.
 
 Claim the cluster soon. The runner does not keep the bind secret of an earlier
 run (`clusters/<domain>/.kubehz-bind`). So each run that registers a claim key

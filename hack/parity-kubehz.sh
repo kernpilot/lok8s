@@ -1362,15 +1362,41 @@ EOF
   done
   key_reset() { rm -f "${CL}/${KEY_DOMAIN}/.kubehz-bind"; : > "${STUB_LOG}"; }
   key_check() { PARITY_PRE_EACH=key_reset PARITY_POST_EACH=unav_record check "$@"; }
+  # The stdout of the harness is not a terminal, so a register prints the
+  # placeholder in place of the one-time claim ticket (aa:bb in the stub),
+  # and with --print-token it prints the ticket. ticket_record checks the
+  # output of each implementation itself (TICKET_WANT: shown, hidden, or
+  # none for a key that lo does not replace), before the request log joins
+  # it: the comparison of the two outputs alone passes a bug that both
+  # implementations share.
+  ticket_record() {
+    local out="${WORK}/${1}.out" err="${WORK}/${1}.err"
+    local hidden_fp="  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key 'kubehz-claim-${KEY_DOMAIN}'; 'lo kubehz register --domain ${KEY_DOMAIN} --print-token' registers again and shows a new ticket)"
+    if [[ "${TICKET_WANT}" == shown ]]; then
+      grep -qxF -- "  fingerprint: aa:bb   (also visible in Hetzner Console -> Security -> SSH keys)" "${out}" ||
+        fail "${1}: lo kubehz register --domain ${KEY_DOMAIN} --print-token: no claim ticket on stdout"
+    else
+      ! grep -qF -- "aa:bb" "${out}" "${err}" ||
+        fail "${1}: lo kubehz register --domain ${KEY_DOMAIN}: the claim ticket is in the output"
+      [[ "${TICKET_WANT}" != hidden ]] || grep -qxF -- "${hidden_fp}" "${out}" ||
+        fail "${1}: lo kubehz register --domain ${KEY_DOMAIN}: no placeholder line on stdout"
+    fi
+    unav_record "${1}"
+  }
+  ticket_check() { PARITY_PRE_EACH=key_reset PARITY_POST_EACH=ticket_record check "$@"; }
   export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
   for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
-    key_check "${UNBOUND}" kubehz register --domain "${KEY_DOMAIN}"
+    TICKET_WANT=none
+    [[ "${KEY_DOMAIN}" != own-key.dev ]] || TICKET_WANT=hidden
+    ticket_check "${UNBOUND}" kubehz register --domain "${KEY_DOMAIN}"
   done
+  KEY_DOMAIN=own-key.dev TICKET_WANT=shown
+  ticket_check "${UNBOUND}" kubehz register --domain "${KEY_DOMAIN}" --print-token
   export KUBEHZ_TOKEN=parity-jwt
   for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
     key_check - kubehz deregister --domain "${KEY_DOMAIN}"
   done
-  unset KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE KEY_DOMAIN
+  unset KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE KEY_DOMAIN TICKET_WANT
   unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
 fi
 
