@@ -146,6 +146,7 @@ binaries:
   `github.com/arg-sh/argsh: {asset: argsh, onPost: "${B_BIN} builtin ${B_EVENT}"}`,
   `yq: {}`, `jq: {}`, `renvsubst: {alias: envsubst}`, `sops: {}`,
   `ssh-to-age: {}` and run `.bin/b install`.
+- **GNU coreutils for the bash side:** the frozen bash `lo kubehz` and `lo bootstrap` commands use `stat -c`, `mv -T`, `ln -T` and `realpath -e`, which only GNU coreutils has, so `lo doctor` warns when `lok8s.yaml` routes commands to bash and the first line of `stat --version` does not name GNU coreutils (on macOS: `brew install coreutils` and put its `gnubin` directory first on `PATH`, or select the Go implementation).
 - **`b` itself** is installed into `.bin/b` from its pinned release tarball
   (`b-<os>-<arch>.tar.gz`, the asset b's own installer resolves), verified
   against the SHA-256 recorded from that release's `checksums.txt` before

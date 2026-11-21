@@ -691,4 +691,33 @@ PARITY_ROUTE_GO=doctor check - doctor --no-color   # routed on both sides
 # doctor cases run with the real toolchain.
 PARITY_ROUTE_GO=version parity::probe_case "${PROJ}" check - version
 
+# The coreutils line (doctor::_coreutils, doctorCoreutils): when lok8s.yaml
+# routes commands to bash, both doctors warn if the first line of
+# `stat --version` does not name GNU coreutils. A stub stat first on PATH
+# gives the BSD answer to --version and runs the real stat for any other
+# argv. The Go side routes only version, so the Go doctor runs natively and
+# also prints its implementation line (allowed); the bash side runs the
+# whole tree. Each side must print the warning: two sides without it also
+# diff equal. With nothing routed, the Go doctor prints no warning. The
+# cases above run with the stat of the host (GNU coreutils), where both
+# sides print no coreutils line.
+cu_line="  ! bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+cu_stat="$(command -v stat)" || cu_stat=""
+if [[ -z "${cu_stat}" ]]; then
+  fail "doctor: no stat on PATH for the coreutils case"
+else
+  mkdir -p "${WORK}/cu-bin"
+  printf '#!/usr/bin/env bash\nif [[ "$*" == --version ]]; then\n  echo "stat: illegal option -- -" >&2\n  exit 1\nfi\nexec %q "$@"\n' "${cu_stat}" > "${WORK}/cu-bin/stat"
+  chmod +x "${WORK}/cu-bin/stat"
+  PATH="${WORK}/cu-bin:${PATH}" PARITY_ROUTE_GO=version check 'PATH_SECRETS|implementation: go; bash for version; tree ' doctor
+  for side in bash go; do
+    kver_pin "${side}: doctor warns without GNU coreutils" "${WORK}/${side}.out" "${cu_line}"
+  done
+  parity::select "${PROJ}" go
+  (cd "${PROJ}" && PATH="${WORK}/cu-bin:${PATH}" "${LO_BIN}" doctor </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || true
+  kver_pin "go: doctor ran with nothing routed" "${WORK}/go.out" "--- environment ---"
+  kver_pin "go: doctor prints no coreutils line with nothing routed" "${WORK}/go.out" "${cu_line}" absent
+  rm -rf "${WORK}/cu-bin"
+fi
+
 report

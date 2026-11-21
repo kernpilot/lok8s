@@ -386,3 +386,117 @@ func TestDoctorKindLineReadsTheActiveDomain(t *testing.T) {
 		}
 	}
 }
+
+// The answers of `stat --version` in TestDoctorCoreutils: stdout, stderr.
+const (
+	statGNU     = "stat (GNU coreutils) 9.12\nCopyright (C) 2026 Free Software Foundation, Inc.\n"
+	statBSD     = "stat: illegal option -- -\nusage: stat [-FLnq] [-f format | -l | -r | -s | -x] [-t timefmt] [file ...]\n"
+	statBusyBox = "stat: unrecognized option '--version'\nBusyBox v1.36.1 (2024-06-10 07:11:47 UTC) multi-call binary.\n\nUsage: stat [-ltf] [-c FMT] FILE...\n"
+	statUutils  = "stat (uutils coreutils) 0.2.2\n"
+)
+
+// statVersionRunner answers `stat --version` with stdout, stderr and err.
+// Any other command fails: the probe runs nothing else.
+func statVersionRunner(stdout, stderr string, err error) *scriptRunner {
+	return &scriptRunner{handler: func(c execx.Cmd) error {
+		if filepath.Base(c.Name) == "stat" && len(c.Args) == 1 && c.Args[0] == "--version" {
+			io.WriteString(c.Stdout, stdout)
+			io.WriteString(c.Stderr, stderr)
+			return err
+		}
+		return errors.New("unexpected command: " + c.Name)
+	}}
+}
+
+// The frozen bash libs (kubehz, bootstrap) use stat -c, mv -T, ln -T and
+// realpath -e, which only GNU coreutils has. Doctor warns when lok8s.yaml
+// routes commands to bash and the first line of `stat --version` does not
+// contain "GNU coreutils". With the Go implementation selected it prints
+// nothing and runs no stat. The bash twin (doctor::_coreutils,
+// tests/unit/doctor_test.bats) has the same cases.
+func TestDoctorCoreutils(t *testing.T) {
+	warn := "  ! " + doctorCoreutilsWarning + "\n"
+	exit1 := errors.New("exit status 1")
+	const (
+		bash  = "    default: bash\n"
+		mixed = "    bash:\n      commands: [version]\n"
+	)
+	withStat := doctorStubBin(t, "stat")
+	for _, tc := range []struct {
+		name           string
+		block          string
+		noProject      bool // a lok8s.yaml that is not a kind: Project document
+		bin            string
+		stdout, stderr string
+		err            error
+		want           string
+		probe          bool // stat --version runs
+	}{
+		{name: "GNU coreutils", block: bash, bin: withStat, stdout: statGNU, probe: true},
+		{name: "GNU coreutils, a mixed route", block: mixed, bin: withStat, stdout: statGNU, probe: true},
+		{name: "GNU coreutils with an exit code: the literal decides", block: bash, bin: withStat, stdout: statGNU, err: exit1, probe: true},
+		{name: "a BSD-like answer", block: bash, bin: withStat, stderr: statBSD, err: exit1, want: warn, probe: true},
+		{name: "a BSD-like answer, a mixed route", block: mixed, bin: withStat, stderr: statBSD, err: exit1, want: warn, probe: true},
+		{name: "a BusyBox answer", block: bash, bin: withStat, stderr: statBusyBox, err: exit1, want: warn, probe: true},
+		{name: "uutils coreutils", block: bash, bin: withStat, stdout: statUutils, want: warn, probe: true},
+		{name: "GNU coreutils only on the second line", block: bash, bin: withStat, stdout: "stat 1.0\nGNU coreutils\n", want: warn, probe: true},
+		{name: "no stat on PATH", block: bash, bin: t.TempDir(), want: warn},
+		{name: "the Go implementation: no block", block: "", bin: withStat, stderr: statBSD, err: exit1},
+		{name: "the Go implementation: default go", block: "    default: go\n", bin: withStat, stderr: statBSD, err: exit1},
+		{name: "the Go implementation: an empty command list", block: "    default: go\n    bash:\n      commands: []\n", bin: withStat, stderr: statBSD, err: exit1},
+		{name: "the Go implementation: not a Project document", block: bash, noProject: true, bin: withStat, stderr: statBSD, err: exit1},
+		{name: "an unknown default selects nothing", block: "    default: Bash\n", bin: withStat, stderr: statBSD, err: exit1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := routedProject(t, tc.block, true)
+			if tc.noProject {
+				testutil.WriteFile(t, filepath.Join(p.Base, config.ProjectFile), "kind: Service\nspec:\n  implementation:\n"+tc.block)
+			}
+			r := statVersionRunner(tc.stdout, tc.stderr, tc.err)
+			var out strings.Builder
+			doctorCoreutils(context.Background(), r, &out, p, tc.bin)
+			if out.String() != tc.want {
+				t.Errorf("got %q, want %q", out.String(), tc.want)
+			}
+			if ran := len(r.calls) > 0; ran != tc.probe {
+				t.Errorf("stat --version ran: %v, want %v (calls %q)", ran, tc.probe, r.calls)
+			}
+		})
+	}
+}
+
+// The environment section prints the coreutils line after the
+// implementation line, and the line does not change the exit code (a
+// warning). The project has its own .bin/argsh, so the bash-mode check
+// passes.
+func TestDoctorEnvironmentSectionCoreutilsLine(t *testing.T) {
+	p := routedProject(t, "    bash:\n      commands: [version]\n", true)
+	testutil.WriteFile(t, filepath.Join(p.Bin, "argsh"), "#!/usr/bin/env bash\n")
+	if err := os.Chmod(filepath.Join(p.Bin, "argsh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	ok := doctorEnvironmentSection(context.Background(), statVersionRunner("", statBSD, errors.New("exit status 1")), p, "", doctorStubBin(t, "stat"), false, &out)
+	if !strings.Contains(out.String(), "\n  ! "+doctorCoreutilsWarning+"\n") {
+		t.Errorf("no coreutils line in:\n%s", out.String())
+	}
+	if impl, cu := strings.Index(out.String(), "implementation: go; bash for version"), strings.Index(out.String(), doctorCoreutilsWarning); impl < 0 || impl > cu {
+		t.Errorf("the coreutils line is not after the implementation line:\n%s", out.String())
+	}
+	if !ok {
+		t.Errorf("the section failed:\n%s", out.String())
+	}
+}
+
+// The bash twin keeps its own copy of the warning text (doctor::_coreutils
+// in the embedded mirror of .lok8s/libs/doctor). Two hand-kept copies
+// drift; this fails first.
+func TestDoctorCoreutilsWarningMatchesBash(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "doctor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(src), `doctor::_warn "`+doctorCoreutilsWarning+`"`); n != 1 {
+		t.Errorf("libs/doctor prints the coreutils warning %d times, want once with the text of doctorCoreutilsWarning", n)
+	}
+}
