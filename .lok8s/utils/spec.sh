@@ -548,13 +548,18 @@ spec::suc_kubectl() {
   fi
 }
 
-# spec::is_suc_addon <dir> — returns 0 when the dir of a bare spec.bootstrap
-# entry names the system-upgrade-controller addon. A trailing "/" or "/." does
-# not count, as in Go: the parser cleans the path of a bare entry
-# (assets.Peek), and filepath.Base removes trailing separators. The bash parser
-# keeps the entry as written (bootstrap::_parse_entry).
-spec::is_suc_addon() {
-  local d="${1}"
+# spec::is_addon <dir> <name> — returns 0 when the dir of a bare
+# spec.bootstrap entry names the addon <name>. It ignores a trailing "/" or
+# "/." of the dir (also a sequence of them, such as "/./" or "//"), so
+# `<name>/` and `<name>/.` name the addon. For these trailing forms the result
+# is the same as in Go: the Go parser cleans the path of a bare entry
+# (assets.Peek), and filepath.Base removes trailing separators. The bash
+# parser keeps the entry as written (bootstrap::_parse_entry), so
+# "${dir##*/}" alone gives an empty name or ".". The helper does not resolve
+# a ".." element, so there the result can differ from Go: Go cleans
+# `<name>/x/..` to <name>, and the helper reads "..".
+spec::is_addon() {
+  local d="${1}" want="${2}"
   while :; do
     case "${d}" in
       */) d="${d%/}" ;;
@@ -562,7 +567,7 @@ spec::is_suc_addon() {
       *) break ;;
     esac
   done
-  [[ "${d##*/}" == system-upgrade-controller ]]
+  [[ "${d##*/}" == "${want}" ]]
 }
 
 # spec::suc_kubectl_range — the range as the lines name it: "1.33 to 1.37".

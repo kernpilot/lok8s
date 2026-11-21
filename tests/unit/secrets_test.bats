@@ -262,6 +262,71 @@ _gitignore_refused() { # <link|dir>
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
 }
 
+# A .gitignore write that stops part way (the payload write ends after half
+# of the payload, as on a full disk): status 1, the last line names the file,
+# the old file stays, and no temp file is left (Go twin:
+# TestAddKeyKeepsTheGitignoreOnAPartialWrite). printf is a function here: for
+# the payload it writes the first half and a call marker, then fails. The
+# lines of the library use builtin printf. The control: with the real printf
+# the write passes.
+@test "secrets: a .gitignore write that stops part way keeps the old file and leaves no temp file" {
+  local marker="${BATS_TEST_TMPDIR}/printf.ran"
+  printf '# old\n' > "${PATH_SECRETS}/.gitignore"
+  printf() {
+    [[ "${*}" == *'!Secret.*.enc'* ]] || { builtin printf "${@}"; return; }
+    builtin printf '%s' "${2:0:${#2}/2}"
+    : >> "${marker}"
+    return 1
+  }
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  unset -f printf
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -e "${marker}" ] || { echo "fixture: the payload write did not run" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ] || { echo "the .gitignore changed: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  [ "$status" -eq 0 ] || { echo "the control: status $status: $output" >&2; return 1; }
+  grep -qxF '!Secret.*.enc' "${PATH_SECRETS}/.gitignore" || { echo "the control: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "the control left a temp file" >&2; return 1; }
+}
+
+# init asks for a mv that takes -T only when it writes the .gitignore. A
+# first run that writes it refuses before the config, with a line that names
+# that write. A first run with a .gitignore that holds the allow line, and a
+# rerun with the key in the config, need no mv. Here the mv has no -T
+# (secrets::_mv_has_t is a function), and ssh-to-age and sops are functions:
+# no crypto tools. The Go binary needs no mv.
+@test "secrets init: a mv without -T is refused only when init writes the .gitignore" {
+  ! command -v gmv >/dev/null 2>&1 || skip "gmv is installed: init renames with it"
+  ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  sops() { :; }
+  secrets::_mv_has_t() { return 1; }
+  printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  local cfg="${PATH_BASE}/.sops.yaml" ignore="${PATH_SECRETS}/.gitignore"
+
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] this mv has no -T, so the .gitignore write cannot rename onto the .gitignore safely: install GNU coreutils (gmv) or use the lo binary" ] || {
+    echo "$output" >&2; return 1; }
+  [ ! -e "${cfg}" ] || { echo "init wrote the config" >&2; return 1; }
+  [ ! -e "${ignore}" ]
+
+  printf '*\n!.gitignore\n!Secret.*.enc\n' > "${ignore}"
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "a current .gitignore: status $status: $output" >&2; return 1; }
+  grep -qF "age: 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'" "${cfg}" || { cat "${cfg}" >&2; return 1; }
+  [ "$(cat "${ignore}")" = $'*\n!.gitignore\n!Secret.*.enc' ]
+
+  rm -f -- "${PATH_SECRETS}/.gitignore"
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "the rerun: status $status: $output" >&2; return 1; }
+  [ "$output" = "age key already configured in .sops.yaml" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${ignore}" ] || { echo "the rerun wrote the .gitignore" >&2; return 1; }
+}
+
 # A write that fails and whose temp file cannot be removed names the temp
 # file with the same line in the three writes through a temp file: the
 # .gitignore, the .sops.yaml and an .enc (Go twin:

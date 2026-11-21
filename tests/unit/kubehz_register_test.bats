@@ -873,7 +873,9 @@ _write_bind_fixture() {
 # a wrapper that saves its argv, a Lo spec through the yq stub, and a curl
 # that saves its argv and its stdin (the request body). Every register
 # response hands out <response bindSecret> as a string, or the raw <JSON
-# value> when one is given.
+# value> when one is given. STUB_FINGERPRINT and STUB_PUBLIC_KEY set the
+# claim key of the answer. With STUB_ENV_DUMP set, each jq child writes its
+# environment to that file.
 _register_sandbox() {
   yq() {
     case "$2" in
@@ -890,6 +892,7 @@ _register_sandbox() {
   : > "${STUB_JQ_ARGV}"
   jq() {
     echo "$*" >> "${STUB_JQ_ARGV}"
+    [[ -z "${STUB_ENV_DUMP:-}" ]] || env >> "${STUB_ENV_DUMP}"
     command jq "$@"
   }
   export -f jq
@@ -902,7 +905,7 @@ _register_sandbox() {
     [[ -z "${STUB_NEXT_JSON:-}" ]] || next_json="${STUB_NEXT_JSON}"
     case "$*" in
       *"/api/clusters/register"*)
-        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":%s,"claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${next_json}" "${STUB_FINGERPRINT:-aa:bb}" ;;
+        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":%s,"claimKey":{"publicKey":"%s","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${next_json}" "${STUB_PUBLIC_KEY:-ssh-ed25519 AAAA k}" "${STUB_FINGERPRINT:-aa:bb}" ;;
       *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n' ;;
       *) printf '{}\n' ;;
     esac
@@ -1584,16 +1587,26 @@ _claim_shasum_only() {
 # _claim_sandbox <keys json>: the api mints the claim key of test.kubehz.dev
 # and lists the registry; GET /v1/ssh_keys?name= answers <keys json>. Each
 # Hetzner Cloud call goes to CLAIM_CALLS as "<method> <url>[ <body>]", the
-# body as compact JSON.
+# body as compact JSON. CLAIM_TICKET and CLAIM_PUBLIC_KEY set the claim key
+# of the register answer, and CLAIM_PLATFORM_REFUSE=1 makes the platform
+# refuse the delete of the cluster. With CLAIM_CONFIGS set, each curl call
+# adds its config (the credentials) to that file. With STUB_ENV_DUMP set,
+# each curl child writes its environment to that file. CLAIM_BIND_SECRET
+# adds that bindSecret to the register answer. The agent-token route of
+# re-enroll goes to CLAIM_CALLS as "AGENT <body>" and answers rotated.
 _claim_sandbox() {
   export CLAIM_KEYS="${1}" CLAIM_CALLS="${BATS_TEST_TMPDIR}/hcloud.calls"
   : > "${CLAIM_CALLS}"
   source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
   curl() {
     curl_capture "$@"
+    [[ -z "${CLAIM_CONFIGS:-}" ]] || printf '%s\n' "${CURL_CONFIG}" >> "${CLAIM_CONFIGS}"
+    [[ -z "${STUB_ENV_DUMP:-}" ]] || env >> "${STUB_ENV_DUMP}"
     case "${CURL_URL}" in
       */api/clusters/register)
-        printf '{"id":"cl-001","registered":true,"claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}'
+        printf '{"id":"cl-001","registered":true%s,"claimKey":{"publicKey":"%s","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}' \
+          "${CLAIM_BIND_SECRET:+,\"bindSecret\":\"${CLAIM_BIND_SECRET}\"}" \
+          "${CLAIM_PUBLIC_KEY:-ssh-ed25519 AAAA k}" "${CLAIM_TICKET:-aa:bb}"
         [[ " $* " != *'%{http_code}'* ]] || printf '\n200'
         ;;
       https://hc.example/*)
@@ -1608,7 +1621,17 @@ _claim_sandbox() {
         fi
         ;;
       */api/clusters\?perPage=500) _deregister_list_fixture ;;
-      */api/clusters/*) printf '{"ok":true}\n200' ;;
+      */agent-token)
+        printf 'AGENT %s\n' "$(printf '%s' "${CURL_BODY}" | jq -c .)" >> "${CLAIM_CALLS}"
+        printf '{"rotated":true}\n200'
+        ;;
+      */api/clusters/*)
+        if [[ "${CLAIM_PLATFORM_REFUSE:-0}" == 1 ]]; then
+          printf '{"data":{"message":"refused by the fixture"}}\n500'
+        else
+          printf '{"ok":true}\n200'
+        fi
+        ;;
     esac
     return 0
   }
@@ -1872,7 +1895,12 @@ ${_CLAIM_DELETE42}"
 # internal/kubehz/claim_ticket_workflow_test.go, runs it on the output of the
 # Go implementation and checks that both workflows have the same function.
 
-_TICKET="aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+# The fixture: a valid ed25519 public key (an ssh-keygen output for these
+# tests; the private key does not exist) and the MD5 fingerprint of its key
+# blob, the one-time claim ticket. The Go twin has the same values in
+# internal/testutil/claimticket.go.
+_TICKET="04:35:55:25:a3:3d:b3:9a:bb:d9:10:20:56:b8:92:31"
+_CLAIM_KEY_PUBLIC="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILb+3WQ5OfPMd1OnV0p1lHo1cEizaxwddsmWOt+c+dpL claim-ticket-fixture"
 # A second ticket in capital hex digits, a ticket without the MD5 shape
 # (only the exact match of the two register lines hides it), and a
 # server-key fingerprint as the legacy announce prints it.
@@ -1881,6 +1909,42 @@ _TICKET_OTHER="SHA256:fake+claim/ticket=without-the-md5-shape"
 _SERVER_FP="12:34:56:78:9a:bc:de:f0:12:34:56:78:9a:bc:de:f0"
 _FP_TAIL="   (also visible in Hetzner Console -> Security -> SSH keys)"
 _TICKET_HIDDEN="<hidden: one-time claim ticket>"
+
+# _no_ticket <where> <text>: fail when <text> holds one of the five literal
+# forms of the fixture ticket: with colons and without, in lower and in upper case, and the
+# base64 key blob, whose MD5 the ticket is. Each form is a literal of its
+# own: none comes from another form or from the code under test, so the
+# check cannot share a bug with the format code of the register.
+_no_ticket() {
+  local where="${1}" text="${2}" form
+  local -a forms=(
+    "04:35:55:25:a3:3d:b3:9a:bb:d9:10:20:56:b8:92:31"
+    "04:35:55:25:A3:3D:B3:9A:BB:D9:10:20:56:B8:92:31"
+    "04355525a33db39abbd9102056b89231"
+    "04355525A33DB39ABBD9102056B89231"
+    "AAAAC3NzaC1lZDI1NTE5AAAAILb+3WQ5OfPMd1OnV0p1lHo1cEizaxwddsmWOt+c+dpL"
+  )
+  for form in "${forms[@]}"; do
+    [[ "${text}" != *"${form}"* ]] || fail "${where} holds the claim ticket (the form ${form})"
+  done
+}
+
+# _no_ticket_in_files <dir>: _no_ticket on each regular file under <dir>.
+_no_ticket_in_files() {
+  local f
+  while IFS= read -r -d '' f; do
+    _no_ticket "the file ${f#"${1}/"}" "$(cat -- "${f}")"
+  done < <(find "${1}" -type f -print0)
+}
+
+# _ticket_fixture: the register answers of the register sandbox carry the
+# fixture key and its ticket. CI and LOK8S_NONINTERACTIVE of the runner are
+# unset, so a test runs the same on a CI runner (there CI hides the ticket
+# also on a terminal, and so masks a register that prints it on a pipe).
+_ticket_fixture() {
+  unset CI LOK8S_NONINTERACTIVE
+  export STUB_FINGERPRINT="${_TICKET}" STUB_PUBLIC_KEY="${_CLAIM_KEY_PUBLIC}"
+}
 
 # _hide_claim_ticket_fn: the definition of hide_claim_ticket in spinup.yml,
 # without the 10-space indent of the run block.
@@ -1891,14 +1955,16 @@ _hide_claim_ticket_fn() {
     on && $0 == "          }" { exit }' "${_PROJECT_ROOT}/.github/workflows/spinup.yml"
 }
 
-# _ticket_register <claim-key|announce>: one register_cluster call, with
-# HCLOUD_TOKEN (the claim key) or without it (the fingerprint announce).
+# _ticket_register <claim-key|announce> [<show_ticket>]: one register_cluster
+# call, with HCLOUD_TOKEN (the claim key) or without it (the fingerprint
+# announce). <show_ticket> is the argument that --print-token gives.
 _ticket_register() {
+  local yaml="${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   if [[ "${1}" == claim-key ]]; then
     HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example" \
-      kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+      kubehz::register_cluster "test.kubehz.dev" "${yaml}" "" "${2:-}"
   else
-    kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+    kubehz::register_cluster "test.kubehz.dev" "${yaml}" "" "${2:-}"
   fi
 }
 
@@ -1909,9 +1975,12 @@ _ticket_register() {
   [[ "${fn}" == "hide_claim_ticket() {"*"}" ]] || fail "no hide_claim_ticket function in spinup.yml"
   eval "${fn}"
 
-  export STUB_FINGERPRINT="${_TICKET}"
+  # The filter is for the output with the ticket in it: run captures
+  # stdout, which is not a terminal, so the register runs with the
+  # argument of --print-token.
+  _ticket_fixture
   _register_sandbox ""
-  run _ticket_register claim-key
+  run _ticket_register claim-key 1
   assert_success
   claim="${output}"
   [[ "$(grep -cF -- "${_TICKET}" <<<"${claim}")" == 2 ]] ||
@@ -1974,4 +2043,527 @@ EOF
   refute_output --partial "${_TICKET_OTHER}"
   refute_output --partial "${_SERVER_FP}"
   assert_output "${want}"
+}
+
+# ── The claim ticket on stdout: --print-token, or a terminal ─────────────
+# The claim-key registration prints the one-time claim ticket only with
+# --print-token (the argument <show_ticket> 1), or when stdout is a
+# terminal and the environment is not a CI run (verbose::noninteractive).
+# Elsewhere the curl hint gets the placeholder, and the "fingerprint:" line
+# names the key in the Hetzner Console and the command that shows a new
+# ticket. The Go twin: internal/kubehz/register_ticket_test.go.
+
+_TICKET_HIDDEN_CURL="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"<hidden: one-time claim ticket>\"}'"
+_TICKET_HIDDEN_FP="  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key 'kubehz-claim-test.kubehz.dev'; 'lo kubehz register --domain test.kubehz.dev --print-token' registers again and shows a new ticket)"
+_TICKET_SHOWN_CURL="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${_TICKET}\"}'"
+_TICKET_SHOWN_FP="  fingerprint: ${_TICKET}${_FP_TAIL}"
+# A string with the shape of an MD5 fingerprint.
+_TICKET_SHAPE='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){15}'
+
+# _ticket_hidden: the last run ended well and has the two placeholder lines
+# in its output, none of the five literal forms of the ticket and no string
+# of its shape is in its output (stdout and stderr), none of the five forms
+# is in a file of the test, and the claim key went to Hetzner Cloud.
+_ticket_hidden() {
+  assert_success
+  _no_ticket "the output" "${output}"
+  refute_output --regexp "${_TICKET_SHAPE}"
+  assert_output --partial "${_TICKET_HIDDEN_CURL}"
+  assert_output --partial "${_TICKET_HIDDEN_FP}"
+  _no_ticket_in_files "${BATS_TEST_TMPDIR}"
+  grep -qF -- "-X POST https://hc.example/v1/ssh_keys" "${STUB_CURL_ARGV}" ||
+    fail "the claim key was not uploaded"
+}
+
+# _ticket_shown: the last run ended well and has both ticket lines in its
+# output, and no placeholder.
+_ticket_shown() {
+  assert_success
+  assert_output --partial "${_TICKET_SHOWN_CURL}"
+  assert_output --partial "${_TICKET_SHOWN_FP}"
+  refute_output --partial "${_TICKET_HIDDEN}"
+}
+
+@test "claim ticket: a stdout that is not a terminal gets none of the five literal forms of the ticket, and the lines say where to read it" {
+  _ticket_fixture
+  _register_sandbox ""
+  run _ticket_register claim-key
+  _ticket_hidden
+}
+
+@test "claim ticket: --print-token shows it on a stdout that is not a terminal, also in a CI run" {
+  _ticket_fixture
+  _register_sandbox ""
+  run _ticket_register claim-key 1
+  _ticket_shown
+  CI=true run _ticket_register claim-key 1
+  _ticket_shown
+}
+
+# Only the argument 1 shows the ticket. Another value does not, and it is
+# never evaluated as arithmetic.
+@test "claim ticket: a show_ticket other than 1 shows no ticket" {
+  _ticket_fixture
+  _register_sandbox ""
+  local v
+  for v in 0 true ' 1' 'x[$(echo PWNED >&2)]'; do
+    run _ticket_register claim-key "${v}"
+    _ticket_hidden
+    refute_output --partial "PWNED"
+  done
+}
+
+# _kubehz_register_sandbox: the spec of test.kubehz.dev for kubehz::register
+# (access registered, through the yq stub), and HCLOUD_TOKEN for the claim
+# key.
+_kubehz_register_sandbox() {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      '.spec.kubehz.hosting // "self"') echo "self" ;;
+      '.spec.kubehz.apiUrl // ""') echo "https://api.kubehz.dev" ;;
+      '.spec.kubehz.access') echo "registered" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  touch "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+}
+
+# The argsh parse of the flag is the parity harness's (it runs the real lo):
+# here :args is a stub that sets what the parse of --print-token sets.
+@test "claim ticket: kubehz::register takes --print-token to the claim key" {
+  _ticket_fixture
+  _register_sandbox ""
+  _kubehz_register_sandbox
+  declare -f kubehz::register | grep -qF "'print-token|:+'" ||
+    fail "kubehz::register has no print-token flag"
+  :args() { domain="test.kubehz.dev" print_token=1; }
+  run kubehz::register
+  _ticket_shown
+  :args() { domain="test.kubehz.dev"; }
+  run kubehz::register
+  _ticket_hidden
+}
+
+# print_token is a local of each entry point, and each one passes the flag
+# down as an argument. A print_token in the environment, or in the scope of
+# a caller, shows nothing.
+@test "claim ticket: an ambient print_token=1 shows no ticket (register_cluster, kubehz::register)" {
+  _ticket_fixture
+  _register_sandbox ""
+  export print_token=1
+  run _ticket_register claim-key
+  _ticket_hidden
+  _ticket_in_a_caller() {
+    local print_token=1
+    _ticket_register claim-key
+  }
+  run _ticket_in_a_caller
+  _ticket_hidden
+  _kubehz_register_sandbox
+  :args() { domain="test.kubehz.dev"; }
+  run kubehz::register
+  _ticket_hidden
+}
+
+# A direct call of ensure_claim_key with no <show_ticket>: the default is 0,
+# never a print_token of the environment or of a caller. register_cluster
+# always passes the argument, so the test above cannot see this default.
+@test "claim ticket: ensure_claim_key with no show_ticket and an ambient print_token=1 shows no ticket" {
+  _ticket_fixture
+  _register_sandbox ""
+  export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+  export print_token=1
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  _ticket_hidden
+  unset print_token
+  _claim_key_in_a_caller() {
+    local print_token=1
+    kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  }
+  run _claim_key_in_a_caller
+  _ticket_hidden
+}
+
+# _dispatch_sandbox: the real provision::dispatch of libs/provision, with a
+# lo driver that does nothing and a kubehz config with access registered,
+# then the real register_cluster in the register sandbox, with HCLOUD_TOKEN
+# (the claim key). main::up of lo and main::provision of libs/provision call
+# it. :args sets what the parse of --print-token sets when ARGS_PRINT_TOKEN
+# is 1 (the argsh parse is the parity harness's).
+_dispatch_sandbox() {
+  _register_sandbox ""
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  eval "$(sed -n '/^main::up()/,/^}/p' "${_PROJECT_ROOT}/.lok8s/lo")"
+  declare -f main::up >/dev/null || fail "no main::up in lo"
+  mkdir -p "${PATH_LOK8S}/drivers/lo"
+  printf 'driver::provision() { :; }\n' > "${PATH_LOK8S}/drivers/lo/main"
+  touch "${PATH_CLUSTERS}/test.kubehz.dev/cluster.lok8s.yaml"
+  provision::resolve_spec() {
+    LOK8S_SPEC_FILE="${PATH_CLUSTERS}/${1}/cluster.lok8s.yaml"
+    LOK8S_SPEC_KIND="cluster"
+  }
+  provision::load_provider_creds() { :; }
+  provision::read_kind() { echo lo; }
+  provision::confirm_infra() { :; }
+  kubehz::read_config() { export LOK8S_KUBEHZ_ACCESS=registered; }
+  kubehz::validate_config() { :; }
+  :args() {
+    domain="test.kubehz.dev"
+    [[ "${ARGS_PRINT_TOKEN:-0}" != 1 ]] || print_token=1
+  }
+  _lo_header() { :; }
+  tilt::up() { :; }
+  bootstrap::_flag_given() { return 1; }
+  bootstrap::mode_check() { return 0; }
+  bootstrap::_dry_run_exit() { return "${1}"; }
+  export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+}
+
+@test "claim ticket: lo up and lo provision take --print-token through the dispatch to the register, and an ambient print_token does not" {
+  _ticket_fixture
+  _dispatch_sandbox
+  local entry
+  for entry in main::up main::provision; do
+    ARGS_PRINT_TOKEN=1 run "${entry}"
+    _ticket_shown
+    run "${entry}"
+    _ticket_hidden
+    print_token=1 run "${entry}"
+    _ticket_hidden
+  done
+  # The call of lo recover: the domain alone (next test), on a pipe.
+  print_token=1 run provision::dispatch test.kubehz.dev
+  _ticket_hidden
+}
+
+@test "claim ticket: lo recover calls the dispatch with the domain alone, so it passes no --print-token" {
+  run grep -nE '^[^#]*provision::dispatch( |$)' "${_PROJECT_ROOT}/.lok8s/libs/recover"
+  assert_success
+  assert_equal "${#lines[@]}" 1
+  assert_output --regexp '^[0-9]+:  recover::_tty_or_null provision::dispatch "\$\{_RECOVER_DOMAIN\}"$'
+}
+
+# _ticket_on_a_terminal [<name>=<value>...]: ensure_claim_key in a child
+# bash on a terminal (script(1)), with the given environment and without
+# the CI and LOK8S_NONINTERACTIVE of the runner. script runs the command
+# with $SHELL, so SHELL is this bash. The child gets the stubs that the
+# sandbox exports, and sources the libs again.
+_ticket_on_a_terminal() {
+  env -u CI -u LOK8S_NONINTERACTIVE "$@" SHELL="${BASH}" script -qec 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" && source "${_PROJECT_ROOT}/.lok8s/utils/http.sh" && source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main" && [[ -t 1 ]] && HCLOUD_TOKEN=hc_test HCLOUD_API_BASE=https://hc.example kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev' /dev/null
+}
+
+@test "claim ticket: a terminal gets the ticket" {
+  command -v script >/dev/null || skip "no script(1) for a terminal"
+  _ticket_fixture
+  _register_sandbox ""
+  export _PROJECT_ROOT
+  run _ticket_on_a_terminal
+  _ticket_shown
+  run _ticket_on_a_terminal CI=false
+  _ticket_shown
+}
+
+# A runner can give the job a pty, and a terminal recording keeps what the
+# terminal shows: a CI run (CI nonempty and not "false") or a nonempty
+# LOK8S_NONINTERACTIVE hides the ticket on a terminal too.
+@test "claim ticket: a terminal in a CI run, or with LOK8S_NONINTERACTIVE, gets no ticket" {
+  command -v script >/dev/null || skip "no script(1) for a terminal"
+  _ticket_fixture
+  _register_sandbox ""
+  export _PROJECT_ROOT
+  local e
+  for e in CI=true CI=1 CI=0 CI=FALSE LOK8S_NONINTERACTIVE=1 LOK8S_NONINTERACTIVE=false "LOK8S_NONINTERACTIVE=1 CI=false"; do
+    # shellcheck disable=SC2086 # each word is one assignment
+    run _ticket_on_a_terminal ${e}
+    _ticket_hidden
+  done
+}
+
+# The rule of the environment. The Go twin: TestNonInteractive in
+# internal/ui/interactive_test.go.
+@test "verbose::noninteractive: LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not false" {
+  local c env want rc
+  for c in ":1" "CI=true:0" "CI=1:0" "CI=0:0" "CI=FALSE:0" "CI=false:1" "CI=:1" "LOK8S_NONINTERACTIVE=1:0" "LOK8S_NONINTERACTIVE=false:0" "LOK8S_NONINTERACTIVE=:1" "LOK8S_NONINTERACTIVE=1 CI=false:0"; do
+    env="${c%:*}" want="${c##*:}" rc=0
+    # shellcheck disable=SC2086 # each word is one assignment
+    env -u CI -u LOK8S_NONINTERACTIVE ${env} "${BASH}" -c 'source "${1}" && verbose::noninteractive' _ "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" || rc=$?
+    [[ "${rc}" == "${want}" ]] || fail "verbose::noninteractive with '${env}': rc ${rc}, want ${want}"
+  done
+}
+
+# _traced_claim_key: the claim key under set -x, with the Hetzner token in
+# the environment before the trace starts.
+_traced_claim_key() {
+  local rc=0
+  export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+  set -x
+  kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev || rc=$?
+  set +x
+  return "${rc}"
+}
+
+# Without the guard, the trace shows the response and the fingerprint, and
+# the curl config line with the Hetzner token. The guard also gives the
+# trace back after the function: the caller's next line is traced.
+@test "claim ticket: set -x in ensure_claim_key prints neither the ticket nor the Hetzner token" {
+  _ticket_fixture
+  _register_sandbox ""
+  run _traced_claim_key
+  assert_success
+  # The trace is on before and after the function.
+  assert_output --partial "kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev"
+  assert_output --regexp $'\n[+]+ set \\+x'
+  _no_ticket "the trace" "${output}"
+  refute_output --regexp "${_TICKET_SHAPE}"
+  refute_output --partial "hc_test"
+  assert_line "${_TICKET_HIDDEN_FP}"
+}
+
+# ── The guard of register_cluster and deregister_cluster ─────────────────
+# Both functions expand KUBEHZ_TOKEN and HCLOUD_TOKEN, and hold the platform
+# answers and the key list of Hetzner Cloud (a public key and its
+# fingerprint, the ticket). The two guard lines (utils/keysonly.sh) keep a
+# caller's trace (set -x, and a DEBUG, RETURN or ERR trap with set -T or
+# set -E) off them, and `local +x` keeps them out of the environment of a
+# child.
+
+# The tokens of these tests: a trace that holds one fails.
+_TRACE_KUBEHZ_TOKEN="khzt_traceFixtureKubehzToken7f3a9c"
+_TRACE_HCLOUD_TOKEN="hcloudTraceFixtureToken5b8e2d"
+
+# _trace_sandbox: the claim sandbox with the fixture key and ticket, both
+# tokens, a Lo spec through the yq stub (the direct claim of KUBEHZ_TOKEN
+# reads the server fingerprint from it), and a key list as Hetzner Cloud
+# answers it: the key 42 of this cluster, with its fingerprint, its public
+# key and the label. Each curl call adds its config to CLAIM_CONFIGS, so a
+# test can show that the tokens were in flight.
+_trace_sandbox() {
+  yq() {
+    case "${2:-}" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  export CLAIM_TICKET="${_TICKET}" CLAIM_PUBLIC_KEY="${_CLAIM_KEY_PUBLIC}" CLAIM_CONFIGS="${BATS_TEST_TMPDIR}/curl.configs"
+  : > "${CLAIM_CONFIGS}"
+  _claim_sandbox "{\"ssh_keys\":[{\"id\":42,\"name\":\"kubehz-claim-test.kubehz.dev\",\"fingerprint\":\"${_TICKET}\",\"public_key\":\"${_CLAIM_KEY_PUBLIC}\",\"labels\":${_CLAIM_OWN}}]}"
+  export KUBEHZ_TOKEN="${_TRACE_KUBEHZ_TOKEN}" HCLOUD_TOKEN="${_TRACE_HCLOUD_TOKEN}"
+}
+
+# _tokens_in_flight: both tokens went to curl in a config.
+_tokens_in_flight() {
+  grep -qF -- "Bearer ${_TRACE_KUBEHZ_TOKEN}" "${CLAIM_CONFIGS}" || fail "KUBEHZ_TOKEN was not sent"
+  grep -qF -- "Bearer ${_TRACE_HCLOUD_TOKEN}" "${CLAIM_CONFIGS}" || fail "HCLOUD_TOKEN was not sent"
+}
+
+# _no_trace_secret: no file of the runs of assert_no_trace_leak holds a
+# token or a form of the ticket.
+_no_trace_secret() {
+  local d n=0
+  for d in "${BATS_TEST_TMPDIR}"/trace.*; do
+    [[ -d "${d}" ]] || continue
+    n=$((n + 1))
+    ! grep -rqF -e "${_TRACE_KUBEHZ_TOKEN}" -e "${_TRACE_HCLOUD_TOKEN}" -- "${d}" ||
+      fail "a file of the trace runs holds a token: $(grep -rlF -e "${_TRACE_KUBEHZ_TOKEN}" -e "${_TRACE_HCLOUD_TOKEN}" -- "${d}")"
+    _no_ticket_in_files "${d}"
+  done
+  (( n > 0 )) || fail "no trace run"
+}
+
+@test "trace: register_cluster under a caller's trace or trap shows no token, no ticket and no public key" {
+  _trace_sandbox
+  assert_no_trace_leak "${_TRACE_KUBEHZ_TOKEN}" kubehz::register_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  _no_trace_secret
+  # The values were in flight: both tokens, the upload of the public key,
+  # and the key list (the own key 42 was replaced).
+  _tokens_in_flight
+  grep -qF -- "\"public_key\":\"${_CLAIM_KEY_PUBLIC}\"" "${CLAIM_CALLS}" || fail "the claim key was not uploaded"
+  grep -qxF -- "${_CLAIM_DELETE42}" "${CLAIM_CALLS}" || fail "the own key 42 was not replaced"
+}
+
+@test "trace: deregister_cluster under a caller's trace or trap shows no token, no ticket and no public key, also when the platform refuses the delete" {
+  _trace_sandbox
+  export CLAIM_PLATFORM_REFUSE=1
+  _deregister_accepted() { CLAIM_PLATFORM_REFUSE=0 kubehz::deregister_cluster "$@"; }
+  # The sixth run: the refused delete under errexit and errtrace.
+  local -a trace_fail=(kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml")
+  assert_no_trace_leak "${_TRACE_KUBEHZ_TOKEN}" _deregister_accepted test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  _no_trace_secret
+  _tokens_in_flight
+  grep -qxF -- "${_CLAIM_DELETE42}" "${CLAIM_CALLS}" || fail "the own key 42 was not deleted"
+  grep -qF -- "delete refused for test.kubehz.dev" "${BATS_TEST_TMPDIR}"/trace.*/stderr.errfail ||
+    fail "the platform did not refuse the delete in the errexit run"
+}
+
+# The agent token of the re-enroll test. The kubectl stub hands it out in
+# base64, as the Secret kubehz-agent holds it.
+_TRACE_AGENT_TOKEN="agentTraceFixtureToken4d2b8a"
+
+# _reenroll_sandbox: the trace sandbox, the spec of test.kubehz.dev (access
+# registered and the api URL, through the yq stub of kubehz::register), an
+# :args stub that sets the domain, and a kubectl stub that prints the agent
+# token in base64. No real kubectl runs.
+_reenroll_sandbox() {
+  _trace_sandbox
+  _kubehz_register_sandbox
+  export KUBEHZ_TOKEN="${_TRACE_KUBEHZ_TOKEN}"
+  :args() { domain="test.kubehz.dev"; }
+  kubectl() { printf '%s' "${_TRACE_AGENT_TOKEN}" | base64; }
+}
+
+# re-enroll reads the agent token, hashes it and sends the hash with
+# KUBEHZ_TOKEN. Under a caller's trace, none of the three may show.
+@test "trace: re-enroll under a caller's trace or trap shows no token, no agent token and no hash of it" {
+  _reenroll_sandbox
+  local hash b64
+  hash="$(printf '%s' "${_TRACE_AGENT_TOKEN}" | sha256sum | cut -d' ' -f1)"
+  b64="$(printf '%s' "${_TRACE_AGENT_TOKEN}" | base64)"
+  assert_no_trace_leak "${_TRACE_AGENT_TOKEN}" kubehz::re-enroll
+  _no_trace_secret
+  ! grep -rqF -e "${hash}" -e "${b64}" -- "${BATS_TEST_TMPDIR}"/trace.* ||
+    fail "a file of the trace runs holds the agent token in base64 or its hash"
+  # The values were in flight: the bearer, and the hash of the agent token.
+  grep -qF -- "Bearer ${_TRACE_KUBEHZ_TOKEN}" "${CLAIM_CONFIGS}" || fail "KUBEHZ_TOKEN was not sent"
+  grep -qxF -- "AGENT {\"agentTokenHash\":\"${hash}\"}" "${CLAIM_CALLS}" ||
+    fail "the hash of the agent token did not reach the platform"
+}
+
+# The bind secret of the probe tests: 64 hex digits, built at run time (no
+# token-like literal in the source).
+_PROBE_BIND_SECRET="$(printf '7c3e9a1f%.0s' 1 2 3 4 5 6 7 8)"
+
+# _probe_bind: the register answer hands out _PROBE_BIND_SECRET, and the
+# project already holds it, so each register body carries it
+# (kubehz::register_body).
+_probe_bind() {
+  export CLAIM_BIND_SECRET="${_PROBE_BIND_SECRET}"
+  (umask 077 && printf '%s' "${_PROBE_BIND_SECRET}" > "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind")
+}
+
+# _env_and_trap_probe <command...>: run the command with set -a, functrace
+# and errtrace, a DEBUG, RETURN and ERR trap that adds the names of the
+# values (declare -p of response, keys, fingerprint, public_key, and of the
+# helper names raw, out, body, secret and msg) to TRAP_LOG, and those names
+# exported by the caller with values of its own. Each curl child of the
+# claim sandbox writes its environment to STUB_ENV_DUMP, and so does each
+# cleanup child: the rm of the EXIT trap of kubehz::register_post, and the
+# mkdir and rm of kubehz::persist_bind_secret (a line "# child <name>"
+# comes first).
+_env_and_trap_probe() {
+  local rc=0
+  export response=caller-response keys=caller-keys fingerprint=caller-fingerprint public_key=caller-public-key
+  export raw=caller-raw out=caller-out body=caller-body secret=caller-secret msg=caller-msg
+  export STUB_ENV_DUMP="${BATS_TEST_TMPDIR}/env.dump" TRAP_LOG="${BATS_TEST_TMPDIR}/trap.log"
+  : > "${STUB_ENV_DUMP}"
+  : > "${TRAP_LOG}"
+  rm() { { printf '# child rm\n' && env; } >> "${STUB_ENV_DUMP}"; command rm "$@"; }
+  mkdir() { { printf '# child mkdir\n' && env; } >> "${STUB_ENV_DUMP}"; command mkdir "$@"; }
+  trap 'declare -p response keys fingerprint public_key raw out body secret msg >> "${TRAP_LOG}" 2>/dev/null' DEBUG RETURN ERR
+  set -aTE
+  "$@" || rc=$?
+  set +aTE
+  trap - DEBUG RETURN ERR
+  return "${rc}"
+}
+
+# _probe_clean [<child>...]: the children and the traps of the last probe
+# ran, saw the values of the caller, and got none of the five literal forms
+# of the ticket and not the bind secret. Each <child> ("rm", "mkdir") must have written its
+# environment. The environment of a child also holds the inputs of the
+# claim sandbox (CLAIM_KEYS, CLAIM_TICKET, CLAIM_PUBLIC_KEY and
+# CLAIM_BIND_SECRET, exported for its stub): the check skips those lines.
+_probe_clean() {
+  local dump="${BATS_TEST_TMPDIR}/env.dump" log="${BATS_TEST_TMPDIR}/trap.log" child envs
+  [[ -s "${dump}" ]] || fail "no child wrote its environment"
+  grep -qF "caller-response" "${log}" || fail "the traps did not run"
+  for child in "$@"; do
+    grep -qxF "# child ${child}" "${dump}" || fail "no ${child} child wrote its environment"
+  done
+  envs="$(grep -vE '^(CLAIM_KEYS|CLAIM_TICKET|CLAIM_PUBLIC_KEY|CLAIM_BIND_SECRET)=' "${dump}")"
+  _no_ticket "the environment of a child" "${envs}"
+  [[ "${envs}" != *"${_PROBE_BIND_SECRET}"* ]] || fail "the environment of a child holds the bind secret"
+  _no_ticket "the output of the traps" "$(cat "${log}")"
+  [[ "$(cat "${log}")" != *"${_PROBE_BIND_SECRET}"* ]] || fail "the output of the traps holds the bind secret"
+}
+
+# register_cluster declares its own value names `local +x` before it calls
+# ensure_claim_key, so a name of ensure_claim_key takes the attributes of
+# that local, not of the caller's export. The direct call shows the guard of
+# ensure_claim_key alone. The helpers (register_post, persist_bind_secret)
+# have names of their own (raw, out, body, secret): the caller exports them
+# too, and the cleanup children (rm, mkdir) write their environment.
+@test "env and traps: set -a, an exported name and a caller's DEBUG, RETURN or ERR trap get no value of register_cluster, ensure_claim_key or deregister_cluster" {
+  _trace_sandbox
+  _probe_bind
+  run _env_and_trap_probe kubehz::register_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  _probe_clean rm mkdir
+  grep -qF -- "\"public_key\":\"${_CLAIM_KEY_PUBLIC}\"" "${CLAIM_CALLS}" || fail "the claim key was not uploaded"
+  : > "${CLAIM_CALLS}"
+  run _env_and_trap_probe kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_success
+  _probe_clean rm mkdir
+  grep -qF -- "\"public_key\":\"${_CLAIM_KEY_PUBLIC}\"" "${CLAIM_CALLS}" || fail "the claim key was not uploaded by ensure_claim_key"
+  [[ "$(cat "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind")" == "${_PROBE_BIND_SECRET}" ]] || fail "the bind secret was not stored"
+  export CLAIM_PLATFORM_REFUSE=1
+  run _env_and_trap_probe kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  _probe_clean
+  assert_output --partial "delete refused for test.kubehz.dev"
+  # The platform's text of the refusal (msg) reaches no child of the key
+  # delete after it.
+  ! grep -qF "msg=refused by the fixture" "${BATS_TEST_TMPDIR}/env.dump" ||
+    fail "the environment of a child holds the platform's refusal text"
+  grep -qxF -- "${_CLAIM_DELETE42}" "${CLAIM_CALLS}" || fail "the own key 42 was not deleted after the refusal"
+}
+
+# _kept <command...>: run the command under a caller's set -xTEa and a
+# DEBUG, RETURN and ERR trap. Then print its return code, and whether the
+# options and the traps after it are the ones before it.
+_kept() {
+  local rc=0 before after tb ta
+  trap ':' DEBUG
+  trap ':' RETURN
+  trap ':' ERR
+  set -xTEa
+  before="$-" tb="$(trap -p DEBUG RETURN ERR)"
+  "$@" >/dev/null 2>&1 || rc=$?
+  after="$-" ta="$(trap -p DEBUG RETURN ERR)"
+  { set +xTEa; } 2>/dev/null
+  trap - DEBUG RETURN ERR
+  printf 'rc %s\n' "${rc}"
+  [[ "${before}" != "${after}" ]] || printf 'options kept\n'
+  [[ "${tb}" != "${ta}" || -z "${ta}" ]] || printf 'traps kept\n'
+}
+
+# _kept_readonly <command...>: _kept with a readonly global response: the
+# local of the function cannot be declared, so it returns 1.
+_kept_readonly() {
+  declare -gr response=caller-response
+  _kept "$@"
+}
+
+@test "guard: a success and a failure of register_cluster and deregister_cluster give the caller its options and traps back" {
+  _trace_sandbox
+  local yaml="${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  run _kept kubehz::register_cluster test.kubehz.dev "${yaml}"
+  assert_success
+  assert_line "rc 0"
+  assert_line "options kept"
+  assert_line "traps kept"
+  run _kept_readonly kubehz::register_cluster test.kubehz.dev "${yaml}"
+  assert_line "rc 1"
+  assert_line "options kept"
+  assert_line "traps kept"
+  export CLAIM_PLATFORM_REFUSE=1
+  run _kept kubehz::deregister_cluster test.kubehz.dev "${yaml}"
+  assert_line "rc 1"
+  assert_line "options kept"
+  assert_line "traps kept"
 }

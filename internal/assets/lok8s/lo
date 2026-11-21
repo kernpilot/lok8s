@@ -276,12 +276,15 @@ _lo_header() {
 
 main::up() {
   local force="${force:-0}"
-  local open_tilt ci timeout
+  # --print-token goes down to kubehz::register_cluster as an argument of
+  # provision::dispatch, not through dynamic scope.
+  local open_tilt ci timeout print_token=0
   local -a args=(
     'open-tilt|o:+'  'Open Tilt in a browser (interactive mode only)'
     'ci|:+'          'Headless: build+deploy+wait-ready via `tilt ci`, exit with real status (no TTY/browser)'
     'timeout|t'      'Readiness timeout for --ci (e.g. 300s, 10m); passed to `tilt ci`'
     'force|f:^:+'    'Skip the real-infrastructure confirmation (cloud drivers)'
+    'print-token|:+' 'Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret'
     "${args[@]}"
   )
   :args "Starting cluster" "${@}"
@@ -290,7 +293,7 @@ main::up() {
 
   # Reconcile infra first regardless of mode (kind cluster, registries,
   # bootstrap addons) — only the post-reconcile Tilt step differs.
-  provision::dispatch "${domain}"
+  provision::dispatch "${domain}" 0 "${print_token}"
 
   # Headless mode: foreground `tilt ci` (build + deploy + wait + exit status).
   # No backgrounded `tilt up`, no browser. Its exit code is main::up's.
