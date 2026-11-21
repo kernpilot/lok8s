@@ -97,6 +97,9 @@ func TestRenderAgentRefusesSurvivingPlaceholder(t *testing.T) {
 	mustContain(t, h.output(), "  agent/configmap.yaml")
 }
 
+// kubectlLogger logs each kubectl call that override does not handle. A pod
+// read answers no pods; only the poll for the pods of the CronJob agent's
+// Jobs is logged, so a test can see it in the order.
 func kubectlLogger(h *harness, override func(c execx.Cmd) (bool, error)) *[]string {
 	var log []string
 	h.runner.handler = func(c execx.Cmd, _ string) error {
@@ -105,7 +108,7 @@ func kubectlLogger(h *harness, override func(c execx.Cmd) (bool, error)) *[]stri
 				return err
 			}
 		}
-		if strings.Contains(argvLine(c), "get pods") {
+		if strings.Contains(argvLine(c), "get pods") && argvLine(c) != agentJobsPollArgv {
 			return nil // idle cluster
 		}
 		log = append(log, argvLine(c))
@@ -117,6 +120,89 @@ func kubectlLogger(h *harness, override func(c execx.Cmd) (bool, error)) *[]stri
 		return nil
 	}
 	return &log
+}
+
+// The argv of the three calls around the stage: the Job delete, the pod poll
+// and the patch that ends the suspend. Literal on purpose: a change of the
+// selector or of the patch in deploy.go fails here.
+const (
+	agentJobsDeleteArgv = "kubectl -n kubehz-system delete job -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --ignore-not-found=true"
+	agentJobsPollArgv   = "kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name"
+	agentResumeArgv     = `kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p {"spec":{"suspend":false}}`
+)
+
+// agentJobsFake switches the fake answers of the calls around the stage:
+// deleteFails fails the Job delete, pollFails fails each pod poll, podsStay
+// makes each pod poll answer a pod that has not ended, and patchFails fails
+// the patch that ends the suspend. Use it as the override of kubectlLogger.
+type agentJobsFake struct{ deleteFails, pollFails, podsStay, patchFails bool }
+
+func (f agentJobsFake) answer(c execx.Cmd) (bool, error) {
+	line := argvLine(c)
+	switch {
+	case f.deleteFails && line == agentJobsDeleteArgv:
+		io.WriteString(c.Stderr, "Error from server (Forbidden): jobs.batch is forbidden\n")
+		return true, exitErr(1)
+	case f.pollFails && line == agentJobsPollArgv:
+		io.WriteString(c.Stderr, "Error from server (Forbidden): pods is forbidden\n")
+		return true, exitErr(1)
+	case f.podsStay && line == agentJobsPollArgv:
+		io.WriteString(c.Stdout, "pod/kubehz-heartbeat-29000000-x2k4q\n")
+		return true, nil
+	case f.patchFails && line == agentResumeArgv:
+		io.WriteString(c.Stderr, "Error from server (Forbidden): cronjobs.batch is forbidden\n")
+		return true, exitErr(1)
+	}
+	return false, nil
+}
+
+// The manifest applies the CronJob suspended, and the jobTemplate and the pod
+// template carry the labels that the Job delete and the pod poll select, in
+// the embedded manifest and in a render of it.
+func TestCronJobAgentManifestIsSuspendedAndLabelsItsJobs(t *testing.T) {
+	t.Parallel()
+	embedded, err := fs.ReadFile(Manifests(), "agent/cronjob.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	for name, raw := range map[string]string{
+		"embedded": string(embedded),
+		"rendered": readFile(t, filepath.Join(work, "agent", "cronjob.yaml")),
+	} {
+		var cj struct {
+			Spec struct {
+				Suspend     *bool `yaml:"suspend"`
+				JobTemplate struct {
+					Metadata struct {
+						Labels map[string]string `yaml:"labels"`
+					} `yaml:"metadata"`
+					Spec struct {
+						Template struct {
+							Metadata struct {
+								Labels map[string]string `yaml:"labels"`
+							} `yaml:"metadata"`
+						} `yaml:"template"`
+					} `yaml:"spec"`
+				} `yaml:"jobTemplate"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(raw), &cj); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if cj.Spec.Suspend == nil || !*cj.Spec.Suspend {
+			t.Fatalf("%s: spec.suspend must be true, so that the apply leaves the CronJob suspended", name)
+		}
+		for _, labels := range []map[string]string{cj.Spec.JobTemplate.Metadata.Labels, cj.Spec.JobTemplate.Spec.Template.Metadata.Labels} {
+			if labels["app"] != "kubehz-heartbeat" || labels["app.kubernetes.io/name"] != "kubehz-agent" {
+				t.Fatalf("%s: labels %v do not match the selector %s", name, labels, agentJobsSelector)
+			}
+		}
+	}
+	if agentJobsSelector != "app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent" {
+		t.Fatalf("selector %q", agentJobsSelector)
+	}
 }
 
 func TestDeployPrint(t *testing.T) {
@@ -131,6 +217,8 @@ func TestDeployPrint(t *testing.T) {
 	}
 	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, h.output(), "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: operator ---")
+	mustContain(t, h.output(), "# The CronJob agent is applied suspended. The deploy then deletes its Jobs (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent) and waits until their pods have ended.")
+	mustContain(t, h.output(), "# The deploy then sets spec.suspend to false on cronjob/kubehz-heartbeat.")
 	mustNotContain(t, h.output(), "kubehz-agent-bind")
 	mustContain(t, h.output(), "# --- Live agent (kubehz-live-agent) — managed tier RBAC ---")
 	mustContain(t, h.output(), "dir: "+filepath.Join(work, "live-agent", "managed"))
@@ -162,7 +250,11 @@ func TestDeployPrintNamesTheBindSecretAfterTheCronJob(t *testing.T) {
 				"# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: " + mode.owner + " ---",
 				"kind: Rendered",
 				"---",
+				"# The CronJob agent is applied suspended. The deploy then deletes its Jobs (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent) and waits until their pods have ended.",
+				"---",
 				"# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied after the CronJob agent; the value is not printed ---",
+				"---",
+				"# The deploy then sets spec.suspend to false on cronjob/kubehz-heartbeat.",
 				"---",
 				mode.next,
 			}
@@ -184,18 +276,23 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 	work := renderInto(t, h, "operator", "managed")
 	log := kubectlLogger(h, nil)
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
-	if len(*log) != 4 {
+	if len(*log) != 7 {
 		t.Fatalf("calls: %v", *log)
 	}
 	mustContain(t, (*log)[0], "apply -k "+filepath.Join(work, "agent"))
+	// The CronJob agent is applied suspended: its Jobs are deleted, their
+	// pods are waited for, and only then the suspend ends.
+	if (*log)[1] != agentJobsDeleteArgv || (*log)[2] != agentJobsPollArgv || (*log)[3] != agentResumeArgv {
+		t.Fatalf("want the Job delete, the pod poll and the resume after the CronJob agent apply: %v", *log)
+	}
 	// The identity Secret is read between the two applies (the live agent
 	// mounts it): it holds an agent-token here, so no bootstrap job runs.
 	// The probe prints only whether the key is there, never a value.
-	mustContain(t, (*log)[1], `get secret kubehz-agent -o go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}`)
-	mustNotContain(t, (*log)[1], "jsonpath")
-	mustContain(t, (*log)[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))
-	mustContain(t, (*log)[3], "rollout status deployment/kubehz-live-agent")
-	mustContain(t, (*log)[3], "--timeout=120s")
+	mustContain(t, (*log)[4], `get secret kubehz-agent -o go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}`)
+	mustNotContain(t, (*log)[4], "jsonpath")
+	mustContain(t, (*log)[5], "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	mustContain(t, (*log)[6], "rollout status deployment/kubehz-live-agent")
+	mustContain(t, (*log)[6], "--timeout=120s")
 	mustNotContain(t, strings.Join(*log, "\n"), "create job")
 }
 
@@ -231,7 +328,7 @@ func bindStageLogger(h *harness, fail string) *[]string {
 }
 
 // bindStageLoggerAfter is bindStageLogger, but a call that contains fail
-// exits 1 only after a call that contains after ran: so the proof of the
+// exits 1 only after a call that contains after ran: so the preflight of the
 // operator direction passes, and the real stage after the CronJob agent
 // apply fails.
 func bindStageLoggerAfter(h *harness, fail, after string) *[]string {
@@ -250,11 +347,17 @@ func bindStageLoggerAfter(h *harness, fail, after string) *[]string {
 // bindStageLoggerWhen is bindStageLogger with a call that fail(argv) holds
 // for exiting 1.
 func bindStageLoggerWhen(h *harness, fail func(line string) bool) *[]string {
+	return bindStageLoggerFake(h, fail, agentJobsFake{})
+}
+
+// bindStageLoggerFake is bindStageLoggerWhen, and fake answers the calls
+// around the stage.
+func bindStageLoggerFake(h *harness, fail func(line string) bool, fake agentJobsFake) *[]string {
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
 		if fail(argvLine(c)) {
 			return true, exitErr(1)
 		}
-		return false, nil
+		return fake.answer(c)
 	})
 	logged := h.runner.handler
 	h.runner.handler = func(c execx.Cmd, stdin string) error {
@@ -297,25 +400,30 @@ func indexOf(log []string, substr string) int {
 	return -1
 }
 
-// assertBindStagedAfter checks the three staging calls: they come right
-// after the CronJob agent apply at log index agent, in their order. Each
-// dry-run create (the proof's too) reads the value on stdin, byte for byte
-// the value, and each server-side apply reads what the dry run printed. The
-// value is never on argv.
+// assertBindStagedAfter checks the calls from the CronJob agent apply at log
+// index agent on, in their order: the suspended CronJob agent apply, the Job
+// delete, the pod poll, the three staging calls, and the patch that ends the
+// suspend. Each dry-run create (the preflight's too) reads the value on
+// stdin, byte for byte the value, and each server-side apply reads what the
+// dry run printed. The value is never on argv.
 func assertBindStagedAfter(t *testing.T, h *harness, log []string, work string, agent int, value string) {
 	t.Helper()
 	want := []string{
 		"apply -k " + filepath.Join(work, "agent"),
+		agentJobsDeleteArgv,
+		agentJobsPollArgv,
 		"apply -f " + filepath.Join(work, "agent", "namespace.yaml"),
 		bindCreateArgv,
 		bindApplyArgv,
+		agentResumeArgv,
 	}
+	const order = "CronJob agent(%d) < Job delete < pod poll < namespace < dry-run create < server-side apply < resume"
 	if len(log) < agent+len(want) {
-		t.Fatalf("want CronJob agent(%d) < namespace < dry-run create < server-side apply: %v", agent, log)
+		t.Fatalf("want "+order+": %v", agent, log)
 	}
 	for i, w := range want {
 		if !strings.HasSuffix(log[agent+i], w) {
-			t.Fatalf("want CronJob agent(%d) < namespace < dry-run create < server-side apply, got %q at %d: %v", agent, log[agent+i], agent+i, log)
+			t.Fatalf("want "+order+", got %q at %d: %v", agent, log[agent+i], agent+i, log)
 		}
 	}
 	joined := strings.Join(log, "\n")
@@ -338,7 +446,7 @@ func assertBindStagedAfter(t *testing.T, h *harness, log []string, work string, 
 	}
 }
 
-// assertBindProvedFirst checks the proof of the operator direction: the
+// assertBindProvedFirst checks the preflight of the operator direction: the
 // first three calls are the namespace apply, the dry-run create and the
 // server-side apply with --dry-run=server, and the CronJob agent apply
 // follows them.
@@ -367,11 +475,11 @@ var stagedBindSecrets = []struct{ name, value string }{
 	{"khzb_ and 64 hex", prefixedBindSecretFixture},
 }
 
-// With a bind secret on disk, the operator deploy proves the stage with a
-// server-side dry run before the CronJob agent apply, stages it right after
-// that apply (so the CronJob makes no new Job from an older template after
-// the value changed), and before the identity bootstrap Job can register.
-// The proof and the stage send the same bytes.
+// With a bind secret on disk, the operator deploy runs the preflight of the
+// stage (a server-side dry run) before the CronJob agent apply, stages it
+// while the CronJob is suspended and its Jobs are gone, and before the
+// identity bootstrap Job can register. The preflight and the stage send the
+// same bytes.
 func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
 	for _, s := range stagedBindSecrets {
 		t.Run(s.name, func(t *testing.T) {
@@ -383,18 +491,18 @@ func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
 			assertBindProvedFirst(t, *log, work)
 			assertBindStagedAfter(t, h, *log, work, 3, s.value)
 			if n := len(stdinsOf(h, "create secret generic kubehz-agent-bind")); n != 2 {
-				t.Fatalf("want 2 dry-run creates (the proof and the stage), got %d: %v", n, *log)
+				t.Fatalf("want 2 dry-run creates (the preflight and the stage), got %d: %v", n, *log)
 			}
-			if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 7 {
-				t.Fatalf("the identity read must follow the stage: %v", *log)
+			if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 10 {
+				t.Fatalf("the identity read must follow the stage and the resume: %v", *log)
 			}
 			mustNotContain(t, h.output(), "no bind secret")
 		})
 	}
 }
 
-// Cronjob mode stages it right after the CronJob agent apply too, as the
-// last step: after the live agent is gone.
+// Cronjob mode stages it the same way, after the live agent is gone, and
+// the patch that ends the suspend is the last step.
 func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 	for _, s := range stagedBindSecrets {
 		t.Run(s.name, func(t *testing.T) {
@@ -405,16 +513,139 @@ func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
 			mustContain(t, (*log)[0], "delete -k "+filepath.Join(work, "live-agent", "managed"))
 			assertBindStagedAfter(t, h, *log, work, 2, s.value)
-			if len(*log) != 6 {
-				t.Fatalf("the server-side apply of the Secret must come last: %v", *log)
+			if len(*log) != 9 {
+				t.Fatalf("the patch that ends the suspend must come last: %v", *log)
 			}
+		})
+	}
+}
+
+// No agent pod runs between the CronJob agent apply and the stage, in both
+// directions, with or without a bind secret on disk: the apply leaves the
+// CronJob suspended, the Job delete and the pod poll come right after it,
+// and the patch that ends the suspend comes after the stage. Between the
+// apply and the patch, only these calls run.
+func TestDeployApplyKeepsTheCronJobSuspendedUntilTheStage(t *testing.T) {
+	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
+		for _, onDisk := range []bool{true, false} {
+			h := newHarness(t)
+			work := renderInto(t, h, mode.owner, mode.access)
+			if onDisk {
+				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+			}
+			log := bindStageLogger(h, "")
+			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access), h.output())
+			cron := indexOf(*log, "apply -k "+filepath.Join(work, "agent"))
+			resume := indexOf(*log, agentResumeArgv)
+			if cron < 0 || resume < cron+3 {
+				t.Fatalf("%s/%v: want the CronJob agent apply, then the Job delete and the pod poll, then the resume: %v", mode.owner, onDisk, *log)
+			}
+			if (*log)[cron+1] != agentJobsDeleteArgv || (*log)[cron+2] != agentJobsPollArgv {
+				t.Fatalf("%s/%v: the Job delete and the pod poll must follow the CronJob agent apply: %v", mode.owner, onDisk, *log)
+			}
+			between := (*log)[cron+3 : resume]
+			if !onDisk && len(between) != 0 {
+				t.Fatalf("%s: without a bind secret, the resume must follow the pod poll: %v", mode.owner, *log)
+			}
+			for _, l := range between {
+				if !strings.HasSuffix(l, "namespace.yaml") && !strings.Contains(l, bindCreateArgv) && !strings.HasSuffix(l, bindApplyArgv) {
+					t.Fatalf("%s/%v: only the stage may run between the pod poll and the resume, got %q: %v", mode.owner, onDisk, l, *log)
+				}
+			}
+			if onDisk && indexOf(*log, bindApplyArgv) > resume {
+				t.Fatalf("%s: the resume must follow the stage: %v", mode.owner, *log)
+			}
+			if n := h.runner.countCalls("patch cronjob"); n != 1 {
+				t.Fatalf("%s/%v: want one patch, got %d", mode.owner, onDisk, n)
+			}
+		}
+	}
+}
+
+// A step around the stage that fails stops the deploy and leaves the
+// CronJob suspended, in both directions: a Job delete that fails, a pod poll
+// that keeps failing, and a pod that does not end. The error says so and
+// names what to do; no stage, no resume, no live agent and no bootstrap Job
+// follow.
+func TestDeployApplyAgentJobsThatDoNotGoLeaveTheCronJobSuspended(t *testing.T) {
+	suspended := "The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again."
+	see := "See the pods: kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone."
+	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
+		for _, tc := range []struct {
+			name string
+			fake agentJobsFake
+			want []string
+			poll bool
+		}{
+			{"the Job delete fails", agentJobsFake{deleteFails: true}, []string{
+				"kubehz: could not delete the Jobs of the CronJob agent (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent). The delete can have removed some of them. " + suspended + " The kubeconfig needs delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again.",
+			}, false},
+			{"the pod poll fails", agentJobsFake{pollFails: true}, []string{
+				"kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for 1s: Error from server (Forbidden): pods is forbidden. " + suspended + " The kubeconfig needs list on Pods in kubehz-system. " + see,
+				"[warn] kubehz: cannot list the pods of the CronJob agent's Jobs in kubehz-system (Error from server (Forbidden): pods is forbidden). The deploy counts that as a pod that has not ended, and tries again.",
+			}, true},
+			{"a pod does not end", agentJobsFake{podsStay: true}, []string{
+				"kubehz: pods of the CronJob agent's Jobs did not end within 1s after the deploy deleted the Jobs. " + suspended + " " + see,
+			}, true},
+		} {
+			t.Run(mode.owner+"/"+tc.name, func(t *testing.T) {
+				h := newHarness(t)
+				h.env["KUBEHZ_AGENT_JOBS_DRAIN_SECONDS"] = "1"
+				work := renderInto(t, h, mode.owner, mode.access)
+				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+				bindStageLoggerFake(h, func(string) bool { return false }, tc.fake)
+				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access))
+				for _, w := range tc.want {
+					mustContain(t, h.output(), w)
+				}
+				mustNotContain(t, h.output(), "--force")
+				calls := strings.Join(h.runner.lines(), "\n")
+				if got := strings.Contains(calls, agentJobsPollArgv); got != tc.poll {
+					t.Fatalf("pod poll ran: %v, want %v:\n%s", got, tc.poll, calls)
+				}
+				// The real stage, the resume, the bootstrap Job and the live
+				// agent never ran (the preflight's server dry run is no stage).
+				for _, l := range h.runner.lines() {
+					if strings.HasSuffix(l, " "+bindApplyArgv) {
+						t.Fatalf("the Secret was staged: %s", calls)
+					}
+				}
+				for _, not := range []string{"patch cronjob", "create job", "get secret kubehz-agent ", "apply -k " + filepath.Join(work, "live-agent")} {
+					mustNotContain(t, calls, not)
+				}
+			})
+		}
+	}
+}
+
+// A patch that ends the suspend and fails stops the deploy after the stage:
+// the error says that the CronJob can stay suspended and names the patch. In
+// the operator direction no bootstrap Job and no live agent follow.
+func TestDeployApplyFailedResumeSaysTheCronJobCanStaySuspended(t *testing.T) {
+	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
+		t.Run(mode.owner, func(t *testing.T) {
+			h := newHarness(t)
+			work := renderInto(t, h, mode.owner, mode.access)
+			writeBindSecret(t, h, "acme.example.com", testBindSecret)
+			log := bindStageLoggerFake(h, func(string) bool { return false }, agentJobsFake{patchFails: true})
+			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access))
+			mustContain(t, h.output(), "kubehz: could not set spec.suspend to false on cronjob/kubehz-heartbeat. The CronJob agent can stay suspended, so heartbeats can stop until the deploy runs again. The kubeconfig needs patch on CronJobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. The deploy sets it with: kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p '{\"spec\":{\"suspend\":false}}'.")
+			if last := argvLine(h.runner.calls[len(h.runner.calls)-1]); last != agentResumeArgv {
+				t.Fatalf("the deploy stopped at %q, want the patch", last)
+			}
+			if indexOf(*log, bindApplyArgv) < 0 {
+				t.Fatalf("the stage must come before the patch: %v", *log)
+			}
+			joined := strings.Join(*log, "\n")
+			mustNotContain(t, joined, "create job")
+			mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent"))
 		})
 	}
 }
 
 // The deploy stages the bytes that it checked. A file that changes after the
 // check (here: on the first namespace apply, between the check and the
-// dry-run create; in the operator direction that is the proof's) does not
+// dry-run create; in the operator direction that is the preflight's) does not
 // reach the Secret, in either form and in both directions.
 func TestDeployApplyStagesTheBytesItChecked(t *testing.T) {
 	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
@@ -448,15 +679,15 @@ func TestDeployApplyStagesTheBytesItChecked(t *testing.T) {
 	}
 }
 
-// A failed stage with a bind secret on disk stops the deploy right after the
-// CronJob agent apply, in both directions and at each of the three steps. In
-// the operator mode the proof before it passed, and the error says that
-// nothing beats. A CronJob without the Secret registers a separate pending
-// row.
+// A failed stage with a bind secret on disk stops the deploy after the
+// CronJob agent apply, the Job delete and the pod poll, in both directions
+// and at each of the three steps. The CronJob stays suspended: no patch ends
+// the suspend, and the error says so. In the operator mode the preflight
+// before it passed.
 //
 // The subtest names hold no fail substring: t.TempDir puts the test name in
 // the render path, and a fail substring there fails the namespace apply.
-func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
+func TestDeployApplyFailedBindStageLeavesTheCronJobSuspended(t *testing.T) {
 	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
 		for _, step := range []struct{ name, fail string }{
 			{"namespace apply", "namespace.yaml"},
@@ -475,21 +706,13 @@ func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 					t.Fatalf("the deploy stopped at %q, want the %s call", last, step.name)
 				}
 				out := h.output()
-				mustContain(t, out, "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind")
-				mustContain(t, out, "The deploy applied the CronJob agent and then stopped.")
-				nothing := "The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until a deploy completes."
-				if mode.owner == "operator" {
-					mustContain(t, out, nothing)
-				} else {
-					mustNotContain(t, out, nothing)
+				mustContain(t, out, "kubehz: could not stage the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The stage can have applied the namespace or the Secret. The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. If you deploy without the secret, the agent can register a separate pending row if it has no binding and no staged value yet. To deploy without the secret, remove the file and the Secret (kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found), then claim the new row with the code from 'lo kubehz claim-code'.")
+				for _, old := range []string{"reporting NOTHING", "The deploy applied the CronJob agent and then stopped.", "pending-pool"} {
+					mustNotContain(t, out, old)
 				}
-				mustContain(t, out, "registers a separate pending row, and the announced row gets no heartbeats.")
-				mustContain(t, out, "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
-				mustContain(t, out, "To deploy without the secret, remove the file")
-				mustNotContain(t, out, "pending-pool")
 				// The CronJob agent apply is the last call that changes an
-				// agent, and only staging calls follow it: no live agent, no
-				// bootstrap Job.
+				// agent. Only the Job delete, the pod poll and staging calls
+				// follow it: no resume, no live agent, no bootstrap Job.
 				cron := indexOf(*log, "apply -k "+filepath.Join(work, "agent"))
 				if cron < 0 {
 					t.Fatalf("no CronJob agent apply: %v", *log)
@@ -497,10 +720,16 @@ func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 				if mode.owner == "operator" {
 					assertBindProvedFirst(t, *log, work)
 				}
-				for _, l := range (*log)[cron+1:] {
+				if len(*log) < cron+3 || (*log)[cron+1] != agentJobsDeleteArgv || (*log)[cron+2] != agentJobsPollArgv {
+					t.Fatalf("want the Job delete and the pod poll after the CronJob agent apply: %v", *log)
+				}
+				for _, l := range (*log)[cron+3:] {
 					if !strings.Contains(l, "namespace.yaml") && !strings.Contains(l, "create secret generic kubehz-agent-bind") {
-						t.Fatalf("only staging calls may follow the CronJob agent apply, got %q: %v", l, *log)
+						t.Fatalf("only staging calls may follow the pod poll, got %q: %v", l, *log)
 					}
+				}
+				if h.runner.anyCall("patch cronjob") {
+					t.Fatalf("a failed stage must leave the CronJob suspended: %v", h.runner.lines())
 				}
 				joined := strings.Join(*log, "\n")
 				mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent"))
@@ -513,7 +742,8 @@ func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 }
 
 // No bind secret on disk: the deploy touches kubehz-agent-bind not at all,
-// keeps today's order, and warns what a register in another checkout means.
+// still deletes the Jobs, waits for their pods and ends the suspend, and
+// warns what a register in another checkout means.
 func TestDeployApplyNoBindSecretWarnsAndContinues(t *testing.T) {
 	for _, mode := range []struct{ owner, access, first string }{
 		{"operator", "managed", "apply -k "}, {"cronjob", "registered", "delete -k "},
@@ -526,10 +756,11 @@ func TestDeployApplyNoBindSecretWarnsAndContinues(t *testing.T) {
 		mustNotContain(t, joined, "kubehz-agent-bind")
 		mustNotContain(t, joined, "namespace.yaml")
 		mustContain(t, (*log)[0], mode.first)
-		mustContain(t, h.output(), "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind.")
-		mustContain(t, h.output(), "the agent registers a separate pending row.")
-		mustContain(t, h.output(), "The announced row stays as it is and gets no heartbeats.")
-		mustContain(t, h.output(), "Claim the new row with the code from 'lo kubehz claim-code'.")
+		cron := indexOf(*log, "apply -k "+filepath.Join(work, "agent"))
+		if cron < 0 || len(*log) < cron+4 || (*log)[cron+1] != agentJobsDeleteArgv || (*log)[cron+2] != agentJobsPollArgv || (*log)[cron+3] != agentResumeArgv {
+			t.Fatalf("%s: want the Job delete, the pod poll and the resume right after the CronJob agent apply: %v", mode.owner, *log)
+		}
+		mustContain(t, h.output(), "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind. If 'lo kubehz register' ran in another checkout, the agent can register a separate pending row if it has no binding and no staged value yet. The announced row then stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.")
 	}
 }
 
@@ -562,66 +793,74 @@ func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
 			mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
 			mustContain(t, (*log)[0], "delete -k ")
 			out := h.output()
-			mustContain(t, out, "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters).")
-			mustContain(t, out, "a Secret kubehz-agent-bind from an earlier deploy stays as it is.")
-			mustContain(t, out, "The announced row stays as it is and gets no heartbeats.")
+			mustContain(t, out, "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). The deploy does not stage it, and a Secret kubehz-agent-bind from an earlier deploy stays as it is. Then the agent can register a separate pending row if it has no binding and no staged value yet. The announced row then stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.")
 			mustContain(t, out, "If the file holds a newer form of bind secret, upgrade lok8s (the lo binary and, for a bash install, the synced tree), then run 'lo kubehz deploy' again.")
 		})
 	}
 }
 
-// A failure before the stage changes no other object, and its error says
-// so, with or without a bind secret on disk. The Secret is not staged: the
-// stage comes only after the CronJob agent apply. In the operator direction
-// with a bind secret on disk, the proof before the CronJob agent apply
-// applied the namespace, and the error says so.
-func TestDeployApplyFailureBeforeTheStageChangedNothing(t *testing.T) {
-	cron := "kubehz: could not apply the CronJob agent (identity bootstrap). "
-	remove := "could not remove the live agent — nothing else was changed"
-	sweep := "could not sweep live-agent Deployments by label — nothing else was changed"
-	for _, tc := range []struct{ owner, access, fail, want, wantOnDisk string }{
-		{"operator", "managed", "apply -k ", cron + "Nothing else was changed.", cron + "Only the namespace kubehz-system was applied."},
-		{"cronjob", "registered", "delete -k ", remove, remove},
-		{"cronjob", "registered", "delete deployment -l", sweep, sweep},
+// A failed apply or delete of several objects can have changed part of
+// them: its error says so, and says that heartbeats can stop until the deploy
+// runs again. It never says that nothing else was changed. With or without a
+// bind secret on disk, a failure before the stage stages no Secret.
+func TestDeployApplyFailedAgentStepsSayWhatCanHaveChanged(t *testing.T) {
+	stop := "heartbeats can stop until the deploy runs again."
+	for _, tc := range []struct {
+		name, owner, access, fail, want string
+		staged                          bool
+	}{
+		{"operator CronJob agent apply", "operator", "managed", "apply -k ",
+			"kubehz: could not apply the CronJob agent (identity bootstrap). The apply can have applied part of the agent objects; an applied CronJob is suspended, so " + stop + " Fix the cause, then run 'lo kubehz deploy' again.", false},
+		{"operator live agent apply", "operator", "managed", "live-agent/managed",
+			"kubehz: could not apply the live agent. The apply can have applied part of the live agent objects. The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator), so " + stop + " Run 'lo kubehz deploy' again, or set spec.kubehz.agent back to cronjob and run it again.", true},
+		{"cronjob live agent delete", "cronjob", "registered", "delete -k ",
+			"kubehz: could not remove the live agent. The delete can have removed part of the live agent objects. The deploy did not apply the CronJob agent, so " + stop, false},
+		{"cronjob sweep", "cronjob", "registered", "delete deployment -l",
+			"kubehz: could not sweep live-agent Deployments by label. The live agent delete before it passed, and the sweep can have removed some Deployments. The deploy did not apply the CronJob agent, so " + stop, false},
+		{"cronjob CronJob agent apply", "cronjob", "registered", "apply -k ",
+			"kubehz: could not apply the CronJob agent. The live agent is gone. The apply can have applied part of the agent objects; an applied CronJob is suspended, so " + stop + " Fix the cause, then run 'lo kubehz deploy' again.", false},
 	} {
 		for _, onDisk := range []bool{true, false} {
 			h := newHarness(t)
 			work := renderInto(t, h, tc.owner, tc.access)
-			want := tc.want
 			if onDisk {
 				writeBindSecret(t, h, "acme.example.com", testBindSecret)
-				want = tc.wantOnDisk
 			}
 			log := bindStageLogger(h, tc.fail)
 			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", tc.owner, tc.access))
-			joined := strings.Join(*log, "\n")
-			mustNotContain(t, joined, bindApplyArgv)
-			mustContain(t, h.output(), want)
-			if tc.owner == "operator" && onDisk {
-				mustNotContain(t, h.output(), "Nothing else was changed.")
-				assertBindProvedFirst(t, append(*log, "kubectl apply -k "+filepath.Join(work, "agent")), work)
-				continue
+			out := h.output()
+			mustContain(t, out, tc.want)
+			for _, old := range []string{"Nothing else was changed.", "nothing else was changed", "Only the namespace kubehz-system was applied.", "reporting NOTHING", "one producer"} {
+				mustNotContain(t, out, old)
 			}
-			mustNotContain(t, joined, "kubehz-agent-bind")
+			if got := indexOf(*log, bindApplyArgv) >= 0; got != (tc.staged && onDisk) {
+				t.Fatalf("%s/%v: the Secret was staged: %v, want %v: %v", tc.name, onDisk, got, tc.staged && onDisk, *log)
+			}
+			if tc.owner == "operator" && onDisk {
+				// The preflight ran before the CronJob agent apply.
+				cron := "kubectl apply -k " + filepath.Join(work, "agent")
+				assertBindProvedFirst(t, append(append([]string{}, (*log)[:3]...), cron), work)
+			}
 		}
 	}
 }
 
-// In the operator direction, a proof of the stage that fails stops the deploy
-// BEFORE the CronJob agent apply: no agent changes, no Secret is staged, and
-// the error says what was changed (the namespace, when its apply passed) and
+// In the operator direction, a preflight of the stage that fails stops the
+// deploy BEFORE the CronJob agent apply: no agent changes, no Secret is
+// staged, and the error says what was changed (the namespace, when its apply
+// passed; what the namespace apply can have changed, when it failed) and
 // what the kubeconfig needs.
 //
 // The subtest names hold no fail substring: t.TempDir puts the test name in
 // the render path, and a fail substring there fails the namespace apply.
-func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
+func TestDeployApplyFailedPreflightStopsBeforeTheCronJob(t *testing.T) {
 	for _, tc := range []struct {
 		name, fail, changed string
 		creates, proofs     int
 	}{
-		{"server dry run", "--dry-run=server", "Only the namespace kubehz-system was applied.", 1, 1},
-		{"dry-run create", "--dry-run=client", "Only the namespace kubehz-system was applied.", 1, 0},
-		{"namespace apply", "namespace.yaml", "Nothing else was changed.", 0, 0},
+		{"server dry run", "--dry-run=server", "The deploy applied only the namespace kubehz-system.", 1, 1},
+		{"dry-run create", "--dry-run=client", "The deploy applied only the namespace kubehz-system.", 1, 0},
+		{"namespace apply", "namespace.yaml", "The namespace apply can have changed the namespace kubehz-system. The deploy applied no other object.", 0, 0},
 	} {
 		for _, s := range stagedBindSecrets {
 			t.Run(tc.name+"/"+s.name, func(t *testing.T) {
@@ -631,11 +870,13 @@ func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
 				log := bindStageLogger(h, tc.fail)
 				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 				out := h.output()
-				mustContain(t, out, "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent. "+tc.changed+" The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
-				mustContain(t, out, "To deploy without the secret, remove the file")
+				mustContain(t, out, "kubehz: the preflight of the bind secret stage failed (a server-side dry run of Secret kubehz-system/kubehz-agent-bind with the value from clusters/acme.example.com/.kubehz-bind), so the deploy stopped before the CronJob agent apply. "+tc.changed+" The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file and the Secret (kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found), then claim the new row with the code from 'lo kubehz claim-code'.")
+				for _, old := range []string{"Nothing else was changed.", "Only the namespace kubehz-system was applied.", "proof"} {
+					mustNotContain(t, out, old)
+				}
 				mustNotContain(t, out, s.value)
 				// The calls that ran, the failed one included (the runner
-				// records failed calls too): the proof stopped at its step.
+				// records failed calls too): the preflight stopped at its step.
 				// After a failed namespace apply, no dry-run create and no
 				// server dry run ran.
 				if n := len(stdinsOf(h, "create secret generic")); n != tc.creates {
@@ -739,7 +980,9 @@ func TestDeployApplyIdentitySecretNeverFilledFails(t *testing.T) {
 	joined := strings.Join(*log, "\n")
 	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
 	// The Job stays for the operator to read; the deploy does not delete it.
-	mustNotContain(t, joined, "delete job")
+	mustNotContain(t, joined, "delete job kubehz-heartbeat-bootstrap-")
+	mustContain(t, h.output(), "A Job that failed stays until you delete it, or until the next 'lo kubehz deploy' deletes it.")
+	mustContain(t, h.output(), "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again.")
 }
 
 // A Secret read that fails for any reason but NotFound (RBAC, an unreachable
@@ -758,7 +1001,8 @@ func TestDeployApplyIdentitySecretUnreadableStops(t *testing.T) {
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "could not read Secret kubehz-agent")
 	mustContain(t, h.output(), "Forbidden")
-	mustContain(t, h.output(), "reporting NOTHING")
+	mustContain(t, h.output(), "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so heartbeats can stop until the deploy runs again. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again.")
+	mustNotContain(t, h.output(), "reporting NOTHING")
 	joined := strings.Join(*log, "\n")
 	mustNotContain(t, joined, "create job")
 	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
@@ -796,7 +1040,8 @@ func TestDeployApplyIdentitySecretNotFoundStops(t *testing.T) {
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "Secret kubehz-agent does not exist in kubehz-system, but the deploy applied it just before")
 	mustContain(t, h.output(), "The agent cannot create it")
-	mustContain(t, h.output(), "reporting NOTHING")
+	mustContain(t, h.output(), "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again.")
+	mustNotContain(t, h.output(), "reporting NOTHING")
 	joined := strings.Join(*log, "\n")
 	mustNotContain(t, joined, "create job")
 	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
@@ -820,7 +1065,7 @@ func TestDeployApplyIdentityBootstrapWithoutATokenFails(t *testing.T) {
 	mustContain(t, h.output(), "completed but left no agent-token in Secret kubehz-agent")
 	joined := strings.Join(*log, "\n")
 	mustContain(t, joined, "create job kubehz-heartbeat-bootstrap-")
-	mustNotContain(t, joined, "delete job")
+	mustNotContain(t, joined, "delete job kubehz-heartbeat-bootstrap-")
 	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
 
 	// The word on a line of its own after a warning line counts.
@@ -847,7 +1092,8 @@ func TestDeployApplyNeverReadyFails(t *testing.T) {
 	})
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "never became Ready")
-	mustContain(t, h.output(), "NOTHING owns the heartbeat")
+	mustContain(t, h.output(), "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not Ready, so heartbeats can stop until the deploy runs again.")
+	mustNotContain(t, h.output(), "NOTHING")
 }
 
 // readyTimeout runs the operator apply with a rollout wait that times out.
@@ -1071,12 +1317,15 @@ func TestDeployApplyToCronjobOrder(t *testing.T) {
 	work := renderInto(t, h, "cronjob", "registered")
 	log := kubectlLogger(h, nil)
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
-	if len(*log) != 3 {
+	if len(*log) != 6 {
 		t.Fatalf("calls: %v", *log)
 	}
 	mustContain(t, (*log)[0], "delete -k "+filepath.Join(work, "live-agent", "managed")+" --ignore-not-found=true")
 	mustContain(t, (*log)[1], "delete deployment -l app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view")
 	mustContain(t, (*log)[2], "apply -k "+filepath.Join(work, "agent"))
+	if (*log)[3] != agentJobsDeleteArgv || (*log)[4] != agentJobsPollArgv || (*log)[5] != agentResumeArgv {
+		t.Fatalf("want the Job delete, the pod poll and the resume after the CronJob agent apply: %v", *log)
+	}
 	mustNotContain(t, strings.Join(*log, "\n"), "apply -k "+filepath.Join(work, "live-agent"))
 }
 
@@ -1136,9 +1385,14 @@ func TestDeployApplyUnreadableHeartbeatProbeWarnsAndContinues(t *testing.T) {
 	work := renderInto(t, h, "operator", "managed")
 	var log []string
 	h.runner.handler = func(c execx.Cmd, _ string) error {
-		if strings.Contains(argvLine(c), "get pods") {
+		// Only the heartbeat probe fails; the poll for the pods of the
+		// CronJob agent's Jobs (fail-hard) finds none.
+		if strings.Contains(argvLine(c), "--field-selector=status.phase=Running") {
 			io.WriteString(c.Stderr, "Error from server (Forbidden): pods is forbidden\n")
 			return exitErr(1)
+		}
+		if strings.Contains(argvLine(c), "get pods") {
+			return nil
 		}
 		log = append(log, argvLine(c))
 		if strings.Contains(argvLine(c), "get secret kubehz-agent ") {
@@ -1148,8 +1402,11 @@ func TestDeployApplyUnreadableHeartbeatProbeWarnsAndContinues(t *testing.T) {
 	}
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, h.output(), "could not check for an in-flight heartbeat pod")
-	mustContain(t, log[1], "get secret kubehz-agent")
-	mustContain(t, log[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))
+	if log[2] != agentResumeArgv {
+		t.Fatalf("the resume must come before the heartbeat probe: %v", log)
+	}
+	mustContain(t, log[3], "get secret kubehz-agent")
+	mustContain(t, log[4], "apply -k "+filepath.Join(work, "live-agent", "managed"))
 }
 
 func TestWaitsIgnoreApiserverWarnings(t *testing.T) {
@@ -1171,6 +1428,10 @@ func TestWaitsIgnoreApiserverWarnings(t *testing.T) {
 		mustOK(t, h.ctx.waitLiveAgentGone(t.Context()), h.output())
 		if h.output() != "" || slept != 0 {
 			t.Fatalf("live-agent wait tripped on a warning: %q slept=%d", h.output(), slept)
+		}
+		mustOK(t, h.ctx.waitAgentJobsGone(t.Context()), h.output())
+		if h.output() != "" || slept != 0 {
+			t.Fatalf("agent Jobs wait tripped on a warning: %q slept=%d", h.output(), slept)
 		}
 	}
 }

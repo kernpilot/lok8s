@@ -1051,6 +1051,10 @@ ${STUB_JQ_ARGV}:0"
       assert_success
       count=$(grep -cF -- "${warning}" <<< "${output}") || true
       [ "${count}" -eq 1 ] || { echo "${mode} ${answer}: the warning came ${count} times: ${output}"; return 1; }
+      # The answer can have rotated the secret: the warning says so, and
+      # names the recovery.
+      assert_output --partial "The platform can have rotated the bind secret with this answer: then the value in the file no longer counts, and lo cannot get the new value again."
+      assert_output --partial "An agent that has no binding yet can then register a separate pending row: claim that row with the code from 'lo kubehz claim-code'."
       refute_output --partial "${BIND_NEXT}"
       refute_output --partial "${BIND_NEXT^^}"
       refute_output --partial "${BIND_STORED}"
@@ -1095,10 +1099,35 @@ ${STUB_JQ_ARGV}:0"
   # shellcheck disable=SC2016  # the filter is jq program text
   run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
   assert_success
-  assert_output --partial "[warn] kubehz: could not create a temporary file to read clusters/test.kubehz.dev/.kubehz-bind, so this register call does not send the bind secret."
+  assert_output --partial "[warn] kubehz: could not create a temporary directory to read clusters/test.kubehz.dev/.kubehz-bind, so this register call does not send the bind secret."
   refute_output --partial "${BIND_STORED}"
   refute_output --partial "bindSecret"
   assert_output --partial '"domain": "test.kubehz.dev"'
+}
+
+# A TERM after the copy exists: the trap of the subshell body removes the
+# private directory with the copy. The jq stub is the step after the copy:
+# it saves what the directory holds, then sends TERM to the shell that runs
+# register_body.
+@test "register_body: a TERM after the copy exists removes the private copy" {
+  _source_main_for_persist
+  local tmp="${BATS_TEST_TMPDIR}/register-term" bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkdir -p "${tmp}"
+  export TMPDIR="${tmp}"
+  export STUB_SEEN="${BATS_TEST_TMPDIR}/seen"
+  _write_bind_fixture valid "${bind_file}"
+  jq() {
+    ls -A -- "${TMPDIR}"/* > "${STUB_SEEN}"
+    kill -TERM "${BASHPID}"
+  }
+  # shellcheck disable=SC2016  # the filter is jq program text
+  run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
+  [ "${status}" -eq 143 ] || { echo "status ${status}: ${output}"; return 1; }
+  run cat "${STUB_SEEN}"
+  assert_output "bind-secret"
+  run ls -A "${tmp}"
+  assert_output ""
+  unset -f jq
 }
 
 @test "bind_secret_snapshot: copies at most 70 bytes at 0600, checks the copy, and refuses a FIFO without a read" {
@@ -1263,7 +1292,7 @@ _persist_with_a_planted_link() {
   _source_main_for_persist
   local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   mkfifo "${slot}"
-  export -f kubehz::bind_secret_ok kubehz::bind_secret_snapshot kubehz::register_body
+  export -f kubehz::bind_secret_ok kubehz::bind_secret_snapshot kubehz::register_body kubehz::own_private_copy
 
   # A read of a FIFO waits for a writer; timeout turns a hang into status 124.
   run timeout 10 bash -c 'kubehz::bind_secret_ok "$1"' _ "${slot}"

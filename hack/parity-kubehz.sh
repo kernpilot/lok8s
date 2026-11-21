@@ -469,13 +469,14 @@ check - kubehz deploy --domain lo-hosted.dev
 check - kubehz deploy --domain kubehz-self.dev
 check "${PARSEERR}" kubehz deploy --domain broken.dev
 
-# ── deploy: the bind secret goes in right after the CronJob agent ──────────
+# ── deploy: the bind secret goes in while the CronJob agent is suspended ───
 # A kubectl that names each call on stderr. It answers the CronJob path (the
-# live-agent removal, an empty pod list, the CronJob apply), the three
-# staging calls, the server dry run with which the operator direction proves
-# the stage before the CronJob apply, an identity Secret that holds an
-# agent-token, and the dry-run render, and fails every other call: in
-# operator mode the first one is the live agent apply. The dry-run create
+# live-agent removal, an empty pod list, the CronJob apply, the delete of its
+# Jobs, the patch that ends the suspend), the three staging calls, the server
+# dry run of the preflight of the operator direction before the CronJob
+# apply, an identity Secret that holds an agent-token, and the dry-run
+# render, and fails every other call: in operator mode the first one is the
+# live agent apply. The dry-run create
 # prints the SHA-256 of its stdin, so the stdin of the server-side apply (and
 # of its dry run) shows which bytes were staged. A call whose argv contains
 # PARITY_BIND_FAIL fails too. The diff then covers the calls in order. The
@@ -490,7 +491,9 @@ case "$*" in
   "apply -k "*/agent) exit 0 ;;
   "delete -k "*/live-agent/managed" --ignore-not-found=true") exit 0 ;;
   "-n kubehz-system delete deployment -l "*) exit 0 ;;
+  "-n kubehz-system delete job -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --ignore-not-found=true") exit 0 ;;
   "-n kubehz-system get pods "*) exit 0 ;;
+  "-n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p "*) exit 0 ;;
   "-n kubehz-system get secret kubehz-agent -o go-template="*) printf 'agent-token\n'; exit 0 ;;
   "apply -f "*/agent/namespace.yaml) exit 0 ;;
   *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml")
@@ -511,20 +514,28 @@ check - kubehz deploy --domain bind-nul.dev              # a NUL in the file: wa
 check - kubehz deploy --dry-run --domain bind-cron.dev    # the Secret line follows the CronJob agent
 check - kubehz deploy --dry-run --domain bind-op.dev
 check - kubehz deploy --dry-run --domain reg.dev
-# A failed stage stops the deploy right after the CronJob agent. In the
-# operator direction the same calls run first as the proof, so a failed
+# A failed stage stops the deploy with the CronJob agent suspended. In the
+# operator direction the same calls run first as the preflight, so a failed
 # namespace apply, dry-run create or server dry run stops the deploy before
 # the CronJob agent.
 export PARITY_BIND_FAIL=namespace.yaml
 check - kubehz deploy --domain bind-cron.dev
-check - kubehz deploy --domain bind-op.dev               # the proof fails: "Nothing else was changed."
+check - kubehz deploy --domain bind-op.dev               # the preflight fails: the namespace apply can have changed it
 export PARITY_BIND_FAIL=--dry-run=client
-check - kubehz deploy --domain bind-op.dev               # the proof fails: "Only the namespace kubehz-system was applied."
+check - kubehz deploy --domain bind-op.dev               # the preflight fails: only the namespace was applied
 export PARITY_BIND_FAIL=--dry-run=server
 check - kubehz deploy --domain bind-op.dev
-# The real server-side apply only (its dry run passes): the proof passes,
-# and the stage after the CronJob agent fails.
+# The real server-side apply only (its dry run passes): the preflight
+# passes, and the stage after the CronJob agent fails.
 export PARITY_BIND_FAIL="--force-conflicts -f -"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+# The delete of the CronJob agent's Jobs fails: no stage, and the CronJob
+# stays suspended. The patch that ends the suspend fails: after the stage.
+export PARITY_BIND_FAIL="delete job -l"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+export PARITY_BIND_FAIL="patch cronjob"
 check - kubehz deploy --domain bind-cron.dev
 check - kubehz deploy --domain bind-op.dev
 unset PARITY_BIND_FAIL
@@ -549,6 +560,11 @@ printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' 
 case "$*" in
   "apply -k "*) exit 0 ;;
   "-n kubehz-system get pods -l app=kubehz-heartbeat "*) exit 0 ;;
+  # The delete of the CronJob agent's Jobs, the poll for their pods (none),
+  # and the patch that ends the suspend.
+  "-n kubehz-system delete job -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --ignore-not-found=true") exit 0 ;;
+  "-n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent "*) exit 0 ;;
+  "-n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p "*) exit 0 ;;
   # The identity probe: the Secret holds an agent-token, so no bootstrap runs.
   "-n kubehz-system get secret kubehz-agent -o go-template="*) printf 'agent-token'; exit 0 ;;
   "-n kubehz-system rollout status "*) echo 'error: timed out waiting for the condition' >&2; exit 1 ;;

@@ -348,8 +348,9 @@ kubehz::get_ssh_fingerprint() {
 # noclobber creates the new one at 0600. No state of the write leaves the
 # secret in a file that .gitignore does not match. A directory, or a link to
 # one, is never replaced. A write failure warns but never fails the register.
-# The deploy then finds no bind secret, and the agent registers a separate
-# pending row that the user claims by its claim code.
+# The deploy then finds no bind secret, and the agent can register a separate
+# pending row if it has no binding and no staged value yet. The user claims
+# that row by its claim code.
 #
 # noclobber refuses an existing regular file, and a link to nothing, but it
 # writes through a link to an existing FIFO or device. A link put in the slot
@@ -399,7 +400,7 @@ kubehz::persist_response_bind_secret() {
       else (select(type == "string" and test("\\A(khzb_)?[0-9a-f]{64}\\z")) // "-") end') || return 0
   [[ -n "${secret}" ]] || return 0
   if [[ "${secret}" == "-" ]]; then
-    warn "kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/${domain}/.kubehz-bind. If the platform hands out a newer form, upgrade lok8s."
+    warn "kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/${domain}/.kubehz-bind. The platform can have rotated the bind secret with this answer: then the value in the file no longer counts, and lo cannot get the new value again. If the platform hands out a newer form, upgrade lok8s. An agent that has no binding yet can then register a separate pending row: claim that row with the code from 'lo kubehz claim-code'."
     return 0
   fi
   kubehz::persist_bind_secret "${domain}" "${secret}"
@@ -430,7 +431,10 @@ kubehz::bind_secret_ok() {
 # copy holds a bind secret (kubehz::bind_secret_ok). <path> must be a readable
 # regular file: a FIFO or any other file type is refused before the read.
 # head opens <path> once. The caller uses the copy for the value and removes
-# it, so a change of <path> after the check does not reach the value.
+# it, so a change of <path> after the check does not reach the value. The
+# check and the open are two steps: a FIFO swapped in between them can block
+# the read, or give bytes that must still pass the exact check of the copy
+# (no other effect). The Go twin checks the file that it opened.
 # Usage: kubehz::bind_secret_snapshot <path> <copy>
 kubehz::bind_secret_snapshot() {
   local path="${1}" copy="${2}"
@@ -439,23 +443,39 @@ kubehz::bind_secret_snapshot() {
   kubehz::bind_secret_ok "${copy}"
 }
 
+# Own the private copy <path> in the subshell that calls this: remove it on
+# every return and on INT or TERM; a kill -9 can leave a 0600 file in the
+# private temp directory. Call it only in a subshell (a function body in
+# parentheses), as the traps belong to the shell that sets them. A path in
+# a directory is removed with the directory content (rm -rf).
+# Usage: kubehz::own_private_copy <path>
+kubehz::own_private_copy() {
+  _KUBEHZ_PRIVATE_COPY="${1}"
+  trap 'rm -rf -- "${_KUBEHZ_PRIVATE_COPY}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
 # Print the JSON body of a register call: the object that <filter> builds
 # from the jq arguments, plus bindSecret when clusters/<domain>/.kubehz-bind
 # holds a bind secret (kubehz::bind_secret_snapshot). Every register call
 # sends it, so a re-run keeps the same cluster record. Any other file adds
 # nothing: the api refuses a malformed value. The check and jq read the same
-# private copy (a mktemp file, removed after jq on every path). jq reads the
-# value from it (--rawfile) and checks it again where it uses it, and the
-# caller pipes the body into curl (--data-binary @-), so the value never
-# reaches argv.
+# private copy, in a private temp directory (mktemp -d). The subshell body
+# owns the directory (kubehz::own_private_copy): it goes on every return and
+# on INT or TERM. jq reads the value from the copy (--rawfile) and checks it
+# again where it uses it, and the caller pipes the body into curl
+# (--data-binary @-), so the value never reaches argv.
 # Usage: kubehz::register_body <domain> <filter> [jq args...]
-kubehz::register_body() {
+kubehz::register_body() (
   local domain="${1}" filter="${2}"
   shift 2
-  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind" copy rc=0
-  if ! copy=$(umask 077 && mktemp); then
-    warn "kubehz: could not create a temporary file to read clusters/${domain}/.kubehz-bind, so this register call does not send the bind secret."
-    copy=""
+  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind" dir copy="" rc=0
+  if dir=$(umask 077 && mktemp -d); then
+    kubehz::own_private_copy "${dir}"
+    copy="${dir}/bind-secret"
+  else
+    warn "kubehz: could not create a temporary directory to read clusters/${domain}/.kubehz-bind, so this register call does not send the bind secret."
   fi
   if [[ -n "${copy}" ]] && kubehz::bind_secret_snapshot "${path}" "${copy}"; then
     # shellcheck disable=SC2016  # $bind is jq program text
@@ -464,9 +484,8 @@ kubehz::register_body() {
   else
     jq -n "${@}" "${filter}" || rc=$?
   fi
-  [[ -z "${copy}" ]] || rm -f -- "${copy}"
   return "${rc}"
-}
+)
 
 # POST a register body (stdin) to <api_url>/api/clusters/register and print
 # the answer of a status below 400. A 503 or 429 with Retry-After tries

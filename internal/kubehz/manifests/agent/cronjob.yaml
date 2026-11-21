@@ -7,11 +7,21 @@ metadata:
     app.kubernetes.io/name: kubehz-agent
     app.kubernetes.io/part-of: kubehz
 spec:
+  # 'lo kubehz deploy' applies the CronJob suspended, deletes its Jobs by the
+  # jobTemplate labels below, waits until their pods have ended, stages the
+  # bind secret, and then sets suspend to false. So no agent pod runs between
+  # the apply and the stage. An apply of these manifests without the deploy
+  # leaves the CronJob suspended.
+  suspend: true
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   jobTemplate:
+    metadata:
+      labels:
+        app: kubehz-heartbeat
+        app.kubernetes.io/name: kubehz-agent
     spec:
       backoffLimit: 1
       activeDeadlineSeconds: 120

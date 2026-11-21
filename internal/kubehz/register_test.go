@@ -426,6 +426,7 @@ func unusableBindSecrets() map[string]string {
 		"khzb_ and 63 hex (68 bytes)":    "khzb_" + hex[1:],
 		"khzb_ and 65 hex (70 bytes)":    "khzb_" + hex + "a",
 		"not hex":                        "g" + hex[1:],
+		"khzb_ and not hex":              "khzb_g" + hex[1:],
 		"oversized":                      hex + strings.Repeat("a", 200000),
 	}
 }
@@ -500,6 +501,10 @@ func TestRegisterModesRefuseAnUnusableResponseBindSecret(t *testing.T) {
 				if n := strings.Count(out, want); n != 1 {
 					t.Fatalf("want the warning once, got %d times:\n%s", n, out)
 				}
+				// The answer can have rotated the secret: the warning says so,
+				// and names the recovery.
+				mustContain(t, out, "The platform can have rotated the bind secret with this answer: then the value in the file no longer counts, and lo cannot get the new value again.")
+				mustContain(t, out, "An agent that has no binding yet can then register a separate pending row: claim that row with the code from 'lo kubehz claim-code'.")
 				mustNotContain(t, out, next)
 				mustNotContain(t, out, strings.ToUpper(next))
 				mustNotContain(t, out, bindSecretFixture)

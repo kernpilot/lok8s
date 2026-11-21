@@ -322,7 +322,8 @@ func (c *Context) bindSecretPath(domain string) string {
 // ignored name (createBindSecret), so no state of the write leaves the secret
 // in a file that .gitignore does not match. A write failure warns but never
 // fails the register. The deploy then finds no bind secret, and the agent
-// registers a separate pending row that the user claims by its claim code.
+// can register a separate pending row if it has no binding and no staged
+// value yet. The user claims that row by its claim code.
 func (c *Context) persistBindSecret(domain, secret string) {
 	if secret == "" {
 		return
@@ -347,7 +348,9 @@ func (c *Context) persistBindSecret(domain, secret string) {
 // No value (no key, null, false or "") writes nothing and prints nothing, as
 // before. Any other value must be a string that bindSecretRe matches, the
 // rule that storedBindSecret applies to the file. Else lo does not change the
-// file and warns. The warning names the file and never the value.
+// file and warns. The warning names the file and never the value. The answer
+// can have rotated the secret, so the warning says that the stored value can
+// be one that no longer counts.
 func (c *Context) persistResponseBindSecret(domain string, v any) {
 	got := jget(v, "bindSecret")
 	if jfalsy(got) || got == "" {
@@ -355,7 +358,7 @@ func (c *Context) persistResponseBindSecret(domain string, v any) {
 	}
 	s, ok := got.(string)
 	if !ok || !bindSecretRe.MatchString(s) {
-		c.warnf("kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/%s/.kubehz-bind. If the platform hands out a newer form, upgrade lok8s.", domain)
+		c.warnf("kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/%s/.kubehz-bind. The platform can have rotated the bind secret with this answer: then the value in the file no longer counts, and lo cannot get the new value again. If the platform hands out a newer form, upgrade lok8s. An agent that has no binding yet can then register a separate pending row: claim that row with the code from 'lo kubehz claim-code'.", domain)
 		return
 	}
 	c.persistBindSecret(domain, s)
