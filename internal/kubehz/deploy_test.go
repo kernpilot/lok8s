@@ -453,15 +453,27 @@ func TestDeployApplyStagesTheBytesItChecked(t *testing.T) {
 // the operator mode the proof before it passed, and the error says that
 // nothing beats. A CronJob without the Secret registers a separate pending
 // row.
+//
+// The subtest names hold no fail substring: t.TempDir puts the test name in
+// the render path, and a fail substring there fails the namespace apply.
 func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
-		for _, step := range []string{"namespace.yaml", "--dry-run=client", "apply --server-side"} {
-			t.Run(mode.owner+"/"+step, func(t *testing.T) {
+		for _, step := range []struct{ name, fail string }{
+			{"namespace apply", "namespace.yaml"},
+			{"dry-run create", "--dry-run=client"},
+			{"server-side apply", "apply --server-side"},
+		} {
+			t.Run(mode.owner+"/"+step.name, func(t *testing.T) {
 				h := newHarness(t)
 				work := renderInto(t, h, mode.owner, mode.access)
 				writeBindSecret(t, h, "acme.example.com", testBindSecret)
-				log := bindStageLoggerAfter(h, step, "apply -k "+filepath.Join(work, "agent"))
+				log := bindStageLoggerAfter(h, step.fail, "apply -k "+filepath.Join(work, "agent"))
 				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access))
+				// The deploy stopped at the call of this step: the last call
+				// that ran (failed calls are recorded too).
+				if last := argvLine(h.runner.calls[len(h.runner.calls)-1]); !strings.Contains(last, step.fail) {
+					t.Fatalf("the deploy stopped at %q, want the %s call", last, step.name)
+				}
 				out := h.output()
 				mustContain(t, out, "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind")
 				mustContain(t, out, "The deploy applied the CronJob agent and then stopped.")
@@ -599,14 +611,20 @@ func TestDeployApplyFailureBeforeTheStageChangedNothing(t *testing.T) {
 // BEFORE the CronJob agent apply: no agent changes, no Secret is staged, and
 // the error says what was changed (the namespace, when its apply passed) and
 // what the kubeconfig needs.
+//
+// The subtest names hold no fail substring: t.TempDir puts the test name in
+// the render path, and a fail substring there fails the namespace apply.
 func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
-	for _, tc := range []struct{ fail, changed string }{
-		{"--dry-run=server", "Only the namespace kubehz-system was applied."},
-		{"--dry-run=client", "Only the namespace kubehz-system was applied."},
-		{"namespace.yaml", "Nothing else was changed."},
+	for _, tc := range []struct {
+		name, fail, changed string
+		creates, proofs     int
+	}{
+		{"server dry run", "--dry-run=server", "Only the namespace kubehz-system was applied.", 1, 1},
+		{"dry-run create", "--dry-run=client", "Only the namespace kubehz-system was applied.", 1, 0},
+		{"namespace apply", "namespace.yaml", "Nothing else was changed.", 0, 0},
 	} {
 		for _, s := range stagedBindSecrets {
-			t.Run(tc.fail+"/"+s.name, func(t *testing.T) {
+			t.Run(tc.name+"/"+s.name, func(t *testing.T) {
 				h := newHarness(t)
 				work := renderInto(t, h, "operator", "managed")
 				writeBindSecret(t, h, "acme.example.com", s.value)
@@ -616,12 +634,15 @@ func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
 				mustContain(t, out, "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent. "+tc.changed+" The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
 				mustContain(t, out, "To deploy without the secret, remove the file")
 				mustNotContain(t, out, s.value)
-				if tc.fail == "namespace.yaml" {
-					// The namespace apply failed: no dry-run create and no
-					// server dry run ran (the runner records failed calls too).
-					if n := len(stdinsOf(h, "create secret generic")) + len(stdinsOf(h, "--dry-run=server")); n != 0 {
-						t.Fatalf("a failed namespace apply ran %d stage calls: %v", n, h.runner.calls)
-					}
+				// The calls that ran, the failed one included (the runner
+				// records failed calls too): the proof stopped at its step.
+				// After a failed namespace apply, no dry-run create and no
+				// server dry run ran.
+				if n := len(stdinsOf(h, "create secret generic")); n != tc.creates {
+					t.Fatalf("want %d dry-run creates, got %d: %v", tc.creates, n, h.runner.calls)
+				}
+				if n := len(stdinsOf(h, "--dry-run=server")); n != tc.proofs {
+					t.Fatalf("want %d server dry runs, got %d: %v", tc.proofs, n, h.runner.calls)
 				}
 				joined := strings.Join(*log, "\n")
 				mustNotContain(t, joined, "apply -k ")
