@@ -402,18 +402,18 @@ kubehz::deploy_apply() {
   if [[ "${owner}" == "operator" ]]; then
     # 0. The bind secret, read once into <workdir>/bind-secret, and the proof
     #    of its stage.
-    local bound=0 changed="nothing else was changed"
+    local bound=0 changed="Nothing else was changed."
     if kubehz::take_bind_secret "${workdir}" "${domain}"; then
       kubehz::prove_bind_secret "${workdir}" "${domain}" || return 1
       bound=1
-      changed="only the namespace kubehz-system was applied"
+      changed="Only the namespace kubehz-system was applied."
     fi
     # 1. The marker first. From the CronJob's next tick on it bootstraps and
     #    enrolls but does not beat, so the beat is unowned rather than
     #    contested while we start the live agent.
     kubectl apply -k "${workdir}/agent" || {
       rm -f -- "${workdir}/bind-secret"
-      error "kubehz: could not apply the CronJob agent (identity bootstrap) — ${changed}"
+      error "kubehz: could not apply the CronJob agent (identity bootstrap). ${changed}"
       return 1
     }
     # 1b. The bind secret, with the copy of step 0, before the identity
@@ -632,13 +632,13 @@ kubehz::take_bind_secret() {
 # removes the copy and stops the deploy before the CronJob agent apply.
 # Usage: kubehz::prove_bind_secret <workdir> <domain>
 kubehz::prove_bind_secret() {
-  local workdir="${1}" domain="${2}" copy="${1}/bind-secret" changed="nothing else was changed"
+  local workdir="${1}" domain="${2}" copy="${1}/bind-secret" changed="Nothing else was changed."
   if kubectl apply -f "${workdir}/agent/namespace.yaml"; then
-    changed="only the namespace kubehz-system was applied"
+    changed="Only the namespace kubehz-system was applied."
     kubehz::bind_secret_upsert "${copy}" --dry-run=server && return 0
   fi
   rm -f -- "${copy}"
-  error "kubehz: the server-side dry run of the stage of the bind secret from clusters/${domain}/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — ${changed}. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'."
+  error "kubehz: the server-side dry run of the stage of the bind secret from clusters/${domain}/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent. ${changed} The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'."
   return 1
 }
 

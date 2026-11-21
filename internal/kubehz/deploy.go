@@ -286,17 +286,17 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 
 	if owner == "operator" {
 		// 0. The bind secret, read once, and the proof of its stage.
-		changed := "nothing else was changed"
+		changed := "Nothing else was changed."
 		secret := c.takeBindSecret(domain)
 		if secret != "" {
 			if err := c.proveBindSecret(ctx, workdir, domain, secret); err != nil {
 				return err
 			}
-			changed = "only the namespace kubehz-system was applied"
+			changed = "Only the namespace kubehz-system was applied."
 		}
 		// 1. The marker first (the CronJob stops beating).
 		if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
-			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap) — %s", changed)
+			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap). %s", changed)
 			return ErrHandled
 		}
 		// 1b. The bind secret, with the bytes of step 0, before the identity
@@ -504,14 +504,14 @@ func (c *Context) takeBindSecret(domain string) string {
 // with --dry-run=server and the same bytes (bindSecretUpsert). A failure
 // stops the deploy before the CronJob agent apply.
 func (c *Context) proveBindSecret(ctx context.Context, workdir, domain, secret string) error {
-	changed := "nothing else was changed"
+	changed := "Nothing else was changed."
 	err := c.run(ctx, "kubectl", "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml"))
 	if err == nil {
-		changed = "only the namespace kubehz-system was applied"
+		changed = "Only the namespace kubehz-system was applied."
 		err = c.bindSecretUpsert(ctx, secret, "--dry-run=server")
 	}
 	if err != nil {
-		c.errorf("kubehz: the server-side dry run of the stage of the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — %s. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'.", domain, changed)
+		c.errorf("kubehz: the server-side dry run of the stage of the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent. %s The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'.", domain, changed)
 		return ErrHandled
 	}
 	return nil

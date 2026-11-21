@@ -141,7 +141,7 @@ func TestDeployPrint(t *testing.T) {
 	mustNotContain(t, h.output(), "live-agent")
 }
 
-// F5: with a bind secret on disk, the dry run names the Secret right after
+// With a bind secret on disk, the dry run names the Secret right after
 // the CronJob agent, in its apply order, and never prints the value.
 func TestDeployPrintNamesTheBindSecretAfterTheCronJob(t *testing.T) {
 	for _, mode := range []struct{ owner, access, next string }{
@@ -521,7 +521,7 @@ func TestDeployApplyNoBindSecretWarnsAndContinues(t *testing.T) {
 	}
 }
 
-// F6: a file that is not a bind secret (the register check: a readable
+// A file that is not a bind secret (the register check: a readable
 // regular file of exactly 64 lowercase hex, or of khzb_ and 64 lowercase hex)
 // is never staged. The deploy warns that the file holds no bind secret and
 // keeps today's order.
@@ -558,34 +558,38 @@ func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
 	}
 }
 
-// F2: a failure before the stage changed nothing, and its error says so,
-// with or without a bind secret on disk. The Secret is not staged: the stage
-// comes only after the CronJob agent apply. In the operator direction with a
-// bind secret on disk, the proof before the CronJob agent apply applied the
-// namespace, and the error says so.
+// A failure before the stage changes no other object, and its error says
+// so, with or without a bind secret on disk. The Secret is not staged: the
+// stage comes only after the CronJob agent apply. In the operator direction
+// with a bind secret on disk, the proof before the CronJob agent apply
+// applied the namespace, and the error says so.
 func TestDeployApplyFailureBeforeTheStageChangedNothing(t *testing.T) {
-	for _, tc := range []struct{ owner, access, fail, prefix string }{
-		{"operator", "managed", "apply -k ", "could not apply the CronJob agent (identity bootstrap) — "},
-		{"cronjob", "registered", "delete -k ", "could not remove the live agent — "},
-		{"cronjob", "registered", "delete deployment -l", "could not sweep live-agent Deployments by label — "},
+	cron := "kubehz: could not apply the CronJob agent (identity bootstrap). "
+	remove := "could not remove the live agent — nothing else was changed"
+	sweep := "could not sweep live-agent Deployments by label — nothing else was changed"
+	for _, tc := range []struct{ owner, access, fail, want, wantOnDisk string }{
+		{"operator", "managed", "apply -k ", cron + "Nothing else was changed.", cron + "Only the namespace kubehz-system was applied."},
+		{"cronjob", "registered", "delete -k ", remove, remove},
+		{"cronjob", "registered", "delete deployment -l", sweep, sweep},
 	} {
 		for _, onDisk := range []bool{true, false} {
 			h := newHarness(t)
 			work := renderInto(t, h, tc.owner, tc.access)
+			want := tc.want
 			if onDisk {
 				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+				want = tc.wantOnDisk
 			}
 			log := bindStageLogger(h, tc.fail)
 			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", tc.owner, tc.access))
 			joined := strings.Join(*log, "\n")
 			mustNotContain(t, joined, bindApplyArgv)
+			mustContain(t, h.output(), want)
 			if tc.owner == "operator" && onDisk {
-				mustContain(t, h.output(), tc.prefix+"only the namespace kubehz-system was applied")
-				mustNotContain(t, h.output(), "nothing else was changed")
+				mustNotContain(t, h.output(), "Nothing else was changed.")
 				assertBindProvedFirst(t, append(*log, "kubectl apply -k "+filepath.Join(work, "agent")), work)
 				continue
 			}
-			mustContain(t, h.output(), tc.prefix+"nothing else was changed")
 			mustNotContain(t, joined, "kubehz-agent-bind")
 		}
 	}
@@ -597,9 +601,9 @@ func TestDeployApplyFailureBeforeTheStageChangedNothing(t *testing.T) {
 // what the kubeconfig needs.
 func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
 	for _, tc := range []struct{ fail, changed string }{
-		{"--dry-run=server", "only the namespace kubehz-system was applied"},
-		{"--dry-run=client", "only the namespace kubehz-system was applied"},
-		{"namespace.yaml", "nothing else was changed"},
+		{"--dry-run=server", "Only the namespace kubehz-system was applied."},
+		{"--dry-run=client", "Only the namespace kubehz-system was applied."},
+		{"namespace.yaml", "Nothing else was changed."},
 	} {
 		for _, s := range stagedBindSecrets {
 			t.Run(tc.fail+"/"+s.name, func(t *testing.T) {
@@ -609,10 +613,16 @@ func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
 				log := bindStageLogger(h, tc.fail)
 				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 				out := h.output()
-				mustContain(t, out, "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — "+tc.changed+".")
-				mustContain(t, out, "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
+				mustContain(t, out, "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent. "+tc.changed+" The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
 				mustContain(t, out, "To deploy without the secret, remove the file")
 				mustNotContain(t, out, s.value)
+				if tc.fail == "namespace.yaml" {
+					// The namespace apply failed: no dry-run create and no
+					// server dry run ran (the runner records failed calls too).
+					if n := len(stdinsOf(h, "create secret generic")) + len(stdinsOf(h, "--dry-run=server")); n != 0 {
+						t.Fatalf("a failed namespace apply ran %d stage calls: %v", n, h.runner.calls)
+					}
+				}
 				joined := strings.Join(*log, "\n")
 				mustNotContain(t, joined, "apply -k ")
 				mustNotContain(t, joined, bindApplyArgv)

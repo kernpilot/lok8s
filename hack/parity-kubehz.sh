@@ -517,9 +517,9 @@ check - kubehz deploy --dry-run --domain reg.dev
 # the CronJob agent.
 export PARITY_BIND_FAIL=namespace.yaml
 check - kubehz deploy --domain bind-cron.dev
-check - kubehz deploy --domain bind-op.dev               # the proof: nothing else was changed
+check - kubehz deploy --domain bind-op.dev               # the proof fails: "Nothing else was changed."
 export PARITY_BIND_FAIL=--dry-run=client
-check - kubehz deploy --domain bind-op.dev               # the proof: only the namespace was applied
+check - kubehz deploy --domain bind-op.dev               # the proof fails: "Only the namespace kubehz-system was applied."
 export PARITY_BIND_FAIL=--dry-run=server
 check - kubehz deploy --domain bind-op.dev
 # The real server-side apply only (its dry run passes): the proof passes,

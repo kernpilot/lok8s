@@ -945,7 +945,7 @@ _register_base() {
     # `command jq`: the test's own jq calls stay out of the argv record.
     run command jq -c . "${STUB_CURL_BODY}"
     assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_STORED}" '. + {bindSecret: $b}')"
-    # The register call refuses a redirect off https (F7).
+    # The register call refuses a redirect off https.
     run grep -c -e " --proto-redir =https -X POST https://api.kubehz.dev/api/clusters/register " "${STUB_CURL_ARGV}"
     assert_output "1"
     run grep -c -e "${BIND_STORED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"

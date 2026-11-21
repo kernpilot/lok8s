@@ -1690,9 +1690,9 @@ _assert_bind_proved_first() {
   _source_deploy
   _write_bind_secret
   local spec fail changed work n=0
-  for spec in "dryrun only the namespace kubehz-system was applied" \
-              "--dry-run=client only the namespace kubehz-system was applied" \
-              "namespace.yaml nothing else was changed"; do
+  for spec in "dryrun Only the namespace kubehz-system was applied." \
+              "--dry-run=client Only the namespace kubehz-system was applied." \
+              "namespace.yaml Nothing else was changed."; do
     read -r fail changed <<< "${spec}"
     n=$(( n + 1 ))
     if [[ "${fail}" == dryrun ]]; then
@@ -1708,10 +1708,14 @@ _assert_bind_proved_first() {
 
     run kubehz::deploy_apply "${work}" acme.example.com operator managed
     assert_failure
-    assert_output --partial "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — ${changed}."
-    assert_output --partial "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new."
+    assert_output --partial "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent. ${changed} The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new."
     assert_output --partial "To deploy without the secret, remove the file"
     refute_output --partial "${BIND_SECRET_VALUE}"
+    if [[ "${fail}" == namespace.yaml ]]; then
+      # The namespace apply failed: no dry-run create and no server dry run.
+      run grep -c -e "--dry-run" "${STUB_KUBECTL_LOG}"
+      assert_output "0"
+    fi
     # No agent changed, and no Secret was staged.
     run grep -c -e "apply -k " -e "apply --server-side --force-conflicts -f -" -e "get secret kubehz-agent " \
       -e "create job" -e "rollout status" "${STUB_KUBECTL_LOG}"
@@ -1855,7 +1859,7 @@ live-agent"
   assert_output --partial "apply -k ${work}/agent"
 }
 
-@test "stage_bind_secret: a file that is not a bind secret is never staged, and the deploy says so (F6)" {
+@test "stage_bind_secret: a file that is not a bind secret is never staged, and the deploy says so" {
   _source_deploy
   local fixture work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
   local v="${BIND_SECRET_VALUE}" p="${BIND_SECRET_PREFIXED}"
@@ -1917,13 +1921,18 @@ live-agent"
   chmod -R u+rwx "${PATH_CLUSTERS}" 2>/dev/null || true
 }
 
-@test "deploy_apply: a failure before the stage changes no other object and stages nothing (F2)" {
+@test "deploy_apply: a failure before the stage changes no other object and stages nothing" {
   _source_deploy
-  local spec owner access fail prefix on_disk work n=0
-  for spec in "operator managed apply|-k could not apply the CronJob agent (identity bootstrap) —" \
-              "cronjob registered delete|-k could not remove the live agent —" \
-              "cronjob registered delete|deployment|-l could not sweep live-agent Deployments by label —"; do
-    read -r owner access fail prefix <<< "${spec}"
+  local spec owner access fail want on_disk work n=0
+  local cron="kubehz: could not apply the CronJob agent (identity bootstrap). Nothing else was changed."
+  local cron_ns="kubehz: could not apply the CronJob agent (identity bootstrap). Only the namespace kubehz-system was applied."
+  local remove="could not remove the live agent — nothing else was changed"
+  local sweep="could not sweep live-agent Deployments by label — nothing else was changed"
+  # The last word of each row names the variable with the expected error.
+  for spec in "operator managed apply|-k cron" \
+              "cronjob registered delete|-k remove" \
+              "cronjob registered delete|deployment|-l sweep"; do
+    read -r owner access fail want <<< "${spec}"
     fail="${fail//|/ }"
     for on_disk in 1 0; do
       n=$(( n + 1 ))
@@ -1939,13 +1948,14 @@ live-agent"
       if [[ "${owner}" == operator ]] && (( on_disk )); then
         # The proof of the stage ran before the CronJob agent apply: it
         # applied the namespace and ran the server dry run, nothing more.
-        assert_output --partial "${prefix} only the namespace kubehz-system was applied"
+        assert_output --partial "${cron_ns}"
+        refute_output --partial "Nothing else was changed."
         run grep -c -e "--dry-run=server" "${STUB_KUBECTL_LOG}"
         assert_output "1"
         run grep -c -e "apply --server-side --force-conflicts -f -" "${STUB_KUBECTL_LOG}"
         assert_output "0"
       else
-        assert_output --partial "${prefix} nothing else was changed"
+        assert_output --partial "${!want}"
         run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
         assert_output "0"
       fi
@@ -1953,7 +1963,7 @@ live-agent"
   done
 }
 
-@test "deploy_print: with a bind secret on disk the dry run names the Secret right after the CronJob agent (F5)" {
+@test "deploy_print: with a bind secret on disk the dry run names the Secret right after the CronJob agent" {
   _source_deploy
   local mode owner access next work n=0
   for mode in "operator managed" "cronjob registered"; do
