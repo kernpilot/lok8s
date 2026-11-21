@@ -261,8 +261,7 @@ func (c *Context) ensureGitignore(dir, step string) error {
 // no error text of the file system, because that text has the raw path. A
 // path prints with printable bytes only.
 func (c *Context) reportFailedWrite(err error, final string) {
-	var left *tempLeftError
-	if errors.As(err, &left) {
+	if left, ok := errors.AsType[*tempLeftError](err); ok {
 		ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", printable(c.rel(left.name)))
 	}
 	ui.ErrorTo(c.ErrOut, "%s", final)
