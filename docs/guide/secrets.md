@@ -280,9 +280,17 @@ path between them, and `set` and `decrypt` do not lock the store. In the
 bash implementation, `set` and `decrypt` need a `mv` that takes `-T` (see the
 encrypt below), also without `--encrypt`.
 
-The secret generator of `lo build` writes plaintext into the store with no
-`.gitignore` check and no `.enc` reservation: it does not refuse a key that
-ends in `.enc`.
+The secret generator of `lo build` writes its cache into the same store
+with the same checks and the same refusal texts as `set`. It refuses a name,
+a namespace or a key with a path part, a key whose plaintext name ends in
+`.enc` (in any letter case), and a plaintext path that is not a regular file
+and not absent. Before it writes a plaintext, it writes the block into the
+`.gitignore`, or it refuses a `.gitignore` that cannot keep the plaintext
+out of git. A build still reads an entry whose name ends in `.enc` that the
+store has already: a read writes nothing. The generator writes the `.sha`
+file of a `bash:` entry and the `.bash-allow` file without these checks:
+they hold hashes, not values. A dry run (`lo bootstrap --dry-run`) writes no
+file into the store and does not do these checks.
 
 The `.gitignore` of the store does not cover these cases:
 

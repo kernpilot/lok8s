@@ -15,6 +15,14 @@
 // store holds a value that is not decrypted yet: Get, ReadByName and
 // GetOrCreate return an *EncryptedOnlyError and never generate a new value
 // over it.
+//
+// Put writes an entry through storeguard, the one plaintext write of a
+// store, which `lo secrets set` and `lo secrets decrypt` use too: the same
+// name checks with the same refusal texts, a .gitignore that keeps every
+// plaintext out of git before the first write, and no write through a
+// link. A read writes nothing, so Get and ReadByName keep reading an entry
+// that Put would refuse to write (a name that ends in .enc, from a store
+// made before the check).
 package cache
 
 import (
@@ -25,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 const (
@@ -143,15 +152,43 @@ func (c *Cache) Get(key string) ([]byte, error) {
 	return data, nil
 }
 
-// Put writes value to the cache atomically with mode 0600.
+// Put writes value to the entry of key, mode 0600, through the one
+// plaintext write of a store (storeguard.Guard.WritePlaintext). Before the
+// write it refuses, with the texts of `lo secrets set`:
+//
+//   - a name, a namespace or a key that makes the file name a path, or a
+//     file that is not an entry of the store directory itself;
+//   - a file name that ends in .enc in any letter case: the rule
+//     !Secret.*.enc of the .gitignore would let git commit the plaintext;
+//   - a file that is not a regular file and not absent (a symlink, a
+//     directory, a FIFO, a socket or a device): it never writes through a
+//     link;
+//   - a .gitignore of the store that cannot keep the plaintext out of git.
+//     A store with no .gitignore, or with one without the lok8s block, gets
+//     the block first.
+//
+// The value goes to a new private temp file in the store and a rename onto
+// the entry. A refusal or a failed write returns a *storeguard.Stop and
+// changes no file.
 func (c *Cache) Put(key string, value []byte) error {
-	return writeFileAtomic(c.filename(key), value, filePerm)
+	base, err := c.entryName(key)
+	if err != nil {
+		return err
+	}
+	return storeguard.Guard{}.WritePlaintext(storeguard.Plaintext{Dir: c.dir, Base: base}, value)
+}
+
+// entryName is the file name of the entry of key, checked as `lo secrets
+// set` checks a key (storeguard.CheckName).
+func (c *Cache) entryName(key string) (string, error) {
+	return storeguard.CheckName(c.dir, c.name, defaultNamespace(c.namespace), key)
 }
 
 // GetOrCreate returns the cached value if present, otherwise calls gen,
 // stores the result, and returns it. It calls gen only when neither the
-// plaintext nor its encrypted twin exists. This is the canonical pattern for
-// cache-first generators:
+// plaintext nor its encrypted twin exists, and only for a key that Put can
+// write (entryName): a refused key generates nothing. This is the canonical
+// pattern for cache-first generators:
 //
 //	cached, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) {
 //	    return random.Password(32, charset.Alphanum)
@@ -160,6 +197,9 @@ func (c *Cache) GetOrCreate(key string, gen func() ([]byte, error)) ([]byte, err
 	if data, err := c.Get(key); err == nil {
 		return data, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if _, err := c.entryName(key); err != nil {
 		return nil, err
 	}
 	data, err := gen()

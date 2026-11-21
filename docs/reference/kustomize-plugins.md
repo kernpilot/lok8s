@@ -710,6 +710,7 @@ Trade-offs to know:
 - **File size limit** of 1 MiB on `file:` reads
 - **Atomic writes** to the cache (tmp file + rename) so concurrent reads never see partial data
 - **0600 file mode** on cache entries
+- **The checks of `lo secrets set`** before each cache write, with its refusal texts: no path part in a name, a namespace or a key, no entry name that ends in `.enc` (in any letter case), no write through a symlink, and a store `.gitignore` that keeps the plaintext out of git (the lok8s block is written first, an unsafe file is refused). See [Secrets → Committing secrets](/guide/secrets#committing-secrets-sops-age)
 - **0700 directory mode** on the cache root
 - **No secret values logged** to stderr at any verbosity
 - **bcrypt cost 10** for htpasswd (apache default)
