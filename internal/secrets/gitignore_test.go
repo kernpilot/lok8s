@@ -267,7 +267,7 @@ func gitWouldAdd(t *testing.T, gitignore string, ignorecase bool) []string {
 	if ignorecase {
 		ic = "core.ignorecase=true"
 	}
-	for _, l := range strings.Split(strings.TrimSpace(git("-c", ic, "-c", "core.quotepath=off", "add", "--dry-run", "-A")), "\n") {
+	for l := range strings.SplitSeq(strings.TrimSpace(git("-c", ic, "-c", "core.quotepath=off", "add", "--dry-run", "-A")), "\n") {
 		if l != "" {
 			added = append(added, strings.TrimSuffix(strings.TrimPrefix(l, "add '"), "'"))
 		}

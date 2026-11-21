@@ -133,7 +133,15 @@ sec_check secrets encrypt              # no .sops.yaml yet → error
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"   # idempotent branch
 sec_state .sops.yaml
-sec_check secrets set -n app -e ENC enc-value             # set + single-file encrypt
+sec_check secrets set -n app -e ENC1 enc-value            # set + single-file encrypt
+# The key ENC makes the plaintext Secret.app.default.ENC, a name that ends in
+# .enc in another letter case. The rule !Secret.*.enc can let git commit it,
+# so set refuses the key before it writes a file, also with -e.
+sec_check secrets set -n app -e ENC enc-value
+for impl in go bash; do
+  [[ ! -e "${WORK}/sec-${impl}/.secrets/Secret.app.default.ENC" ]] \
+    || fail "secrets set (${impl}): a plaintext with a reserved name"
+done
 sec_check secrets set -n app --enc ENC2 enc-value2        # --enc alias
 sec_check secrets set -n app JWT_SECRET s3cr3t2           # stale-.enc warning path
 sec_check secrets e                                       # sweep (alias)
