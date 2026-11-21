@@ -386,6 +386,13 @@ kubehz::deploy_print() {
 # changed: an older script can refuse a newer form of the value. A CronJob pod
 # that starts in the seconds between the two applies reads no value, and its
 # register gets a separate pending row.
+#
+# In the operator direction, the CronJob agent apply of step 1 stops the
+# CronJob's beat, and only the live agent of step 3 beats again. So the deploy
+# reads the bind secret once before step 1 and proves its stage first, with a
+# server-side dry run of the same Secret apply and the same bytes
+# (kubehz::prove_bind_secret). A stage that the apiserver refuses then stops
+# the deploy before it changes an agent.
 # Usage: kubehz::deploy_apply <workdir> <domain> <owner> <access>
 kubehz::deploy_apply() {
   local workdir="${1}" domain="${2}" owner="${3}" access="${4}"
@@ -393,16 +400,27 @@ kubehz::deploy_apply() {
   overlay=$(kubehz::live_agent_overlay "${workdir}" "${access}")
 
   if [[ "${owner}" == "operator" ]]; then
+    # 0. The bind secret, read once into <workdir>/bind-secret, and the proof
+    #    of its stage.
+    local bound=0 changed="nothing else was changed"
+    if kubehz::take_bind_secret "${workdir}" "${domain}"; then
+      kubehz::prove_bind_secret "${workdir}" "${domain}" || return 1
+      bound=1
+      changed="only the namespace kubehz-system was applied"
+    fi
     # 1. The marker first. From the CronJob's next tick on it bootstraps and
     #    enrolls but does not beat, so the beat is unowned rather than
     #    contested while we start the live agent.
     kubectl apply -k "${workdir}/agent" || {
-      error "kubehz: could not apply the CronJob agent (identity bootstrap) — nothing else was changed"
+      rm -f -- "${workdir}/bind-secret"
+      error "kubehz: could not apply the CronJob agent (identity bootstrap) — ${changed}"
       return 1
     }
-    # 1b. The bind secret, before the identity bootstrap Job of step 2b
-    #     registers.
-    kubehz::stage_bind_secret "${workdir}" "${domain}" "${owner}" || return 1
+    # 1b. The bind secret, with the copy of step 0, before the identity
+    #     bootstrap Job of step 2b registers.
+    if (( bound )); then
+      kubehz::stage_bind_copy "${workdir}" "${domain}" "${owner}" || return 1
+    fi
     # 2. A pod that started BEFORE the marker landed is already past the guard
     #    and will still POST once. Wait it out, so the live agent's first beat
     #    cannot overlap it.
@@ -571,30 +589,64 @@ kubehz::image_registry() {
 # the Secret kubehz-system/kubehz-agent-bind. The CronJob's bootstrap reads it
 # (the optional env BIND_SECRET) and sends it on agent-register. The api adopts
 # the announced row only with this secret: a register without it gets a
-# separate pending row, and every later tick keeps that row.
-# kubehz::deploy_apply calls it right after the CronJob agent apply; a failed
-# stage stops the deploy there.
-#
-# No file, or a file that kubehz::bind_secret_snapshot refuses: the deploy
-# warns and continues without the Secret. A register in another checkout
-# leaves no file here.
+# separate pending row, and every later tick keeps that row. In the cronjob
+# direction kubehz::deploy_apply calls it right after the CronJob agent
+# apply; a failed stage stops the deploy there. The operator direction reads
+# the value before its first step (kubehz::take_bind_secret) and stages it
+# with kubehz::stage_bind_copy.
 #
 # The check and kubectl read one private copy, <workdir>/bind-secret (the
 # deploy's mktemp -d), so a change of the file after the check does not reach
 # the Secret. Each return path removes the copy.
 # Usage: kubehz::stage_bind_secret <workdir> <domain> <owner>
 kubehz::stage_bind_secret() {
-  local workdir="${1}" domain="${2}" owner="${3}"
-  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind" copy="${1}/bind-secret" state=""
+  kubehz::take_bind_secret "${1}" "${2}" || return 0
+  kubehz::stage_bind_copy "${1}" "${2}" "${3}"
+}
+
+# Read clusters/<domain>/.kubehz-bind once for the stage: copy it into
+# <workdir>/bind-secret and succeed when the copy holds a bind secret
+# (kubehz::bind_secret_snapshot). No file, or a file that is not a bind
+# secret: warn, remove the copy, and fail; the deploy continues without the
+# Secret. A register in another checkout leaves no file here.
+# Usage: kubehz::take_bind_secret <workdir> <domain>
+kubehz::take_bind_secret() {
+  local domain="${2}" copy="${1}/bind-secret"
+  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind"
   if [[ ! -e "${path}" ]]; then
     warn "kubehz: no bind secret at clusters/${domain}/.kubehz-bind. If 'lo kubehz register' ran in another checkout, the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'."
-    return 0
+    return 1
   fi
   if ! kubehz::bind_secret_snapshot "${path}" "${copy}"; then
     rm -f -- "${copy}"
     warn "kubehz: clusters/${domain}/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). The deploy does not stage it, so the agent registers a separate pending row, and a Secret kubehz-agent-bind from an earlier deploy stays as it is. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'. If the file holds a newer form of bind secret, upgrade lok8s (the lo binary and, for a bash install, the synced tree), then run 'lo kubehz deploy' again."
-    return 0
+    return 1
   fi
+}
+
+# Prove the stage of <workdir>/bind-secret before the operator direction
+# changes an agent. Apply the namespace for real (a first deploy has none
+# yet, and a server-side dry run of a Secret in a missing namespace fails;
+# the stage applies it too), then run the Secret apply of the stage with
+# --dry-run=server and the same copy (kubehz::bind_secret_upsert). A failure
+# removes the copy and stops the deploy before the CronJob agent apply.
+# Usage: kubehz::prove_bind_secret <workdir> <domain>
+kubehz::prove_bind_secret() {
+  local workdir="${1}" domain="${2}" copy="${1}/bind-secret" changed="nothing else was changed"
+  if kubectl apply -f "${workdir}/agent/namespace.yaml"; then
+    changed="only the namespace kubehz-system was applied"
+    kubehz::bind_secret_upsert "${copy}" --dry-run=server && return 0
+  fi
+  rm -f -- "${copy}"
+  error "kubehz: the server-side dry run of the stage of the bind secret from clusters/${domain}/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — ${changed}. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'."
+  return 1
+}
+
+# Stage the copy <workdir>/bind-secret that kubehz::take_bind_secret made,
+# and remove it. A failed stage stops the deploy.
+# Usage: kubehz::stage_bind_copy <workdir> <domain> <owner>
+kubehz::stage_bind_copy() {
+  local workdir="${1}" domain="${2}" owner="${3}" copy="${1}/bind-secret" state=""
   if ! kubehz::apply_bind_secret "${workdir}" "${copy}"; then
     rm -f -- "${copy}"
     [[ "${owner}" != "operator" ]] || state=" The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until a deploy completes."
@@ -615,11 +667,22 @@ kubehz::stage_bind_secret() {
 # Secret is new.
 # Usage: kubehz::apply_bind_secret <workdir> <copy>
 kubehz::apply_bind_secret() {
-  local workdir="${1}" copy="${2}" manifest
-  kubectl apply -f "${workdir}/agent/namespace.yaml" || return 1
+  kubectl apply -f "${1}/agent/namespace.yaml" || return 1
+  kubehz::bind_secret_upsert "${2}"
+}
+
+# The Secret apply of the stage, for kubehz::apply_bind_secret and for the
+# proof (kubehz::prove_bind_secret), so the two cannot drift: the dry-run
+# create renders the manifest from the bytes of <copy> on its stdin, and the
+# server-side apply sends it. The other arguments go before "-f -" (the proof
+# passes --dry-run=server).
+# Usage: kubehz::bind_secret_upsert <copy> [<apply args>...]
+kubehz::bind_secret_upsert() {
+  local copy="${1}" manifest
+  shift
   manifest=$(kubectl -n kubehz-system create secret generic kubehz-agent-bind \
     --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml < "${copy}") || return 1
-  printf '%s\n' "${manifest}" | kubectl apply --server-side --force-conflicts -f -
+  printf '%s\n' "${manifest}" | kubectl apply --server-side --force-conflicts "$@" -f -
 }
 
 # The read of the identity Secret prints the word agent-token when the Secret

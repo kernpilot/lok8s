@@ -227,8 +227,31 @@ func bindManifest(value string) string {
 // bindManifest of its stdin; fail names one argv substring that exits 1.
 // Each byte the create reads lands in h.runner.stdins.
 func bindStageLogger(h *harness, fail string) *[]string {
+	return bindStageLoggerWhen(h, func(line string) bool { return fail != "" && strings.Contains(line, fail) })
+}
+
+// bindStageLoggerAfter is bindStageLogger, but a call that contains fail
+// exits 1 only after a call that contains after ran: so the proof of the
+// operator direction passes, and the real stage after the CronJob agent
+// apply fails.
+func bindStageLoggerAfter(h *harness, fail, after string) *[]string {
+	seen := false
+	return bindStageLoggerWhen(h, func(line string) bool {
+		if seen && strings.Contains(line, fail) {
+			return true
+		}
+		if strings.Contains(line, after) {
+			seen = true
+		}
+		return false
+	})
+}
+
+// bindStageLoggerWhen is bindStageLogger with a call that fail(argv) holds
+// for exiting 1.
+func bindStageLoggerWhen(h *harness, fail func(line string) bool) *[]string {
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
-		if fail != "" && strings.Contains(argvLine(c), fail) {
+		if fail(argvLine(c)) {
 			return true, exitErr(1)
 		}
 		return false, nil
@@ -246,17 +269,23 @@ func bindStageLogger(h *harness, fail string) *[]string {
 	return log
 }
 
-// stdinOf is the stdin of the first call whose argv contains substr.
-func stdinOf(t *testing.T, h *harness, substr string) string {
-	t.Helper()
+// stdinsOf are the stdins of each call whose argv contains substr, in order.
+func stdinsOf(h *harness, substr string) []string {
+	var out []string
 	for i, c := range h.runner.calls {
 		if strings.Contains(argvLine(c), substr) {
-			return h.runner.stdins[i]
+			out = append(out, h.runner.stdins[i])
 		}
 	}
-	t.Fatalf("no call with %q", substr)
-	return ""
+	return out
 }
+
+// The argv of the stage calls.
+const (
+	bindCreateArgv = "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml"
+	bindApplyArgv  = "apply --server-side --force-conflicts -f -"
+	bindProofArgv  = "apply --server-side --force-conflicts --dry-run=server -f -"
+)
 
 // indexOf is the first log line that contains substr, or -1.
 func indexOf(log []string, substr string) int {
@@ -269,27 +298,65 @@ func indexOf(log []string, substr string) int {
 }
 
 // assertBindStagedAfter checks the three staging calls: they come right
-// after the CronJob agent apply at log index agent, in their order. The
-// dry-run create reads the value on stdin, byte for byte the value, and the
-// apply reads what the dry run printed. The value is never on argv.
+// after the CronJob agent apply at log index agent, in their order. Each
+// dry-run create (the proof's too) reads the value on stdin, byte for byte
+// the value, and each server-side apply reads what the dry run printed. The
+// value is never on argv.
 func assertBindStagedAfter(t *testing.T, h *harness, log []string, work string, agent int, value string) {
 	t.Helper()
-	cron := indexOf(log, "apply -k "+filepath.Join(work, "agent"))
-	ns := indexOf(log, "apply -f "+filepath.Join(work, "agent", "namespace.yaml"))
-	create := indexOf(log, "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml")
-	ssa := indexOf(log, "apply --server-side --force-conflicts -f -")
-	if cron != agent || ns != agent+1 || create != agent+2 || ssa != agent+3 {
-		t.Fatalf("want CronJob agent(%d) < namespace < dry-run create < server-side apply, got %d %d %d %d: %v", agent, cron, ns, create, ssa, log)
+	want := []string{
+		"apply -k " + filepath.Join(work, "agent"),
+		"apply -f " + filepath.Join(work, "agent", "namespace.yaml"),
+		bindCreateArgv,
+		bindApplyArgv,
+	}
+	if len(log) < agent+len(want) {
+		t.Fatalf("want CronJob agent(%d) < namespace < dry-run create < server-side apply: %v", agent, log)
+	}
+	for i, w := range want {
+		if !strings.HasSuffix(log[agent+i], w) {
+			t.Fatalf("want CronJob agent(%d) < namespace < dry-run create < server-side apply, got %q at %d: %v", agent, log[agent+i], agent+i, log)
+		}
 	}
 	joined := strings.Join(log, "\n")
 	mustNotContain(t, joined, "--from-literal")
 	mustNotContain(t, joined, value)
 	mustNotContain(t, joined, "delete secret kubehz-agent-bind")
-	if got := stdinOf(t, h, "create secret generic kubehz-agent-bind"); got != value {
-		t.Fatalf("dry-run create stdin = %q, want the bind secret %q", got, value)
+	creates := stdinsOf(h, "create secret generic kubehz-agent-bind")
+	if len(creates) == 0 {
+		t.Fatalf("no dry-run create: %v", log)
 	}
-	if got := stdinOf(t, h, "apply --server-side"); got != bindManifest(value) {
-		t.Fatalf("server-side apply stdin = %q, want the dry-run output", got)
+	for _, got := range creates {
+		if got != value {
+			t.Fatalf("dry-run create stdin = %q, want the bind secret %q", got, value)
+		}
+	}
+	for _, got := range stdinsOf(h, "apply --server-side") {
+		if got != bindManifest(value) {
+			t.Fatalf("server-side apply stdin = %q, want the dry-run output", got)
+		}
+	}
+}
+
+// assertBindProvedFirst checks the proof of the operator direction: the
+// first three calls are the namespace apply, the dry-run create and the
+// server-side apply with --dry-run=server, and the CronJob agent apply
+// follows them.
+func assertBindProvedFirst(t *testing.T, log []string, work string) {
+	t.Helper()
+	want := []string{
+		"apply -f " + filepath.Join(work, "agent", "namespace.yaml"),
+		bindCreateArgv,
+		bindProofArgv,
+		"apply -k " + filepath.Join(work, "agent"),
+	}
+	if len(log) < len(want) {
+		t.Fatalf("want namespace < dry-run create < server dry run < CronJob agent: %v", log)
+	}
+	for i, w := range want {
+		if !strings.HasSuffix(log[i], w) {
+			t.Fatalf("want namespace < dry-run create < server dry run < CronJob agent, got %q at %d: %v", log[i], i, log)
+		}
 	}
 }
 
@@ -300,10 +367,11 @@ var stagedBindSecrets = []struct{ name, value string }{
 	{"khzb_ and 64 hex", prefixedBindSecretFixture},
 }
 
-// With a bind secret on disk, the operator deploy stages it right after the
-// CronJob agent apply (so the CronJob makes no new Job from an older template
-// after the value changed) and before the identity bootstrap Job can
-// register.
+// With a bind secret on disk, the operator deploy proves the stage with a
+// server-side dry run before the CronJob agent apply, stages it right after
+// that apply (so the CronJob makes no new Job from an older template after
+// the value changed), and before the identity bootstrap Job can register.
+// The proof and the stage send the same bytes.
 func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
 	for _, s := range stagedBindSecrets {
 		t.Run(s.name, func(t *testing.T) {
@@ -312,8 +380,12 @@ func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
 			writeBindSecret(t, h, "acme.example.com", s.value)
 			log := bindStageLogger(h, "")
 			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
-			assertBindStagedAfter(t, h, *log, work, 0, s.value)
-			if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 4 {
+			assertBindProvedFirst(t, *log, work)
+			assertBindStagedAfter(t, h, *log, work, 3, s.value)
+			if n := len(stdinsOf(h, "create secret generic kubehz-agent-bind")); n != 2 {
+				t.Fatalf("want 2 dry-run creates (the proof and the stage), got %d: %v", n, *log)
+			}
+			if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 7 {
 				t.Fatalf("the identity read must follow the stage: %v", *log)
 			}
 			mustNotContain(t, h.output(), "no bind secret")
@@ -341,8 +413,9 @@ func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 }
 
 // The deploy stages the bytes that it checked. A file that changes after the
-// check (here: on the namespace apply, between the check and the dry-run
-// create) does not reach the Secret, in either form and in both directions.
+// check (here: on the first namespace apply, between the check and the
+// dry-run create; in the operator direction that is the proof's) does not
+// reach the Secret, in either form and in both directions.
 func TestDeployApplyStagesTheBytesItChecked(t *testing.T) {
 	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
 		for _, s := range stagedBindSecrets {
@@ -365,7 +438,7 @@ func TestDeployApplyStagesTheBytesItChecked(t *testing.T) {
 				if got := readFile(t, p); got != swapped {
 					t.Fatalf("the file was not swapped: %q", got)
 				}
-				agent := 0
+				agent := 3
 				if mode.owner == "cronjob" {
 					agent = 2
 				}
@@ -377,8 +450,9 @@ func TestDeployApplyStagesTheBytesItChecked(t *testing.T) {
 
 // A failed stage with a bind secret on disk stops the deploy right after the
 // CronJob agent apply, in both directions and at each of the three steps. In
-// the operator mode the error says that nothing beats. A CronJob without the
-// Secret registers a separate pending row.
+// the operator mode the proof before it passed, and the error says that
+// nothing beats. A CronJob without the Secret registers a separate pending
+// row.
 func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
 		for _, step := range []string{"namespace.yaml", "--dry-run=client", "apply --server-side"} {
@@ -386,7 +460,7 @@ func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 				h := newHarness(t)
 				work := renderInto(t, h, mode.owner, mode.access)
 				writeBindSecret(t, h, "acme.example.com", testBindSecret)
-				log := bindStageLogger(h, step)
+				log := bindStageLoggerAfter(h, step, "apply -k "+filepath.Join(work, "agent"))
 				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access))
 				out := h.output()
 				mustContain(t, out, "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind")
@@ -407,6 +481,9 @@ func TestDeployApplyFailedBindStageStopsAfterTheCronJob(t *testing.T) {
 				cron := indexOf(*log, "apply -k "+filepath.Join(work, "agent"))
 				if cron < 0 {
 					t.Fatalf("no CronJob agent apply: %v", *log)
+				}
+				if mode.owner == "operator" {
+					assertBindProvedFirst(t, *log, work)
 				}
 				for _, l := range (*log)[cron+1:] {
 					if !strings.Contains(l, "namespace.yaml") && !strings.Contains(l, "create secret generic kubehz-agent-bind") {
@@ -483,7 +560,9 @@ func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
 
 // F2: a failure before the stage changed nothing, and its error says so,
 // with or without a bind secret on disk. The Secret is not staged: the stage
-// comes only after the CronJob agent apply.
+// comes only after the CronJob agent apply. In the operator direction with a
+// bind secret on disk, the proof before the CronJob agent apply applied the
+// namespace, and the error says so.
 func TestDeployApplyFailureBeforeTheStageChangedNothing(t *testing.T) {
 	for _, tc := range []struct{ owner, access, fail, prefix string }{
 		{"operator", "managed", "apply -k ", "could not apply the CronJob agent (identity bootstrap) — "},
@@ -498,8 +577,49 @@ func TestDeployApplyFailureBeforeTheStageChangedNothing(t *testing.T) {
 			}
 			log := bindStageLogger(h, tc.fail)
 			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", tc.owner, tc.access))
+			joined := strings.Join(*log, "\n")
+			mustNotContain(t, joined, bindApplyArgv)
+			if tc.owner == "operator" && onDisk {
+				mustContain(t, h.output(), tc.prefix+"only the namespace kubehz-system was applied")
+				mustNotContain(t, h.output(), "nothing else was changed")
+				assertBindProvedFirst(t, append(*log, "kubectl apply -k "+filepath.Join(work, "agent")), work)
+				continue
+			}
 			mustContain(t, h.output(), tc.prefix+"nothing else was changed")
-			mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
+			mustNotContain(t, joined, "kubehz-agent-bind")
+		}
+	}
+}
+
+// In the operator direction, a proof of the stage that fails stops the deploy
+// BEFORE the CronJob agent apply: no agent changes, no Secret is staged, and
+// the error says what was changed (the namespace, when its apply passed) and
+// what the kubeconfig needs.
+func TestDeployApplyFailedProofStopsBeforeTheCronJob(t *testing.T) {
+	for _, tc := range []struct{ fail, changed string }{
+		{"--dry-run=server", "only the namespace kubehz-system was applied"},
+		{"--dry-run=client", "only the namespace kubehz-system was applied"},
+		{"namespace.yaml", "nothing else was changed"},
+	} {
+		for _, s := range stagedBindSecrets {
+			t.Run(tc.fail+"/"+s.name, func(t *testing.T) {
+				h := newHarness(t)
+				work := renderInto(t, h, "operator", "managed")
+				writeBindSecret(t, h, "acme.example.com", s.value)
+				log := bindStageLogger(h, tc.fail)
+				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
+				out := h.output()
+				mustContain(t, out, "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — "+tc.changed+".")
+				mustContain(t, out, "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
+				mustContain(t, out, "To deploy without the secret, remove the file")
+				mustNotContain(t, out, s.value)
+				joined := strings.Join(*log, "\n")
+				mustNotContain(t, joined, "apply -k ")
+				mustNotContain(t, joined, bindApplyArgv)
+				mustNotContain(t, joined, "get secret kubehz-agent ")
+				mustNotContain(t, joined, "create job")
+				mustNotContain(t, joined, "rollout status")
+			})
 		}
 	}
 }

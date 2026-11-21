@@ -472,13 +472,15 @@ check "${PARSEERR}" kubehz deploy --domain broken.dev
 # ── deploy: the bind secret goes in right after the CronJob agent ──────────
 # A kubectl that names each call on stderr. It answers the CronJob path (the
 # live-agent removal, an empty pod list, the CronJob apply), the three
-# staging calls, an identity Secret that holds an agent-token, and the
-# dry-run render, and fails every other call: in operator mode the first one
-# is the live agent apply. The dry-run create prints the SHA-256 of its stdin,
-# so the stdin of the server-side apply shows which bytes were staged. A call
-# whose argv contains PARITY_BIND_FAIL fails too. The diff then covers the
-# calls in order. The render dir is a new temporary dir on each run, in
-# both twins, so the stub prints it as <work>.
+# staging calls, the server dry run with which the operator direction proves
+# the stage before the CronJob apply, an identity Secret that holds an
+# agent-token, and the dry-run render, and fails every other call: in
+# operator mode the first one is the live agent apply. The dry-run create
+# prints the SHA-256 of its stdin, so the stdin of the server-side apply (and
+# of its dry run) shows which bytes were staged. A call whose argv contains
+# PARITY_BIND_FAIL fails too. The diff then covers the calls in order. The
+# render dir is a new temporary dir on each run, in both twins, so the stub
+# prints it as <work>.
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
 # Parity stub: no live cluster may be reached.
@@ -494,6 +496,7 @@ case "$*" in
   *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml")
     printf 'kind: Secret\nbind-secret-sha256: %s\n' "$(sha256sum | cut -d' ' -f1)"; exit 0 ;;
   "apply --server-side --force-conflicts -f -") sed 's/^/stdin: /' >&2; exit 0 ;;
+  "apply --server-side --force-conflicts --dry-run=server -f -") sed 's/^/dry-run stdin: /' >&2; exit 0 ;;
   "kustomize "*) printf 'kind: Rendered\n'; exit 0 ;;
 esac
 exit 1
@@ -508,11 +511,21 @@ check - kubehz deploy --domain bind-nul.dev              # a NUL in the file: wa
 check - kubehz deploy --dry-run --domain bind-cron.dev    # the Secret line follows the CronJob agent
 check - kubehz deploy --dry-run --domain bind-op.dev
 check - kubehz deploy --dry-run --domain reg.dev
-# A failed stage stops the deploy right after the CronJob agent.
+# A failed stage stops the deploy right after the CronJob agent. In the
+# operator direction the same calls run first as the proof, so a failed
+# namespace apply, dry-run create or server dry run stops the deploy before
+# the CronJob agent.
 export PARITY_BIND_FAIL=namespace.yaml
 check - kubehz deploy --domain bind-cron.dev
-check - kubehz deploy --domain bind-op.dev
+check - kubehz deploy --domain bind-op.dev               # the proof: nothing else was changed
 export PARITY_BIND_FAIL=--dry-run=client
+check - kubehz deploy --domain bind-op.dev               # the proof: only the namespace was applied
+export PARITY_BIND_FAIL=--dry-run=server
+check - kubehz deploy --domain bind-op.dev
+# The real server-side apply only (its dry run passes): the proof passes,
+# and the stage after the CronJob agent fails.
+export PARITY_BIND_FAIL="--force-conflicts -f -"
+check - kubehz deploy --domain bind-cron.dev
 check - kubehz deploy --domain bind-op.dev
 unset PARITY_BIND_FAIL
 # A kubectl that fails every call: the deploy stops at its first call and

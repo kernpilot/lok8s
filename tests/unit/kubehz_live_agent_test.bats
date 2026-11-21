@@ -1563,23 +1563,34 @@ _bind_manifest() {
 }
 
 # _stub_kubectl_bind [fail]: log every call. The dry-run create saves the
-# bytes of its stdin (STUB_CREATE_STDIN) and prints _bind_manifest of them;
-# the server-side apply saves its stdin; a call whose argv contains <fail>
-# exits 1. With STUB_SWAP set, the namespace apply writes that value into
-# the bind file: a change after the check.
+# bytes of its stdin (STUB_CREATE_STDIN, and each call appends them to
+# STUB_CREATE_STDINS) and prints _bind_manifest of them; the server-side
+# apply saves its stdin (STUB_SSA_STDIN, or STUB_DRY_STDIN for the server
+# dry run of the proof). A call whose argv contains <fail> exits 1; with
+# STUB_FAIL_AFTER_CRON set, only after the CronJob agent apply (so the proof
+# of the operator direction passes). With STUB_DRYRUN_FAIL set, the server
+# dry run exits 1. With STUB_SWAP set, the namespace apply writes that value
+# into the bind file: a change after the check.
 _stub_kubectl_bind() {
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   export STUB_KUBECTL_FAIL="${1:-}"
   export STUB_SSA_STDIN="${BATS_TEST_TMPDIR}/ssa.stdin"
+  export STUB_DRY_STDIN="${BATS_TEST_TMPDIR}/dry.stdin"
   export STUB_CREATE_STDIN="${BATS_TEST_TMPDIR}/create.stdin"
+  export STUB_CREATE_STDINS="${BATS_TEST_TMPDIR}/create.stdins"
   : > "${STUB_KUBECTL_LOG}"
-  rm -f "${STUB_CREATE_STDIN}" "${STUB_SSA_STDIN}"
+  rm -f "${STUB_CREATE_STDIN}" "${STUB_CREATE_STDINS}" "${STUB_SSA_STDIN}" "${STUB_DRY_STDIN}"
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
     esac
+    local cron_seen=1
+    [[ -z "${STUB_FAIL_AFTER_CRON:-}" ]] || grep -qE '^apply -k .*/agent$' "${STUB_KUBECTL_LOG}" || cron_seen=0
     echo "$*" >> "${STUB_KUBECTL_LOG}"
-    if [[ -n "${STUB_KUBECTL_FAIL}" && "$*" == *"${STUB_KUBECTL_FAIL}"* ]]; then
+    if [[ -n "${STUB_DRYRUN_FAIL:-}" && "$*" == *"--dry-run=server"* ]]; then
+      return 1
+    fi
+    if [[ -n "${STUB_KUBECTL_FAIL}" && "$*" == *"${STUB_KUBECTL_FAIL}"* ]] && (( cron_seen )); then
       return 1
     fi
     case "$*" in
@@ -1587,7 +1598,9 @@ _stub_kubectl_bind() {
         [[ -z "${STUB_SWAP:-}" ]] || printf %s "${STUB_SWAP}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind" ;;
       *"create secret generic kubehz-agent-bind"*)
         cat > "${STUB_CREATE_STDIN}"
+        cat "${STUB_CREATE_STDIN}" >> "${STUB_CREATE_STDINS}"
         _bind_manifest "${STUB_CREATE_STDIN}" ;;
+      *"apply --server-side"*"--dry-run=server"*) cat > "${STUB_DRY_STDIN}" ;;
       *"apply --server-side"*) cat > "${STUB_SSA_STDIN}" ;;
       # The identity Secret holds an agent-token: no bootstrap.
       *"get secret kubehz-agent -o go-template="*) printf 'agent-token' ;;
@@ -1633,7 +1646,26 @@ _assert_bind_staged_after() {
 live-agent"
 }
 
-@test "apply order (to operator): the bind secret is staged right AFTER the CronJob agent and BEFORE the identity bootstrap" {
+# _assert_bind_proved_first <work> <value>: lines 1 to 3 prove the stage of
+# the operator direction (namespace, dry-run create from stdin, server-side
+# apply with --dry-run=server of the dry-run output on stdin), and line 4
+# applies the CronJob agent. The proof read <value> byte for byte.
+_assert_bind_proved_first() {
+  local work="${1}" value="${2}" expect="${BATS_TEST_TMPDIR}/proof.expect"
+  run sed -n '1p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply -f ${work}/agent/namespace.yaml"
+  run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml"
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply --server-side --force-conflicts --dry-run=server -f -"
+  run sed -n '4p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply -k ${work}/agent"
+  printf %s "${value}" > "${expect}"
+  run cat "${STUB_DRY_STDIN}"
+  assert_output "$(_bind_manifest "${expect}")"
+}
+
+@test "apply order (to operator): the stage is proved by a server dry run BEFORE the CronJob agent, then staged right AFTER it and BEFORE the identity bootstrap" {
   _source_deploy
   _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind1"
@@ -1644,9 +1676,51 @@ live-agent"
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   refute_output --partial "no bind secret"
-  _assert_bind_staged_after "${work}" 1 "${BIND_SECRET_VALUE}"
-  run sed -n '5p' "${STUB_KUBECTL_LOG}"
+  _assert_bind_proved_first "${work}" "${BIND_SECRET_VALUE}"
+  _assert_bind_staged_after "${work}" 4 "${BIND_SECRET_VALUE}"
+  # The proof and the stage read the same bytes.
+  printf '%s%s' "${BIND_SECRET_VALUE}" "${BIND_SECRET_VALUE}" > "${BATS_TEST_TMPDIR}/twice.expect"
+  run cmp "${BATS_TEST_TMPDIR}/twice.expect" "${STUB_CREATE_STDINS}"
+  assert_success
+  run sed -n '8p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "get secret kubehz-agent "
+}
+
+@test "apply order (to operator): a failed proof of the stage stops BEFORE the CronJob agent and stages nothing" {
+  _source_deploy
+  _write_bind_secret
+  local spec fail changed work n=0
+  for spec in "dryrun only the namespace kubehz-system was applied" \
+              "--dry-run=client only the namespace kubehz-system was applied" \
+              "namespace.yaml nothing else was changed"; do
+    read -r fail changed <<< "${spec}"
+    n=$(( n + 1 ))
+    if [[ "${fail}" == dryrun ]]; then
+      export STUB_DRYRUN_FAIL=1
+      _stub_kubectl_bind
+    else
+      unset STUB_DRYRUN_FAIL
+      _stub_kubectl_bind "${fail}"
+    fi
+    work="${BATS_TEST_TMPDIR}/proof${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+    run kubehz::deploy_apply "${work}" acme.example.com operator managed
+    assert_failure
+    assert_output --partial "kubehz: the server-side dry run of the stage of the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — ${changed}."
+    assert_output --partial "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new."
+    assert_output --partial "To deploy without the secret, remove the file"
+    refute_output --partial "${BIND_SECRET_VALUE}"
+    # No agent changed, and no Secret was staged.
+    run grep -c -e "apply -k " -e "apply --server-side --force-conflicts -f -" -e "get secret kubehz-agent " \
+      -e "create job" -e "rollout status" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+    run ls -A "${work}"
+    assert_output "agent
+live-agent"
+  done
+  unset STUB_DRYRUN_FAIL
 }
 
 @test "apply order (to cronjob): the bind secret is staged right AFTER the live agent goes and the CronJob agent returns" {
@@ -1669,7 +1743,8 @@ live-agent"
 @test "apply order (both directions): a khzb_ bind secret is staged as it is, right AFTER the CronJob agent" {
   _source_deploy
   local mode owner access cron work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
-  for mode in "operator managed 1" "cronjob registered 3"; do
+  # The operator direction proves the stage in lines 1 to 3 first.
+  for mode in "operator managed 4" "cronjob registered 3"; do
     read -r owner access cron <<< "${mode}"
     n=$(( n + 1 ))
     _stub_kubectl_bind
@@ -1695,7 +1770,8 @@ live-agent"
   _source_deploy
   local mode owner access cron value work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
   export STUB_SWAP="khzb_$(printf '0f%.0s' $(seq 1 32))"
-  for mode in "operator managed 1" "cronjob registered 3"; do
+  # The operator direction proves the stage in lines 1 to 3 first.
+  for mode in "operator managed 4" "cronjob registered 3"; do
     read -r owner access cron <<< "${mode}"
     for value in "${BIND_SECRET_VALUE}" "${BIND_SECRET_PREFIXED}"; do
       n=$(( n + 1 ))
@@ -1721,6 +1797,9 @@ live-agent"
   _write_bind_secret
   local mode owner access step work n=0
   local nothing="The CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent was NOT applied, so this cluster is reporting NOTHING until a deploy completes."
+  # The stub fails the step only after the CronJob agent apply, so the proof
+  # of the operator direction passes and the real stage fails.
+  export STUB_FAIL_AFTER_CRON=1
   for mode in "operator managed" "cronjob registered"; do
     read -r owner access <<< "${mode}"
     for step in "namespace.yaml" "--dry-run=client" "apply --server-side"; do
@@ -1754,6 +1833,7 @@ live-agent"
 live-agent"
     done
   done
+  unset STUB_FAIL_AFTER_CRON
 }
 
 @test "stage_bind_secret: no bind secret on disk warns, touches no Secret and keeps the order" {
@@ -1837,7 +1917,7 @@ live-agent"
   chmod -R u+rwx "${PATH_CLUSTERS}" 2>/dev/null || true
 }
 
-@test "deploy_apply: a failure before the stage changed nothing and stages nothing (F2)" {
+@test "deploy_apply: a failure before the stage changes no other object and stages nothing (F2)" {
   _source_deploy
   local spec owner access fail prefix on_disk work n=0
   for spec in "operator managed apply|-k could not apply the CronJob agent (identity bootstrap) —" \
@@ -1856,9 +1936,19 @@ live-agent"
 
       run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
       assert_failure
-      assert_output --partial "${prefix} nothing else was changed"
-      run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
-      assert_output "0"
+      if [[ "${owner}" == operator ]] && (( on_disk )); then
+        # The proof of the stage ran before the CronJob agent apply: it
+        # applied the namespace and ran the server dry run, nothing more.
+        assert_output --partial "${prefix} only the namespace kubehz-system was applied"
+        run grep -c -e "--dry-run=server" "${STUB_KUBECTL_LOG}"
+        assert_output "1"
+        run grep -c -e "apply --server-side --force-conflicts -f -" "${STUB_KUBECTL_LOG}"
+        assert_output "0"
+      else
+        assert_output --partial "${prefix} nothing else was changed"
+        run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
+        assert_output "0"
+      fi
     done
   done
 }

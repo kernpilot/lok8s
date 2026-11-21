@@ -766,6 +766,10 @@ before the identity bootstrap Job and the live agent:
   on Secrets in `kubehz-system`, and `create` when the Secret is new. It does
   not need `delete`.
 - The deploy reads `.kubehz-bind` once and stages the bytes that it checked.
+- In the operator mode, the apply of the CronJob stops its heartbeat. So,
+  before that apply, the deploy applies the namespace and does a server-side
+  dry run of the Secret apply. If the dry run fails, the deploy stops before
+  the CronJob apply, and no agent changes.
 - If the deploy cannot stage the secret, it stops after the CronJob apply.
   In the operator mode, it then does not apply the live agent.
 - If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on

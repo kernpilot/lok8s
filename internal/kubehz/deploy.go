@@ -273,20 +273,38 @@ func (c *Context) deployPrint(ctx context.Context, workdir, domain, owner, acces
 // script can refuse a newer form of the value. A CronJob pod that starts in
 // the seconds between the two applies reads no value, and its register gets a
 // separate pending row.
+//
+// In the operator direction, the CronJob agent apply of step 1 stops the
+// CronJob's beat, and only the live agent of step 3 beats again. So the deploy
+// reads the bind secret once before step 1 and proves its stage first, with a
+// server-side dry run of the same Secret apply and the same bytes
+// (proveBindSecret). A stage that the apiserver refuses then stops the deploy
+// before it changes an agent.
 func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, access string) error {
 	overlay := liveAgentOverlay(workdir, access)
 	agentDir := filepath.Join(workdir, "agent")
 
 	if owner == "operator" {
+		// 0. The bind secret, read once, and the proof of its stage.
+		changed := "nothing else was changed"
+		secret := c.takeBindSecret(domain)
+		if secret != "" {
+			if err := c.proveBindSecret(ctx, workdir, domain, secret); err != nil {
+				return err
+			}
+			changed = "only the namespace kubehz-system was applied"
+		}
 		// 1. The marker first (the CronJob stops beating).
 		if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
-			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap) — nothing else was changed")
+			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap) — %s", changed)
 			return ErrHandled
 		}
-		// 1b. The bind secret, before the identity bootstrap Job of step 2b
-		// registers.
-		if err := c.stageBindSecret(ctx, workdir, domain, owner); err != nil {
-			return err
+		// 1b. The bind secret, with the bytes of step 0, before the identity
+		// bootstrap Job of step 2b registers.
+		if secret != "" {
+			if err := c.stageBindSecretBytes(ctx, workdir, domain, owner, secret); err != nil {
+				return err
+			}
 		}
 		// 2. Wait out an in-flight heartbeat pod (fail-soft).
 		c.waitHeartbeatIdle(ctx)
@@ -448,26 +466,61 @@ func imageRegistry(image string) string {
 // kubehz-system/kubehz-agent-bind. The CronJob's bootstrap reads it (the
 // optional env BIND_SECRET) and sends it on agent-register. The api adopts
 // the announced row only with this secret: a register without it gets a
-// separate pending row, and every later tick keeps that row. deployApply
-// calls it right after the CronJob agent apply; a failed stage stops the
-// deploy there.
-//
-// No file, or a file that storedBindSecret refuses: the deploy warns and
-// continues without the Secret. A register in another checkout leaves no
-// file here.
+// separate pending row, and every later tick keeps that row. In the cronjob
+// direction deployApply calls it right after the CronJob agent apply; a
+// failed stage stops the deploy there. The operator direction reads the value
+// before its first step (takeBindSecret) and stages it with
+// stageBindSecretBytes.
 func (c *Context) stageBindSecret(ctx context.Context, workdir, domain, owner string) error {
+	secret := c.takeBindSecret(domain)
+	if secret == "" {
+		return nil
+	}
+	return c.stageBindSecretBytes(ctx, workdir, domain, owner, secret)
+}
+
+// takeBindSecret reads clusters/<domain>/.kubehz-bind once for the stage and
+// gives the bytes that storedBindSecret checked. No file, or a file that
+// storedBindSecret refuses: it warns and gives "", and the deploy continues
+// without the Secret. A register in another checkout leaves no file here.
+func (c *Context) takeBindSecret(domain string) string {
 	// Any stat failure reads as "no file", like the bash `[[ -e ]]`.
 	if _, err := os.Stat(c.bindSecretPath(domain)); err != nil {
 		c.warnf("kubehz: no bind secret at clusters/%s/.kubehz-bind. If 'lo kubehz register' ran in another checkout, the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.", domain)
-		return nil
+		return ""
 	}
 	secret := c.storedBindSecret(domain)
 	if secret == "" {
 		c.warnf("kubehz: clusters/%s/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). The deploy does not stage it, so the agent registers a separate pending row, and a Secret kubehz-agent-bind from an earlier deploy stays as it is. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'. If the file holds a newer form of bind secret, upgrade lok8s (the lo binary and, for a bash install, the synced tree), then run 'lo kubehz deploy' again.", domain)
-		return nil
+		return ""
 	}
-	// The bytes that storedBindSecret checked go to kubectl. The file is not
-	// read again, so a change after the check does not reach the Secret.
+	return secret
+}
+
+// proveBindSecret proves the stage of secret before the operator direction
+// changes an agent. It applies the namespace for real (a first deploy has
+// none yet, and a server-side dry run of a Secret in a missing namespace
+// fails; the stage applies it too), then runs the Secret apply of the stage
+// with --dry-run=server and the same bytes (bindSecretUpsert). A failure
+// stops the deploy before the CronJob agent apply.
+func (c *Context) proveBindSecret(ctx context.Context, workdir, domain, secret string) error {
+	changed := "nothing else was changed"
+	err := c.run(ctx, "kubectl", "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml"))
+	if err == nil {
+		changed = "only the namespace kubehz-system was applied"
+		err = c.bindSecretUpsert(ctx, secret, "--dry-run=server")
+	}
+	if err != nil {
+		c.errorf("kubehz: the server-side dry run of the stage of the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind failed, so the deploy stopped before the CronJob agent — %s. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'.", domain, changed)
+		return ErrHandled
+	}
+	return nil
+}
+
+// stageBindSecretBytes stages secret, the bytes that takeBindSecret read
+// and checked. The file is not read again, so a change after the check does
+// not reach the Secret.
+func (c *Context) stageBindSecretBytes(ctx context.Context, workdir, domain, owner, secret string) error {
 	if err := c.applyBindSecret(ctx, workdir, secret); err != nil {
 		state := ""
 		if owner == "operator" {
@@ -492,6 +545,15 @@ func (c *Context) applyBindSecret(ctx context.Context, workdir, secret string) e
 	if err := c.run(ctx, "kubectl", "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml")); err != nil {
 		return err
 	}
+	return c.bindSecretUpsert(ctx, secret)
+}
+
+// bindSecretUpsert is the Secret apply of the stage, for applyBindSecret and
+// for the proof (proveBindSecret), so the two cannot drift: the dry-run
+// create renders the manifest from the bytes on its stdin, and the
+// server-side apply sends it. extra goes before "-f -" (the proof passes
+// --dry-run=server).
+func (c *Context) bindSecretUpsert(ctx context.Context, secret string, extra ...string) error {
 	var manifest bytes.Buffer
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
@@ -500,8 +562,9 @@ func (c *Context) applyBindSecret(ctx context.Context, workdir, secret string) e
 	}); err != nil {
 		return err
 	}
+	args := append([]string{"apply", "--server-side", "--force-conflicts"}, extra...)
 	return c.Runner.Run(ctx, execx.Cmd{
-		Name: "kubectl", Args: []string{"apply", "--server-side", "--force-conflicts", "-f", "-"},
+		Name: "kubectl", Args: append(args, "-f", "-"),
 		Stdin: &manifest, Stdout: c.out(), Stderr: c.errOut(),
 	})
 }
