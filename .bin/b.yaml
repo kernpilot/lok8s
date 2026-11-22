@@ -99,6 +99,16 @@ binaries:
   github.com/kubermatic/kubeone:
     groups: [kubeone]
 
+  # shellcheck: the local lint of one shell file before CI, with the
+  # repository's .shellcheckrc (TESTING.md, "Shell lint"). The gating job
+  # (the ShellCheck job of ci.yml) lints in the argsh container of
+  # hack/lint-shell.sh, which bundles this release: bump this pin with that
+  # image digest. No profile selects the `lint` group, so a consumer never
+  # gets this entry (internal/toolchain/shellcheck_test.go).
+  github.com/koalaman/shellcheck:
+    version: v0.11.0
+    groups: [lint]
+
 #
 # ── Env-sync profiles
 # Consumers install with: b env add github.com/kernpilot/lok8s#<profile>
@@ -110,6 +120,7 @@ binaries:
 #   local     ⊇ core,kustomize — local dev (kind + Tilt)
 #   capi      ⊇ local         — CAPI provisioning
 #   kubeone   ⊇ local         — KubeOne provisioning
+#   (lint is in no profile: contributor tools only)
 
 profiles:
   core:

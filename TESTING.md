@@ -335,6 +335,19 @@ report. The exit code alone is not the signal either — on a checkout whose
 `^`-prefixed imports the container cannot resolve, the run is already
 non-zero before your file is reached. Look for your file in the output.
 
+**One file before CI.** `./.bin/b install github.com/koalaman/shellcheck`
+installs the shellcheck release that the CI container bundles (the pin in
+`.bin/b.yaml`; no profile gives it to a consumer). Then
+`./.bin/shellcheck <file>` lints that file without docker, with the
+repository's `.shellcheckrc`: shellcheck reads it from the directory of
+the file and each parent, and the repository has only the one at the
+root. This runs shellcheck only, without argsh-lint, so
+`bash hack/lint-shell.sh` stays the full check. That script keeps the
+shellcheck of the container. `argsh lint` uses the container while
+argsh-lint is not local, and the script does not give `PATH_BIN` to
+argsh. With `PATH_BIN`, argsh mounts `.bin/` into the container in front
+of the container's shellcheck.
+
 ## E2E (`lo up --ci`)
 
 The CI job (`e2e-lo-up`, every PR and push to `main`) runs the
