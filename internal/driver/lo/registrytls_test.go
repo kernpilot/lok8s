@@ -242,6 +242,31 @@ func TestRegistriesTLSMintPinsKeysOnlyOffInProcess(t *testing.T) {
 	}
 }
 
+// A failure of the in-process mint prints each line of the error of the
+// generator with the prefix "secret plugin: " (plugin.WriteFailure), as
+// the plugin binary does, then the line of lo. The error here has two
+// lines: a value of LOK8S_SECRETS_OUTPUT with a newline in it, which the
+// generator refuses before it reads the spec.
+func TestRegistriesTLSMintPrefixesEachLineOfAFailureInProcess(t *testing.T) {
+	d, _, _, errBuf, p, _ := tlsDriver(t, "true")
+	t.Setenv(render.ModeEnv, "")
+	t.Setenv("CAROOT", filepath.Join(p.Base, "caroot"))
+	t.Setenv(secret.OutputEnv, "a\nb")
+
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err == nil {
+		t.Fatal("the mint passed with an unknown value of " + secret.OutputEnv)
+	}
+	want := "secret plugin: " + secret.OutputEnv + ": unknown value \"a\n" +
+		"secret plugin: b\" (want \"none\" or unset)\n" +
+		"error: the Secret plugin failed to mint the registry TLS cert\n"
+	if !strings.Contains(errBuf.String(), want) {
+		t.Fatalf("stderr:\n%s\nwant it to hold:\n%s", errBuf.String(), want)
+	}
+	if left := scratchDirs(t, p); len(left) != 0 {
+		t.Fatalf("scratch dirs left behind: %v", left)
+	}
+}
+
 func TestRegistriesTLSCertUpToDateSkipsTheMint(t *testing.T) {
 	d, runner, fd, errBuf, p, _ := tlsDriver(t, "true")
 	_, rec := stubSecretPlugin(t, runner, p.Base)

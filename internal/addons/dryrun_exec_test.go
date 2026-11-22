@@ -51,7 +51,7 @@ func secretPluginMain(args []string, stdout, stderr io.Writer) (bool, int) {
 		return true, 0
 	}
 	if err := secret.Run(args, os.Stdin, stdout, kplugin.DefaultEnv); err != nil {
-		fmt.Fprintln(stderr, "secret plugin:", err)
+		kplugin.WriteFailure(stderr, err)
 		return true, 1
 	}
 	return true, 0

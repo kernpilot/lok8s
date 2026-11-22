@@ -15,6 +15,7 @@ import (
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 
 	specpkg "github.com/kernpilot/lok8s/kustomize/plugins/secret/spec"
 )
@@ -164,8 +165,10 @@ func hashEntry(entry specpkg.BashEntry) string {
 // the store file of a bash: entry's approval hash.
 func ShaFileName(secret, namespace, key string) string { return shaFileName(secret, namespace, key) }
 
+// shaFileName is the name of the plaintext file of the key
+// (storeguard.EntryName), then .sha.
 func shaFileName(secret, namespace, key string) string {
-	return fmt.Sprintf("Secret.%s.%s.%s.sha", secret, namespace, key)
+	return storeguard.EntryName(secret, namespace, key) + ".sha"
 }
 
 // verifyBashAllow checks that the local .bash-allow file approves every bash

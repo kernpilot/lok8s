@@ -16,6 +16,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // coreTemplateVars is the whitelisted variable set of the core-template
@@ -346,8 +347,8 @@ func (d *Driver) injectRegistryAuth(manifest, clusterYAML string) error {
 			continue
 		}
 		ns := defaultStr(e.namespace, "provisioning")
-		username := readSecretFile(filepath.Join(secretsDir, "Secret."+e.secretName+"."+ns+".username"))
-		password := readSecretFile(filepath.Join(secretsDir, "Secret."+e.secretName+"."+ns+".password"))
+		username := readSecretFile(filepath.Join(secretsDir, storeguard.EntryName(e.secretName, ns, "username")))
+		password := readSecretFile(filepath.Join(secretsDir, storeguard.EntryName(e.secretName, ns, "password")))
 		if username == "" || password == "" {
 			ui.WarnTo(stderr, "registry auth: secret %s/%s lacks username/password — '%s' left anonymous", ns, e.secretName, e.host)
 			continue

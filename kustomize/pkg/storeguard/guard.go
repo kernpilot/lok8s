@@ -71,7 +71,7 @@ type Guard struct {
 	// FillGitignore fills the temp file of a .gitignore write with want.
 	// Nil writes want (a seam: a test of lo makes the write stop part way).
 	// EnsureGitignore reads the file again after the rename and refuses a
-	// file that does not have the bytes of the plan, so a fill that writes
+	// file whose bytes are not want (bytes.Equal), so a fill that writes
 	// other bytes and returns nil fails closed.
 	FillGitignore func(w io.Writer, want []byte) error
 	// syncDir syncs a directory. Nil is SyncDir (a seam: a test of this
@@ -86,6 +86,10 @@ func (g Guard) sync(dir string) error {
 	return g.syncDir(dir)
 }
 
+// syncFile syncs an open directory: (*os.File).Sync (a seam: a test of
+// this package gives SyncDir the error of a file system).
+var syncFile = (*os.File).Sync
+
 // SyncDir syncs the directory dir (fsync), so that a rename or a new entry
 // in it survives a power loss. A file system that cannot sync a directory
 // (EINVAL, ENOTSUP) counts as synced: it gives no other way to do it.
@@ -94,7 +98,7 @@ func SyncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	err = d.Sync()
+	err = syncFile(d)
 	if cerr := d.Close(); err == nil {
 		err = cerr
 	}
@@ -109,6 +113,15 @@ func SyncDir(dir string) error {
 // from the top: a new store then survives a power loss with the .gitignore
 // that the first write puts in it. It syncs nothing when dir exists. An
 // error of os.MkdirAll comes back as it is; a sync that fails is a *Stop.
+//
+// When a sync fails, MakeDir removes the directories that it made again,
+// from the deepest (os.Remove: a directory that is not empty stays). A run
+// of the command again then makes them again and syncs their parents: the
+// next run does not sync the parent of a directory that stays. MakeDir
+// tries to remove each directory that it made. A directory that it cannot
+// remove stays, and so does each directory above it. The *Stop names each
+// directory that stays, from the top, and tells the user to remove them
+// before a run again.
 func (g Guard) MakeDir(dir string, perm fs.FileMode) error {
 	var made []string
 	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
@@ -125,10 +138,33 @@ func (g Guard) MakeDir(dir string, perm fs.FileMode) error {
 	}
 	for i := len(made) - 1; i >= 0; i-- {
 		if err := g.sync(filepath.Dir(made[i])); err != nil {
-			return stop("lo made " + Printable(g.rel(made[i])) + ", but the sync of its parent directory failed, so a power loss can lose it: lo wrote no file in it — run this command again")
+			return g.unmake(made[i], made)
 		}
 	}
 	return nil
+}
+
+// unmake removes the directories made (the deepest first), after the sync
+// of the parent of failed failed, and returns the *Stop of MakeDir. It
+// tries each directory, also after a remove that failed. A directory that
+// is gone already counts as removed. The *Stop has one line for each
+// directory that stays, from the top, then the line of the failed sync.
+func (g Guard) unmake(failed string, made []string) *Stop {
+	var left []string
+	for _, d := range made {
+		if err := os.Remove(d); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			left = append(left, d)
+		}
+	}
+	syncFailed := "the sync of the parent directory of " + Printable(g.rel(failed)) + " failed"
+	if len(left) == 0 {
+		return stop(syncFailed + ", so lo removed the directories that it made: lo wrote no file — run this command again")
+	}
+	lines := make([]string, 0, len(left)+1)
+	for i := len(left) - 1; i >= 0; i-- {
+		lines = append(lines, "lo cannot remove "+Printable(g.rel(left[i]))+", which it made")
+	}
+	return stop(append(lines, syncFailed+": lo wrote no file — remove each directory above, then run this command again")...)
 }
 
 func (g Guard) rel(path string) string {
@@ -164,7 +200,7 @@ func CheckName(dir, name, namespace, key string) (string, error) {
 			return "", stop(fmt.Sprintf("the %s '%s' is refused: %s. Nothing was written: use a %s without it", part.field, Printable(part.text), why, part.field))
 		}
 	}
-	base := "Secret." + name + "." + namespace + "." + key
+	base := EntryName(name, namespace, key)
 	if _, ok := Destination(dir, base); !ok {
 		return "", stop(notInStore(base))
 	}
@@ -172,6 +208,18 @@ func CheckName(dir, name, namespace, key string) (string, error) {
 		return "", stop(reservedRefusal("the key '"+Printable(key)+"'", base))
 	}
 	return base, nil
+}
+
+// EntryName is the name of the plaintext file of the key key of the Secret
+// name in namespace, Secret.<name>.<namespace>.<key>. These build the name
+// of one entry with it: CheckName (the writers), FormatName of the cache
+// (the readers), the .sha file of a bash: entry of the Secret generator
+// (the name, then .sha) and the registry credentials of the KubeOne driver.
+// A listing by a name or a namespace (lo secrets env, the plaintexts of
+// encrypt) matches the start of the name, and builds that start itself. It
+// checks nothing (CheckName does).
+func EntryName(name, namespace, key string) string {
+	return "Secret." + name + "." + namespace + "." + key
 }
 
 // reservedRefusal is the one text of the refusal of a plaintext file base
@@ -336,9 +384,11 @@ func (g Guard) GitignorePlan(dir, step string) (want []byte, write bool, err err
 // it was and returns a *Stop that names the file (FailedWrite). step names
 // the step of the command that a refusal stops before.
 //
-// After the rename it reads the file again: a file that does not have the
-// bytes of the plan (GitignorePlan wants another write, or refuses it) is
-// refused, so a FillGitignore that writes other bytes fails closed. Then it
+// After the rename it reads the file again (holds): a file that is not a
+// regular file, whose bytes are not the bytes of the plan (bytes.Equal), or
+// that it cannot read back, is refused, each with its own text. Thus a
+// FillGitignore that writes other bytes fails closed (also a file that the
+// plan would keep as it is). Then it
 // syncs dir, so that the .gitignore survives a power loss before the caller
 // writes a plaintext. After the rename, wrote is true, also with an error:
 // the error then says that the file was written.
@@ -363,13 +413,82 @@ func (g Guard) EnsureGitignore(dir, step string) (wrote bool, err error) {
 	if err := WriteReplacing(gitignore, 0o644, func(w io.Writer) error { return fill(w, want) }); err != nil {
 		return false, g.FailedWrite(err, "cannot write "+rel+": it was not changed")
 	}
-	if _, again, err := g.GitignorePlan(dir, step); err != nil || again {
+	switch err := holds(gitignore, want); {
+	case err == nil:
+	case errors.Is(err, errOtherBytes):
 		return true, stop(rel + " was written, but it does not have the bytes that lo planned for it: lo stopped before " + step + " — fix the file, then run this command again")
+	case errors.Is(err, errNotRegular):
+		return true, stop(rel + " was written, but now it is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or another file came to its path while lo read it back: lo stopped before " + step + " — fix the file, then run this command again")
+	default:
+		return true, stop("cannot read " + rel + " back after its write: lo stopped before " + step + " — check the file, then run this command again")
 	}
 	if err := g.sync(dir); err != nil {
 		return true, stop(rel + " was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before " + step + " — run this command again")
 	}
 	return true, nil
+}
+
+// The refusals of holds that are not an error of the file system.
+var (
+	errNotRegular = errors.New("not the regular file at the path")
+	errOtherBytes = errors.New("not the bytes that lo planned")
+)
+
+// openReadBack opens a file for the read of holds, also a FIFO without a
+// wait (O_NONBLOCK). It is a seam: a test of this package changes the
+// entry at the path between the lookup and the open.
+var openReadBack = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
+// holds reads the file at path again after its write, and returns nil when
+// it is a regular file whose bytes are want. It looks the path up without
+// a link (os.Lstat), opens it, and checks the opened file (f.Stat): it
+// must be a regular file and the file of the lookup (os.SameFile). Thus a
+// symlink or another entry that comes to the path between the lookup and
+// the open is refused, also when the file that it names has the bytes
+// want. It returns errNotRegular for a path or an opened file that is not
+// that regular file, errOtherBytes for other bytes, and the error of the
+// file system when the lookup, the open or the read fails: an absent file
+// is an error of the lookup or of the open. It reads at most one byte more
+// than want.
+func holds(path string, want []byte) error {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() {
+		return errNotRegular
+	}
+	f, err := openReadBack(path)
+	if err != nil {
+		return err
+	}
+	raw, err := readOpened(f, before, int64(len(want))+1)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(raw, want) {
+		return errOtherBytes
+	}
+	return nil
+}
+
+// readOpened reads at most limit bytes of f when f is a regular file and
+// the file before (os.SameFile), else it returns errNotRegular or the
+// error of f.Stat.
+func readOpened(f *os.File, before fs.FileInfo, limit int64) ([]byte, error) {
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, errNotRegular
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
 }
 
 // FailedWrite is the *Stop of a write through WriteReplacing that failed,

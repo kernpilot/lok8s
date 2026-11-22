@@ -107,3 +107,29 @@ func TestRun_PassesFileRootAndEnv(t *testing.T) {
 		t.Errorf("Env lookup failed: (%q, %v)", got, ok)
 	}
 }
+
+// WriteFailure puts the prefix on each line of the error: a refusal of more
+// lines keeps it on each line, and a text of one line prints as Fail
+// printed it before (one line, the prefix, a space, the text). An empty
+// line (a trailing newline, a blank line, a line of spaces) prints
+// nothing, and a text with no other line prints the prefix once.
+func TestWriteFailurePrefixesEachLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"one line", errors.New("line 6:13: passwd.PASSWORD: cannot unmarshal"), "secret plugin: line 6:13: passwd.PASSWORD: cannot unmarshal\n"},
+		{"two lines", errors.New("s/.gitignore:9: a cause\ns/.gitignore was not changed"), "secret plugin: s/.gitignore:9: a cause\nsecret plugin: s/.gitignore was not changed\n"},
+		{"an empty text", errors.New(""), "secret plugin: \n"},
+		{"a trailing newline", errors.New("a cause\n"), "secret plugin: a cause\n"},
+		{"a blank line", errors.New("a cause\n\n  the next step\n \r\n"), "secret plugin: a cause\nsecret plugin:   the next step\n"},
+		{"empty lines only", errors.New("\n\n"), "secret plugin: \n"},
+	} {
+		var b bytes.Buffer
+		WriteFailure(&b, tc.err)
+		if b.String() != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, b.String(), tc.want)
+		}
+	}
+}

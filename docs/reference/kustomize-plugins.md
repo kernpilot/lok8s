@@ -727,6 +727,10 @@ secret plugin: line 14:13: passwd.NUXT_SESSION_PASSWORD: passwd length must be >
 secret plugin: line 6:13: passwd.PASSWORD: cannot unmarshal !!str value into int
 ```
 
+An error of more lines (for example a refusal of the store `.gitignore`,
+one line for each cause and a final line) prints each line with the prefix
+`secret plugin: `. An empty line of the error prints nothing.
+
 kustomize writes the generator config again before the plugin reads it, so
 the line is a line of that copy. The section and the key say where the
 error is in the source. kustomize parses the config first: a value with an
