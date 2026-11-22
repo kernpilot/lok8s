@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -64,10 +65,17 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 	// committed, survives `lo up`.
 	d.corednsCustom(ctx, out, errOut, domain, clusterYAML, kubeconfig)
 
-	// Tolerated-failure patch (bash: 2>/dev/null || true).
-	_ = d.runQuiet(ctx, "kubectl", "patch", "deployment", "coredns", "-n", "kube-system",
-		"--kubeconfig", kubeconfig, "--type", "json",
-		"--patch-file", filepath.Join(corednsDir, "patch.json"))
+	// Tolerated-failure patch (bash: 2>/dev/null || true). It writes from a
+	// file, so it runs with the kubectl user defaults off (bash:
+	// `KUBERC=off kubectl patch …`).
+	_ = d.deps.Runner.Run(ctx, execx.Cmd{
+		Name: "kubectl",
+		Args: []string{"patch", "deployment", "coredns", "-n", "kube-system",
+			"--kubeconfig", kubeconfig, "--type", "json",
+			"--patch-file", filepath.Join(corednsDir, "patch.json")},
+		Env:    []string{execx.KubeRCOff},
+		Stdout: io.Discard, Stderr: io.Discard,
+	})
 
 	return d.runOut(ctx, out, errOut, "kubectl", "rollout", "restart", "deployment/coredns",
 		"-n", "kube-system", "--kubeconfig", kubeconfig)

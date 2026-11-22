@@ -734,6 +734,7 @@ func (c *Context) bindSecretUpsert(ctx context.Context, secret string, extra ...
 	args := append([]string{"apply", "--server-side", "--force-conflicts"}, extra...)
 	return c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: append(args, "-f", "-"),
+		Env:   []string{execx.KubeRCOff},
 		Stdin: &manifest, Stdout: c.out(), Stderr: c.errOut(),
 	})
 }

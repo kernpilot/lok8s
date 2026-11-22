@@ -22,7 +22,8 @@ parity::init "${1:-}"
 unset TILT_PORT LOK8S_SERVICE_CONFIG \
   LOK8S_REGISTRY_IP_CACHE LOK8S_REGISTRY_JSON LOK8S_PREFLIGHT \
   LOK8S_FORCE_CLEAR_TERMINATING KIND_EXPERIMENTAL_DOCKER_NETWORK \
-  DOCKER_REGISTRY DOCKER_PROJECT DOCKER_TAG PARITY_TAG
+  DOCKER_REGISTRY DOCKER_PROJECT DOCKER_TAG PARITY_TAG \
+  LO_SHOW_SENSITIVE_OUTPUT
 
 # indent — prefix every line on stdin with two spaces (a per-line anchor is
 # not expressible as a parameter expansion, so no sed; keeps SC2001 quiet).
@@ -563,19 +564,41 @@ for hk_case in marker no-yaml; do
   done
 done
 
+# What kubectl got on stdin. lo keeps the kubectl output of an apply off
+# its stdout (kapply), so the kubectl stubs of the hooks and deploy cases
+# below write a digest of each manifest on stdin to PARITY_STDIN_LOG, and a
+# case reads it there. stdin_pre and stdin_post <impl> are the
+# PARITY_PRE_EACH and PARITY_POST_EACH hooks (hack/lib/parity.sh): after
+# each run the log moves to ${WORK}/kubectl.<impl>.stdin, so each
+# implementation has its own.
+export PARITY_STDIN_LOG="${WORK}/kubectl.stdin"
+stdin_pre() { rm -f "${PARITY_STDIN_LOG}"; }
+stdin_post() {
+  if [[ -f "${PARITY_STDIN_LOG}" ]]; then
+    mv "${PARITY_STDIN_LOG}" "${WORK}/kubectl.${1}.stdin"
+  else
+    : > "${WORK}/kubectl.${1}.stdin"
+  fi
+}
+
 # The positive control: a clean artifact, a selector that matches. Each
-# verb reaches kubectl in both implementations. The stub prints, for each
+# verb reaches kubectl in both implementations. The stub keeps, for each
 # manifest on stdin, the digest of its canonical form (yq, keys sorted):
 # the Go stream is yaml.v3's and the bash stream is yq's, so the bytes can
 # differ, and the values cannot. A last |+ block scalar keeps its final
-# newlines in both.
+# newlines in both. The stub prints the digest too: that is kubectl output,
+# which must not reach the output of lo.
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
-# Parity stub: log the argv, print the canonical digest of a manifest on
-# stdin, answer a get with "not found" (no live cluster may be reached).
+# Parity stub: log the argv, keep and print the canonical digest of a
+# manifest on stdin, answer a get with "not found" (no live cluster may be
+# reached).
 echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
 case " $* " in
-  *" -f - "*) printf 'parity-stub -f %s\n' "$(yq -o=json -I=0 'sort_keys(..)' - | sha256sum | cut -d' ' -f1)" ;;
+  *" -f - "*)
+    d="$(yq -o=json -I=0 'sort_keys(..)' - | sha256sum | cut -d' ' -f1)"
+    printf 'parity-stub -f %s\n' "${d}" >> "${PARITY_STDIN_LOG}"
+    printf 'parity-stub -f %s\n' "${d}" ;;
   *" get "*) exit 1 ;;
 esac
 exit 0
@@ -585,7 +608,7 @@ printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespa
 for hk_verb in recreate apply restart; do
   hk_label="lo hooks ${hk_verb} reaches kubectl with the selected objects"
   rm -f "${PARITY_KUBECTL_LOG}"
-  parity::run_pair hooks "${hk_verb}" --selector lok8s.dev/role=seed
+  PARITY_PRE_EACH=stdin_pre PARITY_POST_EACH=stdin_post parity::run_pair hooks "${hk_verb}" --selector lok8s.dev/role=seed
   hk_ok=1
   parity::compare "${hk_label}" - || hk_ok=0
   case "${hk_verb}" in
@@ -599,12 +622,21 @@ for hk_verb in recreate apply restart; do
     hk_ok=0
   fi
   # Each implementation applies the objects of the artifact: the digest is
-  # in the stdout of both runs.
+  # in the stdin log of both runs. The kubectl output (the stub prints the
+  # digest) stays off the output of both.
   if [[ "${hk_verb}" != restart ]]; then
     hk_digest="$(yq -o=json -I=0 'sort_keys(..)' "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | sha256sum | cut -d' ' -f1)"
     for hk_impl in go bash; do
-      if ! grep -qF -- "parity-stub -f ${hk_digest}" "${WORK}/${hk_impl}.out"; then
-        echo "FAIL: ${hk_label} — the objects that ${hk_impl} applied are not the artifact's (digest ${hk_digest}):"
+      if ! grep -qF -- "parity-stub -f ${hk_digest}" "${WORK}/kubectl.${hk_impl}.stdin"; then
+        echo "FAIL: ${hk_label} — the objects that ${hk_impl} applied are not the artifact's (digest ${hk_digest}), stdin log:"
+        indent < "${WORK}/kubectl.${hk_impl}.stdin"
+        hk_ok=0
+      fi
+      # Only the apply runs through kapply, so only its kubectl output is
+      # private. The recreate prints the kubectl output as before (the
+      # other apply sites are a follow-up).
+      if [[ "${hk_verb}" == apply ]] && grep -qF -- 'parity-stub' "${WORK}/${hk_impl}.out" "${WORK}/${hk_impl}.err"; then
+        echo "FAIL: ${hk_label} — ${hk_impl} printed the kubectl output:"
         indent < "${WORK}/${hk_impl}.out"
         hk_ok=0
       fi
@@ -615,17 +647,22 @@ done
 
 # lo deploy reads artifacts.yaml once, checks that copy and applies that copy
 # (the full apply and -l key=value). The kubectl stub logs its argv and
-# prints a digest of each manifest that it gets: for a clean artifact both
-# implementations apply the same manifests; a marked artifact and one that
-# does not parse are refused (rc 1, the same message) before any kubectl
-# call.
+# keeps a digest of each manifest that it gets in the stdin log: for a clean
+# artifact both implementations apply the same manifests; a marked artifact
+# and one that does not parse are refused (rc 1, the same message) before
+# any kubectl call. The stub prints one kubectl line per manifest, which lo
+# counts for its summary line ("✓ <label> · 1 resource") and never prints.
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
-# Parity stub: log the argv, print the digest of the bytes of an applied
-# manifest, answer a get with no objects (no live cluster may be reached).
+# Parity stub: log the argv, keep the digest of the bytes of an applied
+# manifest and print a kubectl line with it, answer a get with no objects
+# (no live cluster may be reached).
 echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
 case " $* " in
-  *" apply "*) printf 'parity-stub applied %s\n' "$(sha256sum | cut -d' ' -f1)" ;;
+  *" apply "*)
+    d="$(sha256sum | cut -d' ' -f1)"
+    printf 'parity-stub applied %s\n' "${d}" >> "${PARITY_STDIN_LOG}"
+    printf 'manifest/parity-stub-%s serverside-applied\n' "${d}" ;;
   *" get "*) printf '{"items":[]}' ;;
 esac
 exit 0
@@ -658,25 +695,32 @@ for dp_case in clean plus marker no-yaml; do
     dp_args=(deploy --domain lok8s.dev) dp_n=2
     [[ "${dp_route}" == full ]] || { dp_args+=(-l lok8s.dev/type=platform); dp_n=1; }
     rm -f "${PARITY_KUBECTL_LOG}"
-    parity::run_pair "${dp_args[@]}"
+    PARITY_PRE_EACH=stdin_pre PARITY_POST_EACH=stdin_post parity::run_pair "${dp_args[@]}"
     dp_ok=1
     parity::compare "${dp_label}" - || dp_ok=0
     if [[ -z "${dp_want}" ]]; then
       # Each implementation applies dp_n manifests, and the full apply gives
-      # kubectl the bytes of the artifact: the digest is in the stdout of
-      # both runs.
+      # kubectl the bytes of the artifact: the digest is in the stdin log of
+      # both runs. Each prints one summary line per manifest, and no kubectl
+      # output.
       dp_digest="$(sha256sum < "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | cut -d' ' -f1)"
       for dp_impl in go bash; do
         dp_rc="${go_rc}"
         [[ "${dp_impl}" == go ]] || dp_rc="${bash_rc}"
-        dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/${dp_impl}.out" || true)
-        if (( dp_rc != 0 || dp_applied != dp_n )); then
-          echo "FAIL: ${dp_label} — ${dp_impl}: rc=${dp_rc}, ${dp_applied} manifest(s) applied, stdout:"
+        dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/kubectl.${dp_impl}.stdin" || true)
+        dp_summary=$(grep -c '^✓ lok8s\.dev.* · 1 resource$' "${WORK}/${dp_impl}.out" || true)
+        if (( dp_rc != 0 || dp_applied != dp_n || dp_summary != dp_n )); then
+          echo "FAIL: ${dp_label} — ${dp_impl}: rc=${dp_rc}, ${dp_applied} manifest(s) applied, ${dp_summary} summary line(s), stdout:"
           indent < "${WORK}/${dp_impl}.out"
           dp_ok=0
         fi
-        if [[ "${dp_route}" == full ]] && ! grep -qF "parity-stub applied ${dp_digest}" "${WORK}/${dp_impl}.out"; then
-          echo "FAIL: ${dp_label} — ${dp_impl}: kubectl did not get the bytes of the artifact (digest ${dp_digest}):"
+        if [[ "${dp_route}" == full ]] && ! grep -qF "parity-stub applied ${dp_digest}" "${WORK}/kubectl.${dp_impl}.stdin"; then
+          echo "FAIL: ${dp_label} — ${dp_impl}: kubectl did not get the bytes of the artifact (digest ${dp_digest}), stdin log:"
+          indent < "${WORK}/kubectl.${dp_impl}.stdin"
+          dp_ok=0
+        fi
+        if grep -qF -- 'parity-stub' "${WORK}/${dp_impl}.out" "${WORK}/${dp_impl}.err"; then
+          echo "FAIL: ${dp_label} — ${dp_impl} printed the kubectl output:"
           indent < "${WORK}/${dp_impl}.out"
           dp_ok=0
         fi
@@ -697,8 +741,52 @@ for dp_case in clean plus marker no-yaml; do
     parity::record "${dp_ok}" "${dp_label}"
   done
 done
+
+# The kubectl output stays off the output of lo deploy: with the opt-in
+# unset, neither implementation prints the stub's lines. With
+# LO_SHOW_SENSITIVE_OUTPUT=1 (set for this run only) both print them on
+# stdout, one per manifest, after a [warn] line on stderr. The full apply
+# of a clean artifact: two manifests.
+printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\n' \
+  > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+for dp_show in unset 1; do
+  dp_label="lo deploy prints the kubectl output only with LO_SHOW_SENSITIVE_OUTPUT=1 (opt-in ${dp_show})"
+  rm -f "${PARITY_KUBECTL_LOG}"
+  if [[ "${dp_show}" == 1 ]]; then
+    LO_SHOW_SENSITIVE_OUTPUT=1 PARITY_PRE_EACH=stdin_pre PARITY_POST_EACH=stdin_post parity::run_pair deploy --domain lok8s.dev
+    dp_n=2
+  else
+    PARITY_PRE_EACH=stdin_pre PARITY_POST_EACH=stdin_post parity::run_pair deploy --domain lok8s.dev
+    dp_n=0
+  fi
+  dp_ok=1
+  parity::compare "${dp_label}" - || dp_ok=0
+  for dp_impl in go bash; do
+    dp_rc="${go_rc}"
+    [[ "${dp_impl}" == go ]] || dp_rc="${bash_rc}"
+    dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/kubectl.${dp_impl}.stdin" || true)
+    dp_shown=$(grep -c '^manifest/parity-stub-[0-9a-f]* serverside-applied$' "${WORK}/${dp_impl}.out" || true)
+    if (( dp_rc != 0 || dp_applied != 2 || dp_shown != dp_n )); then
+      echo "FAIL: ${dp_label} — ${dp_impl}: rc=${dp_rc}, ${dp_applied} manifest(s) applied, ${dp_shown} kubectl line(s) on stdout (want ${dp_n}), stdout and stderr:"
+      indent < "${WORK}/${dp_impl}.out"
+      indent < "${WORK}/${dp_impl}.err"
+      dp_ok=0
+    fi
+    if (( dp_n == 0 )) && grep -qF -- 'parity-stub' "${WORK}/${dp_impl}.err"; then
+      echo "FAIL: ${dp_label} — ${dp_impl} printed the kubectl output on stderr:"
+      indent < "${WORK}/${dp_impl}.err"
+      dp_ok=0
+    fi
+    if (( dp_n != 0 )) && ! grep -qF '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for lok8s.dev' "${WORK}/${dp_impl}.err"; then
+      echo "FAIL: ${dp_label} — ${dp_impl}: no [warn] line before the kubectl output, stderr:"
+      indent < "${WORK}/${dp_impl}.err"
+      dp_ok=0
+    fi
+  done
+  parity::record "${dp_ok}" "${dp_label}"
+done
 unset LOK8S_NONINTERACTIVE
-unset PARITY_KUBECTL_LOG
+unset PARITY_KUBECTL_LOG PARITY_STDIN_LOG
 parity::stub_kubectl_fail "${PROJ}"
 rm -rf "${PROJ}/clusters/lok8s.dev"
 

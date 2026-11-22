@@ -34,6 +34,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"gopkg.in/yaml.v3"
 )
@@ -598,11 +599,13 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	// The diff's stdout is the diff text. Its stderr goes to a buffer that
 	// only the classification below reads: lo never prints it, at any exit
 	// code and at any log level, because it can quote a value of the
-	// manifest (see diffFailedText).
+	// manifest (see diffFailedText). The user defaults of kubectl are off
+	// (execx.KubeRCOff): a kuberc cannot turn on --show-secrets for it.
 	var out, errOut strings.Builder
 	err := e.Runner.Run(ctx, execx.Cmd{
 		Name:   "kubectl",
 		Args:   []string{"--kubeconfig", kubeconfig, "diff", "--server-side", "--force-conflicts", "-f", "-"},
+		Env:    []string{execx.KubeRCOff},
 		Stdin:  strings.NewReader(diffInput),
 		Stdout: &out, Stderr: &errOut,
 	})
@@ -643,8 +646,8 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	case rc == 0:
 		return dryResult{status: dryUnchanged}
 	case rc == 1:
-		if os.Getenv("DEBUG") != "" && diff != "" {
-			_, _ = io.WriteString(stderr, strings.TrimRight(diff, "\n")+"\n")
+		if os.Getenv("DEBUG") != "" {
+			e.debugDiff(stderr, label, stem, diff, diffInput)
 		}
 		res := dryResult{status: dryDiffers}
 		res.changed, res.added, res.counted = summarizeDiff(diff)
@@ -807,6 +810,266 @@ func writeGuarded(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("refusing to write through a symlink: %s", path)
 	}
 	return os.WriteFile(path, data, perm)
+}
+
+// debugDiff prints at debug what a diff with differences (rc 1) found,
+// without the diff text: one line for each object of diffInput (the
+// manifest that kubectl diff got) that differs (diffObjects), then where
+// the text is. The diff text can quote a value of the manifest: kubectl
+// masks only the data of a core v1 Secret. It prints only under
+// LO_SHOW_SENSITIVE_OUTPUT=1, after a [warn] line. The bash twin is the rc
+// 1 branch of bootstrap::_diff_manifest (the same bytes).
+func (e *Engine) debugDiff(stderr io.Writer, label, stem, diff, diffInput string) {
+	for _, obj := range diffObjects(diff, diffInput) {
+		ui.DebugTo(stderr, "bootstrap dry-run: %s: differs: %s", label, obj)
+	}
+	switch {
+	case kapply.ShowSensitive():
+		if text := strings.TrimRight(diff, "\n"); text != "" {
+			ui.WarnTo(stderr, "bootstrap dry-run: %s: %s", label, kapply.ShowSensitiveText("the diff text"))
+			_, _ = io.WriteString(stderr, text+"\n")
+		}
+	case e.Options.RenderDir != "":
+		ui.DebugTo(stderr, "bootstrap dry-run: %s: the diff text is in %s. lo does not print it: it can quote a value of the manifest (%s=1 prints it)",
+			label, e.Options.RenderDir+"/"+stem+".diff", kapply.ShowSensitiveEnv)
+	default:
+		ui.DebugTo(stderr, "bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (%s=1 prints it)",
+			label, kapply.ShowSensitiveEnv)
+	}
+}
+
+// diffObjectRe is the name that kubectl diff gives the file of an object in
+// its LIVE and MERGED trees: [<group>.]<version>.<Kind>.<namespace>.<name>
+// (k8s.io/kubectl/pkg/cmd/diff, InfoObject.Name). A cluster-scoped object
+// has an empty namespace. The Kind is the first part that starts with an
+// upper-case letter, so the name parses one way only.
+var diffObjectRe = regexp.MustCompile(`^(?:([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^\s/]+)$`)
+
+// diffObjects names the objects of a `kubectl diff` from the `--- ` file
+// headers of its unified-diff framing (diffParser), in the objectLabel
+// shape: `<apiVersion> <kind> <namespace>/<name>`, or `<apiVersion> <kind>
+// <name>` for a cluster-scoped object, escaped (kapply.EscapeText). A
+// header names an object only when:
+//   - the framing puts it where a file header can start, and a `+++ ` line
+//     follows it: a `--- ` line inside a hunk is a removed line, and a line
+//     that breaks the framing stops the parse for the rest of the diff;
+//   - its path is a file of the LIVE tree of kubectl (a directory whose
+//     name starts with LIVE-, os.MkdirTemp("", "LIVE-")) with the kubectl
+//     file name (diffObjectRe);
+//   - its group, version, kind, namespace and name match an object of
+//     manifest, the diff input. A manifest object with no namespace
+//     matches its group, version, kind and name in any namespace.
+//
+// Any other header (an external diff tool, a line of the diff text) names
+// nothing: lo prints a name of the manifest only, never a line of the diff
+// text. The bash twin is bootstrap::_diff_objects.
+func diffObjects(diff, manifest string) []string {
+	keys := manifestDiffKeys(manifest)
+	var objs []string
+	var p diffParser
+	for line := range strings.SplitSeq(diff, "\n") {
+		header, ok := p.step(line)
+		if !ok {
+			break
+		}
+		if k, live := liveDiffKey(header); live && keys.match(k) {
+			objs = append(objs, kapply.EscapeText(k.label()))
+		}
+	}
+	return objs
+}
+
+// diffKey is the group, version, kind, namespace and name of an object.
+type diffKey struct{ group, version, kind, namespace, name string }
+
+// label is the objectLabel shape of k.
+func (k diffKey) label() string {
+	apiVersion, name := k.version, k.name
+	if k.group != "" {
+		apiVersion = k.group + "/" + k.version
+	}
+	if k.namespace != "" {
+		name = k.namespace + "/" + name
+	}
+	return apiVersion + " " + k.kind + " " + name
+}
+
+// liveDiffKey reads the key of an object from a `--- ` header line of
+// kubectl diff: a file of its LIVE tree with the kubectl file name.
+func liveDiffKey(header string) (diffKey, bool) {
+	rest, ok := strings.CutPrefix(header, "--- ")
+	if !ok {
+		return diffKey{}, false
+	}
+	path, _, _ := strings.Cut(rest, "\t")
+	i := strings.LastIndex(path, "/")
+	if i < 0 || !strings.HasPrefix(path[strings.LastIndex(path[:i], "/")+1:i], "LIVE-") {
+		return diffKey{}, false
+	}
+	m := diffObjectRe.FindStringSubmatch(path[i+1:])
+	if m == nil {
+		return diffKey{}, false
+	}
+	return diffKey{group: m[1], version: m[2], kind: m[3], namespace: m[4], name: m[5]}, true
+}
+
+// diffKeys holds the keys of the objects of a manifest: exact for an
+// object with a namespace, anyNamespace (with no namespace) for one
+// without.
+type diffKeys struct{ exact, anyNamespace map[diffKey]bool }
+
+// manifestDiffKeys reads the keys of the objects of a manifest stream. A
+// document that does not parse ends the read.
+func manifestDiffKeys(manifest string) diffKeys {
+	keys := diffKeys{exact: map[diffKey]bool{}, anyNamespace: map[diffKey]bool{}}
+	str := func(v any) string {
+		s, _ := v.(string)
+		return s
+	}
+	dec := yaml.NewDecoder(strings.NewReader(manifest))
+	for {
+		var node yaml.Node
+		if dec.Decode(&node) != nil {
+			return keys
+		}
+		var m map[string]any
+		if node.Decode(&m) != nil || m == nil {
+			continue
+		}
+		meta, _ := m["metadata"].(map[string]any)
+		k := diffKey{kind: str(m["kind"]), namespace: str(meta["namespace"]), name: str(meta["name"])}
+		if group, version, ok := strings.Cut(str(m["apiVersion"]), "/"); ok {
+			k.group, k.version = group, version
+		} else {
+			k.version = group
+		}
+		if k.namespace == "" {
+			keys.anyNamespace[k] = true
+		} else {
+			keys.exact[k] = true
+		}
+	}
+}
+
+// match reports whether the key of a diff file name is an object of the
+// manifest.
+func (k diffKeys) match(f diffKey) bool {
+	if k.exact[f] {
+		return true
+	}
+	f.namespace = ""
+	return k.anyNamespace[f]
+}
+
+// diffParser reads the framing of a unified diff (GNU diff -u -N, as
+// kubectl diff runs it over its LIVE and MERGED trees). A `--- ` file
+// header can start only at the start, after a `diff ` line, or after the
+// last line of the hunks of the file before, which it counts from each
+// `@@ -a,b +c,d @@` line (a missing count is 1; a `\ No newline at end of
+// file` line counts for neither). A `+++ ` line must follow each header.
+// The bash twin is the framing loop of bootstrap::_diff_objects.
+type diffParser struct {
+	state    int
+	pending  string
+	old, new int
+}
+
+const (
+	dpStart = iota // the start: a `diff ` line or a header
+	dpDiff         // after a `diff ` line: a header
+	dpPlus         // after a header: its `+++ ` line
+	dpHunk         // after the `+++ ` line: a hunk line
+	dpBody         // in a hunk, until its old and new lines are counted
+	dpNext         // after the last line of a hunk: a `diff ` line, a header, a hunk line or a `\` line
+)
+
+// hunkRe is the hunk line of a unified diff: @@ -a[,b] +c[,d] @@.
+var hunkRe = regexp.MustCompile(`^@@ -([0-9]{1,9})(,([0-9]{1,9}))? \+([0-9]{1,9})(,([0-9]{1,9}))? @@`)
+
+// step reads one line of the diff. It returns the `--- ` header line that
+// this line (its `+++ ` line) completes, and false when the line breaks
+// the framing.
+func (p *diffParser) step(line string) (string, bool) {
+	switch p.state {
+	case dpDiff:
+		return "", p.header(line)
+	case dpPlus:
+		if !strings.HasPrefix(line, "+++ ") {
+			return "", false
+		}
+		p.state = dpHunk
+		return p.pending, true
+	case dpHunk:
+		return "", p.hunk(line)
+	case dpBody:
+		return "", p.body(line)
+	}
+	switch {
+	case strings.HasPrefix(line, "diff "):
+		p.state = dpDiff
+		return "", true
+	case strings.HasPrefix(line, "--- "):
+		return "", p.header(line)
+	case p.state == dpNext && strings.HasPrefix(line, "@@ "):
+		return "", p.hunk(line)
+	case p.state == dpNext && strings.HasPrefix(line, `\`):
+		return "", true
+	}
+	return "", false
+}
+
+func (p *diffParser) header(line string) bool {
+	if !strings.HasPrefix(line, "--- ") {
+		return false
+	}
+	p.pending, p.state = line, dpPlus
+	return true
+}
+
+func (p *diffParser) hunk(line string) bool {
+	m := hunkRe.FindStringSubmatch(line)
+	if m == nil {
+		return false
+	}
+	p.old, p.new = hunkCount(m[2], m[3]), hunkCount(m[5], m[6])
+	p.state = dpBody
+	p.endHunk()
+	return true
+}
+
+// hunkCount is the count of a hunk line: 1 when the line gives none.
+func hunkCount(comma, n string) int {
+	if comma == "" {
+		return 1
+	}
+	v, _ := strconv.Atoi(n)
+	return v
+}
+
+func (p *diffParser) body(line string) bool {
+	switch {
+	case strings.HasPrefix(line, " "):
+		p.old--
+		p.new--
+	case strings.HasPrefix(line, "-"):
+		p.old--
+	case strings.HasPrefix(line, "+"):
+		p.new--
+	case strings.HasPrefix(line, `\`):
+	default:
+		return false
+	}
+	if p.old < 0 || p.new < 0 {
+		return false
+	}
+	p.endHunk()
+	return true
+}
+
+func (p *diffParser) endHunk() {
+	if p.old == 0 && p.new == 0 {
+		p.state = dpNext
+	}
 }
 
 // summarizeDiff counts the objects of a `kubectl diff` (GNU `diff -u -N`

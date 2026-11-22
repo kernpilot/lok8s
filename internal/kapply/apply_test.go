@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,10 +26,13 @@ func (e *rcError) Error() string { return fmt.Sprintf("exit status %d", e.code) 
 func (e *rcError) ExitCode() int { return e.code }
 
 // fakeKubectl mirrors the bats kubectl stub: log every call; drive `apply`
-// via applyOut/applyRC and `get` via getOut; replace/patch just succeed.
+// via applyOut (stdout), applyErr (stderr) and applyRC, and `get` via
+// getOut; replace/patch just succeed.
 type fakeKubectl struct {
 	calls    []string
+	envs     [][]string // the Env of each call, in call order
 	applyOut string
+	applyErr string
 	applyRC  int
 	getOut   string
 }
@@ -36,11 +40,8 @@ type fakeKubectl struct {
 func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 	line := c.Name + " " + strings.Join(c.Args, " ")
 	f.calls = append(f.calls, line)
-	// Skip a leading --kubeconfig pair, like the bats stub's cmd probe.
-	args := c.Args
-	if len(args) >= 2 && args[0] == "--kubeconfig" {
-		args = args[2:]
-	}
+	f.envs = append(f.envs, c.Env)
+	args := verbArgs(c.Args)
 	if len(args) == 0 {
 		return nil
 	}
@@ -48,6 +49,9 @@ func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 	case "apply":
 		if f.applyOut != "" && c.Stdout != nil {
 			fmt.Fprintln(c.Stdout, f.applyOut)
+		}
+		if f.applyErr != "" && c.Stderr != nil {
+			fmt.Fprintln(c.Stderr, f.applyErr)
 		}
 		if f.applyRC != 0 {
 			return &rcError{f.applyRC}
@@ -64,6 +68,23 @@ func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 }
 
 func (f *fakeKubectl) log() string { return strings.Join(f.calls, "\n") }
+
+// verbArgs drops the leading global flags of a call (--kubeconfig <path>,
+// --server <url>, --server=<url>), like the bats stub's cmd probe, so the
+// fake sees the subcommand.
+func verbArgs(args []string) []string {
+	for len(args) > 0 {
+		switch {
+		case len(args) >= 2 && (args[0] == "--kubeconfig" || args[0] == "--server"):
+			args = args[2:]
+		case strings.HasPrefix(args[0], "--server="):
+			args = args[1:]
+		default:
+			return args
+		}
+	}
+	return args
+}
 
 const deployManifest = `apiVersion: apps/v1
 kind: Deployment
@@ -227,6 +248,67 @@ func TestSealedSecretInteractiveAcceptRecreates(t *testing.T) {
 	}
 }
 
+// The kind and the name of an immutable-field error come from kubectl's
+// error text, which an admission webhook can write. A name that is in no
+// manifest object is not healed and no part of it is printed: one fixed
+// line instead. A manifest object named next to it is healed as before.
+func TestImmutableHealSkipsANameThatIsInNoManifestObject(t *testing.T) {
+	f := &fakeKubectl{applyRC: 1,
+		applyOut: "Error from server (Invalid): Deployment.apps \"" + canaryValue + "\" is invalid: spec.selector: field is immutable\n" +
+			"Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: field is immutable"}
+	a, out, errOut := testApplier(f)
+	a.ForceRecreate = true
+	a.Apply(t.Context(), "resources", deployManifest)
+	refuteText(t, out.String()+errOut.String(), canaryValue)
+	if !strings.Contains(errOut.String(), UnmatchedImmutableText) {
+		t.Errorf("no fixed line %q:\n%s", UnmatchedImmutableText, errOut.String())
+	}
+	if n := strings.Count(f.log(), "replace --force"); n != 1 {
+		t.Errorf("replace calls = %d, want 1 (the manifest object only):\n%s", n, f.log())
+	}
+	if !strings.Contains(errOut.String(), "recreating immutable Deployment/web") {
+		t.Errorf("the manifest object was not healed:\n%s", errOut.String())
+	}
+}
+
+// The object line of the heal comes from the manifest values, with the
+// control bytes escaped (EscapeText).
+func TestImmutableHealPrintsTheManifestNameEscaped(t *testing.T) {
+	manifest := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: \"we\\eb\"\n  namespace: default\n"
+	f := &fakeKubectl{applyRC: 1,
+		applyOut: "Error from server (Invalid): Deployment.apps \"we\x1bb\" is invalid: spec.selector: field is immutable"}
+	a, _, errOut := testApplier(f)
+	a.ForceRecreate = true
+	a.Apply(t.Context(), "resources", manifest)
+	if !strings.Contains(errOut.String(), `recreating immutable Deployment/we\x1bb`) {
+		t.Errorf("no escaped object line:\n%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "\x1b") {
+		t.Errorf("a raw ESC byte was printed:\n%q", errOut.String())
+	}
+	if !strings.Contains(f.log(), "replace --force") {
+		t.Errorf("no recreate call:\n%s", f.log())
+	}
+}
+
+func TestEscapeText(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"web":         "web",
+		"we\x1bb":     `we\x1bb`,
+		"a\\b":        `a\\b`,
+		"tab\there":   `tab\x09here`,
+		"nl\n":        `nl\x0a`,
+		"del\x7f":     `del\x7f`,
+		"\x1b[31mred": `\x1b[31mred`,
+		"é":           "é",
+	} {
+		if got := EscapeText(in); got != want {
+			t.Errorf("EscapeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestStuckTerminatingForceClearsCRFinalizers(t *testing.T) {
 	f := &fakeKubectl{applyRC: 1,
 		applyOut: `Error from server: object is being deleted: clusters.postgresql.cnpg.io "db" already exists`,
@@ -239,6 +321,60 @@ func TestStuckTerminatingForceClearsCRFinalizers(t *testing.T) {
 	}
 	if !strings.Contains(f.log(), "finalizers") {
 		t.Errorf("no finalizer clear:\n%s", f.log())
+	}
+}
+
+// A global flag of the caller with a separate value before the subcommand
+// (--server <url> apply) must not drop the override of the kubectl user
+// defaults: each write of Apply from stdin (the apply passes, the replace
+// of the immutable heal, the replace of the namespace finalize) runs with
+// KUBERC=off, and the reads (get) run without it. The Env is set at each
+// call, not guessed from the arguments.
+func TestApplyWritesRunWithKubeRCOffAfterAServerFlag(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--server", "https://203.0.113.1:6443"},
+		{"--server=https://203.0.113.1:6443"},
+	} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			f := &fakeKubectl{applyRC: 1,
+				applyOut: "Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: field is immutable\n" +
+					"Error from server (Forbidden): configmaps \"ca-bundle\" is forbidden: unable to create new content in namespace kubermatic because it is being terminated",
+				getOut: "2026-01-01T00:00:00Z"}
+			a, _, _ := testApplier(f)
+			a.ForceRecreate = true
+			a.Apply(t.Context(), "resources", deployManifest, flags...)
+			seen := map[string]int{}
+			for i, line := range f.calls {
+				args := verbArgs(strings.Fields(line)[1:])
+				if len(args) < 2 {
+					continue
+				}
+				verb := args[0]
+				if verb == "replace" {
+					verb += " " + args[1]
+				}
+				seen[verb]++
+				off := slices.Contains(f.envs[i], execx.KubeRCOff)
+				switch verb {
+				case "apply", "replace --force", "replace --raw":
+					if !off {
+						t.Errorf("%s runs without %s (Env %q)", line, execx.KubeRCOff, f.envs[i])
+					}
+				case "get":
+					if off {
+						t.Errorf("%s: a read runs with %s", line, execx.KubeRCOff)
+					}
+				}
+			}
+			for verb, want := range map[string]int{"apply": 2, "replace --force": 1, "replace --raw": 1} {
+				if seen[verb] != want {
+					t.Errorf("%s calls = %d, want %d:\n%s", verb, seen[verb], want, f.log())
+				}
+			}
+			if !strings.Contains(f.log(), "kubectl "+strings.Join(flags, " ")+" replace --force -f -") {
+				t.Errorf("the flags of the caller are not in front of the replace:\n%s", f.log())
+			}
+		})
 	}
 }
 

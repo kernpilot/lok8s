@@ -223,6 +223,10 @@ func (e *Engine) newApplier(job Job, stdout, stderr io.Writer) *kapply.Applier {
 	if job.NonInteractive {
 		a.NonInteractive = true
 	}
+	// The scheduler's private buffer of a background job (nil for a
+	// foreground apply): kapply copies the kubectl output there, never to
+	// the job's printed buffer.
+	a.Private = job.Private
 	if e.Sleep != nil {
 		a.Sleep = e.Sleep
 	}

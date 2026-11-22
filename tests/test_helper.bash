@@ -353,6 +353,45 @@ assert_no_tool_ran() {
   }
 }
 
+# kubectl_path_stub — an executable kubectl FIRST on PATH, in place of a
+# kubectl function (it removes one): each kubectl call then starts a child
+# process with the environment that lo gave it, so a test sees what kubectl
+# gets (a `KUBERC=off kubectl …` prefix, for example), not what a function
+# sees. Each call appends one line to ${KUBECTL_PATH_LOG}: KUBERC=<the
+# KUBERC of the child, or <unset>>, a tab, then its argv. The child then
+# runs kubectl_path_answer with its argv when the test exported that
+# function (the output and the exit code of the call); else it reads its
+# stdin for a `-f -` and exits 0. Call it after setup_tmpdir.
+kubectl_path_stub() {
+  [[ -d "${BATS_TEST_TMPDIR:-}" ]] || { echo "kubectl_path_stub: BATS_TEST_TMPDIR is not a directory" >&2; return 1; }
+  local bin="${BATS_TEST_TMPDIR}/kubectl-bin"
+  mkdir -p "${bin}"
+  export KUBECTL_PATH_LOG="${BATS_TEST_TMPDIR}/kubectl-path.log"
+  : > "${KUBECTL_PATH_LOG}"
+  {
+    printf '#!%s\n' "${BASH}"
+    cat <<'SH'
+printf 'KUBERC=%s\t%s\n' "${KUBERC-<unset>}" "$*" >> "${KUBECTL_PATH_LOG}"
+if declare -F kubectl_path_answer >/dev/null; then
+  kubectl_path_answer "$@"
+  exit
+fi
+[[ " $* " != *" -f - "* ]] || cat >/dev/null
+SH
+  } > "${bin}/kubectl"
+  chmod +x "${bin}/kubectl"
+  unset -f kubectl
+  export PATH="${bin}:${PATH}"
+}
+
+# kubectl_path_file_calls — the lines of ${KUBECTL_PATH_LOG}
+# (kubectl_path_stub) whose kubectl call reads a manifest or a patch from a
+# file or stdin: an argument -f, --filename, --patch-file, -k or
+# --kustomize (also in the --flag=value form).
+kubectl_path_file_calls() {
+  grep -E $'\t(.* )?(-f|--filename|--patch-file|-k|--kustomize)( |=|$)' "${KUBECTL_PATH_LOG}" || true
+}
+
 # _path_without_yq <dir> — make <dir> a PATH that has the tools of the
 # bounded yq reads (yqbound.sh, spec.sh, dnssearch.sh) and no yq: a link
 # to each of them, found on PATH. Prints <dir>. For the cases of a missing

@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 )
@@ -31,7 +33,7 @@ import (
 const cannedDiff = `diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.testcni /tmp/MERGED-1/v1.ConfigMap.default.testcni
 --- /tmp/LIVE-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
 +++ /tmp/MERGED-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
-@@ -3,4 +3,5 @@
+@@ -3,3 +3,4 @@
  kind: ConfigMap
  metadata:
    name: testcni
@@ -468,15 +470,18 @@ func TestDryRunFailedDiffUnderIgnoreNondeterministic(t *testing.T) {
 }
 
 // A diff with differences (rc 1) still reports as before, also when kubectl
-// prints a message on stderr: "differs" with the counts, exit 1, and the
-// diff text at debug (kubectl masks the data of a Secret in it). The
-// kubectl stderr is not printed, and the .diff file holds the diff text
-// only. The bats twin is "bootstrap::apply --dry-run: a diff with
-// differences and a kubectl message still differs (rc 1)".
+// prints a message on stderr: "differs" with the counts, exit 1. The diff
+// text is not printed, also at debug (it can quote a value of the
+// manifest): debug prints one line for each object that differs and the
+// path of the .diff file. The kubectl stderr is not printed, and the .diff
+// file holds the diff text only. The bats twin is "bootstrap::apply
+// --dry-run: a diff with differences and a kubectl message still differs
+// (rc 1)".
 func TestDryRunDiffersWithKubectlTextStillDiffers(t *testing.T) {
 	for _, debug := range []bool{false, true} {
 		t.Run(fmt.Sprintf("debug=%v", debug), func(t *testing.T) {
 			setDebug(t, debug)
+			t.Setenv(kapply.ShowSensitiveEnv, "")
 			e, f, spec, kc := dryEngine(t, "testcni")
 			dir := filepath.Join(t.TempDir(), "out")
 			e.Options.RenderDir = dir
@@ -490,13 +495,172 @@ func TestDryRunDiffersWithKubectlTextStillDiffers(t *testing.T) {
 			if got := stdoutOf(e); got != want {
 				t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
 			}
-			if got := strings.Contains(stderrOf(e), diffTextCanary); got != debug {
-				t.Errorf("the diff text on stderr = %v, want %v (debug only):\n%s", got, debug, stderrOf(e))
+			debugLines := wantDebugDiffLines("testcni", dir+"/01-testcni.diff")
+			for _, line := range debugLines {
+				if got := strings.Contains(stderrOf(e), line); got != debug {
+					t.Errorf("stderr has %q = %v, want %v (debug only):\n%s", line, got, debug, stderrOf(e))
+				}
 			}
 			if got := readDiffFile(t, filepath.Join(dir, "01-testcni.diff")); got != diffOutWithCanary {
 				t.Errorf("01-testcni.diff = %q, want the stdout of the diff only", got)
 			}
-			refuteOutput(t, stderrOf(e), diffValueCanary, "Invalid value", "typed patch", "kubectl diff failed")
+			refuteOutput(t, stdoutOf(e)+stderrOf(e), diffTextCanary, "+  foo: bar", diffValueCanary, "Invalid value", "typed patch", "kubectl diff failed")
+		})
+	}
+}
+
+// wantDebugDiffLines is what a dry run prints at debug for the canned diff
+// (diffOutWithCanary) of label: one line for each object of the manifest
+// that differs (the render holds testcni only: extra and other are in the
+// diff, not in the manifest), then the line that names the .diff file at
+// diffPath ("" without --render-dir).
+func wantDebugDiffLines(label, diffPath string) []string {
+	lines := []string{
+		"[debug] bootstrap dry-run: " + label + ": differs: v1 ConfigMap default/testcni\n",
+	}
+	if diffPath == "" {
+		return append(lines, "[debug] bootstrap dry-run: "+label+": lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n")
+	}
+	return append(lines, "[debug] bootstrap dry-run: "+label+": the diff text is in "+diffPath+". lo does not print it: it can quote a value of the manifest (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n")
+}
+
+// At debug without --render-dir the dry run prints the object lines and
+// says how to keep the diff text in a file; it prints no diff text and
+// writes no .diff file. The bats twin is "bootstrap::apply --dry-run at
+// debug without --render-dir names the objects, not the diff text".
+func TestDryRunDebugDiffWithoutRenderDir(t *testing.T) {
+	setDebug(t, true)
+	t.Setenv(kapply.ShowSensitiveEnv, "")
+	e, f, spec, kc := dryEngine(t, "testcni")
+	diffScript(t, f, diffOutWithCanary, "", 1)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); !errors.Is(err, ErrDryRunDiffers) {
+		t.Fatalf("err = %v, want ErrDryRunDiffers", err)
+	}
+	for _, line := range wantDebugDiffLines("testcni", "") {
+		if !strings.Contains(stderrOf(e), line) {
+			t.Errorf("stderr misses %q:\n%s", line, stderrOf(e))
+		}
+	}
+	refuteOutput(t, stdoutOf(e)+stderrOf(e), diffTextCanary, "+  foo: bar", "@@ ",
+		"differs: v1 ConfigMap default/extra", "differs: v1 ConfigMap default/other")
+}
+
+// LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
+// line, as lo printed it before; without debug it prints nothing more. The
+// bats twin is "bootstrap::apply --dry-run: LO_SHOW_SENSITIVE_OUTPUT=1
+// prints the diff text at debug".
+func TestDryRunDiffTextUnderShowSensitive(t *testing.T) {
+	const warn = "[warn] bootstrap dry-run: testcni: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the diff text, which can quote a value of the manifest\n"
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug=%v", debug), func(t *testing.T) {
+			setDebug(t, debug)
+			t.Setenv(kapply.ShowSensitiveEnv, "1")
+			e, f, spec, kc := dryEngine(t, "testcni")
+			diffScript(t, f, diffOutWithCanary, diffErrText, 1)
+			if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); !errors.Is(err, ErrDryRunDiffers) {
+				t.Fatalf("err = %v, want ErrDryRunDiffers", err)
+			}
+			if got := strings.Contains(stderrOf(e), warn+diffOutWithCanary); got != debug {
+				t.Errorf("stderr has the [warn] line and the diff text = %v, want %v:\n%s", got, debug, stderrOf(e))
+			}
+			if debug && strings.Contains(stderrOf(e), "the diff text is in") {
+				t.Errorf("under the opt-in, stderr still has the path line:\n%s", stderrOf(e))
+			}
+			// The kubectl stderr stays private also under the opt-in.
+			refuteOutput(t, stderrOf(e), diffValueCanary, "Invalid value")
+		})
+	}
+}
+
+// diffManifest is the manifest (the diff input) of TestDiffObjects: each
+// object that its cases name, and "anyns", a ConfigMap with no namespace.
+const diffManifest = `apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: front, namespace: web}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: r, namespace: ns}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: admin}
+---
+apiVersion: v1beta1
+kind: Ingress
+metadata: {name: a.example.com, namespace: default}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: s, namespace: default}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: anyns}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: "we\x1bb", namespace: default}
+`
+
+// diffFile is the `diff`, `--- ` and `+++ ` lines of the file of one
+// object (its kubectl file name), as kubectl diff prints them.
+func diffFile(name string) string {
+	const ts = "\t2026-10-12 10:00:00.000000000 +0000"
+	return "diff -u -N /tmp/LIVE-1/" + name + " /tmp/MERGED-1/" + name + "\n" +
+		"--- /tmp/LIVE-1/" + name + ts + "\n" +
+		"+++ /tmp/MERGED-1/" + name + ts + "\n"
+}
+
+// diffObjects names the objects of the --- file headers of the LIVE tree
+// that the unified-diff framing allows and that are objects of the
+// manifest, in the objectLabel shape, escaped; any other line names
+// nothing. The bats twin is "bootstrap::_diff_objects names the objects of
+// the LIVE headers only" (the same cases).
+func TestDiffObjects(t *testing.T) {
+	const ts = "\t2026-10-12 10:00:00.000000000 +0000"
+	hunk := "@@ -1 +1 @@\n-a: x\n+a: y\n"
+	for _, tc := range []struct {
+		name string
+		diff string
+		want []string
+	}{
+		{"core", diffFile("v1.ConfigMap.default.cfg") + hunk, []string{"v1 ConfigMap default/cfg"}},
+		{"group", diffFile("apps.v1.Deployment.web.front") + hunk, []string{"apps/v1 Deployment web/front"}},
+		{"dotted group", diffFile("rbac.authorization.k8s.io.v1.Role.ns.r") + hunk, []string{"rbac.authorization.k8s.io/v1 Role ns/r"}},
+		{"cluster-scoped", diffFile("rbac.authorization.k8s.io.v1.ClusterRole..admin") + hunk, []string{"rbac.authorization.k8s.io/v1 ClusterRole admin"}},
+		{"dotted name", diffFile("v1beta1.Ingress.default.a.example.com") + hunk, []string{"v1beta1 Ingress default/a.example.com"}},
+		{"a header at the start, no diff line", "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts, []string{"v1 ConfigMap default/cfg"}},
+		{"external diff tool, no header", "the files differ\n", nil},
+		{"not the LIVE tree", "--- /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts + "\n+++ a/v1.ConfigMap.default.cfg", nil},
+		{"no directory", "--- v1.ConfigMap.default.cfg\n+++ v1.ConfigMap.default.cfg", nil},
+		{"not the kubectl shape", diffFile("configmap-cfg.yaml") + hunk + diffFile("V1.ConfigMap.default.cfg") + hunk, nil},
+		{"no +++ line after the header", "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n@@ -1 +1 @@", nil},
+		{"a header in no manifest object", diffFile("v1.ConfigMap.default.unknown") + hunk, nil},
+		{"another namespace", diffFile("v1.ConfigMap.other.cfg") + hunk, nil},
+		{"another version", diffFile("apps.v2.Deployment.web.front") + hunk, nil},
+		{"no manifest namespace: any namespace", diffFile("v1.ConfigMap.kube-system.anyns") + hunk, []string{"v1 ConfigMap kube-system/anyns"}},
+		{"a name with an ESC byte, escaped", diffFile("v1.ConfigMap.default.we\x1bb") + hunk, []string{`v1 ConfigMap default/we\x1bb`}},
+		{"a forged header inside a hunk", diffFile("v1.Secret.default.s") +
+			"@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts + "\n a: x\n",
+			[]string{"v1 Secret default/s"}},
+		{"two files", diffFile("v1.Secret.default.s") + hunk + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s", "v1 ConfigMap default/cfg"}},
+		{"two hunks and a no-newline line", diffFile("v1.Secret.default.s") + hunk + "@@ -5,2 +5 @@\n c\n-d\n\\ No newline at end of file\n" + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s", "v1 ConfigMap default/cfg"}},
+		{"a line that breaks the framing stops the parse", diffFile("v1.Secret.default.s") + "@@ -1 +1 @@\n-a: x\n+a: y\ngarbage\n" + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s"}},
+		{"a removed line past the count stops the parse", diffFile("v1.Secret.default.s") + "@@ -1 +1 @@\n-a: x\n-b: z\n+a: y\n" + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := diffObjects(tc.diff, diffManifest); !slices.Equal(got, tc.want) {
+				t.Errorf("diffObjects = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }

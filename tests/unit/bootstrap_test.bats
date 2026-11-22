@@ -2662,6 +2662,230 @@ YAML
   [[ "$output" != *"· 1 resource"* ]]
 }
 
+# ── the kubectl output of an entry stays private ─────────────────────────────
+# CANARY_VALUE stands for a value of the manifest that kubectl quotes in its
+# output (a field error prints "Invalid value: <value>"). It is a made-up
+# string. A background entry's kapply appends the kubectl output to
+# KAPPLY_PRIVATE_LOG; the reap parks and counts from that file and prints
+# fixed lines. The Go twins are in internal/bootstrap/private_test.go.
+
+CANARY_VALUE=zq7Canary9xLm2
+# STDERR_CANARY stands for a value that kubectl quotes on its stderr (an
+# error or a warning), apart from CANARY_VALUE on its stdout.
+STDERR_CANARY=zq7StderrCanary4kWp
+
+# _private_kubectl_stub <apply-output> <apply-rc> [<apply-stderr>] — kubectl
+# answers `apply` with <apply-output> on stdout, <apply-stderr> on stderr
+# and <apply-rc>, every other verb with 0 and no output. KENV gets the verb
+# and the KUBERC of each call.
+_private_kubectl_stub() {
+  export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
+  export APPLY_OUT="${1}" APPLY_RC="${2}" APPLY_ERR="${3-}"
+  kubectl() {
+    local verb="$1"; [[ "$1" == "--kubeconfig" ]] && verb="$3"
+    echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    if [[ "${verb}" == apply ]]; then
+      printf '%s\n' "${APPLY_OUT}"
+      [[ -z "${APPLY_ERR}" ]] || printf '%s\n' "${APPLY_ERR}" >&2
+      return "${APPLY_RC}"
+    fi
+    return 0
+  }
+  export -f kubectl
+}
+
+@test "bootstrap::apply: the kubectl output of an entry stays private (each level, success and failure)" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  local lvl
+  for lvl in "" 1; do
+    # A clean apply: the count comes from the private output.
+    _private_kubectl_stub "configmap/testcni serverside-applied
+Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spec.${STDERR_CANARY}\""
+    DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_success
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "${STDERR_CANARY}"
+    if [[ -n "${lvl}" ]]; then
+      assert_line '[debug] kapply: kubectl apply for testcni exited 0 (1 resources)'
+    else
+      assert_line '✓ testcni · 1 resource'
+    fi
+    [ "$(grep -c '^apply ' "${KENV}")" -eq 1 ]
+    [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 1 ]
+    # A failed apply: the fixed lines, never the kubectl output.
+    _private_kubectl_stub "The ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\"" 1 "Error from server: ${STDERR_CANARY}"
+    DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "${STDERR_CANARY}"
+    refute_output --partial "Invalid value"
+    assert_output --partial '[error] kapply: kubectl apply failed for testcni (rc=1). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1'
+    assert_output --partial '[error] bootstrap: testcni apply failed (rc=1)'
+    [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 1 ]
+  done
+}
+
+# The kubectl of PATH (kubectl_path_stub) is a child process: its log holds
+# the KUBERC that lo gave it, with a KUBERC of the user set. The restore.d
+# apply and the entry's apply (a real run), and the diffs of the entry and
+# of restore.d (a dry run) read stdin and run with KUBERC=off.
+@test "kuberc: a kubectl on PATH runs the restore.d apply, the entry apply and the dry-run diffs with KUBERC=off" {
+  write_cluster_spec "testcni"
+  local d="${PATH_CLUSTERS}/test.lok8s.dev" log
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n  namespace: default\n' > "${d}/secrets/restore.d/tls-a.yaml"
+  sops() { echo "sops-called" >> "${BATS_TEST_TMPDIR}/sops.log"; return 1; }
+  export -f sops
+  kubectl_path_stub
+  log="${KUBECTL_PATH_LOG}"
+  export KUBERC=/user/kuberc
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "restore.d — 1 applied, 0 skipped"
+  [ "$(grep -c $'^KUBERC=off\t--kubeconfig .* apply --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  [ "$(grep -c $'^KUBERC=off\t--kubeconfig .* diff --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  [ "$(kubectl_path_file_calls | grep -c .)" -eq 4 ] || { cat "${log}"; return 1; }
+  [ -z "$(kubectl_path_file_calls | grep -v $'^KUBERC=off\t')" ] || { cat "${log}"; return 1; }
+  [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
+}
+
+@test "bootstrap::apply: LO_SHOW_SENSITIVE_OUTPUT=1 shows the kubectl output of a failed entry" {
+  write_cluster_spec "testcni"
+  _private_kubectl_stub "The ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\"" 1
+  LO_SHOW_SENSITIVE_OUTPUT=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "${CANARY_VALUE}"
+  assert_output --partial '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for testcni, which can quote a value of the manifest'
+}
+
+@test "bootstrap::apply: an immutable conflict in the private output PARKS the entry, and no kubectl text prints" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
+  local lvl
+  for lvl in "" 1; do
+    _private_kubectl_stub "Error from server (Invalid): ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\": field is immutable" 1
+    DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_failure
+    assert_output --partial 'will confirm at the end'
+    assert_output --partial 'needs recreate'
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial 'field is immutable'
+  done
+}
+
+@test "bootstrap::apply: a terminating-namespace 403 in the private output reaches the prompt" {
+  local p="${BATS_TEST_TMPDIR}/prompt.txt"
+  write_cluster_spec "testcni"
+  _private_kubectl_stub "Error from server (Forbidden): error when creating \"x\": secrets \"${CANARY_VALUE}\" is forbidden: unable to create new content in namespace app-system because it is being terminated" 1
+  bootstrap::_interactive() { return 0; }
+  bootstrap::_ask() { printf '%s' "${1}" > "${p}"; return 1; }
+  unset LOK8S_FORCE_RECREATE LO_SHOW_SENSITIVE_OUTPUT
+  local out="${BATS_TEST_TMPDIR}/ns.out" rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>&1 </dev/null || rc=$?
+  [ "${rc}" -ne 0 ]
+  grep -q "app-system" "${p}"
+  grep -q 'will confirm at the end' "${out}"
+  [ "$(cat "${out}" "${p}" | grep -c "${CANARY_VALUE}" || true)" -eq 0 ]
+}
+
+@test "bootstrap::apply: a background job's private file sits in the 0700 scheduler dir and is removed at the reap" {
+  export LOK8S_BOOTSTRAP_PARALLEL=8
+  export SEEN="${BATS_TEST_TMPDIR}/seen"; : > "${SEEN}"
+  bootstrap::_apply_one() {
+    printf 'configmap/%s-one serverside-applied\n' "${1}" >> "${KAPPLY_PRIVATE_LOG}"
+    printf '%s %s\n' "${KAPPLY_PRIVATE_LOG}" "$(stat -c %a "${KAPPLY_PRIVATE_LOG%/*}")" >> "${SEEN}"
+    return 0
+  }
+  local n
+  for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"a "*"· 1 resource"* ]]
+  [[ "$output" == *"b "*"· 1 resource"* ]]
+  [[ "$output" != *"serverside-applied"* ]]
+  [ "$(wc -l < "${SEEN}")" -eq 2 ]
+  local path mode
+  while read -r path mode; do
+    [[ "${path}" == *.priv ]]
+    [ "${mode}" = "700" ]
+    [ ! -e "${path}" ]
+  done < "${SEEN}"
+}
+
+# The private dir of the scheduler holds the kubectl output of the entries.
+# A TERM in the middle of a run removes it, and the caller's traps stay
+# (chained while the run lasts, put back afterwards).
+@test "bootstrap::apply: a TERM removes the scheduler's private dir and keeps the caller's EXIT trap" {
+  write_cluster_spec "testcni"
+  export SCHED_SEEN="${BATS_TEST_TMPDIR}/sched-dir" SCHED_GO="${BATS_TEST_TMPDIR}/sched-go"
+  export CALLER_TRAP="${BATS_TEST_TMPDIR}/caller-trap"
+  # kubectl records the private dir of the entry in its apply, then blocks
+  # until SCHED_GO exists (at most 10 s). Every other call returns 0.
+  kubectl() {
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    [[ " $* " == *" apply "* && -n "${KAPPLY_PRIVATE_DIR-}" ]] || return 0
+    printf '%s\n' "${KAPPLY_PRIVATE_DIR}" > "${SCHED_SEEN}"
+    local i
+    for (( i = 0; i < 100; i++ )); do
+      [[ ! -e "${SCHED_GO}" ]] || break
+      sleep 0.1
+    done
+    return 0
+  }
+  export -f kubectl
+  export _PROJECT_ROOT
+  local script="${BATS_TEST_TMPDIR}/sched-term.sh"
+  cat > "${script}" <<'SH'
+source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
+source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
+source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+trap 'echo ran > "${CALLER_TRAP}"' EXIT
+bootstrap::apply test.lok8s.dev "$1" "$2"
+SH
+  local log="${BATS_TEST_TMPDIR}/sched-term.log"
+  ( exec bash "${script}" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null >"${log}" 2>&1 ) &
+  local pid=$! rc=0 i dir
+  for (( i = 0; i < 100; i++ )); do
+    [[ ! -s "${SCHED_SEEN}" ]] || break
+    sleep 0.1
+  done
+  dir="$(cat "${SCHED_SEEN}" 2>/dev/null || true)"
+  [[ -n "${dir}" && -d "${dir}" ]] || { : > "${SCHED_GO}"; echo "no private dir seen"; cat "${log}"; return 1; }
+  kill -TERM "${pid}"
+  wait "${pid}" || rc=$?
+  : > "${SCHED_GO}"   # release the entry, which outlives its scheduler
+  [ "${rc}" -eq 143 ] || { echo "rc ${rc}"; return 1; }
+  [ ! -e "${dir}" ] || { ls -la "${dir}"; return 1; }
+  [ "$(cat "${CALLER_TRAP}")" = ran ]
+
+  # The main-shell path: chained while the run lasts, put back afterwards.
+  bash -c '
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo caller" EXIT
+    trap "echo term" TERM
+    bootstrap::_sched_trap /nonexistent/x
+    trap -p EXIT TERM
+    bootstrap::_sched_untrap
+    trap -p EXIT TERM' > "${BATS_TEST_TMPDIR}/traps" 2>&1 || true
+  run cat "${BATS_TEST_TMPDIR}/traps"
+  assert_line --index 0 "trap -- 'bootstrap::_sched_rm; echo caller' EXIT"
+  assert_line --index 1 "trap -- 'bootstrap::_sched_signal TERM' SIGTERM"
+  assert_line --index 2 "trap -- 'echo caller' EXIT"
+  assert_line --index 3 "trap -- 'echo term' SIGTERM"
+  assert_line --index 4 "caller"
+}
+
 # ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
 
 @test "hosted: _apply_one skips cilium unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {
@@ -2914,7 +3138,7 @@ _dry_canned_diff() {
 diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.testcni /tmp/MERGED-1/v1.ConfigMap.default.testcni
 --- /tmp/LIVE-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
 +++ /tmp/MERGED-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
-@@ -3,4 +3,5 @@
+@@ -3,3 +3,4 @@
  kind: ConfigMap
  metadata:
    name: testcni
@@ -3033,7 +3257,7 @@ _dry_kubectl_stub() {
 _dry_text_stub() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
   export DRY_OUT="${1}" DRY_ERR="${2}"; shift 2
-  export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"
+  export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"; : > "${DRY_CALLS}.env"
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
@@ -3042,6 +3266,8 @@ _dry_text_stub() {
       return 9
     fi
     echo x >> "${DRY_CALLS}"
+    # The KUBERC each diff ran with (the kubectl user defaults are off).
+    echo "diff KUBERC=${KUBERC-<unset>}" >> "${DRY_CALLS}.env"
     local n rc=0; n="$(wc -l < "${DRY_CALLS}")"
     set -- ${DRY_RCS}
     (( n <= $# )) && rc="${!n}"
@@ -3236,14 +3462,33 @@ STANDIN
   done
 }
 
+# _dry_debug_lines <label> <diff-path> — what a dry run prints at debug for
+# the canned diff of <label>: one line for each object of the manifest that
+# differs (the render holds testcni only: extra and other are in the diff,
+# not in the manifest), then the line that names the .diff file at
+# <diff-path> ("" without --render-dir). The Go twin is wantDebugDiffLines.
+_dry_debug_lines() {
+  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap default/%s\n' "${1}" testcni
+  if [[ -z "${2}" ]]; then
+    printf '[debug] bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}"
+  else
+    printf '[debug] bootstrap dry-run: %s: the diff text is in %s. lo does not print it: it can quote a value of the manifest (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}" "${2}"
+  fi
+}
+
 # A diff with differences (rc 1) still reports as before, also when kubectl
-# prints a message on stderr: "differs" with the counts, rc 1, and the diff
-# text at debug (kubectl masks the data of a Secret in it). The kubectl
-# stderr is not printed, and the .diff file holds the diff text only. The
-# Go twin is TestDryRunDiffersWithKubectlTextStillDiffers.
+# prints a message on stderr: "differs" with the counts, rc 1. The diff text
+# is not printed, also at debug (it can quote a value of the manifest):
+# debug prints one line for each object that differs and the path of the
+# .diff file. The kubectl stderr is not printed, the .diff file holds the
+# diff text only (0600, in the 0700 render dir), and kubectl runs with the
+# user defaults off (KUBERC=off). The Go twins are
+# TestDryRunDiffersWithKubectlTextStillDiffers and
+# TestDryRunDiffFileIsPrivate.
 @test "bootstrap::apply --dry-run: a diff with differences and a kubectl message still differs (rc 1)" {
   write_cluster_spec "testcni"
-  local bootstrap_dry_run=1 lvl rd
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  local bootstrap_dry_run=1 lvl rd line
   for lvl in "" 1; do
     rd="${BATS_TEST_TMPDIR}/out-${lvl:-0}"
     _dry_text_stub "$(_dry_diff_with_canary)" "$(_dry_value_text)" 1
@@ -3252,13 +3497,151 @@ STANDIN
     [ "${status}" -eq 1 ]
     assert_line "bootstrap dry-run: testcni: differs changed=1 new=2"
     assert_line "bootstrap dry-run: entries=1 unchanged=0 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0"
-    if [[ -n "${lvl}" ]]; then assert_line "+  note: diff-text-canary-1111"; else refute_output --partial "diff-text-canary-1111"; fi
+    while IFS= read -r line; do
+      if [[ -n "${lvl}" ]]; then assert_line "${line}"; else refute_line "${line}"; fi
+    done < <(_dry_debug_lines testcni "${rd}/01-testcni.diff")
+    refute_output --partial "diff-text-canary-1111"
+    refute_output --partial "+  foo: bar"
     refute_output --partial "canary-value-0000"
     refute_output --partial "Invalid value"
     refute_output --partial "typed patch"
     refute_output --partial "kubectl diff failed"
     _dry_assert_diff_file "${rd}/01-testcni.diff" "$(_dry_diff_with_canary)"
+    [ "$(stat -c %a "${rd}/01-testcni.diff")" = "600" ]
+    [ "$(stat -c %a "${rd}")" = "700" ]
+    [ "$(grep -cx 'diff KUBERC=off' "${DRY_CALLS}.env")" -eq 1 ]
+    [ "$(wc -l < "${DRY_CALLS}.env")" -eq 1 ]
   done
+}
+
+# At debug without --render-dir the dry run prints the object lines and says
+# how to keep the diff text in a file; it prints no diff text. The Go twin is
+# TestDryRunDebugDiffWithoutRenderDir.
+@test "bootstrap::apply --dry-run at debug without --render-dir names the objects, not the diff text" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  local bootstrap_dry_run=1 line
+  _dry_text_stub "$(_dry_diff_with_canary)" "" 1
+  DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 1 ]
+  while IFS= read -r line; do
+    assert_line "${line}"
+  done < <(_dry_debug_lines testcni "")
+  refute_output --partial "diff-text-canary-1111"
+  refute_output --partial "+  foo: bar"
+  refute_output --partial "@@ "
+  refute_output --partial "differs: v1 ConfigMap default/extra"
+  refute_output --partial "differs: v1 ConfigMap default/other"
+}
+
+# LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
+# line, as lo printed it before; without debug it prints nothing more. The
+# kubectl stderr stays private. The Go twin is
+# TestDryRunDiffTextUnderShowSensitive.
+@test "bootstrap::apply --dry-run: LO_SHOW_SENSITIVE_OUTPUT=1 prints the diff text at debug" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 lvl
+  local -r warn_line='[warn] bootstrap dry-run: testcni: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the diff text, which can quote a value of the manifest'
+  for lvl in "" 1; do
+    _dry_text_stub "$(_dry_diff_with_canary)" "$(_dry_value_text)" 1
+    LO_SHOW_SENSITIVE_OUTPUT=1 DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 1 ]
+    if [[ -n "${lvl}" ]]; then
+      assert_line "${warn_line}"
+      assert_line "+  note: diff-text-canary-1111"
+      assert_line "+  foo: bar"
+    else
+      refute_line "${warn_line}"
+      refute_output --partial "diff-text-canary-1111"
+    fi
+    refute_output --partial "canary-value-0000"
+    refute_output --partial "Invalid value"
+  done
+}
+
+# bootstrap::_diff_objects names the objects of the --- file headers of the
+# LIVE tree that the unified-diff framing allows and that are objects of the
+# manifest, escaped; any other line names nothing. The Go twin is
+# TestDiffObjects (the same cases, and the same manifest: each object that
+# the cases name, and "anyns", a ConfigMap with no namespace).
+@test "bootstrap::_diff_objects names the objects of the LIVE headers only" {
+  local -r ts=$'\t2026-10-12 10:00:00.000000000 +0000'
+  local m
+  m="$(cat <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: front, namespace: web}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: r, namespace: ns}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: admin}
+---
+apiVersion: v1beta1
+kind: Ingress
+metadata: {name: a.example.com, namespace: default}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: s, namespace: default}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: anyns}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: "we\x1bb", namespace: default}
+YAML
+)"
+  # _objs <case> <want>: the diff comes on stdin.
+  _objs() {
+    local d
+    d="$(cat)"
+    run bootstrap::_diff_objects "${d}" "${m}"
+    assert_success || { echo "case: ${1}" >&2; return 1; }
+    assert_output "${2}" || { echo "case: ${1}" >&2; return 1; }
+  }
+  # _dfile <name>: the diff, --- and +++ lines of the file of one object.
+  _dfile() {
+    printf 'diff -u -N /tmp/LIVE-1/%s /tmp/MERGED-1/%s\n' "${1}" "${1}"
+    printf -- '--- /tmp/LIVE-1/%s%s\n+++ /tmp/MERGED-1/%s%s\n' "${1}" "${ts}" "${1}" "${ts}"
+  }
+  _hunk() { printf '@@ -1 +1 @@\n-a: x\n+a: y\n'; }
+  _objs "core" "v1 ConfigMap default/cfg" < <(_dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "group" "apps/v1 Deployment web/front" < <(_dfile apps.v1.Deployment.web.front && _hunk)
+  _objs "dotted group" "rbac.authorization.k8s.io/v1 Role ns/r" < <(_dfile rbac.authorization.k8s.io.v1.Role.ns.r && _hunk)
+  _objs "cluster-scoped" "rbac.authorization.k8s.io/v1 ClusterRole admin" < <(_dfile rbac.authorization.k8s.io.v1.ClusterRole..admin && _hunk)
+  _objs "dotted name" "v1beta1 Ingress default/a.example.com" < <(_dfile v1beta1.Ingress.default.a.example.com && _hunk)
+  _objs "a header at the start, no diff line" "v1 ConfigMap default/cfg" \
+    < <(printf -- '--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n' "${ts}" "${ts}")
+  _objs "external diff tool, no header" "" < <(printf 'the files differ\n')
+  _objs "not the LIVE tree" "" < <(printf -- '--- /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n+++ a/v1.ConfigMap.default.cfg\n' "${ts}")
+  _objs "no directory" "" < <(printf -- '--- v1.ConfigMap.default.cfg\n+++ v1.ConfigMap.default.cfg\n')
+  _objs "not the kubectl shape" "" < <(_dfile configmap-cfg.yaml && _hunk && _dfile V1.ConfigMap.default.cfg && _hunk)
+  _objs "no +++ line after the header" "" < <(printf -- '--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n@@ -1 +1 @@\n' "${ts}")
+  _objs "a header in no manifest object" "" < <(_dfile v1.ConfigMap.default.unknown && _hunk)
+  _objs "another namespace" "" < <(_dfile v1.ConfigMap.other.cfg && _hunk)
+  _objs "another version" "" < <(_dfile apps.v2.Deployment.web.front && _hunk)
+  _objs "no manifest namespace: any namespace" "v1 ConfigMap kube-system/anyns" < <(_dfile v1.ConfigMap.kube-system.anyns && _hunk)
+  _objs "a name with an ESC byte, escaped" 'v1 ConfigMap default/we\x1bb' < <(_dfile $'v1.ConfigMap.default.we\x1bb' && _hunk)
+  _objs "a forged header inside a hunk" "v1 Secret default/s" \
+    < <(_dfile v1.Secret.default.s && printf -- '@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n a: x\n' "${ts}" "${ts}")
+  _objs "two files" $'v1 Secret default/s\nv1 ConfigMap default/cfg' \
+    < <(_dfile v1.Secret.default.s && _hunk && _dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "two hunks and a no-newline line" $'v1 Secret default/s\nv1 ConfigMap default/cfg' \
+    < <(_dfile v1.Secret.default.s && _hunk && printf '@@ -5,2 +5 @@\n c\n-d\n\\ No newline at end of file\n' && _dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "a line that breaks the framing stops the parse" "v1 Secret default/s" \
+    < <(_dfile v1.Secret.default.s && printf '@@ -1 +1 @@\n-a: x\n+a: y\ngarbage\n' && _dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "a removed line past the count stops the parse" "v1 Secret default/s" \
+    < <(_dfile v1.Secret.default.s && printf '@@ -1 +1 @@\n-a: x\n-b: z\n+a: y\n' && _dfile v1.ConfigMap.default.cfg && _hunk)
 }
 
 # A clean diff (rc 0) with a kubectl warning on stderr is unchanged, rc 0,

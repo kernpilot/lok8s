@@ -58,12 +58,16 @@ type rcError struct{ code int }
 func (e *rcError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 func (e *rcError) ExitCode() int { return e.code }
 
-// fakeRunner mocks kubectl: apply consumes the manifest and records which
-// kinds reached it; wait echoes; get returns the ready snapshot.
+// fakeRunner mocks kubectl: apply records the manifest that it gets on
+// stdin and prints a kubectl line for each object of it (then applyOut);
+// wait echoes; get returns the ready snapshot. lo keeps the output of an
+// apply off its stdout (kapply), so a test reads what kubectl got from
+// applied, not from the stdout of lo.
 type fakeRunner struct {
 	calls    []string
 	applied  []string // manifests handed to apply, in order
 	applyRC  int
+	applyOut string // a line that apply prints after the object lines
 	waitFail bool
 }
 
@@ -81,7 +85,15 @@ func (f *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 			fmt.Fprintln(c.Stderr, "error: apply refused")
 			return &rcError{f.applyRC}
 		}
-		fmt.Fprintln(c.Stdout, "applied")
+		// kubectl prints one line per object: <kind>/<name> serverside-applied.
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			if kind, ok := strings.CutPrefix(strings.TrimSuffix(line, "\r"), "kind: "); ok {
+				fmt.Fprintf(c.Stdout, "%s/fake serverside-applied\n", strings.ToLower(kind))
+			}
+		}
+		if f.applyOut != "" {
+			fmt.Fprintln(c.Stdout, f.applyOut)
+		}
 		return nil
 	case "wait":
 		if f.waitFail {
@@ -116,16 +128,32 @@ func newDeployer(t *testing.T, f *fakeRunner, artifact string) (*Deployer, *byte
 	return &Deployer{Paths: p, Applier: a, Stderr: &errBuf}, &out, &errBuf, domainDir
 }
 
+// setDisplay sets the display of a kapply pass: off a terminal, with the
+// opt-in LO_SHOW_SENSITIVE_OUTPUT set to show ("" = off). newDeployer reads
+// it (kapply.NewApplier), so a test calls setDisplay first.
+func setDisplay(t *testing.T, show string) {
+	t.Helper()
+	t.Setenv("KAPPLY_TTY", "")
+	t.Setenv(kapply.ShowSensitiveEnv, show)
+}
+
 // bats: "deploy::apply applies the single domain artifact"
 // bats: "deploy::apply applies CRDs first (waits for Established)"
+// lo prints the summary line of each phase, and the wait passes its output
+// through; the kubectl output of the apply stays off stdout. What kubectl
+// got is in f.applied.
 func TestApplyAppliesCRDsFirst(t *testing.T) {
+	setDisplay(t, "")
 	f := &fakeRunner{}
 	d, out, _, _ := newDeployer(t, f, artifactYAML)
 	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "applied") {
-		t.Errorf("stdout = %q", out.String())
+	wantOut := "✓ test.lok8s.dev crds · 1 resource\n" +
+		"waited: wait --for=condition=Established crd/widgets.test.lok8s.dev --timeout=60s\n" +
+		"✓ test.lok8s.dev · 3 resources\n"
+	if out.String() != wantOut {
+		t.Errorf("stdout = %q, want %q", out.String(), wantOut)
 	}
 	want := []string{
 		"kubectl apply --server-side --force-conflicts -f -",
@@ -169,8 +197,56 @@ func TestApplyEmptyArtifactNoOp(t *testing.T) {
 	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.String(), "applied") || len(f.calls) != 0 {
+	if out.String() != "" || len(f.calls) != 0 {
 		t.Errorf("no apply expected: out=%q calls=%v", out.String(), f.calls)
+	}
+}
+
+// The kubectl output of an apply stays off the stdout and stderr of lo
+// deploy, on both routes: lo prints the summary line instead. With
+// LO_SHOW_SENSITIVE_OUTPUT=1 lo prints the kubectl output on stdout, after
+// a [warn] line. canary stands for a value of the manifest that kubectl
+// quotes in its output; it is a made-up string. bats: "deploy::apply and
+// deploy::apply_filtered print the kubectl output only with
+// LO_SHOW_SENSITIVE_OUTPUT=1".
+func TestApplyPrintsTheKubectlOutputOnlyWithTheOptIn(t *testing.T) {
+	const canary = "zq7DeployCanary5tRw"
+	const warn = "[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for test.lok8s.dev"
+	for _, show := range []string{"", "1"} {
+		for _, filtered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("show=%q/filtered=%v", show, filtered), func(t *testing.T) {
+				setDisplay(t, show)
+				f := &fakeRunner{applyOut: `Warning: the value "` + canary + `" is deprecated`}
+				d, out, errBuf, _ := newDeployer(t, f, artifactYAML)
+				var err error
+				if filtered {
+					err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+				} else {
+					err = d.Apply(t.Context(), "test.lok8s.dev")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(f.applied) == 0 {
+					t.Fatalf("kubectl apply did not run: calls = %v", f.calls)
+				}
+				if show == "" {
+					if strings.Contains(out.String()+errBuf.String(), canary) || strings.Contains(out.String(), "serverside-applied") {
+						t.Errorf("the kubectl output reached the output of lo:\nstdout:\n%s\nstderr:\n%s", out.String(), errBuf.String())
+					}
+					if !strings.HasPrefix(out.String(), "✓ test.lok8s.dev") {
+						t.Errorf("stdout = %q, want the summary line", out.String())
+					}
+					return
+				}
+				if !strings.Contains(out.String(), canary) {
+					t.Errorf("the opt-in did not print the kubectl output on stdout:\n%s", out.String())
+				}
+				if !strings.Contains(errBuf.String(), warn) {
+					t.Errorf("stderr misses the [warn] line:\n%s", errBuf.String())
+				}
+			})
+		}
 	}
 }
 

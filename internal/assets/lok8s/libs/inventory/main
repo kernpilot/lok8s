@@ -170,7 +170,7 @@ inventory::publish() {
     warn "inventory: ClusterInventory CRD manifest not found — skipping publish"
     return 0
   fi
-  if ! kubectl --kubeconfig "${kubeconfig}" apply --server-side --field-manager=lok8s \
+  if ! KUBERC=off kubectl --kubeconfig "${kubeconfig}" apply --server-side --field-manager=lok8s \
         -f "${crd}" >/dev/null 2>&1; then
     warn "inventory: could not apply the ClusterInventory CRD (cluster unreachable, RBAC, or a conflicting CRD) — skipping publish"
     return 0
@@ -185,7 +185,7 @@ inventory::publish() {
     warn "inventory: failed to build the ClusterInventory for ${domain} — skipping publish"
     return 0
   fi
-  if kubectl --kubeconfig "${kubeconfig}" apply --server-side --field-manager=lok8s \
+  if KUBERC=off kubectl --kubeconfig "${kubeconfig}" apply --server-side --field-manager=lok8s \
        -f - <<< "${cr}" >/dev/null 2>&1; then
     debug "inventory: published ClusterInventory 'cluster' for ${domain}"
   else
