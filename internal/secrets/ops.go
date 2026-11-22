@@ -108,7 +108,7 @@ creation_rules:
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := c.makeStore(dir); err != nil {
 		return err
 	}
 	return c.ensureGitignore(dir, stepGitignoreWrite)
@@ -490,7 +490,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+	if err := c.makeStore(secretsDir); err != nil {
 		return err
 	}
 	// The one plaintext write of a store (storeguard: Guard.WritePlaintext),

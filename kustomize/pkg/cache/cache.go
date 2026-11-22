@@ -21,9 +21,12 @@
 // name checks with the same refusal texts, a .gitignore that keeps every
 // plaintext out of git before the first write, and no write through a
 // link. A path in a refusal is relative to the project of a per-domain
-// store, as set prints it (storeRel). GetOrCreate runs these checks before
-// it generates a value (checkWrite), and so does the dry-run overlay in
-// place of the write. A read writes nothing, so Get and ReadByName keep
+// store, as set prints it (storeRel). On a miss, GetOrCreate runs these
+// checks before it generates a value (checkWrite), and the dry-run overlay
+// runs them in place of the write. An env: entry and an update: true entry
+// compute their value before Put, so for them only the write is refused
+// (a bash: command with update: true has run). A read writes nothing, so
+// Get and ReadByName keep
 // reading an entry that Put would refuse to write (a name that ends in
 // .enc, from a store made before the check).
 package cache
@@ -110,10 +113,12 @@ type Cache struct {
 
 // New creates a Cache scoped to the given Secret name + namespace,
 // rooted at dir (typically $PATH_SECRETS). The directory is created
-// with 0700 if it doesn't exist.
+// with 0700 if it doesn't exist, and the parent of each directory that it
+// makes is synced (storeguard.Guard.MakeDir), before any entry is written.
 //
 // Returns an error if dir is empty (caller should check $PATH_SECRETS
-// before calling) or if mkdir fails.
+// before calling), if mkdir fails, or if a sync fails (a
+// *storeguard.Stop).
 func New(dir, namespace, name string) (*Cache, error) {
 	if dir == "" {
 		return nil, errs.New("cache: PATH_SECRETS is not set")
@@ -121,7 +126,10 @@ func New(dir, namespace, name string) (*Cache, error) {
 	if name == "" {
 		return nil, errs.New("cache: secret name is empty")
 	}
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
+	if err := (storeguard.Guard{Rel: storeRel(dir)}).MakeDir(dir, dirPerm); err != nil {
+		if _, ok := errors.AsType[*storeguard.Stop](err); ok {
+			return nil, err
+		}
 		return nil, fmt.Errorf("cache: mkdir %s: %w", dir, err)
 	}
 	return &Cache{dir: dir, namespace: namespace, name: name}, nil
@@ -175,10 +183,14 @@ func (c *Cache) Get(key string) ([]byte, error) {
 //     the block first.
 //
 // The value goes to a new private temp file in the store and a rename onto
-// the entry. A refusal or a failed write returns a *storeguard.Stop and
-// changes no file. A path in it is relative as storeRel makes it, and the
-// line of a failed write names no command (the line of set starts with
-// "set").
+// the entry, then a sync of the store directory. A refusal returns a
+// *storeguard.Stop and changes no file. A write that fails returns one too
+// and leaves the old entry as it was; the .gitignore that the write put in
+// place before stays, and a temp file stays only when its remove failed
+// too (the error names it). A sync that fails after a rename says that
+// the file was written. A path in it is relative as storeRel makes it, and
+// the line of a failed write names no command (the line of set starts
+// with "set").
 func (c *Cache) Put(key string, value []byte) error {
 	base, err := c.entryName(key)
 	if err != nil {
@@ -189,10 +201,12 @@ func (c *Cache) Put(key string, value []byte) error {
 
 // checkWrite runs the checks of Put for key and writes nothing: the name
 // (entryName), then the path of the entry and the .gitignore of the store
-// (storeguard.Guard.CheckPlaintext). It returns the refusal of Put.
+// (storeguard.Guard.CheckPlaintext). It returns the refusal of Put; it
+// cannot tell that the write will fail (a full disk). On a miss,
 // GetOrCreate runs it before it generates a value, so a refused write runs
 // no generator (a bash: command has side effects). The dry-run overlay runs
-// it in place of the write.
+// it in place of the write. Put does not run it: a caller of Put has its
+// value already (env:, update: true).
 func (c *Cache) checkWrite(key string) error {
 	base, err := c.entryName(key)
 	if err != nil {
@@ -232,8 +246,8 @@ func storeRel(dir string) func(string) string {
 
 // GetOrCreate returns the cached value if present, otherwise calls gen,
 // stores the result, and returns it. It calls gen only when neither the
-// plaintext nor its encrypted twin exists, and only when Put can write the
-// entry (checkWrite: the name, the path and the .gitignore): a refused
+// plaintext nor its encrypted twin exists, and only when the checks of Put
+// pass (checkWrite: the name, the path and the .gitignore): a refused
 // write generates nothing. This is the canonical pattern for cache-first
 // generators:
 //

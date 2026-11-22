@@ -2,9 +2,11 @@ package storeguard
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -100,5 +102,216 @@ func TestWritePlaintextNamesAFailedWrite(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
 		t.Errorf("%d entries, want the .gitignore only", len(ents))
+	}
+}
+
+// newStore makes an empty store dir under a temp project and returns it
+// with a Guard whose Rel names a file relative to the project.
+func newStore(t *testing.T) (string, Guard) {
+	t.Helper()
+	base := t.TempDir()
+	dir := filepath.Join(base, "secrets")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir, Guard{Rel: func(p string) string { return strings.TrimPrefix(p, base+"/") }}
+}
+
+// entries returns the sorted names of the entries of dir.
+func entries(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range ents {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// The store directory is synced after the rename of the .gitignore,
+// before the first byte of the plaintext (the temp file of the plaintext
+// does not exist yet), and again after the rename of the plaintext. A
+// sync that fails after the .gitignore leaves no plaintext. A sync that
+// fails after the plaintext says that the file was written.
+func TestWritePlaintextSyncsTheStoreDirectory(t *testing.T) {
+	dir, g := newStore(t)
+	var seen [][]string
+	g.syncDir = func(d string) error {
+		if d != dir {
+			t.Errorf("sync of %s, want the store %s", d, dir)
+		}
+		seen = append(seen, entries(t, dir))
+		return nil
+	}
+	if err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K"}, []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{".gitignore"}, {".gitignore", "Secret.app.default.K"}}; !slices.EqualFunc(seen, want, slices.Equal[[]string]) {
+		t.Errorf("the store at each sync: %q, want %q", seen, want)
+	}
+
+	// The .gitignore is there: one sync, after the plaintext.
+	seen = nil
+	if err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.L"}, []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Errorf("%d syncs for a store with its .gitignore, want 1", len(seen))
+	}
+
+	// The sync after the .gitignore fails: no plaintext, no temp file.
+	dir, g = newStore(t)
+	g.syncDir = func(string) error { return errors.New("input/output error") }
+	err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K", Who: "set"}, []byte("v"))
+	want := []string{"secrets/.gitignore was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before the plaintext write — run this command again"}
+	if got := lines(t, err); !slices.Equal(got, want) {
+		t.Errorf("failed sync after the .gitignore:\n%q\nwant %q", got, want)
+	}
+	if got := entries(t, dir); !slices.Equal(got, []string{".gitignore"}) {
+		t.Errorf("store %q: a plaintext was written before the .gitignore was synced", got)
+	}
+
+	// The sync after the plaintext fails: the error says that it was written.
+	dir, g = newStore(t)
+	calls := 0
+	g.syncDir = func(string) error {
+		if calls++; calls == 2 {
+			return errors.New("input/output error")
+		}
+		return nil
+	}
+	err = g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K", Who: "set"}, []byte("v"))
+	want = []string{"secrets/Secret.app.default.K was written, but the sync of its directory failed, so a power loss can lose the new file"}
+	if got := lines(t, err); !slices.Equal(got, want) {
+		t.Errorf("failed sync after the plaintext:\n%q\nwant %q", got, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "Secret.app.default.K")); err != nil || string(b) != "v" {
+		t.Errorf("the plaintext: %q, %v", b, err)
+	}
+}
+
+// MakeDir syncs the parent of each directory that it makes, from the top,
+// and nothing for a directory that exists. A sync that fails names the
+// new directory.
+func TestMakeDirSyncsTheParentOfEachNewDirectory(t *testing.T) {
+	base := t.TempDir()
+	var synced []string
+	g := Guard{
+		Rel:     func(p string) string { return strings.TrimPrefix(p, base+"/") },
+		syncDir: func(d string) error { synced = append(synced, d); return nil },
+	}
+	dir := filepath.Join(base, "clusters", "alpha.dev", "secrets")
+	if err := g.MakeDir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{base, filepath.Join(base, "clusters"), filepath.Join(base, "clusters", "alpha.dev")}
+	if !slices.Equal(synced, want) {
+		t.Errorf("synced %q, want %q", synced, want)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("the store: %v", err)
+	}
+	synced = nil
+	if err := g.MakeDir(dir, 0o700); err != nil || len(synced) != 0 {
+		t.Errorf("a store that exists: %v, synced %q", err, synced)
+	}
+
+	g.syncDir = func(string) error { return errors.New("input/output error") }
+	err := g.MakeDir(filepath.Join(base, "other"), 0o700)
+	wantLines := []string{"lo made other, but the sync of its parent directory failed, so a power loss can lose it: lo wrote no file in it — run this command again"}
+	if got := lines(t, err); !slices.Equal(got, wantLines) {
+		t.Errorf("failed sync:\n%q\nwant %q", got, wantLines)
+	}
+}
+
+// The plaintext boundary refuses the name .gitignore in any letter case,
+// for a direct caller too: the plaintext would replace the rules of the
+// store. The .gitignore keeps its bytes, and no file is written. A name
+// that only starts with .gitignore is a plaintext like any other.
+func TestWritePlaintextRefusesTheGitignoreName(t *testing.T) {
+	for _, base := range []string{".gitignore", ".GITIGNORE", ".GitIgnore"} {
+		for _, withRules := range []bool{false, true} {
+			dir := t.TempDir()
+			if withRules {
+				if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(gitignoreContent), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := Plaintext{Dir: dir, Base: base}
+			want := []string{"the plaintext write is refused: the plaintext file " + base + " would replace the .gitignore of the store (in any letter case), which keeps every plaintext out of git. Nothing was written: use the name of a store entry"}
+			if got := lines(t, Guard{}.WritePlaintext(p, []byte("the-value"))); !slices.Equal(got, want) {
+				t.Errorf("%s: %q, want %q", base, got, want)
+			}
+			if got := lines(t, Guard{}.CheckPlaintext(p)); !slices.Equal(got, want) {
+				t.Errorf("CheckPlaintext %s: %q, want %q", base, got, want)
+			}
+			got := entries(t, dir)
+			if !withRules && len(got) != 0 {
+				t.Errorf("%s: store %q, want empty", base, got)
+			}
+			if withRules {
+				if b, _ := os.ReadFile(filepath.Join(dir, ".gitignore")); string(b) != gitignoreContent || !slices.Equal(got, []string{".gitignore"}) {
+					t.Errorf("%s: store %q, .gitignore %q", base, got, b)
+				}
+			}
+		}
+	}
+	dir := t.TempDir()
+	if err := (Guard{}).WritePlaintext(Plaintext{Dir: dir, Base: ".gitignore.bak"}, []byte("v")); err != nil {
+		t.Errorf("the control: %v", err)
+	}
+}
+
+// EnsureGitignore reads the file again after its write: a fill that writes
+// other bytes and returns nil (here: nothing, or the block with a
+// negation) is refused, and no plaintext is written.
+func TestEnsureGitignoreRefusesAFillThatWritesOtherBytes(t *testing.T) {
+	for name, fill := range map[string]func(io.Writer, []byte) error{
+		"nothing":    func(io.Writer, []byte) error { return nil },
+		"a negation": func(w io.Writer, want []byte) error { _, err := w.Write(append(want, "!x\n"...)); return err },
+	} {
+		dir, g := newStore(t)
+		g.FillGitignore = fill
+		err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K"}, []byte("the-value"))
+		want := []string{"secrets/.gitignore was written, but it does not have the bytes that lo planned for it: lo stopped before the plaintext write — fix the file, then run this command again"}
+		if got := lines(t, err); !slices.Equal(got, want) {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+		if got := entries(t, dir); !slices.Equal(got, []string{".gitignore"}) {
+			t.Errorf("%s: store %q, want the .gitignore only", name, got)
+		}
+		wrote, err := g.EnsureGitignore(t.TempDir(), StepPlaintext)
+		if !wrote || err == nil {
+			t.Errorf("%s: EnsureGitignore = %v, %v, want true and the refusal", name, wrote, err)
+		}
+	}
+}
+
+// The plan reads a negation below the block in each form that git reads
+// it: after a UTF-8 BOM, with CRLF line ends, and with a ** pattern. Each
+// is refused as a plain negation is, on its own line. The same files
+// without the negation pass.
+func TestPlanGitignoreRefusesANegationInEachForm(t *testing.T) {
+	const bom = "\xef\xbb\xbf"
+	crlf := strings.ReplaceAll(gitignoreContent, "\n", "\r\n")
+	want := []string{"s/.gitignore:9: " + gitignoreNegationText}
+	for _, tc := range []struct{ name, rules, negation string }{
+		{"plain", gitignoreContent, "!x\n"},
+		{"a BOM", bom + gitignoreContent, "!x\n"},
+		{"CRLF line ends", crlf, "!x\r\n"},
+		{"a BOM and CRLF line ends", bom + crlf, "!x\r\n"},
+		{"a ** negation", gitignoreContent, "!**/x\n"},
+		{"a ** negation of a plaintext", crlf, "!**/Secret.app.default.K\r\n"},
+	} {
+		plan, problems := PlanGitignore([]byte(tc.rules+tc.negation), "s/.gitignore")
+		if plan != nil || !slices.Equal(problems, want) {
+			t.Errorf("%s: plan %q, problems %q, want %q", tc.name, plan, problems, want)
+		}
+		if _, problems := PlanGitignore([]byte(tc.rules), "s/.gitignore"); problems != nil {
+			t.Errorf("%s without the negation: %q", tc.name, problems)
+		}
 	}
 }

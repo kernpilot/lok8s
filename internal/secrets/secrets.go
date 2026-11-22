@@ -137,10 +137,22 @@ func (c *Context) resolveStore(w io.Writer) (string, error) {
 // (not the flat fallback) even on the very first command — StorePath only
 // returns the per-domain path once the dir exists, so create it first when a
 // domain is in context (bash: secrets::_ensure_store). A no-op when no domain
-// is in context or the domain dir doesn't exist.
+// is in context or the domain dir doesn't exist. A store that it makes has
+// its parent synced (makeStore).
 func (c *Context) ensureStore() error {
 	if c.Domain != "" && fsutil.DirExists(c.Paths.Clusters+"/"+c.Domain) {
-		return os.MkdirAll(c.Paths.Clusters+"/"+c.Domain+"/secrets", 0o755)
+		return c.makeStore(c.Paths.Clusters + "/" + c.Domain + "/secrets")
+	}
+	return nil
+}
+
+// makeStore makes the store dir with its missing parents, mode 0755, and
+// syncs the parent of each directory that it makes (storeguard:
+// Guard.MakeDir; the bash twin does not sync). It prints a sync that fails
+// and returns ErrHandled; an error of the mkdir comes back as it is.
+func (c *Context) makeStore(dir string) error {
+	if err := c.guard().MakeDir(dir, 0o755); err != nil {
+		return c.printStop(err)
 	}
 	return nil
 }

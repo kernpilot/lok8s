@@ -6,6 +6,8 @@
 // Guard.WritePlaintext only. Before the write, it checks that:
 //
 //   - the file is an entry of the store directory itself (Destination);
+//   - its name is not .gitignore in any letter case: the plaintext would
+//     replace the rules that keep it out of git;
 //   - its name does not end in .enc in any letter case (ReservedName): the
 //     rule !Secret.*.enc of the block re-includes such a name, and git
 //     would commit the plaintext;
@@ -18,6 +20,12 @@
 // the path (WriteReplacing). A symlink or a hard link at the path is
 // replaced as a name, and the file that it names keeps its old content.
 // Guard.CheckPlaintext runs the same checks and writes nothing.
+//
+// The order holds after a power loss too: the guard syncs the store
+// directory after the rename of the .gitignore, before the first byte of
+// the plaintext, and again after the rename of the plaintext. MakeDir syncs
+// the parent of each directory that it makes. The rules keep an untracked
+// plaintext out of git only: a file that git tracks already stays tracked.
 //
 // The package uses the standard library only: the lo binary and the
 // standalone Secret plugin both import it. A refusal or a failed write is a
@@ -32,16 +40,19 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // StepPlaintext is the step that a refusal of WritePlaintext stops before,
 // when the caller has no other name for it.
 const StepPlaintext = "the plaintext write"
 
-// Stop is the error of a store write that did not happen: a refusal before
-// the write, or a write that failed and left the old file as it was. Lines
-// are the lines to print, in order, each as one error line.
+// Stop is the error of a store write: a refusal before the write, a write
+// that failed and left the old file as it was, or a write whose file is in
+// place but whose sync failed (its text says that the file was written).
+// Lines are the lines to print, in order, each as one error line.
 type Stop struct {
 	Lines []string
 }
@@ -59,7 +70,65 @@ type Guard struct {
 	Rel func(path string) string
 	// FillGitignore fills the temp file of a .gitignore write with want.
 	// Nil writes want (a seam: a test of lo makes the write stop part way).
+	// EnsureGitignore reads the file again after the rename and refuses a
+	// file that does not have the bytes of the plan, so a fill that writes
+	// other bytes and returns nil fails closed.
 	FillGitignore func(w io.Writer, want []byte) error
+	// syncDir syncs a directory. Nil is SyncDir (a seam: a test of this
+	// package makes a sync fail).
+	syncDir func(dir string) error
+}
+
+func (g Guard) sync(dir string) error {
+	if g.syncDir == nil {
+		return SyncDir(dir)
+	}
+	return g.syncDir(dir)
+}
+
+// SyncDir syncs the directory dir (fsync), so that a rename or a new entry
+// in it survives a power loss. A file system that cannot sync a directory
+// (EINVAL, ENOTSUP) counts as synced: it gives no other way to do it.
+func SyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+		return nil
+	}
+	return err
+}
+
+// MakeDir makes the store directory dir with its missing parents, mode
+// perm (os.MkdirAll), and syncs the parent of each directory that it made,
+// from the top: a new store then survives a power loss with the .gitignore
+// that the first write puts in it. It syncs nothing when dir exists. An
+// error of os.MkdirAll comes back as it is; a sync that fails is a *Stop.
+func (g Guard) MakeDir(dir string, perm fs.FileMode) error {
+	var made []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		made = append(made, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	for i := len(made) - 1; i >= 0; i-- {
+		if err := g.sync(filepath.Dir(made[i])); err != nil {
+			return stop("lo made " + Printable(g.rel(made[i])) + ", but the sync of its parent directory failed, so a power loss can lose it: lo wrote no file in it — run this command again")
+		}
+	}
+	return nil
 }
 
 func (g Guard) rel(path string) string {
@@ -85,8 +154,10 @@ type Plaintext struct {
 // each part that makes the name a path, so the Destination check refuses
 // only an empty dir (the file would be at the root of the file system):
 // New of the cache refuses an empty dir before, and set has a store path.
-// set checks a key with it before it reads the value. A refusal names the
-// field and its text, never the value.
+// The name starts with Secret., so it is never .gitignore in any letter
+// case (WritePlaintext refuses that name for a direct caller). set checks
+// a key with it before it reads the value. A refusal names the field and
+// its text, never the value.
 func CheckName(dir, name, namespace, key string) (string, error) {
 	for _, part := range []struct{ field, text string }{{"name", name}, {"namespace", namespace}, {"key", key}} {
 		if why := PartProblem(part.text); why != "" {
@@ -111,6 +182,11 @@ func reservedRefusal(subject, base string) string {
 	return subject + " is refused: the plaintext file " + Printable(base) + " would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc"
 }
 
+// gitignoreName reports whether base is .gitignore in any ASCII letter
+// case. A plaintext of that name would replace the rules of the store, and
+// a file system that ignores the case of a name has one file for them all.
+func gitignoreName(base string) bool { return asciiLower(base) == ".gitignore" }
+
 // notInStore is the refusal of a plaintext file that is not an entry of the
 // store directory itself (Destination).
 func notInStore(base string) string {
@@ -127,6 +203,7 @@ func notRegular(rel, step string) string {
 // p.Dir, mode 0600. It writes nothing and returns a *Stop when:
 //
 //   - the file is not an entry of p.Dir itself (Destination);
+//   - its name is .gitignore in any letter case;
 //   - its name ends in .enc in any letter case (ReservedName);
 //   - the path is not a regular file and not absent (DestinationOK);
 //   - the .gitignore of p.Dir cannot protect the store, or its write fails
@@ -136,9 +213,11 @@ func notRegular(rel, step string) string {
 // decrypt with its own check of each entry), so a name refusal here comes
 // from a direct caller, or from an entry that decrypt lists after its check.
 // Then it writes a new private temp file in p.Dir and renames it onto the
-// path (WriteReplacing). A write that fails leaves the old file as it was
-// and returns a *Stop that names the path, and the temp file if its remove
-// failed too. The caller makes p.Dir.
+// path (WriteReplacing), and syncs p.Dir. A write that fails leaves the old
+// file as it was and returns a *Stop that names the path, and the temp file
+// if its remove failed too. The .gitignore that EnsureGitignore wrote stays.
+// A sync of p.Dir that fails after the rename returns a *Stop that says
+// that the file was written. The caller makes p.Dir (MakeDir).
 func (g Guard) WritePlaintext(p Plaintext, data []byte) error {
 	path, step, err := g.destination(p)
 	if err != nil {
@@ -157,6 +236,9 @@ func (g Guard) WritePlaintext(p Plaintext, data []byte) error {
 		}
 		return g.FailedWrite(err, final)
 	}
+	if err := g.sync(p.Dir); err != nil {
+		return stop(Printable(g.rel(path)) + " was written, but the sync of its directory failed, so a power loss can lose the new file")
+	}
 	return nil
 }
 
@@ -167,7 +249,8 @@ func (g Guard) WritePlaintext(p Plaintext, data []byte) error {
 // for a refusal. A caller runs it before it computes a value that it will
 // write (the cache, before a generator), or in place of the write (a dry
 // run). A store directory that does not exist passes: the write makes the
-// .gitignore and the file.
+// .gitignore and the file. It reads the files as they are: it cannot tell
+// that the write will fail (a full disk, a change after the check).
 func (g Guard) CheckPlaintext(p Plaintext) error {
 	_, step, err := g.destination(p)
 	if err == nil {
@@ -187,6 +270,9 @@ func (g Guard) destination(p Plaintext) (path, step string, err error) {
 	path, ok := Destination(p.Dir, p.Base)
 	if !ok {
 		return "", "", stop(notInStore(p.Base))
+	}
+	if gitignoreName(p.Base) {
+		return "", "", stop("the plaintext write is refused: the plaintext file " + Printable(p.Base) + " would replace the .gitignore of the store (in any letter case), which keeps every plaintext out of git. Nothing was written: use the name of a store entry")
 	}
 	if ReservedName(p.Base) {
 		return "", "", stop(reservedRefusal("the plaintext write", p.Base))
@@ -250,6 +336,13 @@ func (g Guard) GitignorePlan(dir, step string) (want []byte, write bool, err err
 // it was and returns a *Stop that names the file (FailedWrite). step names
 // the step of the command that a refusal stops before.
 //
+// After the rename it reads the file again: a file that does not have the
+// bytes of the plan (GitignorePlan wants another write, or refuses it) is
+// refused, so a FillGitignore that writes other bytes fails closed. Then it
+// syncs dir, so that the .gitignore survives a power loss before the caller
+// writes a plaintext. After the rename, wrote is true, also with an error:
+// the error then says that the file was written.
+//
 // The file gets mode 0644 on each rewrite: the .gitignore is committed, and
 // git reads the same rules for each user of the repository. It holds no
 // secret.
@@ -266,8 +359,15 @@ func (g Guard) EnsureGitignore(dir, step string) (wrote bool, err error) {
 		}
 	}
 	gitignore := dir + "/.gitignore"
+	rel := Printable(g.rel(gitignore))
 	if err := WriteReplacing(gitignore, 0o644, func(w io.Writer) error { return fill(w, want) }); err != nil {
-		return false, g.FailedWrite(err, "cannot write "+Printable(g.rel(gitignore))+": it was not changed")
+		return false, g.FailedWrite(err, "cannot write "+rel+": it was not changed")
+	}
+	if _, again, err := g.GitignorePlan(dir, step); err != nil || again {
+		return true, stop(rel + " was written, but it does not have the bytes that lo planned for it: lo stopped before " + step + " — fix the file, then run this command again")
+	}
+	if err := g.sync(dir); err != nil {
+		return true, stop(rel + " was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before " + step + " — run this command again")
 	}
 	return true, nil
 }

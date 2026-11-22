@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,6 +253,57 @@ func TestDecryptRefusesALinkedPlaintextFile(t *testing.T) {
 			}
 			sameStates(t, before, fileStates(t, c.Paths.Base))
 		})
+	}
+}
+
+// decrypt checks each entry again at its write, after its check of the
+// whole store: a plaintext path that becomes a symlink after that check
+// is refused, and nothing is written through the link or over it. The
+// link is made while decrypt writes the .gitignore (the writeGitignore
+// seam), which comes after the check. The link names a file older than
+// the .enc, so decrypt does not skip the entry as newer.
+func TestDecryptRefusesALinkMadeAfterItsCheck(t *testing.T) {
+	c, _, errOut := testEnv(t)
+	dir := encryptedStore(t, c)
+	if err := os.Remove(dir + "/.gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	other := c.Paths.Base + "/elsewhere"
+	write(t, other, "old")
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(other, old, old); err != nil {
+		t.Fatal(err)
+	}
+	orig := writeGitignore
+	calls := 0
+	writeGitignore = func(w io.Writer, want []byte) error {
+		calls++
+		if err := os.Symlink(other, dir+"/Secret.app.default.K"); err != nil {
+			return err
+		}
+		return orig(w, want)
+	}
+	t.Cleanup(func() { writeGitignore = orig })
+
+	errOut.Reset()
+	if err := c.Decrypt("/nonexistent-ssh-key"); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if calls != 1 {
+		t.Fatalf("the seam ran %d times, want 1: the link was not made after the check", calls)
+	}
+	want := "[error] .secrets/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write — remove it, then run this command again\n"
+	if errOut.String() != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	}
+	if got := readFile(t, other); got != "old" {
+		t.Errorf("the write went through the link: %q", got)
+	}
+	if fi, err := os.Lstat(dir + "/Secret.app.default.K"); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link was replaced: %v", err)
+	}
+	if left, _ := filepath.Glob(dir + "/.Secret.app.default.K.tmp-*"); len(left) != 0 {
+		t.Errorf("temp files stay: %q", left)
 	}
 }
 

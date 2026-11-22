@@ -11,8 +11,11 @@ package cache
 // lo marks that entry "non-repeatable", because the real run generates new
 // bytes for it. Before it generates or keeps a value, the overlay runs the
 // checks of the real write (Cache.checkWrite: the name, the path and the
-// .gitignore, which it reads and does not write): a dry run refuses a write
-// that the real run refuses, with the same text.
+// .gitignore, which it reads and does not write): a dry run refuses a key,
+// an entry or a .gitignore that the real run refuses, with the same text.
+// It cannot tell that a real write will fail (a full disk), and an env:
+// or update: true entry computes its value before the check, as in the
+// real run.
 
 import (
 	"bytes"
