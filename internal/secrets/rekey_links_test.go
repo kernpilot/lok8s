@@ -619,7 +619,7 @@ func TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened(t *testing.T) {
 			if !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] cannot open the lock file " + real + "/sops.yaml.lock: the lock goes beside the file that .sops.yaml names, so lo needs write access to " + real + ". Nothing was changed\n"
+			want := "[error] cannot open the lock file " + real + "/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Give lo write access to " + real + " and run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}

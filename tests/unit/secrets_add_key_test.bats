@@ -173,7 +173,7 @@ _add() { # <key> [all] [skip_orphans]
   _add_path() { local PATH="${1}"; shift; _add "${@}"; }
   DOMAIN=a.dev run _add_path "${bin}" "${KEY_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] flock not found: add-key and remove-key do not run without the lock of .sops.yaml. Nothing was changed
+  [ "$output" = "[error] flock not found: nothing was changed. add-key and remove-key do not run without the lock of .sops.yaml
 [error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock file was made" >&2; return 1; }
@@ -585,7 +585,7 @@ _ls_then_missing() {
   DOMAIN=a.dev run _add "${KEY_A}"
   chmod 755 "${dir}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: the lock goes beside the file that .sops.yaml names, so lo needs write access to ${dir}. Nothing was changed" ] || {
+  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Give lo write access to ${dir} and run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${dir}/sops.yaml")" = "${before}" ]
   [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }
@@ -1010,7 +1010,7 @@ Encrypted 2 secret(s)
   [ ! -s "${ENCRYPT_RAN}" ]
 }
 
-_no_fd='[error] bash cannot test an open file through /dev/fd (on Linux, /proc/self/fd): add-key and remove-key do not run without that test of the lock of .sops.yaml; nothing was changed
+_no_fd='[error] bash cannot test an open file through /dev/fd (on Linux, /proc/self/fd): nothing was changed. add-key and remove-key do not run without that test of the lock of .sops.yaml
 [error]   mount /proc, or use the lo binary: it tests the lock without /dev/fd'
 
 @test "when bash cannot test a descriptor through /dev/fd, add-key refuses before the lock file with a line that names the cause" {

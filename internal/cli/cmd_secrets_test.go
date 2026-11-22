@@ -99,7 +99,7 @@ func TestSecretsSetHandParser(t *testing.T) {
 	for _, flag := range []string{"--encrypt", "--enc", "-e"} {
 		os.RemoveAll(paths.Base + "/.secrets")
 		_, errStr, err := runSecrets(t, paths, "secrets", "set", "-n", "app", flag, "K4", "v4")
-		if err == nil || !strings.Contains(errStr, "No .sops.yaml found — run: lo secrets init") {
+		if err == nil || !strings.Contains(errStr, "No .sops.yaml found. Run: lo secrets init") {
 			t.Errorf("%s: err=%v stderr=%q", flag, err, errStr)
 		}
 		if raw, rerr := os.ReadFile(paths.Base + "/.secrets/Secret.app.default.K4"); rerr != nil || string(raw) != "v4" {

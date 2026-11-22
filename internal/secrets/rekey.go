@@ -1157,10 +1157,10 @@ func (c *Context) removeKeySummary(rules, listed, rekeyed, orphans int) {
 	fmt.Fprintf(c.Out, "%d .enc file(s) listed the recipient in their labels\n", listed)
 	fmt.Fprintf(c.Out, "%d .enc file(s) re-keyed with a new data key\n", rekeyed)
 	if orphans > 0 {
-		fmt.Fprintf(c.Out, "done — every managed .enc of the selected stores but %d orphan(s) was rewritten: commit them together with .sops.yaml\n", orphans)
+		fmt.Fprintf(c.Out, "done: every managed .enc of the selected stores but %d orphan(s) was rewritten. Commit them together with .sops.yaml\n", orphans)
 		return
 	}
-	fmt.Fprintln(c.Out, "done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml")
+	fmt.Fprintln(c.Out, "done: every managed .enc of the selected stores was rewritten. Commit them together with .sops.yaml")
 }
 
 // twinsMatch compares each .enc of encs, decrypted in memory with the

@@ -477,7 +477,7 @@ func TestRemoveKeySkipOrphansWarns(t *testing.T) {
 	wantTail := "1 creation rule(s) changed\n" +
 		"2 .enc file(s) listed the recipient in their labels\n" +
 		"1 .enc file(s) re-keyed with a new data key\n" +
-		"done — every managed .enc of the selected stores but 1 orphan(s) was rewritten: commit them together with .sops.yaml\n"
+		"done: every managed .enc of the selected stores but 1 orphan(s) was rewritten. Commit them together with .sops.yaml\n"
 	if !strings.HasSuffix(out.String(), wantTail) {
 		t.Errorf("stdout:\n%q\nwant the tail:\n%q", out.String(), wantTail)
 	}
@@ -491,7 +491,7 @@ func rmSummary(rules, listed, rekeyed int) string {
 	return strconv.Itoa(rules) + " creation rule(s) changed\n" +
 		strconv.Itoa(listed) + " .enc file(s) listed the recipient in their labels\n" +
 		strconv.Itoa(rekeyed) + " .enc file(s) re-keyed with a new data key\n" +
-		"done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml\n"
+		"done: every managed .enc of the selected stores was rewritten. Commit them together with .sops.yaml\n"
 }
 
 // A recipient in no creation rule and on no .enc label is a warning, not a
@@ -717,7 +717,7 @@ func TestRemoveKeyKeepsAFutureDatedPlaintextNewerAndAnEditIsNotLost(t *testing.T
 	if err := f.run(); err != nil {
 		t.Fatalf("%v\n%s", err, f.errOut.String())
 	}
-	warn := "[warn] " + f.c.rel(plain) + " has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)\n"
+	warn := "[warn] " + f.c.rel(plain) + " has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again. Set the time of the plaintext to now (touch it)\n"
 	if n := strings.Count(f.errOut.String(), warn); n != 1 {
 		t.Errorf("the warning shows %d time(s), want 1:\n%s", n, f.errOut.String())
 	}

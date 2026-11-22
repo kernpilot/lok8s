@@ -132,7 +132,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		return nil, ErrHandled
 	}
 	if err != nil {
-		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s: the lock goes beside the file that .sops.yaml names, so lo needs write access to %s. Nothing was changed", path, filepath.Dir(path))
+		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s: nothing was changed. The lock goes beside the file that .sops.yaml names. Give lo write access to %s and run this command again", path, filepath.Dir(path))
 		return nil, ErrHandled
 	}
 	lockOpened(path)
