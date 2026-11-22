@@ -561,7 +561,7 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 func (c *Context) encryptFile(plaintext string) error {
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
-		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
+		ui.ErrorTo(c.ErrOut, "No .sops.yaml found. Run: lo secrets init")
 		return ErrHandled
 	}
 	encPath := plaintext + ".enc"
@@ -587,7 +587,7 @@ func (c *Context) encryptFile(plaintext string) error {
 	// not after now gets no warning: the clock of the kernel, which stamps
 	// the .enc, can be behind time.Now().
 	if !nudgeNewer(encPath, plaintext) {
-		ui.WarnTo(c.ErrOut, "%s has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)", c.rel(plaintext))
+		ui.WarnTo(c.ErrOut, "%s has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again. Set the time of the plaintext to now (touch it)", c.rel(plaintext))
 	}
 	return nil
 }
@@ -682,7 +682,7 @@ func (c *Context) encryptSweep(secretsDir, name string, force bool, list func() 
 	}
 
 	if !fsutil.IsRegular(c.sopsConfigPath()) {
-		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
+		ui.ErrorTo(c.ErrOut, "No .sops.yaml found. Run: lo secrets init")
 		return ErrHandled
 	}
 

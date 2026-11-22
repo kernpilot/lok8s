@@ -1117,13 +1117,29 @@ _hard_link_replaced() {
   }
   printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
   local plain="${PATH_SECRETS}/Secret.app.default.K" line
-  line="[warn] .secrets/Secret.app.default.K has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)"
+  line="[warn] .secrets/Secret.app.default.K has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again. Set the time of the plaintext to now (touch it)"
   printf 'v' > "${plain}"
   touch -d '+1 hour' -- "${plain}"
   run secrets::_encrypt_file "${plain}"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   [ "${output}" = "${line}" ] || { echo "$output" >&2; return 1; }
   [ -z "$(find "${PATH_SECRETS}" -name '.*.now-*')" ] || { echo "a temp file of the time check stayed" >&2; return 1; }
+}
+
+# Without a .sops.yaml the encrypt of one file and the sweep of a store
+# refuse with one line, before sops runs, and write no .enc (Go twins:
+# TestSetEncryptWithoutSopsYAMLFails, TestEncryptSweepWithoutSopsYAMLFails).
+@test "secrets encrypt: without a .sops.yaml the encrypt of a file and the sweep refuse with one line" {
+  sops() { echo "sops ran" >&2; return 1; }
+  local plain="${PATH_SECRETS}/Secret.app.default.K" line='[error] No .sops.yaml found. Run: lo secrets init'
+  printf 'v' > "${plain}"
+  run secrets::_encrypt_file "${plain}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output}" = "${line}" ] || { echo "$output" >&2; return 1; }
+  run secrets::_encrypt_store "${PATH_SECRETS}" "" find
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output}" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${plain}.enc" ] || { echo "an .enc was written" >&2; return 1; }
 }
 
 # init checks the .gitignore of the store before its first write, and a

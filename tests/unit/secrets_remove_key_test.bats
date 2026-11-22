@@ -184,7 +184,7 @@ _summary() {
   printf '%s\n' "${1} creation rule(s) changed" \
     "${2} .enc file(s) listed the recipient in their labels" \
     "${3} .enc file(s) re-keyed with a new data key" \
-    "done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml"
+    "done: every managed .enc of the selected stores was rewritten. Commit them together with .sops.yaml"
 }
 # _no_label <recipient> — the warning for a key in no rule and on no label.
 _no_label() {
@@ -283,6 +283,14 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   DOMAIN=a.dev run _rm "${RCPT_B}" 0 1
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   [[ "$output" == *"[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them"* ]]
+  # The summary counts the orphan apart from the files that the run re-keyed
+  # (Go twin: TestRemoveKeySkipOrphansWarns).
+  [[ "$output" == *"
+1 creation rule(s) changed
+2 .enc file(s) listed the recipient in their labels
+1 .enc file(s) re-keyed with a new data key
+done: every managed .enc of the selected stores but 1 orphan(s) was rewritten. Commit them together with .sops.yaml
+${_rotate}" ]] || { echo "$output" >&2; return 1; }
 }
 
 @test "a recipient in no rule and on no .enc label warns, re-keys every managed .enc and changes no rule" {
@@ -1063,7 +1071,7 @@ _rm_path() {
   cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
   DOMAIN=a.dev run _rm_path "${bin}" "${RCPT_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] flock not found: add-key and remove-key do not run without the lock of .sops.yaml. Nothing was changed
+  [ "$output" = "[error] flock not found: nothing was changed. add-key and remove-key do not run without the lock of .sops.yaml
 [error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
   cmp -s "${CFG}" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc changed" >&2; return 1; }
@@ -1855,7 +1863,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   _stub_sops
   _cache a.dev app "${RCPT_B}"
   local plain="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K" line
-  line="[warn] ${plain} has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)"
+  line="[warn] ${plain} has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again. Set the time of the plaintext to now (touch it)"
   touch -t 209901010000 "${plain}"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }

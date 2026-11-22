@@ -331,7 +331,7 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 	if err := c.Set(t.Context(), "app", "default", "KEY", "v", true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
-	if !strings.Contains(errOut.String(), "No .sops.yaml found — run: lo secrets init") {
+	if !strings.Contains(errOut.String(), "No .sops.yaml found. Run: lo secrets init") {
 		t.Errorf("stderr: %s", errOut.String())
 	}
 	// Cache still written (plaintext), but no .enc produced.
@@ -339,6 +339,25 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 		t.Error("plaintext cache missing")
 	}
 	if fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY.enc") {
+		t.Error(".enc produced without config")
+	}
+}
+
+// Without a .sops.yaml the sweep refuses after the .gitignore write and
+// before the first encrypt, with the line of the encrypt of one file
+// (encryptSweep; bash: secrets::_encrypt_store). The bats twin is in
+// tests/unit/secrets_test.bats.
+func TestEncryptSweepWithoutSopsYAMLFails(t *testing.T) {
+	c, _, errOut := testEnv(t)
+	store := c.Paths.Base + "/.secrets"
+	write(t, store+"/Secret.app.default.KEY", "v")
+	if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v", err)
+	}
+	if want := "[error] No .sops.yaml found. Run: lo secrets init\n"; errOut.String() != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	}
+	if fsutil.IsRegular(store + "/Secret.app.default.KEY.enc") {
 		t.Error(".enc produced without config")
 	}
 }
