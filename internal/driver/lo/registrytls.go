@@ -296,11 +296,11 @@ cert:
 	} else {
 		// In-process: no argv config path, so the generator reads the
 		// manifest from stdin — the same protocol the exec above uses. A
-		// failure is reported the way the plugin binary's main did
-		// (plugin.Fail) on the same stream.
+		// failure is reported the way the plugin binary's main does
+		// (plugin.Fail, through plugin.WriteFailure) on the same stream.
 		err = secret.Run([]string{"Secret"}, strings.NewReader(manifest), &out, mintEnv(scratch))
 		if err != nil {
-			fmt.Fprintln(d.stderr(), "secret plugin:", err)
+			plugin.WriteFailure(d.stderr(), err)
 		}
 	}
 	if err != nil {
