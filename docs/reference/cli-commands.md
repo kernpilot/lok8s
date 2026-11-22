@@ -21,20 +21,20 @@ lo [flags]
 ### Options
 
 ```
-  -s, --cluster string       Cluster name to manage
-      --config string        Kind config to use
-      --debug                On a failure, print the external command line (docker, kind, kubectl, …) and its exit code
-      --domain string        Domain to use
-      --domain-sans string   Domain sans to use
-  -f, --force                Force operation without prompts (also recreates immutable/terminating conflicts)
-      --force-recreate       On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer
-  -h, --help                 help for lo
-      --kubernetes string    Kubernetes version to use
-      --no-color             No ANSI colour on the terminal (env form: NO_COLOR)
-      --no-eject             Never write embedded framework assets into the project (.lok8s/…); serve them from a temp dir instead
-  -q, --quiet                Print errors and warnings only: no [assets] or DOMAIN_NAME notices
-  -r, --remote               Provision on remote VM (uses spec.provider + spec.remote)
-  -v, --verbose count        Enable verbose logging
+  -s, --cluster string                Cluster name to manage
+      --config string                 Kind config to use
+      --debug[=true|false]            On a failure, print the external command line (docker, kind, kubectl, …) and its exit code
+      --domain string                 Domain to use
+      --domain-sans string            Domain sans to use
+  -f, --force[=true|false]            Force operation without prompts (also recreates immutable/terminating conflicts)
+      --force-recreate[=true|false]   On apply, recreate objects blocked by an immutable field or a stuck Terminating finalizer
+  -h, --help[=true|false]             help for lo
+      --kubernetes string             Kubernetes version to use
+      --no-color[=true|false]         No ANSI colour on the terminal (env form: NO_COLOR)
+      --no-eject[=true|false]         Never write embedded framework assets into the project (.lok8s/…); serve them from a temp dir instead
+  -q, --quiet[=true|false]            Print errors and warnings only: no [assets] or DOMAIN_NAME notices
+  -r, --remote[=true|false]           Provision on remote VM (uses spec.provider + spec.remote)
+  -v, --verbose count                 Enable verbose logging
 ```
 
 ### SEE ALSO
@@ -92,10 +92,10 @@ lo addons [addon...] [flags]
 ### Options
 
 ```
-      --detail count    Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure
-  -h, --help            help for addons
-      --origin          Add the ORIGIN column: builtin (served from the binary) · local · local (modified) · local-only (see: lo assets)
-  -o, --output string   Output format: text, json or yaml (default "text")
+      --detail count          Inventory the addons THIS cluster deploys (spec.bootstrap) + category + how to configure
+  -h, --help[=true|false]     help for addons
+      --origin[=true|false]   Add the ORIGIN column: builtin (served from the binary) · local · local (modified) · local-only (see: lo assets)
+  -o, --output string         Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -120,7 +120,7 @@ lo ai [flags]
 ### Options
 
 ```
-  -h, --help   help for ai
+  -h, --help[=true|false]   help for ai
 ```
 
 ### SEE ALSO
@@ -148,7 +148,7 @@ lo ai check [flags]
 ### Options
 
 ```
-  -h, --help   help for check
+  -h, --help[=true|false]   help for check
 ```
 
 ### SEE ALSO
@@ -173,8 +173,8 @@ lo ai link [agent] [flags]
 ### Options
 
 ```
-  -c, --copy count   Copy the skills instead of symlinking
-  -h, --help         help for link
+  -c, --copy count          Copy the skills instead of symlinking
+  -h, --help[=true|false]   help for link
 ```
 
 ### SEE ALSO
@@ -198,7 +198,7 @@ lo ai skills [flags]
 ### Options
 
 ```
-  -h, --help   help for skills
+  -h, --help[=true|false]   help for skills
 ```
 
 ### SEE ALSO
@@ -222,7 +222,7 @@ lo ai unlink [agent] [flags]
 ### Options
 
 ```
-  -h, --help   help for unlink
+  -h, --help[=true|false]   help for unlink
 ```
 
 ### SEE ALSO
@@ -247,7 +247,7 @@ lo assets [flags]
 ### Options
 
 ```
-  -h, --help   help for assets
+  -h, --help[=true|false]   help for assets
 ```
 
 ### SEE ALSO
@@ -283,10 +283,10 @@ lo assets diff [rel...] [flags]
 ### Options
 
 ```
-      --check           Exit 1 on any drift
-  -h, --help            help for diff
-      --json            Machine-readable output (the same as -o json)
-  -o, --output string   Output format: text, json or yaml (default "text")
+      --check[=true|false]   Exit 1 on any drift
+  -h, --help[=true|false]    help for diff
+      --json[=true|false]    Machine-readable output (the same as -o json)
+  -o, --output string        Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -330,9 +330,9 @@ lo assets eject [rel...] [flags]
 ### Options
 
 ```
-      --all     Eject every embedded asset, not only the referenced ones
-      --check   Write nothing; exit 1 if any asset would be ejected
-  -h, --help    help for eject
+      --all[=true|false]     Eject every embedded asset, not only the referenced ones
+      --check[=true|false]   Write nothing; exit 1 if any asset would be ejected
+  -h, --help[=true|false]    help for eject
 ```
 
 ### SEE ALSO
@@ -357,9 +357,9 @@ lo assets list [flags]
 ### Options
 
 ```
-  -h, --help            help for list
-      --json            Machine-readable output (the same as -o json)
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for list
+      --json[=true|false]   Machine-readable output (the same as -o json)
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -384,7 +384,7 @@ lo assets update <rel> [flags]
 ### Options
 
 ```
-  -h, --help   help for update
+  -h, --help[=true|false]   help for update
 ```
 
 ### SEE ALSO
@@ -410,10 +410,10 @@ lo audit [domain] [flags]
 ### Options
 
 ```
-  -h, --help            help for audit
-      --json            Emit machine-readable JSON (stable schema for tooling; the same as -o json)
-  -o, --output string   Output format: text, json or yaml (default "text")
-      --sarif           Emit SARIF 2.1.0 (GitHub code-scanning upload)
+  -h, --help[=true|false]    help for audit
+      --json[=true|false]    Emit machine-readable JSON (stable schema for tooling; the same as -o json)
+  -o, --output string        Output format: text, json or yaml (default "text")
+      --sarif[=true|false]   Emit SARIF 2.1.0 (GitHub code-scanning upload)
 ```
 
 ### SEE ALSO
@@ -439,14 +439,14 @@ lo bootstrap [flags]
 ### Options
 
 ```
-      --allow-generators          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
-      --dry-run                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
-  -h, --help                      help for bootstrap
-      --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
-      --no-diff                   Dry run without the kubectl diff: render only, no cluster access
-      --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
-      --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
-      --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
+      --allow-generators[=true|false]          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
+      --dry-run[=true|false]                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help[=true|false]                      help for bootstrap
+      --ignore-nondeterministic[=true|false]   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
+      --no-diff[=true|false]                   Dry run without the kubectl diff: render only, no cluster access
+      --only strings                           Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
+      --render-dir string                      Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --with-restore[=true|false]              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
 ### SEE ALSO
@@ -472,11 +472,11 @@ lo build [flags]
 
 ```
       --cluster-override string   Override cluster domain for kubeconfig resolution
-  -h, --help                      help for build
-      --keys-only                 Print the render to stdout with every Secret emptied: its values, label and annotation values and comments (key names kept; other kinds as rendered); reads no store, writes no file
-      --no-secrets                Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)
-      --single                    Skip the split emit even when the spec declares it (debug override)
-      --split                     Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)
+  -h, --help[=true|false]         help for build
+      --keys-only[=true|false]    Print the render to stdout with every Secret emptied: its values, label and annotation values and comments (key names kept; other kinds as rendered); reads no store, writes no file
+      --no-secrets[=true|false]   Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)
+      --single[=true|false]       Skip the split emit even when the spec declares it (debug override)
+      --split[=true|false]        Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)
 ```
 
 ### SEE ALSO
@@ -500,7 +500,7 @@ lo chat [flags]
 ### Options
 
 ```
-  -h, --help   help for chat
+  -h, --help[=true|false]   help for chat
 ```
 
 ### SEE ALSO
@@ -525,9 +525,9 @@ lo clean [flags]
 ### Options
 
 ```
-  -a, --all    Clean up all volumes
-  -h, --help   help for clean
-  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
+  -a, --all[=true|false]    Clean up all volumes
+  -h, --help[=true|false]   help for clean
+  -y, --yes[=true|false]    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -554,7 +554,7 @@ See each sub-command's help for details on how to use the generated script.
 ### Options
 
 ```
-  -h, --help   help for completion
+  -h, --help[=true|false]   help for completion
 ```
 
 ### SEE ALSO
@@ -607,8 +607,8 @@ lo completion bash
 ### Options
 
 ```
-  -h, --help              help for bash
-      --no-descriptions   disable completion descriptions
+  -h, --help[=true|false]              help for bash
+      --no-descriptions[=true|false]   disable completion descriptions
 ```
 
 ### SEE ALSO
@@ -647,8 +647,8 @@ lo completion fish [flags]
 ### Options
 
 ```
-  -h, --help              help for fish
-      --no-descriptions   disable completion descriptions
+  -h, --help[=true|false]              help for fish
+      --no-descriptions[=true|false]   disable completion descriptions
 ```
 
 ### SEE ALSO
@@ -684,8 +684,8 @@ lo completion powershell [flags]
 ### Options
 
 ```
-  -h, --help              help for powershell
-      --no-descriptions   disable completion descriptions
+  -h, --help[=true|false]              help for powershell
+      --no-descriptions[=true|false]   disable completion descriptions
 ```
 
 ### SEE ALSO
@@ -735,8 +735,8 @@ lo completion zsh [flags]
 ### Options
 
 ```
-  -h, --help              help for zsh
-      --no-descriptions   disable completion descriptions
+  -h, --help[=true|false]              help for zsh
+      --no-descriptions[=true|false]   disable completion descriptions
 ```
 
 ### SEE ALSO
@@ -763,7 +763,7 @@ lo deploy [flags]
 
 ```
       --cluster-override string   Override cluster domain for kubeconfig resolution
-  -h, --help                      help for deploy
+  -h, --help[=true|false]         help for deploy
   -l, --label string              Only deploy resources with this label (key=value; key may be lok8s.dev/<x> or any label key)
 ```
 
@@ -790,8 +790,8 @@ lo destroy [flags]
 
 ```
       --confirm-cluster string   The provider's cluster_name, to confirm the destroy off a terminal (--force does not replace it)
-  -h, --help                     help for destroy
-  -y, --yes                      Answer the confirmation on a terminal (off a terminal there is none)
+  -h, --help[=true|false]        help for destroy
+  -y, --yes[=true|false]         Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -816,9 +816,9 @@ lo doctor [flags]
 ### Options
 
 ```
-  -h, --help            help for doctor
-  -o, --output string   Output format: text, json or yaml (default "text")
-      --toolchain       Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo toolchain install)
+  -h, --help[=true|false]        help for doctor
+  -o, --output string            Output format: text, json or yaml (default "text")
+      --toolchain[=true|false]   Verify the b-managed toolchain against the pins (default: only when .bin/b.yaml was written by lo toolchain install)
 ```
 
 ### SEE ALSO
@@ -843,8 +843,8 @@ lo down [flags]
 ### Options
 
 ```
-  -h, --help   help for down
-  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
+  -h, --help[=true|false]   help for down
+  -y, --yes[=true|false]    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -869,9 +869,9 @@ lo drivers [name] [args...] [flags]
 ### Options
 
 ```
-  -h, --help         help for drivers
-  -l, --list count   List available drivers
-      --origin       With --list: add the origin of each driver's cluster templates (builtin · local · local (modified) · local-only)
+  -h, --help[=true|false]     help for drivers
+  -l, --list count            List available drivers
+      --origin[=true|false]   With --list: add the origin of each driver's cluster templates (builtin · local · local (modified) · local-only)
 ```
 
 ### SEE ALSO
@@ -901,7 +901,7 @@ lo drivers capi [flags]
 ### Options
 
 ```
-  -h, --help   help for capi
+  -h, --help[=true|false]   help for capi
 ```
 
 ### SEE ALSO
@@ -929,7 +929,7 @@ lo drivers capi destroy <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
+  -h, --help[=true|false]   help for destroy
 ```
 
 ### SEE ALSO
@@ -953,7 +953,7 @@ lo drivers capi kubeconfig <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for kubeconfig
+  -h, --help[=true|false]   help for kubeconfig
 ```
 
 ### SEE ALSO
@@ -977,7 +977,7 @@ lo drivers capi provision <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for provision
+  -h, --help[=true|false]   help for provision
 ```
 
 ### SEE ALSO
@@ -1001,7 +1001,7 @@ lo drivers capi status <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -1026,7 +1026,7 @@ lo drivers kkp [flags]
 ### Options
 
 ```
-  -h, --help   help for kkp
+  -h, --help[=true|false]   help for kkp
 ```
 
 ### SEE ALSO
@@ -1054,7 +1054,7 @@ lo drivers kkp destroy <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
+  -h, --help[=true|false]   help for destroy
 ```
 
 ### SEE ALSO
@@ -1078,7 +1078,7 @@ lo drivers kkp kubeconfig <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for kubeconfig
+  -h, --help[=true|false]   help for kubeconfig
 ```
 
 ### SEE ALSO
@@ -1102,7 +1102,7 @@ lo drivers kkp provision <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for provision
+  -h, --help[=true|false]   help for provision
 ```
 
 ### SEE ALSO
@@ -1126,7 +1126,7 @@ lo drivers kkp status <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -1151,7 +1151,7 @@ lo drivers kubehz [flags]
 ### Options
 
 ```
-  -h, --help   help for kubehz
+  -h, --help[=true|false]   help for kubehz
 ```
 
 ### SEE ALSO
@@ -1179,7 +1179,7 @@ lo drivers kubehz destroy <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
+  -h, --help[=true|false]   help for destroy
 ```
 
 ### SEE ALSO
@@ -1203,7 +1203,7 @@ lo drivers kubehz kubeconfig <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for kubeconfig
+  -h, --help[=true|false]   help for kubeconfig
 ```
 
 ### SEE ALSO
@@ -1227,7 +1227,7 @@ lo drivers kubehz provision <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for provision
+  -h, --help[=true|false]   help for provision
 ```
 
 ### SEE ALSO
@@ -1251,7 +1251,7 @@ lo drivers kubehz status <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -1276,7 +1276,7 @@ lo drivers kubeone [flags]
 ### Options
 
 ```
-  -h, --help   help for kubeone
+  -h, --help[=true|false]   help for kubeone
 ```
 
 ### SEE ALSO
@@ -1304,7 +1304,7 @@ lo drivers kubeone destroy <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
+  -h, --help[=true|false]   help for destroy
 ```
 
 ### SEE ALSO
@@ -1328,7 +1328,7 @@ lo drivers kubeone kubeconfig <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for kubeconfig
+  -h, --help[=true|false]   help for kubeconfig
 ```
 
 ### SEE ALSO
@@ -1352,7 +1352,7 @@ lo drivers kubeone provision <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for provision
+  -h, --help[=true|false]   help for provision
 ```
 
 ### SEE ALSO
@@ -1376,7 +1376,7 @@ lo drivers kubeone status <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -1401,7 +1401,7 @@ lo drivers lo [flags]
 ### Options
 
 ```
-  -h, --help   help for lo
+  -h, --help[=true|false]   help for lo
 ```
 
 ### SEE ALSO
@@ -1429,7 +1429,7 @@ lo drivers lo destroy <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
+  -h, --help[=true|false]   help for destroy
 ```
 
 ### SEE ALSO
@@ -1453,7 +1453,7 @@ lo drivers lo kubeconfig <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for kubeconfig
+  -h, --help[=true|false]   help for kubeconfig
 ```
 
 ### SEE ALSO
@@ -1477,7 +1477,7 @@ lo drivers lo provision <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for provision
+  -h, --help[=true|false]   help for provision
 ```
 
 ### SEE ALSO
@@ -1501,7 +1501,7 @@ lo drivers lo status <domain> [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -1526,7 +1526,7 @@ lo gitops [flags]
 ### Options
 
 ```
-  -h, --help   help for gitops
+  -h, --help[=true|false]   help for gitops
 ```
 
 ### SEE ALSO
@@ -1553,7 +1553,7 @@ lo gitops argo [flags]
 ### Options
 
 ```
-  -h, --help   help for argo
+  -h, --help[=true|false]   help for argo
 ```
 
 ### SEE ALSO
@@ -1578,7 +1578,7 @@ lo gitops flux [flags]
 ### Options
 
 ```
-  -h, --help   help for flux
+  -h, --help[=true|false]   help for flux
 ```
 
 ### SEE ALSO
@@ -1603,7 +1603,7 @@ lo image [flags]
 ### Options
 
 ```
-  -h, --help   help for image
+  -h, --help[=true|false]   help for image
 ```
 
 ### SEE ALSO
@@ -1631,9 +1631,9 @@ lo image cache [service] [flags]
 ### Options
 
 ```
-  -a, --all     Process every service in the active cache queue
-  -f, --force   Force re-pull even if image exists in cache
-  -h, --help    help for cache
+  -a, --all[=true|false]     Process every service in the active cache queue
+  -f, --force[=true|false]   Force re-pull even if image exists in cache
+  -h, --help[=true|false]    help for cache
 ```
 
 ### SEE ALSO
@@ -1657,8 +1657,8 @@ lo image clean [flags]
 ### Options
 
 ```
-  -h, --help   help for clean
-  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
+  -h, --help[=true|false]   help for clean
+  -y, --yes[=true|false]    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -1682,7 +1682,7 @@ lo image list [flags]
 ### Options
 
 ```
-  -h, --help   help for list
+  -h, --help[=true|false]   help for list
 ```
 
 ### SEE ALSO
@@ -1708,10 +1708,10 @@ lo init [flags]
 ### Options
 
 ```
-  -n, --dry-run   The same as --plan
-  -h, --help      help for init
-      --plan      Print what lo init sees here and offers, as text; write nothing (works off a terminal)
-  -y, --yes       Never ask: print the help instead of the screens (scripts, CI)
+  -n, --dry-run[=true|false]   The same as --plan
+  -h, --help[=true|false]      help for init
+      --plan[=true|false]      Print what lo init sees here and offers, as text; write nothing (works off a terminal)
+  -y, --yes[=true|false]       Never ask: print the help instead of the screens (scripts, CI)
 ```
 
 ### SEE ALSO
@@ -1740,12 +1740,12 @@ lo init cluster [domain] [flags]
 ### Options
 
 ```
-      --driver string   Driver of the spec: lo, kubeone, capi, kkp, kubehz-hosted (default "lo")
-  -n, --dry-run         The same as --plan
-  -h, --help            help for cluster
-      --no-active       Write the spec only; keep the active domain as it is
-      --plan            Print the screen as text and write nothing (works off a terminal)
-  -y, --yes             Never ask: run with the values given (scripts, CI)
+      --driver string            Driver of the spec: lo, kubeone, capi, kkp, kubehz-hosted (default "lo")
+  -n, --dry-run[=true|false]     The same as --plan
+  -h, --help[=true|false]        help for cluster
+      --no-active[=true|false]   Write the spec only; keep the active domain as it is
+      --plan[=true|false]        Print the screen as text and write nothing (works off a terminal)
+  -y, --yes[=true|false]         Never ask: run with the values given (scripts, CI)
 ```
 
 ### SEE ALSO
@@ -1774,7 +1774,7 @@ lo init project [name] [flags]
       --cluster string          Also write the first cluster spec, clusters/<domain>/cluster.lok8s.yaml, for this domain
       --driver string           Driver of the --cluster spec: lo, kubeone, capi, kkp, kubehz-hosted (default "lo")
       --env string              Shell environment file to scaffold: mise (mise.toml), direnv (.envrc) or none — PATH only, no PATH_* pins (default "mise")
-  -h, --help                    help for project
+  -h, --help[=true|false]       help for project
       --implementation string   Set spec.implementation.default in lok8s.yaml: go or bash (the file is created when missing; comments and other keys are kept)
   -p, --path string             Directory for the project (default: the working directory)
 ```
@@ -1801,11 +1801,11 @@ lo init service [name] [flags]
 ### Options
 
 ```
-  -n, --dry-run       The same as --plan
-  -h, --help          help for service
-  -p, --path string   Directory for the service (default: ./<name>)
-      --plan          Print the screen as text and write nothing (works off a terminal)
-  -y, --yes           Never ask: run with the values given (scripts, CI)
+  -n, --dry-run[=true|false]   The same as --plan
+  -h, --help[=true|false]      help for service
+  -p, --path string            Directory for the service (default: ./<name>)
+      --plan[=true|false]      Print the screen as text and write nothing (works off a terminal)
+  -y, --yes[=true|false]       Never ask: run with the values given (scripts, CI)
 ```
 
 ### SEE ALSO
@@ -1830,11 +1830,11 @@ lo init test [flags]
 ### Options
 
 ```
-  -n, --dry-run       The same as --plan
-  -h, --help          help for test
-  -p, --path string   Directory for the suite (default: ./tests)
-      --plan          Print the screen as text and write nothing (works off a terminal)
-  -y, --yes           Never ask: run with the values given (scripts, CI)
+  -n, --dry-run[=true|false]   The same as --plan
+  -h, --help[=true|false]      help for test
+  -p, --path string            Directory for the suite (default: ./tests)
+      --plan[=true|false]      Print the screen as text and write nothing (works off a terminal)
+  -y, --yes[=true|false]       Never ask: run with the values given (scripts, CI)
 ```
 
 ### SEE ALSO
@@ -1861,7 +1861,7 @@ lo kubeconfig [flags]
 
 ```
       --cluster-override string   Override cluster domain for kubeconfig resolution
-  -h, --help                      help for kubeconfig
+  -h, --help[=true|false]         help for kubeconfig
   -o, --oidc count                Emit an OIDC (kubelogin exec-plugin) kubeconfig instead of the admin one
 ```
 
@@ -1888,7 +1888,7 @@ lo kubehz [flags]
 ### Options
 
 ```
-  -h, --help   help for kubehz
+  -h, --help[=true|false]   help for kubehz
 ```
 
 ### SEE ALSO
@@ -1925,7 +1925,7 @@ lo kubehz assess [flags]
 ### Options
 
 ```
-  -h, --help   help for assess
+  -h, --help[=true|false]   help for assess
 ```
 
 ### SEE ALSO
@@ -1949,8 +1949,8 @@ lo kubehz claim --nonce <khzn_…> [flags]
 ### Options
 
 ```
-  -h, --help           help for claim
-  -n, --nonce string   Claim-challenge nonce minted in the dashboard (khzn_…); '-' reads it from stdin, or set KUBEHZ_CLAIM_NONCE
+  -h, --help[=true|false]   help for claim
+  -n, --nonce string        Claim-challenge nonce minted in the dashboard (khzn_…); '-' reads it from stdin, or set KUBEHZ_CLAIM_NONCE
 ```
 
 ### SEE ALSO
@@ -1974,7 +1974,7 @@ lo kubehz claim-code [flags]
 ### Options
 
 ```
-  -h, --help   help for claim-code
+  -h, --help[=true|false]   help for claim-code
 ```
 
 ### SEE ALSO
@@ -1999,7 +1999,7 @@ lo kubehz cluster [flags]
 ### Options
 
 ```
-  -h, --help   help for cluster
+  -h, --help[=true|false]   help for cluster
 ```
 
 ### SEE ALSO
@@ -2027,8 +2027,8 @@ lo kubehz cluster get <id> [flags]
 ### Options
 
 ```
-  -h, --help            help for get
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for get
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2052,9 +2052,9 @@ lo kubehz cluster kubeconfig <id> --file <path> [flags]
 ### Options
 
 ```
-      --file string     Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
-  -h, --help            help for kubeconfig
-  -o, --output string   Output format: text, json or yaml (default "text")
+      --file string         Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
+  -h, --help[=true|false]   help for kubeconfig
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2078,9 +2078,9 @@ lo kubehz cluster lease <id> --hours <n> [flags]
 ### Options
 
 ```
-  -h, --help            help for lease
-      --hours string    Hours from now until the platform deletes it (1 to 720)
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for lease
+      --hours string        Hours from now until the platform deletes it (1 to 720)
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2105,8 +2105,8 @@ lo kubehz cluster list [flags]
 ### Options
 
 ```
-  -h, --help            help for list
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for list
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2131,8 +2131,8 @@ lo kubehz deploy [flags]
 ### Options
 
 ```
-      --dry-run   Print the rendered manifests and apply nothing
-  -h, --help      help for deploy
+      --dry-run[=true|false]   Print the rendered manifests and apply nothing
+  -h, --help[=true|false]      help for deploy
 ```
 
 ### SEE ALSO
@@ -2156,7 +2156,7 @@ lo kubehz deregister [flags]
 ### Options
 
 ```
-  -h, --help   help for deregister
+  -h, --help[=true|false]   help for deregister
 ```
 
 ### SEE ALSO
@@ -2181,7 +2181,7 @@ lo kubehz handover [flags]
 ### Options
 
 ```
-  -h, --help   help for handover
+  -h, --help[=true|false]   help for handover
 ```
 
 ### SEE ALSO
@@ -2207,14 +2207,14 @@ lo kubehz handover preseed --bundle <path> --node <ip> [flags]
 ### Options
 
 ```
-      --accept-new-host-key   Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)
-  -b, --bundle string         Export bundle: a directory or .tar.gz with the contract keys
-  -h, --help                  help for preseed
-      --known-hosts string    known_hosts file with the node's host key (default: ssh's own files); the file must exist, and an unknown or changed key fails
-  -n, --node string           Target node address (kubeone node0) to place the PKI on
-  -p, --port int              SSH port (default 22)
-  -i, --ssh-key string        SSH private key file
-  -u, --user string           SSH user (default "root")
+      --accept-new-host-key[=true|false]   Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)
+  -b, --bundle string                      Export bundle: a directory or .tar.gz with the contract keys
+  -h, --help[=true|false]                  help for preseed
+      --known-hosts string                 known_hosts file with the node's host key (default: ssh's own files); the file must exist, and an unknown or changed key fails
+  -n, --node string                        Target node address (kubeone node0) to place the PKI on
+  -p, --port int                           SSH port (default 22)
+  -i, --ssh-key string                     SSH private key file
+  -u, --user string                        SSH user (default "root")
 ```
 
 ### SEE ALSO
@@ -2239,11 +2239,11 @@ lo kubehz handover receive --bundle <path> [--snapshot <file>] [--single-node] [
 ### Options
 
 ```
-  -b, --bundle string     Exported control-plane bundle (tar or directory)
-      --cluster string    Cluster name to manage
-  -h, --help              help for receive
-      --single-node       Restore as a single control-plane node
-  -s, --snapshot string   etcd snapshot file to restore (default: the bundle's snapshot-location)
+  -b, --bundle string              Exported control-plane bundle (tar or directory)
+      --cluster string             Cluster name to manage
+  -h, --help[=true|false]          help for receive
+      --single-node[=true|false]   Restore as a single control-plane node
+  -s, --snapshot string            etcd snapshot file to restore (default: the bundle's snapshot-location)
 ```
 
 ### SEE ALSO
@@ -2268,8 +2268,8 @@ lo kubehz join <node> [flags]
 ### Options
 
 ```
-  -h, --help          help for join
-      --print-token   Also print the plaintext ticket (without a join script: instead of the ticket file)
+  -h, --help[=true|false]          help for join
+      --print-token[=true|false]   Also print the plaintext ticket (without a join script: instead of the ticket file)
 ```
 
 ### SEE ALSO
@@ -2295,7 +2295,7 @@ lo kubehz node [flags]
 ### Options
 
 ```
-  -h, --help   help for node
+  -h, --help[=true|false]   help for node
 ```
 
 ### SEE ALSO
@@ -2325,9 +2325,9 @@ lo kubehz node cordon --name <node> [flags]
 ### Options
 
 ```
-  -h, --help              help for cordon
-  -n, --name string       Node name to cordon
-      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+  -h, --help[=true|false]   help for cordon
+  -n, --name string         Node name to cordon
+      --space-id string     Space id (sp-xxxxxxxx); default: the space of the active domain
 ```
 
 ### SEE ALSO
@@ -2352,11 +2352,11 @@ lo kubehz node drain --name <node> [flags]
 ### Options
 
 ```
-      --evict-unmanaged   Also evict the pods that no controller recreates
-  -h, --help              help for drain
-  -n, --name string       Node name to drain
-      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
-      --timeout string    Seconds the platform tries, from 60 to 3600; default: the platform default
+      --evict-unmanaged[=true|false]   Also evict the pods that no controller recreates
+  -h, --help[=true|false]              help for drain
+  -n, --name string                    Node name to drain
+      --space-id string                Space id (sp-xxxxxxxx); default: the space of the active domain
+      --timeout string                 Seconds the platform tries, from 60 to 3600; default: the platform default
 ```
 
 ### SEE ALSO
@@ -2381,13 +2381,13 @@ lo kubehz node join [flags]
 ### Options
 
 ```
-  -c, --cluster-id string        Cluster id (cl-xxxxxxxx); default: the cluster of the active domain
-  -h, --help                     help for join
-      --kubelet-version string   Kubelet version to declare; default: read from this machine
-  -n, --name string              Node name; default: the short hostname of this machine
-      --node-ip string           Address other nodes reach this machine on (needed behind NAT)
-  -p, --pool string              Static pool to join; default: the one pool every node of the cluster is in
-      --print-only               Print the join command and run nothing. The command holds the bootstrap token: when you run it, the token is on argv
+  -c, --cluster-id string         Cluster id (cl-xxxxxxxx); default: the cluster of the active domain
+  -h, --help[=true|false]         help for join
+      --kubelet-version string    Kubelet version to declare; default: read from this machine
+  -n, --name string               Node name; default: the short hostname of this machine
+      --node-ip string            Address other nodes reach this machine on (needed behind NAT)
+  -p, --pool string               Static pool to join; default: the one pool every node of the cluster is in
+      --print-only[=true|false]   Print the join command and run nothing. The command holds the bootstrap token: when you run it, the token is on argv
 ```
 
 ### SEE ALSO
@@ -2412,7 +2412,7 @@ lo kubehz node remove --name <node> [flags]
 
 ```
   -c, --cluster-id string   Cluster id (cl-xxxxxxxx); default: the cluster of the active domain
-  -h, --help                help for remove
+  -h, --help[=true|false]   help for remove
   -n, --name string         Node name to remove
 ```
 
@@ -2438,7 +2438,7 @@ lo kubehz node status [flags]
 
 ```
   -c, --cluster-id string   Cluster id (cl-xxxxxxxx); default: the cluster of the active domain
-  -h, --help                help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -2462,9 +2462,9 @@ lo kubehz node uncordon --name <node> [flags]
 ### Options
 
 ```
-  -h, --help              help for uncordon
-  -n, --name string       Node name to uncordon
-      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+  -h, --help[=true|false]   help for uncordon
+  -n, --name string         Node name to uncordon
+      --space-id string     Space id (sp-xxxxxxxx); default: the space of the active domain
 ```
 
 ### SEE ALSO
@@ -2488,7 +2488,7 @@ lo kubehz re-enroll [flags]
 ### Options
 
 ```
-  -h, --help   help for re-enroll
+  -h, --help[=true|false]   help for re-enroll
 ```
 
 ### SEE ALSO
@@ -2512,8 +2512,8 @@ lo kubehz register [flags]
 ### Options
 
 ```
-  -h, --help          help for register
-      --print-token   Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
+  -h, --help[=true|false]          help for register
+      --print-token[=true|false]   Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
 ```
 
 ### SEE ALSO
@@ -2538,7 +2538,7 @@ lo kubehz space [flags]
 ### Options
 
 ```
-  -h, --help   help for space
+  -h, --help[=true|false]   help for space
 ```
 
 ### SEE ALSO
@@ -2569,7 +2569,7 @@ lo kubehz space create --name <name> --slug <slug> [flags]
 ### Options
 
 ```
-  -h, --help                    help for create
+  -h, --help[=true|false]       help for create
       --lease-hours string      Hours until the platform deletes the space (1 to 720); an agent key gets 2 without it
       --name string             Display name of the space
       --namespaces string       Namespace limit; default: the platform's
@@ -2601,8 +2601,8 @@ lo kubehz space delete <id> [flags]
 ### Options
 
 ```
-  -h, --help            help for delete
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for delete
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2627,8 +2627,8 @@ lo kubehz space get <id> [flags]
 ### Options
 
 ```
-  -h, --help            help for get
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for get
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2652,9 +2652,9 @@ lo kubehz space kubeconfig <id> --file <path> [flags]
 ### Options
 
 ```
-      --file string     Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
-  -h, --help            help for kubeconfig
-  -o, --output string   Output format: text, json or yaml (default "text")
+      --file string         Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
+  -h, --help[=true|false]   help for kubeconfig
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2678,9 +2678,9 @@ lo kubehz space lease <id> --hours <n> [flags]
 ### Options
 
 ```
-  -h, --help            help for lease
-      --hours string    Hours from now until the platform deletes it (1 to 720)
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for lease
+      --hours string        Hours from now until the platform deletes it (1 to 720)
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2705,8 +2705,8 @@ lo kubehz space list [flags]
 ### Options
 
 ```
-  -h, --help            help for list
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for list
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -2730,7 +2730,7 @@ lo kubehz status [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -2755,7 +2755,7 @@ lo kustomize [flags]
 ### Options
 
 ```
-  -h, --help   help for kustomize
+  -h, --help[=true|false]   help for kustomize
 ```
 
 ### SEE ALSO
@@ -2783,7 +2783,7 @@ lo kustomize build [flags]
 ### Options
 
 ```
-  -h, --help   help for build
+  -h, --help[=true|false]   help for build
 ```
 
 ### SEE ALSO
@@ -2807,7 +2807,7 @@ lo kustomize clean [flags]
 ### Options
 
 ```
-  -h, --help   help for clean
+  -h, --help[=true|false]   help for clean
 ```
 
 ### SEE ALSO
@@ -2831,7 +2831,7 @@ lo kustomize list [flags]
 ### Options
 
 ```
-  -h, --help   help for list
+  -h, --help[=true|false]   help for list
 ```
 
 ### SEE ALSO
@@ -2855,7 +2855,7 @@ lo kustomize test [flags]
 ### Options
 
 ```
-  -h, --help   help for test
+  -h, --help[=true|false]   help for test
 ```
 
 ### SEE ALSO
@@ -2880,9 +2880,9 @@ lo lint [flags]
 ### Options
 
 ```
-      --format string   Finding format: text (default), editor (file:line: [level] message) or github (workflow commands, the default under GITHUB_ACTIONS off a terminal)
-  -h, --help            help for lint
-      --notes           Also print a [note] per spec key that equals its documented default (advisory; the exit code is unchanged)
+      --format string        Finding format: text (default), editor (file:line: [level] message) or github (workflow commands, the default under GITHUB_ACTIONS off a terminal)
+  -h, --help[=true|false]    help for lint
+      --notes[=true|false]   Also print a [note] per spec key that equals its documented default (advisory; the exit code is unchanged)
 ```
 
 ### SEE ALSO
@@ -2951,7 +2951,7 @@ into the editor's MCP config:
 ### Options
 
 ```
-  -h, --help   help for mcp
+  -h, --help[=true|false]   help for mcp
 ```
 
 ### SEE ALSO
@@ -2982,7 +2982,7 @@ Manage MCP server configuration for Claude Desktop
 ### Options
 
 ```
-  -h, --help   help for claude
+  -h, --help[=true|false]   help for claude
 ```
 
 ### SEE ALSO
@@ -3014,7 +3014,7 @@ lo mcp claude disable [flags]
 
 ```
       --config-path string   Path to Claude config file
-  -h, --help                 help for disable
+  -h, --help[=true|false]    help for disable
       --server-name string   Name of the MCP server to remove (default: derived from executable name)
 ```
 
@@ -3046,7 +3046,7 @@ lo mcp claude enable [flags]
 ```
       --config-path string   Path to Claude config file
   -e, --env stringToString   Environment variables (e.g., --env KEY1=value1 --env KEY2=value2) (default [])
-  -h, --help                 help for enable
+  -h, --help[=true|false]    help for enable
       --log-level string     Log level (debug, info, warn, error)
       --server-name string   Name for the MCP server (default: derived from executable name)
 ```
@@ -3077,7 +3077,7 @@ lo mcp claude list [flags]
 
 ```
       --config-path string   Path to Claude config file
-  -h, --help                 help for list
+  -h, --help[=true|false]    help for list
 ```
 
 ### SEE ALSO
@@ -3102,7 +3102,7 @@ Manage MCP server configuration for Cursor
 ### Options
 
 ```
-  -h, --help   help for cursor
+  -h, --help[=true|false]   help for cursor
 ```
 
 ### SEE ALSO
@@ -3133,10 +3133,10 @@ lo mcp cursor disable [flags]
 ### Options
 
 ```
-      --config-path string   Path to Cursor config file
-  -h, --help                 help for disable
-      --server-name string   Name of the MCP server to remove (default: derived from executable name)
-      --workspace            Remove from workspace settings (.cursor/mcp.json) instead of user settings
+      --config-path string       Path to Cursor config file
+  -h, --help[=true|false]        help for disable
+      --server-name string       Name of the MCP server to remove (default: derived from executable name)
+      --workspace[=true|false]   Remove from workspace settings (.cursor/mcp.json) instead of user settings
 ```
 
 ### SEE ALSO
@@ -3165,12 +3165,12 @@ lo mcp cursor enable [flags]
 ### Options
 
 ```
-      --config-path string   Path to Cursor config file
-  -e, --env stringToString   Environment variables (e.g., --env KEY1=value1 --env KEY2=value2) (default [])
-  -h, --help                 help for enable
-      --log-level string     Log level (debug, info, warn, error)
-      --server-name string   Name for the MCP server (default: derived from executable name)
-      --workspace            Add to workspace settings (.cursor/mcp.json) instead of user settings
+      --config-path string       Path to Cursor config file
+  -e, --env stringToString       Environment variables (e.g., --env KEY1=value1 --env KEY2=value2) (default [])
+  -h, --help[=true|false]        help for enable
+      --log-level string         Log level (debug, info, warn, error)
+      --server-name string       Name for the MCP server (default: derived from executable name)
+      --workspace[=true|false]   Add to workspace settings (.cursor/mcp.json) instead of user settings
 ```
 
 ### SEE ALSO
@@ -3198,9 +3198,9 @@ lo mcp cursor list [flags]
 ### Options
 
 ```
-      --config-path string   Path to Cursor config file
-  -h, --help                 help for list
-      --workspace            List from workspace settings (.cursor/mcp.json) instead of user settings
+      --config-path string       Path to Cursor config file
+  -h, --help[=true|false]        help for list
+      --workspace[=true|false]   List from workspace settings (.cursor/mcp.json) instead of user settings
 ```
 
 ### SEE ALSO
@@ -3225,12 +3225,12 @@ lo mcp serve [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
-      --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
-  -h, --help                help for serve
-      --host string         Address to listen on (default "127.0.0.1")
-      --log-level string    Server log level on stderr (debug, info, warn, error) (default "info")
-      --port int            Port to listen on (default 8080)
+      --allow-destructive[=true|false]   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
+      --allow-mutating[=true|false]      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
+  -h, --help[=true|false]                help for serve
+      --host string                      Address to listen on (default "127.0.0.1")
+      --log-level string                 Server log level on stderr (debug, info, warn, error) (default "info")
+      --port int                         Port to listen on (default 8080)
 ```
 
 ### SEE ALSO
@@ -3255,10 +3255,10 @@ lo mcp start [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
-      --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
-  -h, --help                help for start
-      --log-level string    Server log level on stderr (debug, info, warn, error) (default "info")
+      --allow-destructive[=true|false]   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
+      --allow-mutating[=true|false]      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
+  -h, --help[=true|false]                help for start
+      --log-level string                 Server log level on stderr (debug, info, warn, error) (default "info")
 ```
 
 ### SEE ALSO
@@ -3283,10 +3283,10 @@ lo mcp tools [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
-      --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
-  -h, --help                help for tools
-      --json                Print the full tool definitions (schemas, annotations) as JSON
+      --allow-destructive[=true|false]   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
+      --allow-mutating[=true|false]      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
+  -h, --help[=true|false]                help for tools
+      --json[=true|false]                Print the full tool definitions (schemas, annotations) as JSON
 ```
 
 ### SEE ALSO
@@ -3311,7 +3311,7 @@ Manage MCP server configuration for Visual Studio Code
 ### Options
 
 ```
-  -h, --help   help for vscode
+  -h, --help[=true|false]   help for vscode
 ```
 
 ### SEE ALSO
@@ -3342,10 +3342,10 @@ lo mcp vscode disable [flags]
 ### Options
 
 ```
-      --config-path string   Path to VSCode config file
-  -h, --help                 help for disable
-      --server-name string   Name of the MCP server to remove (default: derived from executable name)
-      --workspace            Remove from workspace settings (.vscode/mcp.json) instead of user settings
+      --config-path string       Path to VSCode config file
+  -h, --help[=true|false]        help for disable
+      --server-name string       Name of the MCP server to remove (default: derived from executable name)
+      --workspace[=true|false]   Remove from workspace settings (.vscode/mcp.json) instead of user settings
 ```
 
 ### SEE ALSO
@@ -3374,12 +3374,12 @@ lo mcp vscode enable [flags]
 ### Options
 
 ```
-      --config-path string   Path to VSCode config file
-  -e, --env stringToString   Environment variables (e.g., --env KEY1=value1 --env KEY2=value2) (default [])
-  -h, --help                 help for enable
-      --log-level string     Log level (debug, info, warn, error)
-      --server-name string   Name for the MCP server (default: derived from executable name)
-      --workspace            Add to workspace settings (.vscode/mcp.json) instead of user settings
+      --config-path string       Path to VSCode config file
+  -e, --env stringToString       Environment variables (e.g., --env KEY1=value1 --env KEY2=value2) (default [])
+  -h, --help[=true|false]        help for enable
+      --log-level string         Log level (debug, info, warn, error)
+      --server-name string       Name for the MCP server (default: derived from executable name)
+      --workspace[=true|false]   Add to workspace settings (.vscode/mcp.json) instead of user settings
 ```
 
 ### SEE ALSO
@@ -3407,9 +3407,9 @@ lo mcp vscode list [flags]
 ### Options
 
 ```
-      --config-path string   Path to VSCode config file
-  -h, --help                 help for list
-      --workspace            List from workspace settings (.vscode/mcp.json) instead of user settings
+      --config-path string       Path to VSCode config file
+  -h, --help[=true|false]        help for list
+      --workspace[=true|false]   List from workspace settings (.vscode/mcp.json) instead of user settings
 ```
 
 ### SEE ALSO
@@ -3435,16 +3435,16 @@ lo provision [flags]
 ### Options
 
 ```
-      --allow-generators          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
-  -b, --bootstrap                 Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
-      --dry-run                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
-  -h, --help                      help for provision
-      --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
-      --no-diff                   Dry run without the kubectl diff: render only, no cluster access
-      --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
-      --print-token               Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
-      --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
-      --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
+      --allow-generators[=true|false]          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
+  -b, --bootstrap[=true|false]                 Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
+      --dry-run[=true|false]                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help[=true|false]                      help for provision
+      --ignore-nondeterministic[=true|false]   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
+      --no-diff[=true|false]                   Dry run without the kubectl diff: render only, no cluster access
+      --only strings                           Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
+      --print-token[=true|false]               Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
+      --render-dir string                      Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --with-restore[=true|false]              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
 ### SEE ALSO
@@ -3470,9 +3470,9 @@ lo recover [recover-domain] [flags]
 ### Options
 
 ```
-      --dry-run        Preview the rebuild plan (reimages nothing) and stop before provision
-  -h, --help           help for recover
-      --skip-rebuild   Skip the bare-metal node rebuild — re-run provision + verify only
+      --dry-run[=true|false]        Preview the rebuild plan (reimages nothing) and stop before provision
+  -h, --help[=true|false]           help for recover
+      --skip-rebuild[=true|false]   Skip the bare-metal node rebuild — re-run provision + verify only
 ```
 
 ### SEE ALSO
@@ -3497,8 +3497,8 @@ lo registry [flags]
 ### Options
 
 ```
-  -h, --help     help for registry
-  -S, --shared   Include shared mirrors (for clean/status)
+  -h, --help[=true|false]     help for registry
+  -S, --shared[=true|false]   Include shared mirrors (for clean/status)
 ```
 
 ### SEE ALSO
@@ -3528,8 +3528,8 @@ lo registry clean [flags]
 ### Options
 
 ```
-  -h, --help   help for clean
-  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
+  -h, --help[=true|false]   help for clean
+  -y, --yes[=true|false]    Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -3553,7 +3553,7 @@ lo registry down [flags]
 ### Options
 
 ```
-  -h, --help   help for down
+  -h, --help[=true|false]   help for down
 ```
 
 ### SEE ALSO
@@ -3578,8 +3578,8 @@ lo registry status [flags]
 ### Options
 
 ```
-  -h, --help            help for status
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for status
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -3604,7 +3604,7 @@ lo registry tls [flags]
 ### Options
 
 ```
-  -h, --help   help for tls
+  -h, --help[=true|false]   help for tls
 ```
 
 ### SEE ALSO
@@ -3630,7 +3630,7 @@ lo registry tls renew [flags]
 ### Options
 
 ```
-  -h, --help   help for renew
+  -h, --help[=true|false]   help for renew
 ```
 
 ### SEE ALSO
@@ -3654,7 +3654,7 @@ lo registry tls status [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -3678,7 +3678,7 @@ lo registry up [flags]
 ### Options
 
 ```
-  -h, --help   help for up
+  -h, --help[=true|false]   help for up
 ```
 
 ### SEE ALSO
@@ -3704,7 +3704,7 @@ lo secrets [flags]
 ### Options
 
 ```
-  -h, --help   help for secrets
+  -h, --help[=true|false]   help for secrets
 ```
 
 ### SEE ALSO
@@ -3740,9 +3740,9 @@ lo secrets add-key <key> [flags]
 ### Options
 
 ```
-  -a, --all            Re-key every domain store, not just the current one
-  -h, --help           help for add-key
-      --skip-orphans   Proceed even if some .enc files have no decrypted twin
+  -a, --all[=true|false]            Re-key every domain store, not just the current one
+  -h, --help[=true|false]           help for add-key
+      --skip-orphans[=true|false]   Proceed even if some .enc files have no decrypted twin
 ```
 
 ### SEE ALSO
@@ -3766,7 +3766,7 @@ lo secrets allow [flags]
 ### Options
 
 ```
-  -h, --help   help for allow
+  -h, --help[=true|false]   help for allow
 ```
 
 ### SEE ALSO
@@ -3790,8 +3790,8 @@ lo secrets decrypt [flags]
 ### Options
 
 ```
-  -h, --help             help for decrypt
-  -k, --ssh-key string   Path to SSH private key
+  -h, --help[=true|false]   help for decrypt
+  -k, --ssh-key string      Path to SSH private key
 ```
 
 ### SEE ALSO
@@ -3815,8 +3815,8 @@ lo secrets encrypt [flags]
 ### Options
 
 ```
-  -h, --help          help for encrypt
-  -n, --name string   Encrypt only this Secret's cache files (metadata.name); default is the whole store
+  -h, --help[=true|false]   help for encrypt
+  -n, --name string         Encrypt only this Secret's cache files (metadata.name); default is the whole store
 ```
 
 ### SEE ALSO
@@ -3840,10 +3840,10 @@ lo secrets env --name N [--namespace NS] [flags]
 ### Options
 
 ```
-      --cluster string     Cluster name to manage
-  -h, --help               help for env
-  -n, --name string        Secret name
-  -s, --namespace string   Namespace (default "default")
+      --cluster string      Cluster name to manage
+  -h, --help[=true|false]   help for env
+  -n, --name string         Secret name
+  -s, --namespace string    Namespace (default "default")
 ```
 
 ### SEE ALSO
@@ -3867,8 +3867,8 @@ lo secrets init [flags]
 ### Options
 
 ```
-  -h, --help             help for init
-  -k, --ssh-key string   Path to SSH public key
+  -h, --help[=true|false]   help for init
+  -k, --ssh-key string      Path to SSH public key
 ```
 
 ### SEE ALSO
@@ -3892,7 +3892,7 @@ lo secrets list [flags]
 ### Options
 
 ```
-  -h, --help   help for list
+  -h, --help[=true|false]   help for list
 ```
 
 ### SEE ALSO
@@ -3916,7 +3916,7 @@ lo secrets path [flags]
 ### Options
 
 ```
-  -h, --help   help for path
+  -h, --help[=true|false]   help for path
 ```
 
 ### SEE ALSO
@@ -3941,9 +3941,9 @@ lo secrets print [pattern...] [flags]
 ### Options
 
 ```
-  -c, --copy       Copy secret(s) to clipboard (--only-one is implied)
-  -h, --help       help for print
-  -o, --only-one   Only print one secret (error if multiple matches)
+  -c, --copy[=true|false]       Copy secret(s) to clipboard (--only-one is implied)
+  -h, --help[=true|false]       help for print
+  -o, --only-one[=true|false]   Only print one secret (error if multiple matches)
 ```
 
 ### SEE ALSO
@@ -4020,9 +4020,9 @@ lo secrets remove-key <key> [flags]
 ### Options
 
 ```
-  -a, --all            Re-key every domain store, not just the current one
-  -h, --help           help for remove-key
-      --skip-orphans   Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)
+  -a, --all[=true|false]            Re-key every domain store, not just the current one
+  -h, --help[=true|false]           help for remove-key
+      --skip-orphans[=true|false]   Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)
 ```
 
 ### SEE ALSO
@@ -4048,11 +4048,11 @@ lo secrets set [--name N] [--namespace NS] [--encrypt] <key> [value] [flags]
 ### Options
 
 ```
-      --cluster string     Cluster name to manage
-  -e, --encrypt            SOPS-encrypt this one file after writing (needs .sops.yaml)
-  -h, --help               help for set
-  -n, --name string        Secret name
-  -s, --namespace string   Namespace (default "default")
+      --cluster string         Cluster name to manage
+  -e, --encrypt[=true|false]   SOPS-encrypt this one file after writing (needs .sops.yaml)
+  -h, --help[=true|false]      help for set
+  -n, --name string            Secret name
+  -s, --namespace string       Namespace (default "default")
 ```
 
 ### SEE ALSO
@@ -4077,8 +4077,8 @@ lo status [flags]
 ### Options
 
 ```
-  -h, --help            help for status
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for status
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -4104,7 +4104,7 @@ lo tilt [flags]
 ### Options
 
 ```
-  -h, --help   help for tilt
+  -h, --help[=true|false]   help for tilt
 ```
 
 ### SEE ALSO
@@ -4135,8 +4135,8 @@ lo tilt ci [flags]
 ### Options
 
 ```
-  -h, --help              help for ci
-  -t, --timeout tilt ci   Max time to wait for readiness (e.g. 300s, 10m); passed to tilt ci
+  -h, --help[=true|false]   help for ci
+  -t, --timeout tilt ci     Max time to wait for readiness (e.g. 300s, 10m); passed to tilt ci
 ```
 
 ### SEE ALSO
@@ -4160,7 +4160,7 @@ lo tilt down [flags]
 ### Options
 
 ```
-  -h, --help   help for down
+  -h, --help[=true|false]   help for down
 ```
 
 ### SEE ALSO
@@ -4185,10 +4185,10 @@ lo tilt preflight [flags]
 ### Options
 
 ```
-  -a, --age string         Only clear objects terminating longer than this many seconds (default 30)
-      --crd-allow string   Comma-separated CRD names the force policy may strip (empty = all)
-  -c, --crds string        Stuck-CRD policy: drain (clear instance finalizers), skip, or force
-  -h, --help               help for preflight
+  -a, --age string          Only clear objects terminating longer than this many seconds (default 30)
+      --crd-allow string    Comma-separated CRD names the force policy may strip (empty = all)
+  -c, --crds string         Stuck-CRD policy: drain (clear instance finalizers), skip, or force
+  -h, --help[=true|false]   help for preflight
 ```
 
 ### SEE ALSO
@@ -4212,7 +4212,7 @@ lo tilt restart [flags]
 ### Options
 
 ```
-  -h, --help   help for restart
+  -h, --help[=true|false]   help for restart
 ```
 
 ### SEE ALSO
@@ -4236,7 +4236,7 @@ lo tilt status [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help[=true|false]   help for status
 ```
 
 ### SEE ALSO
@@ -4260,7 +4260,7 @@ lo tilt up [flags]
 ### Options
 
 ```
-  -h, --help   help for up
+  -h, --help[=true|false]   help for up
 ```
 
 ### SEE ALSO
@@ -4285,7 +4285,7 @@ lo toolchain [flags]
 ### Options
 
 ```
-  -h, --help   help for toolchain
+  -h, --help[=true|false]   help for toolchain
 ```
 
 ### SEE ALSO
@@ -4322,7 +4322,7 @@ lo toolchain doctor [flags]
 ### Options
 
 ```
-  -h, --help   help for doctor
+  -h, --help[=true|false]   help for doctor
 ```
 
 ### SEE ALSO
@@ -4367,10 +4367,10 @@ lo toolchain install [flags]
 ### Options
 
 ```
-  -n, --dry-run         Print what would be written, downloaded and run; touch nothing
-      --groups string   Groups to activate (core,local,cloud,bash; core is implied) (default "core,local")
-  -h, --help            help for install
-  -p, --path string     Project directory (default: the nearest project root above the working directory, else the working directory)
+  -n, --dry-run[=true|false]   Print what would be written, downloaded and run; touch nothing
+      --groups string          Groups to activate (core,local,cloud,bash; core is implied) (default "core,local")
+  -h, --help[=true|false]      help for install
+  -p, --path string            Project directory (default: the nearest project root above the working directory, else the working directory)
 ```
 
 ### SEE ALSO
@@ -4394,7 +4394,7 @@ lo trust [flags]
 ### Options
 
 ```
-  -h, --help   help for trust
+  -h, --help[=true|false]   help for trust
 ```
 
 ### SEE ALSO
@@ -4420,11 +4420,11 @@ lo up [flags]
 ### Options
 
 ```
-      --ci tilt ci        Headless: build+deploy+wait-ready via tilt ci, exit with real status (no TTY/browser)
-  -h, --help              help for up
-  -o, --open-tilt         Open Tilt in a browser (interactive mode only)
-      --print-token       Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
-  -t, --timeout tilt ci   Readiness timeout for --ci (e.g. 300s, 10m); passed to tilt ci
+      --ci[=true|false]            Headless: build+deploy+wait-ready via tilt ci, exit with real status (no TTY/browser)
+  -h, --help[=true|false]          help for up
+  -o, --open-tilt[=true|false]     Open Tilt in a browser (interactive mode only)
+      --print-token[=true|false]   Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
+  -t, --timeout tilt ci            Readiness timeout for --ci (e.g. 300s, 10m); passed to tilt ci
 ```
 
 ### SEE ALSO
@@ -4449,8 +4449,8 @@ lo use [domain] [flags]
 ### Options
 
 ```
-  -h, --help            help for use
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for use
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
@@ -4475,8 +4475,8 @@ lo version [flags]
 ### Options
 
 ```
-  -h, --help            help for version
-  -o, --output string   Output format: text, json or yaml (default "text")
+  -h, --help[=true|false]   help for version
+  -o, --output string       Output format: text, json or yaml (default "text")
 ```
 
 ### SEE ALSO
