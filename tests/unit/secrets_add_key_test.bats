@@ -173,7 +173,7 @@ _add() { # <key> [all] [skip_orphans]
   _add_path() { local PATH="${1}"; shift; _add "${@}"; }
   DOMAIN=a.dev run _add_path "${bin}" "${KEY_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] flock not found — add-key and remove-key do not run without the lock of .sops.yaml; nothing was changed
+  [ "$output" = "[error] flock not found: add-key and remove-key do not run without the lock of .sops.yaml. Nothing was changed
 [error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock file was made" >&2; return 1; }
@@ -585,7 +585,7 @@ _ls_then_missing() {
   DOMAIN=a.dev run _add "${KEY_A}"
   chmod 755 "${dir}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock — the lock goes beside the file that .sops.yaml names, so lo needs write access to ${dir}; nothing was changed" ] || {
+  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: the lock goes beside the file that .sops.yaml names, so lo needs write access to ${dir}. Nothing was changed" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${dir}/sops.yaml")" = "${before}" ]
   [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }
@@ -713,7 +713,7 @@ _sops_envelope() {
 recipient already present in .sops.yaml, but 2 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key
   ${KEY_B}
 Encrypted 2 secret(s)
-done — commit .sops.yaml and the updated .enc files together" ] || { echo "$output" >&2; return 1; }
+done. Commit .sops.yaml and the updated .enc files together" ] || { echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo "the rerun wrote .sops.yaml" >&2; return 1; }
   [ "$(_file_id "${PATH_BASE}/.sops.yaml")" = "${id}" ] || { echo "the rerun wrote or replaced .sops.yaml" >&2; return 1; }
   [ "$(LC_ALL=C sort "${SOPS_LOG}")" = "${store}/Secret.app.default.K
@@ -802,7 +802,7 @@ _finished_store() {
     [ "$output" = "recipient already present in .sops.yaml, but 1 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key
   ${KEY_B}
 Encrypted 1 secret(s)
-done — commit .sops.yaml and the updated .enc files together" ] || { echo "${kind}: $output" >&2; return 1; }
+done. Commit .sops.yaml and the updated .enc files together" ] || { echo "${kind}: $output" >&2; return 1; }
     [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.app.default.K" ] || { echo "${kind}: sops ran on: $(cat "${SOPS_LOG}")" >&2; return 1; }
     [ "$(secrets::_enc_lists "${KEY_B}" "${app}" added)" = listed ] || { echo "${kind}: app was not re-keyed" >&2; return 1; }
     [ "$(_state "${db}" "${PATH_BASE}/.sops.yaml")" = "${before}" ] || { echo "${kind}: the .enc of db or .sops.yaml changed" >&2; return 1; }
@@ -1191,7 +1191,7 @@ _unlistable='[error] cannot list the store @store@ (not a directory, no read or 
   ${KEY_B}
 re-keying 2 cache file(s) across 1 store(s)…
 Encrypted 2 secret(s)
-done — commit .sops.yaml and the updated .enc files together" ] || { echo "the first run: $output" >&2; return 1; }
+done. Commit .sops.yaml and the updated .enc files together" ] || { echo "the first run: $output" >&2; return 1; }
   [ "$(_listings)" -eq 1 ] || { echo "the first run: the store was listed $(_listings) times" >&2; return 1; }
   for p in app db; do
     [ "$(secrets::_enc_lists "${KEY_B}" "${store}/Secret.${p}.default.K.enc" added)" = listed ] || {
@@ -1207,7 +1207,7 @@ done — commit .sops.yaml and the updated .enc files together" ] || { echo "the
   [ "$output" = "recipient already present in .sops.yaml, but 1 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key
   ${KEY_B}
 Encrypted 1 secret(s)
-done — commit .sops.yaml and the updated .enc files together" ] || { echo "the rerun: $output" >&2; return 1; }
+done. Commit .sops.yaml and the updated .enc files together" ] || { echo "the rerun: $output" >&2; return 1; }
   [ "$(_listings)" -eq 1 ] || { echo "the rerun: the store was listed $(_listings) times" >&2; return 1; }
   [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.app.default.K" ] || { echo "the rerun: sops ran on: $(cat "${SOPS_LOG}")" >&2; return 1; }
 }

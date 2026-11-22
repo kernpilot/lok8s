@@ -619,7 +619,7 @@ func TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened(t *testing.T) {
 			if !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] cannot open the lock file " + real + "/sops.yaml.lock — the lock goes beside the file that .sops.yaml names, so lo needs write access to " + real + "; nothing was changed\n"
+			want := "[error] cannot open the lock file " + real + "/sops.yaml.lock: the lock goes beside the file that .sops.yaml names, so lo needs write access to " + real + ". Nothing was changed\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -682,7 +682,7 @@ func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
 			if err := f.run(); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 			}
-			want := "[error] " + target + ".lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
+			want := "[error] " + target + ".lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again\n"
 			if f.errOut.String() != want || f.out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 			}
@@ -898,7 +898,7 @@ func TestAddKeyRerunFinishesAReKeyThatAnEarlierRunLeft(t *testing.T) {
 	}
 	want := "recipient already present in .sops.yaml, but 2 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n  " + gone + "\n" +
 		"Encrypted 2 secret(s)\n" +
-		"done — commit .sops.yaml and the updated .enc files together\n"
+		"done. Commit .sops.yaml and the updated .enc files together\n"
 	if got := f.out.String(); got != want {
 		t.Errorf("stdout:\n%q\nwant:\n%q", got, want)
 	}
@@ -1067,7 +1067,7 @@ func TestAddKeyRerunReKeysOnlyTheFilesThatAreNotFinished(t *testing.T) {
 			}
 			want := "recipient already present in .sops.yaml, but 1 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n  " + gone + "\n" +
 				"Encrypted 1 secret(s)\n" +
-				"done — commit .sops.yaml and the updated .enc files together\n"
+				"done. Commit .sops.yaml and the updated .enc files together\n"
 			if f.out.String() != want || f.errOut.String() != "" {
 				t.Errorf("stdout:\n%q\nstderr %q\nwant stdout:\n%q", f.out.String(), f.errOut.String(), want)
 			}
@@ -1367,7 +1367,7 @@ func TestSopsConfigDestRefusesALinkThatNamesNoRegularFile(t *testing.T) {
 			if !errors.Is(err, ErrHandled) || dest != "" {
 				t.Fatalf("want ErrHandled and no path, got %q, %v", dest, err)
 			}
-			want := "[error] " + c.sopsConfigPath() + " does not resolve to a regular file — nothing was changed; run this command again\n"
+			want := "[error] " + c.sopsConfigPath() + " does not resolve to a regular file: nothing was changed. Run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -1523,7 +1523,7 @@ func TestAddKeyListsTheStoreOnce(t *testing.T) {
 		want := "added recipient to .sops.yaml (1 creation rule(s))\n  " + gone + "\n" +
 			"re-keying 2 cache file(s) across 1 store(s)\u2026\n" +
 			"Encrypted 2 secret(s)\n" +
-			"done \u2014 commit .sops.yaml and the updated .enc files together\n"
+			"done. Commit .sops.yaml and the updated .enc files together\n"
 		if f.out.String() != want || f.errOut.String() != "" {
 			t.Errorf("stdout:\n%q\nstderr %q\nwant stdout:\n%q", f.out.String(), f.errOut.String(), want)
 		}
@@ -1546,7 +1546,7 @@ func TestAddKeyListsTheStoreOnce(t *testing.T) {
 		}
 		want := "recipient already present in .sops.yaml, but 1 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n  " + gone + "\n" +
 			"Encrypted 1 secret(s)\n" +
-			"done \u2014 commit .sops.yaml and the updated .enc files together\n"
+			"done. Commit .sops.yaml and the updated .enc files together\n"
 		if f.out.String() != want || f.errOut.String() != "" {
 			t.Errorf("stdout:\n%q\nstderr %q\nwant stdout:\n%q", f.out.String(), f.errOut.String(), want)
 		}

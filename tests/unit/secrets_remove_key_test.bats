@@ -1063,7 +1063,7 @@ _rm_path() {
   cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
   DOMAIN=a.dev run _rm_path "${bin}" "${RCPT_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] flock not found — add-key and remove-key do not run without the lock of .sops.yaml; nothing was changed
+  [ "$output" = "[error] flock not found: add-key and remove-key do not run without the lock of .sops.yaml. Nothing was changed
 [error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
   cmp -s "${CFG}" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc changed" >&2; return 1; }
@@ -1211,7 +1211,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
 # writes an .enc only to a regular file or a path that does not exist (Go
 # twin: TestSetEncryptRefusesAnEncPathThatIsNotARegularFile).
 
-_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again'
+_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written. Remove it, then encrypt again'
 
 # _set_encrypt <proj> — `lo secrets --domain a.dev set -n app --encrypt K v`
 # through the real entrypoint in the project, as _run_lo runs it, bounded at
@@ -1720,7 +1720,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
   exec {fd}>&-
   [ "$status" -eq 1 ]
-  [ "$output" = "[error] ${CFG}.lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends" ] || {
+  [ "$output" = "[error] ${CFG}.lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${CFG}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]
@@ -1741,7 +1741,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   before="$(cat "${CFG}")"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] ${CFG}.lock is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again" ] || {
+  [ "$output" = "[error] ${CFG}.lock is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed. Remove it, then run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${victim}")" = 'the bytes of another file' ] || { echo "the file that the link names changed" >&2; return 1; }
   [ "$(readlink "${CFG}.lock")" = "${victim}" ]
@@ -1773,7 +1773,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
   exec {lockfd}>&-
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends" ] || {
+  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${conf}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]
@@ -1799,7 +1799,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
     ln -s "${target}" "${CFG}"
     run secrets::_config_dest "${CFG}"
     [ "$status" -eq 1 ] || { echo "${target}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] ${CFG} does not resolve to a regular file — nothing was changed; run this command again" ] || {
+    [ "$output" = "[error] ${CFG} does not resolve to a regular file: nothing was changed. Run this command again" ] || {
       echo "${target}: $output" >&2; return 1; }
   done
 }

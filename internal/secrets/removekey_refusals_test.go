@@ -330,7 +330,7 @@ func TestKeyCommandsRefuseWhileTheLockIsHeld(t *testing.T) {
 			if err := tc.run(c); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v", err)
 			}
-			want := "[error] " + lockPath(t, c) + " is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
+			want := "[error] " + lockPath(t, c) + " is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -388,7 +388,7 @@ func TestKeyCommandsRefuseALockThatIsNotARegularFile(t *testing.T) {
 				if !errors.Is(err, ErrHandled) {
 					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 				}
-				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed. Remove it, then run this command again\n"
 				if errOut.String() != want || out.String() != "" {
 					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 				}
@@ -449,7 +449,7 @@ func TestKeyCommandsRefuseALockLinkPutThereAfterTheCheck(t *testing.T) {
 				if calls != 1 {
 					t.Fatalf("the seam ran %d times, want 1", calls)
 				}
-				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed. Remove it, then run this command again\n"
 				if errOut.String() != want || out.String() != "" {
 					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 				}
@@ -534,7 +534,7 @@ func TestKeyCommandsRefuseALockFIFOPutThereAfterTheCheck(t *testing.T) {
 				if calls != 1 {
 					t.Fatalf("the seam ran %d times, want 1", calls)
 				}
-				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed. Remove it, then run this command again\n"
 				if errOut.String() != want || out.String() != "" {
 					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 				}

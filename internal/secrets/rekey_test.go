@@ -78,7 +78,7 @@ func TestAddKeyOutputIsPinned(t *testing.T) {
 		"  " + second.Recipient().String() + "\n" +
 		"re-keying 2 cache file(s) across 2 store(s)…\n" +
 		"Encrypted 1 secret(s)\n" +
-		"done — commit .sops.yaml and the updated .enc files together\n"
+		"done. Commit .sops.yaml and the updated .enc files together\n"
 	if out.String() != wantOut {
 		t.Errorf("stdout:\n%q\nwant:\n%q", out.String(), wantOut)
 	}
