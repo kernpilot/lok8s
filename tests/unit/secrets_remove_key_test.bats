@@ -195,6 +195,30 @@ _not_written='[error]   the re-key encrypts with age through the first matching 
 # prints it, with a match or not (Go twin: scopeWarn).
 _scope='[warn] the check for your own decrypt identity reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files'
 
+# Without a .sops.yaml the command refuses with one line on stderr that
+# names the path, prints nothing on stdout and writes no file (Go twin:
+# TestKeyCommandsWithoutSopsYAMLRefuseWithOneLine).
+@test "remove-key without a .sops.yaml refuses with one line on stderr and writes nothing" {
+  bats_require_minimum_version 1.5.0
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  rm -- "${CFG}"
+  local before
+  before="$(_state "${PATH_BASE}" "${PATH_CLUSTERS}")"
+  DOMAIN=a.dev run --separate-stderr _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output / $stderr" >&2; return 1; }
+  [ -z "${output}" ] || { echo "stdout: $output" >&2; return 1; }
+  [ "${stderr}" = "[error] ${CFG} not found. Run: lo secrets init" ] || {
+    echo "stderr: $stderr" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}" "${PATH_CLUSTERS}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}" "${PATH_CLUSTERS}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "the recipient leaves every creation rule and the store is re-keyed" {
   _load
   _stub_encrypt

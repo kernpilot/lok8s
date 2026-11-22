@@ -307,8 +307,9 @@ The tests of `tests/unit/secrets_test.bats` that call `require_argsh_cli`
 run the lib through the real argsh CLI, and they skip without
 `.bin/argsh.so`. CI sets `PATH_BIN` to the workspace `.bin` for
 `argsh builtins install`, so the `.so` is there, and the install step fails
-when it is not. Five of these tests also run the real sops and carry the
-tag `real-sops`.
+when it is not there or bash cannot load it. The step that runs the unit
+tests fails when one of them skips for that reason. Five of these tests
+also run the real sops and carry the tag `real-sops`.
 
 The bats suites keep running against the frozen tree because a command
 routed to bash, the provider plugins and the `lo drivers` fallback still

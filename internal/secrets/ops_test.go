@@ -327,12 +327,12 @@ func TestSetEncryptOnlyThatFile(t *testing.T) {
 }
 
 func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
-	c, _, errOut := testEnv(t)
+	c, out, errOut := testEnv(t)
 	if err := c.Set(t.Context(), "app", "default", "KEY", "v", true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
-	if want := "[error] No .sops.yaml found. Run: lo secrets init\n"; errOut.String() != want {
-		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	if want := "[error] No .sops.yaml found. Run: lo secrets init\n"; errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 	}
 	// Cache still written (plaintext), but no .enc produced.
 	if !fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY") {
@@ -348,14 +348,14 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 // (encryptSweep; bash: secrets::_encrypt_store). The bats twin is in
 // tests/unit/secrets_test.bats.
 func TestEncryptSweepWithoutSopsYAMLFails(t *testing.T) {
-	c, _, errOut := testEnv(t)
+	c, out, errOut := testEnv(t)
 	store := c.Paths.Base + "/.secrets"
 	write(t, store+"/Secret.app.default.KEY", "v")
 	if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
-	if want := "[error] No .sops.yaml found. Run: lo secrets init\n"; errOut.String() != want {
-		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	if want := "[error] No .sops.yaml found. Run: lo secrets init\n"; errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 	}
 	if fsutil.IsRegular(store + "/Secret.app.default.KEY.enc") {
 		t.Error(".enc produced without config")

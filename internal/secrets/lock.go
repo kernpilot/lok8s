@@ -132,10 +132,10 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		return nil, ErrHandled
 	}
 	if err != nil {
-		// Two usual causes: a new lock in a directory that the account
-		// cannot write, or a lock file that it cannot write (for example,
-		// one of another user). The line names both, as in the bash twin,
-		// whose open shows no error either.
+		// The open fails for a new lock in a directory that the account
+		// cannot write, or for a lock file that it cannot write (for
+		// example, one of another user). The bash twin hides the error of
+		// its open. This line names both causes.
 		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s: nothing was changed. The lock goes beside the file that .sops.yaml names. Make sure that your account can write to %s and to the lock file, if it exists. Then run this command again", path, filepath.Dir(path))
 		return nil, ErrHandled
 	}

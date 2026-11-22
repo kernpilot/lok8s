@@ -83,6 +83,11 @@ jobs:
           # The install can exit 0 without the file: stop here, not with
           # skipped tests.
           test -f .bin/argsh.so || { echo "::error::.bin/argsh.so is missing after 'argsh builtins install'"; exit 1; }
+          # A file that bash cannot load passes the test above, and argsh then
+          # tries a download of its own. A new bash loads the :args builtin
+          # from the file, with the call that argsh makes (enable -f).
+          bash --noprofile --norc -c 'enable -f "${PWD}/.bin/argsh.so" :args && [[ "$(type -t :args)" == builtin ]]' \
+            || { echo "::error::bash cannot load the :args builtin from .bin/argsh.so"; exit 1; }
 
       - name: The installed yq is the pinned release
         # b exits 0 when a binary fails to install, and the bats container
@@ -97,6 +102,14 @@ jobs:
             || { echo "::error::.bin/argsh drifted from .bin/b.lock — run 'b install' and commit the result"; exit 1; }
 
       - name: Run unit tests
+        # The TAP output goes through tee into a log, under pipefail, so a
+        # failed test fails the step. The step also fails when a test skipped
+        # with the reason "argsh not installed (b install)" or "argsh.so not
+        # installed (b install)": the install step puts both files in .bin.
+        # ARGSH_NO_AUTO_DOWNLOAD=1 stops a download of argsh.so by argsh on
+        # the runner. The container gets only the variables that have the
+        # prefix ARGSH_ENV_, without the prefix. Thus
+        # ARGSH_ENV_ARGSH_NO_AUTO_DOWNLOAD sets the same value in it.
         env:
           # `argsh test` docker-forwards to the argsh container (no host bats).
           # PATH_BIN makes it mount .bin — the b-pinned toolchain, incl. the
@@ -104,7 +117,16 @@ jobs:
           # matching local dev where direnv exports PATH_BIN. Without it the
           # container only has its own tools and `kustomize build` tests 127.
           PATH_BIN: ${{ github.workspace }}/.bin
-        run: ./.bin/argsh test tests/unit/
+          ARGSH_NO_AUTO_DOWNLOAD: "1"
+          ARGSH_ENV_ARGSH_NO_AUTO_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          ./.bin/argsh test tests/unit/ | tee "${log}"
+          if grep -E '^ok [0-9]+ .* # skip argsh(\.so)? not installed \(b install\)$' "${log}"; then
+            echo "::error::a bats test skipped because .bin/argsh or .bin/argsh.so is missing"
+            exit 1
+          fi
 
       - name: Real-helm bats tests (native, pinned helm v3)
         # The argsh container above has no helm and forwards no CI
@@ -155,13 +177,16 @@ jobs:
         # runner: its ssh-keygen, the sops and ssh-to-age that `b install`
         # put in .bin, and the bats and libraries that the step above
         # installed. Five of them also run the real argsh CLI with the
-        # .bin/argsh.so of the install step. It downloads nothing. .bin comes
-        # first on PATH, and the step fails before bats runs when sops or
-        # ssh-to-age resolves to another file. The TAP output goes through
-        # tee into a log, under pipefail (as in "Provision & register" of
-        # spinup.yml), so a failed test fails the step. The step also fails
-        # when the plan is not 1..19 (the nineteen tagged tests) or when a
-        # test skipped.
+        # .bin/argsh.so of the install step. ARGSH_NO_AUTO_DOWNLOAD=1 stops
+        # a download of argsh.so by argsh, so the step downloads nothing.
+        # .bin comes first on PATH, and the step fails before bats runs when
+        # sops or ssh-to-age resolves to another file. The TAP output goes
+        # through tee into a log, under pipefail (as in "Provision &
+        # register" of spinup.yml), so a failed test fails the step. The step
+        # also fails when the plan is not 1..19 (the nineteen tagged tests)
+        # or when a test skipped.
+        env:
+          ARGSH_NO_AUTO_DOWNLOAD: "1"
         run: |
           set -euo pipefail
           export PATH="${GITHUB_WORKSPACE}/.bin:${HOME}/.local/bin:${PATH}"

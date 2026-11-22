@@ -1142,9 +1142,9 @@ _hard_link_replaced() {
   [ ! -e "${plain}.enc" ] || { echo "an .enc was written" >&2; return 1; }
 }
 
-# The summary of the sweep goes to stdout and an error goes to stderr, so a
-# caller can read the summary without the errors (Go twins: the out and errOut
-# buffers of TestEncryptSweepWithoutSopsYAMLFails and the sweep tests).
+# The sweep prints its summary to stdout only and an error to stderr only.
+# The Go twin TestEncryptSweepWithoutSopsYAMLFails checks the error half: the
+# error line on stderr and nothing on stdout.
 @test "secrets encrypt: the summary goes to stdout and the error goes to stderr" {
   sops() {
     [ "${8}" = --output ] || return 1
