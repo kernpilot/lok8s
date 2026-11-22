@@ -88,6 +88,30 @@ _add() { # <key> [all] [skip_orphans]
   secrets::add-key
 }
 
+# Without a .sops.yaml the command refuses with one line on stderr that
+# names the path, prints nothing on stdout and writes no file (Go twin:
+# TestKeyCommandsWithoutSopsYAMLRefuseWithOneLine).
+@test "add-key without a .sops.yaml refuses with one line on stderr and writes nothing" {
+  bats_require_minimum_version 1.5.0
+  _load
+  printf 'v\n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.KEY"
+  printf 'enc\n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.KEY.enc"
+  rm -- "${PATH_BASE}/.sops.yaml"
+  local before
+  before="$(_state "${PATH_BASE}" "${PATH_CLUSTERS}")"
+  DOMAIN=a.dev run --separate-stderr _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output / $stderr" >&2; return 1; }
+  [ -z "${output}" ] || { echo "stdout: $output" >&2; return 1; }
+  [ "${stderr}" = "[error] ${PATH_BASE}/.sops.yaml not found. Run: lo secrets init" ] || {
+    echo "stderr: $stderr" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}" "${PATH_CLUSTERS}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}" "${PATH_CLUSTERS}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
+
 @test "a valid age key is appended to the creation rule" {
   _load
   run _add "${KEY_B}"
@@ -585,7 +609,7 @@ _ls_then_missing() {
   DOMAIN=a.dev run _add "${KEY_A}"
   chmod 755 "${dir}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Give lo write access to ${dir} and run this command again" ] || {
+  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Make sure that your account can write to ${dir} and to the lock file, if it exists. Then run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${dir}/sops.yaml")" = "${before}" ]
   [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }

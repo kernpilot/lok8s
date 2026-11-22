@@ -184,7 +184,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
-		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
+		ui.ErrorTo(c.ErrOut, "%s not found. Run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
 	// Before the first write (the lock file): the .gitignore of the store

@@ -297,11 +297,19 @@ sops (tagged `real-sops`) skip there. The `unit-tests` job runs that tag a
 second time on the runner, with the sops and ssh-to-age of `b install`. The
 step puts `.bin` first on `PATH`, and it fails before bats runs when `sops`
 or `ssh-to-age` resolves to a file other than the one in `.bin`. It also
-fails when a test fails, when the TAP plan is not `1..14` (the fourteen tagged
+fails when a test fails, when the TAP plan is not `1..19` (the nineteen tagged
 tests: a change to the tags changes that number in
 `.github/workflows/ci.yml`), or when a test skips. Locally,
 `bats --filter-tags real-sops tests/unit/` runs them when `ssh-keygen`,
 `sops` and `ssh-to-age` are on `PATH`.
+
+The tests of `tests/unit/secrets_test.bats` that call `require_argsh_cli`
+run the lib through the real argsh CLI, and they skip without
+`.bin/argsh.so`. CI sets `PATH_BIN` to the workspace `.bin` for
+`argsh builtins install`, so the `.so` is there, and the install step fails
+when it is not there or bash cannot load it. The step that runs the unit
+tests fails when one of them skips for that reason. Five of these tests
+also run the real sops and carry the tag `real-sops`.
 
 The bats suites keep running against the frozen tree because a command
 routed to bash, the provider plugins and the `lo drivers` fallback still

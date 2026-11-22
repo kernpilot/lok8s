@@ -594,11 +594,15 @@ of the file that the link names then. When the link does not name a regular
 file, the command stops and changes nothing. A second run waits
 `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
 and changes nothing. The lock file holds no data. The command opens the lock
-file for writing, and makes it when it is not there. When the open fails
-(for example, there is no lock file and the command cannot write in its
-directory), the command stops, names that directory and changes nothing,
-also when there is nothing to add or remove. A lock file that is there and
-that the command can write opens also in a directory that it cannot write.
+file for writing, and makes it when it is not there. The open fails when
+there is no lock file and your account cannot write to its directory. It
+also fails when the lock file exists and your account cannot write to it
+(for example, a lock file of another user). Then the command stops and
+changes nothing, also when there is nothing to add or remove. The error
+names the lock file and its directory, and gives one next step for both
+cases: "Make sure that your account can write to `<directory>` and to the
+lock file, if it exists." A lock file that is there and that the command
+can write opens also in a directory that it cannot write.
 A lock path that is not a regular file (a symlink, a directory, a FIFO, a
 socket or a device) stops the command before it opens the lock, and no open
 empties the lock file. The `lo` binary opens the lock without following a

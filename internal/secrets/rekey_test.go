@@ -145,6 +145,41 @@ func TestAddKeyNoStoreOutputIsPinned(t *testing.T) {
 	}
 }
 
+// Without a .sops.yaml both key commands refuse with one line that names the
+// path, and nothing is written (bash: the same line in secrets::add-key and
+// secrets::remove-key). The store of the domain holds a twin pair, an
+// orphan .enc and a .gitignore that is a directory, so a check or a read of
+// the store before the check of .sops.yaml has something to report. A check
+// of the store first prints the refusal of that .gitignore.
+func TestKeyCommandsWithoutSopsYAMLRefuseWithOneLine(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			store := c.Paths.Clusters + "/a.dev/secrets"
+			write(t, store+"/Secret.app.default.K", "v")
+			write(t, store+"/Secret.app.default.K.enc", "enc")
+			write(t, store+"/Secret.orphan.default.K.enc", "enc")
+			mkdir(t, store+"/.gitignore")
+			before := fileStates(t, c.Paths.Base)
+			var err error
+			if cmd == "add-key" {
+				err = c.AddKey(keyA, false, false)
+			} else {
+				err = c.RemoveKey(keyA, false, false)
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v", err)
+			}
+			want := "[error] " + c.Paths.Base + "/.sops.yaml not found. Run: lo secrets init\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, c.Paths.Base))
+		})
+	}
+}
+
 // --all with every domain store a path it cannot read (each domain directory
 // mode 000): add-key does not read those paths, and its output stays the one
 // of no store, while remove-key names them (TestRemoveKeyAllNamesEveryStoreItCannotRead).
