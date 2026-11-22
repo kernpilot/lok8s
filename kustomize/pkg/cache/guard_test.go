@@ -229,6 +229,12 @@ func TestPutRefusesAnUnsafeGitignoreBeforeAnyWrite(t *testing.T) {
 	}
 }
 
+// encKeyRefusal is the refusal of `lo secrets set` for the key key of the
+// Secret app in namespace default, whose entry name ends in .enc.
+func encKeyRefusal(key string) []string {
+	return []string{"the key '" + key + "' is refused: the plaintext file Secret.app.default." + key + " would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc"}
+}
+
 // A key whose entry name ends in .enc, in any letter case, is refused with
 // the text of `lo secrets set`: the rule !Secret.*.enc of the block
 // re-includes the name, and git would commit the plaintext. GetOrCreate
@@ -243,7 +249,7 @@ func TestPutRefusesAKeyThatEndsInEnc(t *testing.T) {
 				called = true
 				return []byte("minted"), nil
 			})
-			want := []string{"the key '" + key + "' is refused: the plaintext file Secret.app.default." + key + " would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc"}
+			want := encKeyRefusal(key)
 			if got := stopLines(t, err); !slices.Equal(got, want) {
 				t.Errorf("GetOrCreate refusal:\n%q\nwant:\n%q", got, want)
 			}
@@ -565,7 +571,8 @@ func TestPutReplacesAHardLinkAsAName(t *testing.T) {
 // A store can hold an entry whose name ends in .enc from before the check
 // (an earlier generator wrote it). A read writes nothing, so the cache keeps
 // reading it: GetOrCreate returns it and generates nothing. A write to it
-// is refused, and the file keeps its bytes.
+// is refused with the refusal of the key (as `lo secrets set` refuses it),
+// and the file keeps its bytes.
 func TestReadKeepsAnEntryThatPutRefuses(t *testing.T) {
 	c, dir := newStore(t)
 	path := filepath.Join(dir, "Secret.app.default.enc")
@@ -578,11 +585,42 @@ func TestReadKeepsAnEntryThatPutRefuses(t *testing.T) {
 	if err != nil || string(got) != "old" || called {
 		t.Fatalf("GetOrCreate = %q, %v (generated: %v), want the stored value", got, err, called)
 	}
-	if err := c.Put("enc", []byte("new")); err == nil {
-		t.Error("Put wrote an entry whose name ends in .enc")
+	if got, want := stopLines(t, c.Put("enc", []byte("new"))), encKeyRefusal("enc"); !slices.Equal(got, want) {
+		t.Errorf("Put refusal:\n%q\nwant:\n%q", got, want)
 	}
 	if got := readString(t, path); got != "old" {
 		t.Errorf("entry %q", got)
+	}
+}
+
+// The writer and the readers of an entry build its name in one place
+// (storeguard.EntryName): the file that Put writes, under the name that
+// storeguard.CheckName checks, is the file that Get, ReadByName and a
+// reference (FormatName) read. An empty namespace is "default" on both
+// sides.
+func TestPutWritesTheNameThatTheReadersRead(t *testing.T) {
+	for _, ns := range []string{"", "default", "ns"} {
+		dir := filepath.Join(t.TempDir(), "clusters", "alpha.dev", "secrets")
+		c, err := New(dir, ns, "app")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Put("tls.crt", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+		name := FormatName("app", ns, "tls.crt")
+		if got := names(t, dir); !slices.Equal(got, []string{".gitignore", name}) {
+			t.Errorf("namespace %q: the store holds %q, want the .gitignore and %s", ns, got, name)
+		}
+		if base, err := storeguard.CheckName(dir, "app", defaultNamespace(ns), "tls.crt"); err != nil || base != name {
+			t.Errorf("namespace %q: CheckName = %q, %v, want %s", ns, base, err, name)
+		}
+		if v, err := c.Get("tls.crt"); err != nil || string(v) != "v" {
+			t.Errorf("namespace %q: Get = %q, %v", ns, v, err)
+		}
+		if v, err := c.ReadByName(name); err != nil || string(v) != "v" {
+			t.Errorf("namespace %q: ReadByName(%s) = %q, %v", ns, name, v, err)
+		}
 	}
 }
 
