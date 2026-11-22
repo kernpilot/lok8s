@@ -57,6 +57,11 @@ jobs:
       - name: Install toolchain (b → argsh, yq)
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # `argsh builtins install` puts argsh.so into PATH_BIN (as in the
+          # Go job below). Without PATH_BIN the .so went to another directory,
+          # and every bats test that calls require_argsh_cli (a file test of
+          # .bin/argsh.so) skipped.
+          PATH_BIN: ${{ github.workspace }}/.bin
         run: |
           sudo apt-get update && sudo apt-get install -y gettext-base
           # Pin the BINARY, not just the installer script. install.sh resolves
@@ -75,6 +80,9 @@ jobs:
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
+          # The install can exit 0 without the file: stop here, not with
+          # skipped tests.
+          test -f .bin/argsh.so || { echo "::error::.bin/argsh.so is missing after 'argsh builtins install'"; exit 1; }
 
       - name: The installed yq is the pinned release
         # b exits 0 when a binary fails to install, and the bats container
@@ -146,12 +154,14 @@ jobs:
         # sops, with throwaway keys) skip there. This step runs them on the
         # runner: its ssh-keygen, the sops and ssh-to-age that `b install`
         # put in .bin, and the bats and libraries that the step above
-        # installed. It downloads nothing. .bin comes first on PATH, and the
-        # step fails before bats runs when sops or ssh-to-age resolves to
-        # another file. The TAP output goes through tee into a log, under
-        # pipefail (as in "Provision & register" of spinup.yml), so a failed
-        # test fails the step. The step also fails when the plan is not 1..14
-        # (the fourteen tagged tests) or when a test skipped.
+        # installed. Five of them also run the real argsh CLI with the
+        # .bin/argsh.so of the install step. It downloads nothing. .bin comes
+        # first on PATH, and the step fails before bats runs when sops or
+        # ssh-to-age resolves to another file. The TAP output goes through
+        # tee into a log, under pipefail (as in "Provision & register" of
+        # spinup.yml), so a failed test fails the step. The step also fails
+        # when the plan is not 1..19 (the nineteen tagged tests) or when a
+        # test skipped.
         run: |
           set -euo pipefail
           export PATH="${GITHUB_WORKSPACE}/.bin:${HOME}/.local/bin:${PATH}"
@@ -167,7 +177,7 @@ jobs:
           log="$(mktemp)"
           bats --filter-tags real-sops tests/unit/ | tee "${log}"
           plan="$(head -n 1 "${log}")"
-          if [[ "${plan}" != "1..14" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..14"; exit 1; fi
+          if [[ "${plan}" != "1..19" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..19"; exit 1; fi
           if grep -q '# skip' "${log}"; then echo "::error::a real-sops bats test skipped"; exit 1; fi
 
       - name: Real-git bats tests (native, the git of the runner)

@@ -1387,6 +1387,7 @@ require_argsh_cli() {
   done
 }
 
+# bats test_tags=real-sops
 @test "secrets set --encrypt: encrypts exactly that file, others untouched" {
   require_argsh_cli
   require_tools
@@ -1556,6 +1557,7 @@ _two_secrets() {
   printf 'beta-val'  > "${PATH_SECRETS}/Secret.beta.default.TOKEN"
 }
 
+# bats test_tags=real-sops
 @test "secrets encrypt --name: encrypts ONLY that Secret, leaves the rest alone" {
   _two_secrets
   run secrets_cli encrypt --name alpha
@@ -1565,6 +1567,7 @@ _two_secrets() {
   [ ! -f "${PATH_SECRETS}/Secret.beta.default.TOKEN.enc" ]
 }
 
+# bats test_tags=real-sops
 @test "secrets encrypt without --name still sweeps the whole store" {
   _two_secrets
   run secrets_cli encrypt
@@ -1573,6 +1576,7 @@ _two_secrets() {
   [ -f "${PATH_SECRETS}/Secret.beta.default.TOKEN.enc" ]
 }
 
+# bats test_tags=real-sops
 @test "secrets encrypt --name: a name that matches NOTHING fails loudly" {
   # A typo must not print a reassuring line and exit 0, leaving the operator to
   # commit whatever stale .enc is already on disk.
@@ -1584,6 +1588,7 @@ _two_secrets() {
   [ ! -f "${PATH_SECRETS}/Secret.alpha.default.TOKEN.enc" ]
 }
 
+# bats test_tags=real-sops
 @test "secrets encrypt --name: rejects a name that could escape the store" {
   _two_secrets
   run secrets_cli encrypt --name "../../etc"
