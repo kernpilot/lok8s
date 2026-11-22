@@ -1353,7 +1353,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
-		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
+		ui.ErrorTo(c.ErrOut, "%s not found. Run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
 	// The file that the lock, the read and the write use, resolved once

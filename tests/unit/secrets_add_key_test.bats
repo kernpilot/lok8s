@@ -585,7 +585,7 @@ _ls_then_missing() {
   DOMAIN=a.dev run _add "${KEY_A}"
   chmod 755 "${dir}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Give lo write access to ${dir} and run this command again" ] || {
+  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Make sure that your account can write to ${dir} and to the lock file, if it exists. Then run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${dir}/sops.yaml")" = "${before}" ]
   [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }

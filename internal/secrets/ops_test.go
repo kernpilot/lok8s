@@ -331,8 +331,8 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 	if err := c.Set(t.Context(), "app", "default", "KEY", "v", true); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
-	if !strings.Contains(errOut.String(), "No .sops.yaml found. Run: lo secrets init") {
-		t.Errorf("stderr: %s", errOut.String())
+	if want := "[error] No .sops.yaml found. Run: lo secrets init\n"; errOut.String() != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 	}
 	// Cache still written (plaintext), but no .enc produced.
 	if !fsutil.IsRegular(c.Paths.Base + "/.secrets/Secret.app.default.KEY") {

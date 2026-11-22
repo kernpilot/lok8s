@@ -1142,6 +1142,28 @@ _hard_link_replaced() {
   [ ! -e "${plain}.enc" ] || { echo "an .enc was written" >&2; return 1; }
 }
 
+# The summary of the sweep goes to stdout and an error goes to stderr, so a
+# caller can read the summary without the errors (Go twins: the out and errOut
+# buffers of TestEncryptSweepWithoutSopsYAMLFails and the sweep tests).
+@test "secrets encrypt: the summary goes to stdout and the error goes to stderr" {
+  sops() {
+    [ "${8}" = --output ] || return 1
+    printf 'enc' > "${9}"
+  }
+  local plain="${PATH_SECRETS}/Secret.app.default.K"
+  printf 'v' > "${plain}"
+  run --separate-stderr secrets::_encrypt_store "${PATH_SECRETS}" "" find
+  [ "$status" -eq 1 ] || { echo "status $status: $output / $stderr" >&2; return 1; }
+  [ -z "${output}" ] || { echo "stdout: $output" >&2; return 1; }
+  [ "${stderr}" = '[error] No .sops.yaml found. Run: lo secrets init' ] || { echo "stderr: $stderr" >&2; return 1; }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  run --separate-stderr secrets::_encrypt_store "${PATH_SECRETS}" "" find
+  [ "$status" -eq 0 ] || { echo "status $status: $output / $stderr" >&2; return 1; }
+  [ "${output}" = 'Encrypted 1 secret(s)' ] || { echo "stdout: $output" >&2; return 1; }
+  [ -z "${stderr}" ] || { echo "stderr: $stderr" >&2; return 1; }
+  [ "$(cat "${plain}.enc")" = enc ]
+}
+
 # init checks the .gitignore of the store before its first write, and a
 # rerun with a config checks it too. Its status is the refusal's: 1, no
 # .sops.yaml, and the file that the link names keeps its bytes (Go twin:

@@ -584,47 +584,65 @@ func TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig(t *testing.T) {
 }
 
 // With a .sops.yaml link, the lock goes beside the file that the link names.
-// In a directory that lo cannot write, both commands refuse, also add-key of
-// a recipient that is already there and remove-key of a key in no rule. The
-// line names that directory and says where the lock goes; nothing changes.
+// When the open of the lock fails, both commands refuse, also add-key of a
+// recipient that is already there and remove-key of a key in no rule. The
+// open fails in a directory that the account cannot write, and for a lock
+// file that it cannot write (for example, one of another user). The line is
+// the same for both: it names the directory and the lock file and says where
+// the lock goes; nothing changes.
 func TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened(t *testing.T) {
 	skipUnlessPermissionsHold(t)
-	for _, cmd := range []string{"add-key", "remove-key"} {
-		t.Run(cmd, func(t *testing.T) {
-			c, out, errOut := testEnv(t)
-			c.Domain = "a.dev"
-			sopsRules(t, c, keyA)
-			dir := mkdir(t, c.Paths.Base+"/conf")
-			if err := os.Rename(c.sopsConfigPath(), dir+"/sops.yaml"); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("conf/sops.yaml", c.sopsConfigPath()); err != nil {
-				t.Fatal(err)
-			}
-			real, err := filepath.EvalSymlinks(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
+	for _, tc := range []struct {
+		name string
+		deny func(t *testing.T, dir string)
+	}{
+		{"a directory it cannot write", func(t *testing.T, dir string) {
 			if err := os.Chmod(dir, 0o555); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-			before := fileStates(t, c.Paths.Base)
+		}},
+		{"a lock file it cannot write", func(t *testing.T, dir string) {
+			write(t, dir+"/sops.yaml.lock", "")
+			if err := os.Chmod(dir+"/sops.yaml.lock", 0o444); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		for _, cmd := range []string{"add-key", "remove-key"} {
+			t.Run(tc.name+"/"+cmd, func(t *testing.T) {
+				c, out, errOut := testEnv(t)
+				c.Domain = "a.dev"
+				sopsRules(t, c, keyA)
+				dir := mkdir(t, c.Paths.Base+"/conf")
+				if err := os.Rename(c.sopsConfigPath(), dir+"/sops.yaml"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("conf/sops.yaml", c.sopsConfigPath()); err != nil {
+					t.Fatal(err)
+				}
+				real, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tc.deny(t, dir)
+				before := fileStates(t, c.Paths.Base)
 
-			if cmd == "add-key" {
-				err = c.AddKey(keyA, false, false)
-			} else {
-				err = c.RemoveKey(keyB, false, false)
-			}
-			if !errors.Is(err, ErrHandled) {
-				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
-			}
-			want := "[error] cannot open the lock file " + real + "/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Give lo write access to " + real + " and run this command again\n"
-			if errOut.String() != want || out.String() != "" {
-				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
-			}
-			sameStates(t, before, fileStates(t, c.Paths.Base))
-		})
+				if cmd == "add-key" {
+					err = c.AddKey(keyA, false, false)
+				} else {
+					err = c.RemoveKey(keyB, false, false)
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				want := "[error] cannot open the lock file " + real + "/sops.yaml.lock: nothing was changed. The lock goes beside the file that .sops.yaml names. Make sure that your account can write to " + real + " and to the lock file, if it exists. Then run this command again\n"
+				if errOut.String() != want || out.String() != "" {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+				}
+				sameStates(t, before, fileStates(t, c.Paths.Base))
+			})
+		}
 	}
 }
 
