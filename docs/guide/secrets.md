@@ -276,18 +276,27 @@ again. The plaintext goes to a new private temp file in the store (mode
 old file keeps the old content. When the write fails, the command names the
 plaintext file and removes the temp file, and the old file stays. The check
 and the rename are two steps: lo does not stop a program that replaces the
-path between them, and `set` and `decrypt` do not lock the store. In the
-bash implementation, `set` and `decrypt` need a `mv` that takes `-T` (see the
-encrypt below), also without `--encrypt`.
+path between them, and `set` and `decrypt` do not lock the store. The
+binary syncs the store directory after a new `.gitignore` and before the
+first plaintext, and again after the plaintext, so the order holds after a
+power loss too. When a sync fails after a rename, the error says that the
+file was written. In the bash implementation, `set` and `decrypt` need a
+`mv` that takes `-T` (see the encrypt below), also without `--encrypt`. The
+bash implementation does not sync, and its `decrypt` checks the entries once
+before its first write; the binary checks each entry again at its write.
 
 The secret generator of `lo build` writes its cache into the same store
 with the same checks as `set`. It refuses a name, a namespace or a key with
 a path part, a key whose plaintext name ends in `.enc` (in any letter case),
 and a plaintext path that is not a regular file and not absent. Before it
 writes a plaintext, it writes the block into the `.gitignore`, or it refuses
-a `.gitignore` that cannot keep the plaintext out of git. It does these
-checks before it generates a value too: for a refused key, no generator runs
-(a `bash:` command has side effects). A refusal has the text of `set`. It
+a `.gitignore` that cannot keep the plaintext out of git. For a value that
+it makes on a cache miss, it does these checks before the generator runs:
+for a refused key, no generator runs (a `bash:` command has side effects).
+An `env:` entry and a `bash:` entry with `update: true` get their value
+first and then write it: for them, the check refuses the write, and a
+`bash:` command with `update: true` has run already. A refusal has the text
+of `set`. It
 names a file of a store `clusters/<domain>/secrets` relative to the project,
 as `set` does, and a file of any other store relative to the parent
 directory of the store. When a write fails, the error names the file and
@@ -319,7 +328,9 @@ checks: they hold hashes, not values.
 A dry run (`lo bootstrap --dry-run`) writes no file into the store, and no
 `.gitignore`. Before it generates or keeps a value, it does the same checks
 as the build: it reads the `.gitignore` and does not write the block. Thus a
-dry run refuses what the build refuses, with the same text.
+dry run refuses a key, an entry or a `.gitignore` that the build refuses,
+with the same text. It cannot tell that a write of the build will fail (for
+example, on a full disk).
 
 The `.gitignore` of the store does not cover these cases:
 
@@ -331,12 +342,16 @@ The `.gitignore` of the store does not cover these cases:
   the `.gitignore` of the store. A rule there cannot re-include a file that
   the store ignores.
 
-- `git add -f` adds an ignored file, and git keeps a file that it tracks
-  already. No ignore rule stops these. Run `git ls-files` on the store to
-  see the files that git tracks.
+- The rules keep an untracked plaintext out of git only. `git add -f` adds
+  an ignored file, and git keeps a file that it tracks already: `set`,
+  `decrypt` and a build write a tracked plaintext as any other, and git
+  shows the change. No ignore rule stops these. Run `git ls-files` on the
+  store to see the files that git tracks.
 
 - lo trusts the store directory and its parent directories. It follows a
-  symlink to the store or to a parent directory.
+  symlink to the store or to a parent directory. The checks do not stop a
+  program of the same user that replaces the store, a parent directory or
+  the `.gitignore` during a write.
 
 - lo checks only the files that it writes. A plaintext file that a user
   renames (for example, to a name that ends in `.enc`) is outside these
