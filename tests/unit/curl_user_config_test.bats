@@ -171,9 +171,11 @@ ${root}/libs/split"
 }
 
 # The anti-vacuity half: each canary breaks a rule in one way, and the gate
-# names its file and line. The compliant forms (and the forms that are not
-# a curl call) give no line. The allowlist of the tree is cleared here: its
-# entries name files that this run does not read.
+# names its file and line. The compliant forms give no line, and so do the
+# forms that are not a curl call: in quotes, in a comment, or on a line
+# that opts out of the backstop with "# curl-gate: not a call". The
+# allowlist of the tree is cleared here: its entries name files that this
+# run does not read.
 @test "curl gate: each canary breaks the rule it shows, and the compliant forms pass" {
   local bad="${BATS_TEST_TMPDIR}/bad.sh" good="${BATS_TEST_TMPDIR}/good.sh"
   CURL_GATE_ALLOW=()
@@ -237,8 +239,8 @@ local -a curl_args=(
   --config -
 )
 error "a value for the curl option holds a control character"
-command -v curl >/dev/null
-apt-get -y install jq curl gnupg
+command -v curl >/dev/null # curl-gate: not a call
+apt-get -y install jq curl gnupg # curl-gate: not a call
 x=$(http::curl_config header "Authorization: Bearer ${T}" | (
   http::tls_log_vars_unset &&
     curl -q -K - -fsSL \
@@ -251,9 +253,9 @@ if out=$(printf '%s' "${b}" | ( http::tls_log_vars_unset && curl -q -sS --data-b
 ( http::tls_log_vars_unset && cu\
 rl -q -sS https://h.example/n10 )
 eval "${saved_traps}"
-x=$(echo curl is a word, not a call)
+x=$(echo curl is a word, not a call) # curl-gate: not a call
 printf '%s\n' "${a}" | tr -d '\n' | ( http::tls_log_vars_unset && curl -q -sS https://h.example/n11 )
-y="$(echo curl is a word here too)"
+y="$(echo curl is a word here too)" # curl-gate: not a call
 SH
   local q="a curl call: -q is not its first argument"
   local v="curl named through a variable: the gate cannot check that call"
@@ -355,6 +357,923 @@ ${good}:19
 ${good}:23"
   run curl_gate x "${good}"
   assert_failure 2
+}
+
+# A shell operator ends a word: in "echo x=y; curl …" the word before the
+# ; is x=y, not the assignment word "x=y;" that the wrapper step dropped (it
+# then saw "echo curl", a curl that is no command, and both modes passed).
+# Each canary is a credential call in both modes. In lines 1 to 9, a word
+# comes before the assignment, and no space comes before the operator. In
+# line 10, the assignment comes just after the ( of a subshell. In lines 11
+# to 13, an operator in a ${ } is no operator (X=${a//;/} stays one
+# assignment word), and the ${ } ends at its first }, so the ; after it
+# ends the word. In line 14, a ${ with no } before the curl skips nothing:
+# the X=1 in its $( ) is an assignment word, as before. The controls keep
+# their verdicts: a real assignment prefix (also with an operator in
+# quotes) is still a call with -q, a quoted operator is no operator, and
+# the & of a redirection (>&x=y, a file) ends no word, so the curl after
+# it stays an argument (its line opts out of the backstop).
+@test "curl gate: a shell operator ends a word, so an assignment before it hides no curl call" {
+  local bad="${BATS_TEST_TMPDIR}/ops-bad.sh" good="${BATS_TEST_TMPDIR}/ops-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+echo x=y; curl -u "${U}:${P}" "${url}"
+echo x=y&& curl -u "${U}:${P}" "${url}"
+echo x=y|| curl -u "${U}:${P}" "${url}"
+echo x=y|curl -u "${U}:${P}" "${url}"
+echo x=y& curl -u "${U}:${P}" "${url}"
+(echo x=y; curl -u "${U}:${P}" "${url}")
+out=$(echo x=y; curl -u "${U}:${P}" "${url}")
+(echo x=y)&& curl -u "${U}:${P}" "${url}"
+{ echo x=y;}&& curl -u "${U}:${P}" "${url}"
+(X=1 curl -u "${U}:${P}" "${url}")
+X=${a//;/} curl -u "${U}:${P}" "${url}"
+X=${a//&/+} curl -u "${U}:${P}" "${url}"
+echo X=${x:-a}; curl -u "${U}:${P}" "${url}"
+echo ${y:-$(X=1 curl -u "${U}:${P}" "${url}")}
+SH
+  cat > "${good}" <<'SH'
+X=1 curl -q -sS https://h.example/c1
+X="a;b" curl -q -sS https://h.example/c2
+X='a|b' Y="c&&d" curl -q -sS https://h.example/c3
+echo "x=y; curl -u ${U}:${P} ${url}"
+echo 'x=y&& curl -u u:p https://h.example/c4'
+( http::tls_log_vars_unset && curl -q -sS "https://h.example/c5?a=1;b=2" )
+x=$(X=1 curl -q -sS https://h.example/c6)
+echo x=y 2>&1 | curl -q -sS https://h.example/c7
+echo a >&x=y curl -sS https://h.example/c8 # curl-gate: not a call
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local want_q="" want_t="" want_l=""
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+    want_q+="${bad}:${n}: ${q}"$'\n'
+    want_t+="${bad}:${n}: ${t}"$'\n'
+    want_l+="${bad}:${n} credential"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want_q%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want_t%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:1
+${good}:2
+${good}:3
+${good}:6
+${good}:7
+${good}:8"
+  # The assignment prefixes are outside the TLS form (as before), the
+  # helper form with a quoted ; is not.
+  run curl_gate tls "${good}"
+  assert_failure 1
+  assert_output "${good}:1: ${t}
+${good}:2: ${t}
+${good}:3: ${t}
+${good}:7: ${t}
+${good}:8: ${t}"
+}
+
+# A ${ } nests: a ${ in it opens one more, quotes in it are quotes, and
+# only its own } ends it. A $( ) or a `…` in a ${ } or in double quotes is
+# a command, and the gate finds a call there as at the top level. A call
+# also starts at curl and a redirection (curl</dev/null). Each canary is a
+# credential call in both modes. The controls: curl in the text of a ${ }
+# is no call, and a redirection is no argument, so a -q after it is the
+# first argument.
+@test "curl gate: an expansion nests, a command in it is a command, and a call starts at curl and a redirection" {
+  local bad="${BATS_TEST_TMPDIR}/nest-bad.sh" good="${BATS_TEST_TMPDIR}/nest-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+X=${a:-${b};} curl -u "${U}:${P}" "${url}"
+echo ${y:-$(X=${z} curl -u "${U}:${P}" "${url}")}
+echo ${y:-`curl -u "${U}:${P}" "${url}"`}
+echo "x `curl -u u:p https://h.example/t4`"
+X=${a:-"}"} curl -u "${U}:${P}" "${url}"
+curl</dev/null -u "${U}:${P}" "${url}"
+curl>/tmp/out -u "${U}:${P}" "${url}"
+SH
+  cat > "${good}" <<'SH'
+echo ${a:-${b};curl -u u:p https://h.example/n1}
+echo ${a:-see curl docs}
+curl</dev/null -q -sS https://h.example/n3
+curl 2>/dev/null -q -sS https://h.example/n4
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local want_q="" want_t="" want_l=""
+  for n in 1 2 3 4 5 6 7; do
+    want_q+="${bad}:${n}: ${q}"$'\n'
+    want_t+="${bad}:${n}: ${t}"$'\n'
+    want_l+="${bad}:${n} credential"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want_q%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want_t%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:3
+${good}:4"
+  run curl_gate tls "${good}"
+  assert_failure 1
+  assert_output "${good}:3: ${t}
+${good}:4: ${t}"
+}
+
+# The backstop: a curl word in code that the gate cannot place as a call
+# is a finding in the q and tls modes. The canaries: a case arm, a
+# redirection before the command (also before \curl and a path), a lookup,
+# an argument, and six lines that do not opt out: more text after the
+# marker, no space after its #, other text of the same length, no white
+# space before its #, the marker text in a string before a comment of
+# the same length, and a marker in a string that goes on to the next
+# line (no comment). A line opts out only with the trailing comment
+# "# curl-gate: not a call" after white space. The controls hold no curl
+# word in code: in quotes, in a comment, in a ${ }, in a longer word, and
+# on a line that opts out.
+@test "curl gate: a curl word that the gate cannot place is a finding, unless its line opts out" {
+  local bad="${BATS_TEST_TMPDIR}/word-bad.sh" good="${BATS_TEST_TMPDIR}/word-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+case "${x}" in a) curl -u "${U}:${P}" "${url}" ;; esac
+2>&1 curl -u "${U}:${P}" "${url}"
+2>/dev/null \curl -u "${U}:${P}" "${url}"
+2>/dev/null /usr/bin/curl -u "${U}:${P}" "${url}"
+command -v curl >/dev/null
+x=$(echo curl is a word, not a call)
+cmd -x curl # curl-gate: not a call here
+cmd -x curl #curl-gate: not a call
+cmd -x curl # curl-gate: not a CALL
+cmd -x curl;# curl-gate: not a call
+echo "# curl-gate: not a call" curl # curl-gate: not a CALL
+echo curl "x # curl-gate: not a call
+y"
+SH
+  cat > "${good}" <<'SH'
+echo "curl -u ${U}:${P} ${url}"
+# curl -u "${U}:${P}" "${url}"
+cmd # curl -u "${U}:${P}" "${url}"
+echo ${a:-see curl docs}
+curl_gate q x.sh
+source lib/curl.sh
+cmd -x curl # curl-gate: not a call
+SH
+  local c="a curl word the gate cannot place" want=""
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    want+="${bad}:${n}: ${c}"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output ""
+  local m
+  for m in q tls list; do
+    run curl_gate "${m}" "${good}"
+    assert_success
+    assert_output ""
+  done
+}
+
+# The state of a line goes on at the next line: a quote that is still
+# open (the lines are one command), a $( ) that is still open (the next
+# command starts in it), and a here-document (its body is no command).
+# The calls (q): a single quote in a ${ } in double quotes is text (line
+# 1), a quote that a line before opened ends at its ' (line 3), a call
+# after the end of a "$( )" over more lines (lines 8 and 9), and a call
+# after a body (lines 20 and 26), after a shift in (( )) (line 22). The
+# findings that the gate cannot place: a curl word in a string over more
+# lines, also on a line that starts with # (line 5); a curl word in an
+# unquoted body, where the shell runs the $( ) (lines 11 and 14, a split
+# name); a curl word in quotes on a line that starts in a $( ) of a line
+# before (line 28: the ) of the case arm ends the $( ) for the gate). In
+# amb.sh, a single quote in a ${ } in double quotes comes before the curl
+# word in quotes: in its default mode bash reads that quote as a quote. In
+# open.sh, a quoted body has no end in the file. The controls: a quoted
+# body is text (also with <<-), libcurl and curl_config are no curl words,
+# and the calls after a string or a $( ) over more lines are calls.
+@test "curl gate: a quote, a \$( ) and a here-document over more lines keep their state, and a line that the gate cannot read is a finding" {
+  local bad="${BATS_TEST_TMPDIR}/multi-bad.sh" amb="${BATS_TEST_TMPDIR}/amb.sh"
+  local open="${BATS_TEST_TMPDIR}/open.sh" good="${BATS_TEST_TMPDIR}/multi-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+X="${a:-'}" curl -u u:p https://h.example/a1
+x='
+'; curl -u u:p https://h.example/a2
+echo "a
+# curl -u u:p https://h.example/a3
+b"
+x="$(
+  printf '%s' "${y}" | curl -u u:p https://h.example/a4
+)"; curl -u u:p https://h.example/a5
+cat <<EOF
+'$(curl -u u:p https://h.example/a6)'
+EOF
+cat <<EOF
+$(cu\
+rl -u u:p https://h.example/a7)
+EOF
+cat <<'EOF'
+x
+EOF
+curl -u u:p https://h.example/a8
+y=$(( 1 << n ))
+curl -u u:p https://h.example/a9
+cat <<EOF &&
+body
+EOF
+curl -u u:p https://h.example/a10
+z="$(f
+case "${y}" in a) curl -u u:p https://h.example/a11 ;; esac
+)"
+SH
+  printf '%s\n' 'X="${a:-'"'"'"'"'"'}" curl -u u:p https://h.example/b1' > "${amb}"
+  printf '%s\n' "cat <<'EOF'" 'curl -u u:p https://h.example/c1' 'EOF-not' > "${open}"
+  cat > "${good}" <<'SH'
+y="${a:-'x'}"; ( http::tls_log_vars_unset && curl -q -sS https://h.example/g1 )
+cat <<'EOF'
+curl -u u:p https://h.example/g2
+EOF
+cat <<-"EOF"
+	$(curl -u u:p https://h.example/g3)
+	EOF
+cat <<EOF
+libcurl and curl_config are no words of the gate
+EOF
+echo "x
+y" && ( http::tls_log_vars_unset && curl -q -sS https://h.example/g4 )
+z=$(
+  echo a
+) && ( http::tls_log_vars_unset && curl -q -sS https://h.example/g5 )
+echo "a ' b" && ( http::tls_log_vars_unset && curl -q -sS https://h.example/g6 )
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place"
+  local want_q="" want_t="" want_l=""
+  for n in 1 3 5 8 9 11 14 20 22 26 28; do
+    case "${n}" in
+      5 | 11 | 14 | 28) want_q+="${bad}:${n}: ${c}"$'\n'; want_t+="${bad}:${n}: ${c}"$'\n' ;;
+      *) want_q+="${bad}:${n}: ${q}"$'\n'; want_t+="${bad}:${n}: ${t}"$'\n'; want_l+="${bad}:${n} credential"$'\n' ;;
+    esac
+  done
+  run curl_gate q "${bad}" "${amb}" "${open}"
+  assert_failure 1
+  assert_output "${want_q}${amb}:1: ${c}
+${open}:2: ${c}"
+  run curl_gate tls "${bad}" "${amb}" "${open}"
+  assert_failure 1
+  assert_output "${want_t}${amb}:1: ${c}
+${open}:2: ${c}"
+  run curl_gate list "${bad}" "${amb}" "${open}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate tls "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:1
+${good}:12
+${good}:15
+${good}:16"
+}
+
+# A here-document body ends only at the line that is its delimiter,
+# compared exactly, as bash does: " EOF" and a tab before EOF are body text
+# with << (lines 7 and 11), and <<- strips only the leading tabs (line 16).
+# In an unquoted body, a line that ends in a backslash joins the next line
+# before the test: "x \" then "EOF" is body text (line 19), and "E\" then
+# "OF" ends the body (line 24). In an unquoted body, a curl name in quotes
+# after a $( or a backtick of the body is a call too (lines 2 to 4, and
+# line 29 after a $( on the line before). The controls: the same lines in a
+# quoted body, a curl name in quotes with no $( or backtick before it in its
+# body (also after a body with a $( that ended, and after a file whose body
+# has no end), and a YAML block, whose indentation the shell does not see.
+@test "curl gate: a here-document body ends at its exact delimiter after the line join, and a quoted curl name in a \$( ) of an unquoted body is a finding" {
+  local bad="${BATS_TEST_TMPDIR}/hd-bad.sh" good="${BATS_TEST_TMPDIR}/hd-good.sh"
+  local yaml="${BATS_TEST_TMPDIR}/hd-good.yaml" open="${BATS_TEST_TMPDIR}/hd-open.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+cat <<EOF
+$("curl" -u u:p https://h.example/d1)
+$('curl' -u u:p https://h.example/d2)
+`"/usr/bin/curl" -u u:p https://h.example/d3`
+EOF
+cat <<EOF
+ EOF
+'$(curl -u u:p https://h.example/d4)'
+EOF
+cat <<EOF
+	EOF
+'$(curl -u u:p https://h.example/d5)'
+EOF
+cat <<-'EOF'
+x
+	EOF
+curl -u u:p https://h.example/d6
+cat <<EOF
+x \
+EOF
+'$(curl -u u:p https://h.example/d7)'
+EOF
+cat <<EOF
+E\
+OF
+curl -u u:p https://h.example/d8
+cat <<EOF
+$(f
+"curl" -u u:p https://h.example/d9)
+EOF
+SH
+  printf '%s\n' 'cat <<EOF' '$(date)' > "${open}"
+  cat > "${good}" <<'SH'
+cat <<EOF
+"curl" is a word of this text
+EOF
+cat <<EOF
+$(date)
+EOF
+cat <<EOF
+"curl" is a word of this text
+EOF
+cat <<'EOF'
+	EOF
+curl -u u:p https://h.example/g1
+EOF
+cat <<'EOF'
+ EOF
+curl -u u:p https://h.example/g2
+x \
+EOF
+SH
+  cat > "${yaml}" <<'YAML'
+spec:
+  args:
+    - |
+      cat <<'EOF'
+      curl -u u:p https://h.example/y1
+      EOF
+      ( http::tls_log_vars_unset && curl -q -sS https://h.example/y2 )
+YAML
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place"
+  local want_q="" want_t="" want_l=""
+  for n in 2 3 4 8 12 17 21 26 29; do
+    case "${n}" in
+      17 | 26) want_q+="${bad}:${n}: ${q}"$'\n'; want_t+="${bad}:${n}: ${t}"$'\n'; want_l+="${bad}:${n} credential"$'\n' ;;
+      *) want_q+="${bad}:${n}: ${c}"$'\n'; want_t+="${bad}:${n}: ${c}"$'\n' ;;
+    esac
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want_q%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want_t%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${open}" "${good}" "${yaml}"
+  assert_success
+  assert_output ""
+  run curl_gate tls "${open}" "${good}" "${yaml}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${open}" "${good}" "${yaml}"
+  assert_success
+  assert_output "${yaml}:7"
+}
+
+# For <<-, bash joins the lines of an unquoted body first and then strips
+# the leading tabs of the joined line: "E\" then "<tab>OF" is body text
+# (line 3), and "<tab>E\" then "OF" ends the body (line 8). In a YAML
+# file, YAML removes the indentation of the block scalar (that of its
+# first line) before the shell sees the text: a delimiter with one more
+# space (line 5 of the YAML file) or with the indentation of a command in
+# the block (line 11) is body text for bash, and the gate reports it. A
+# new block sets its own indentation (lines 15 to 18), and in a quoted
+# body the same holds (line 20). A block with an indentation indicator
+# (|2) has no delimiter that the gate can place (line 24). The control: a
+# here-document whose opener has more indentation than its delimiter,
+# with the delimiter at the indentation of the block, after a comment line
+# that ends in "|" (a comment starts no block).
+@test "curl gate: <<- strips the tabs of the joined line, and a YAML body ends only at the indentation of its block" {
+  local sh="${BATS_TEST_TMPDIR}/tabs-bad.sh" yaml="${BATS_TEST_TMPDIR}/block-bad.yaml"
+  local good="${BATS_TEST_TMPDIR}/block-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${sh}" <<'SH'
+cat <<-EOF
+E\
+	OF
+'$(curl -u u:p https://h.example/t1)'
+EOF
+cat <<-EOF
+	E\
+OF
+curl -u u:p https://h.example/t2
+SH
+  cat > "${yaml}" <<'YAML'
+spec:
+  args:
+    - |
+      cat <<EOF
+       EOF
+      '$(curl -u u:p https://h.example/y1)'
+      EOF
+      if true; then
+        cat <<EOF
+        '$(curl -u u:p https://h.example/y2)'
+        EOF
+      '$(curl -u u:p https://h.example/y3)'
+      EOF
+      fi
+    - |
+          cat <<EOF
+          EOF
+          curl -u u:p https://h.example/y4
+          cat <<'EOF'
+           EOF
+          EOF
+    - |2
+        cat <<EOF
+        EOF
+        echo the end
+YAML
+  cat > "${good}" <<'YAML'
+spec:
+  # the args: |
+    args:
+      - |
+        if true; then
+          cat <<'EOF'
+        curl -u u:p https://h.example/g1
+        EOF
+        fi
+        ( http::tls_log_vars_unset && curl -q -sS https://h.example/g2 )
+YAML
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place" d="a here-document delimiter the gate cannot place"
+  run curl_gate q "${sh}" "${yaml}"
+  assert_failure 1
+  assert_output "${sh}:4: ${c}
+${sh}:9: ${q}
+${yaml}:5: ${d}
+${yaml}:6: ${c}
+${yaml}:10: ${c}
+${yaml}:11: ${d}
+${yaml}:12: ${c}
+${yaml}:18: ${q}
+${yaml}:20: ${d}
+${yaml}:24: ${d}"
+  run curl_gate tls "${sh}" "${yaml}"
+  assert_failure 1
+  assert_output "${sh}:4: ${c}
+${sh}:9: ${t}
+${yaml}:5: ${d}
+${yaml}:6: ${c}
+${yaml}:10: ${c}
+${yaml}:11: ${d}
+${yaml}:12: ${c}
+${yaml}:18: ${t}
+${yaml}:20: ${d}
+${yaml}:24: ${d}"
+  run curl_gate list "${sh}" "${yaml}"
+  assert_success
+  assert_output "${sh}:9 credential
+${yaml}:18 credential"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate tls "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:10"
+}
+
+# A folded block (">") joins its lines with a space, and an empty line
+# becomes the newline: YAML gives "cat <<EOF\nEOF '$(curl …)'\nEOF\n", and
+# bash runs the $( ) in the unquoted body. The gate does not decode the
+# folding, so each line with a << in a folded block is a finding in the q
+# and tls modes (fold.yaml:2), also a << whose delimiter is on the next
+# line (fold.yaml:9) and a << on a later line of the block (fold.yaml:14).
+# The controls: a literal block ("|"), a tab after the indentation, and a
+# <<< in a folded block.
+@test "curl gate: a here-document in a folded YAML block is a finding" {
+  local fold="${BATS_TEST_TMPDIR}/fold.yaml" good="${BATS_TEST_TMPDIR}/fold-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${fold}" <<'YAML'
+run: >
+  cat <<EOF
+
+  EOF
+  '$(curl -u u:p https://h.example/f1)'
+
+  EOF
+also: >-
+  cat <<
+  EOF
+  echo x
+second: >
+  echo start
+  cat <<EOF
+  EOF
+YAML
+  printf '%b' "lit: |\n  cat <<EOF\n\n  EOF\n  '\$(curl -u u:p https://h.example/g1)'\ntabbed: |\n    cat <<-EOF\n    \tbody\n    \tEOF\nstr: >\n  cat <<<\"x\"\n" > "${good}"
+  local f="a here-document in a folded YAML block (>) the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${fold}"
+    assert_failure 1
+    assert_output "${fold}:2: ${f}
+${fold}:9: ${f}
+${fold}:14: ${f}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${fold}" "${good}"
+  assert_success
+  assert_output ""
+}
+
+# In a folded block, an empty line after a line that ends in a backslash
+# gives the backslash and a newline, and the shell removes both. YAML gives
+# "cat <\\\n<EOF\nEOF '$(curl …)'\nEOF\n" from bs.yaml:1-9: bash reads
+# cat <<EOF and runs the $( ) in the unquoted body, but no line holds a
+# <<. And "cu\", an empty line and "rl -u …" (bs.yaml:10-13) give a curl
+# call. The gate does not decode the folding: each line of a folded block
+# that ends in a backslash is a finding in the q and tls modes. The
+# controls: a backslash at the end of a line of a literal block (the gate
+# joins the lines as the shell does), and a backslash in a line of a
+# folded block.
+@test "curl gate: a backslash at the end of a line of a folded YAML block is a finding" {
+  local bs="${BATS_TEST_TMPDIR}/bs.yaml" good="${BATS_TEST_TMPDIR}/bs-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${bs}" <<'YAML'
+run: >
+  cat <\
+
+  <EOF
+
+  EOF
+  '$(curl -u u:p https://h.example/b1)'
+
+  EOF
+split: >
+  cu\
+
+  rl -u u:p https://h.example/b2
+YAML
+  cat > "${good}" <<'YAML'
+lit: |
+  ( http::tls_log_vars_unset && curl -q -sS \
+    https://h.example/g1 )
+str: >
+  echo a\ b
+YAML
+  local f="a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${bs}"
+    assert_failure 1
+    assert_output "${bs}:2: ${f}
+${bs}:11: ${f}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${bs}" "${good}"
+  assert_success
+  assert_output "${good}:2"
+}
+
+# YAML takes only spaces as indentation. In first.yaml, the first line of
+# the block is two spaces and a tab: the parsers do not agree on it (YAML
+# takes indentation two and the tab as content, a parser can also stop
+# with an error). With indentation two, bash keeps two spaces before the
+# first EOF and runs the $( ); the last EOF ends the body. The gate took
+# the line as blank and indentation four. Now a tab in the leading white
+# space of the first line of a block (also a line of white space only),
+# or after fewer spaces than the indentation of the block (in.yaml:3), is
+# a finding in the q and tls modes. From that line on the gate does not
+# know the indentation of the block, so each delimiter of a body is a
+# finding too. The control: a tab after the indentation (fold-good.yaml
+# in the case above).
+@test "curl gate: a tab in the indentation of a YAML block is a finding" {
+  local first="${BATS_TEST_TMPDIR}/first.yaml" in="${BATS_TEST_TMPDIR}/in.yaml"
+  CURL_GATE_ALLOW=()
+  printf '%b' "run: |\n  \t\n    cat <<EOF\n    EOF\n    '\$(curl -u u:p https://h.example/t1)'\n  EOF\n" > "${first}"
+  printf '%b' "run: |\n    cat <<EOF\n  \tEOF\n    EOF\n" > "${in}"
+  local b="a YAML block line the gate cannot place: a tab in its indentation"
+  local c="a curl word the gate cannot place" d="a here-document delimiter the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${first}" "${in}"
+    assert_failure 1
+    assert_output "${first}:2: ${b}
+${first}:4: ${d}
+${first}:5: ${c}
+${first}:6: ${d}
+${in}:3: ${b}
+${in}:3: ${d}
+${in}:4: ${d}"
+  done
+  run curl_gate list "${first}" "${in}"
+  assert_success
+  assert_output ""
+}
+
+# A backslash at the end of a line continues the command, but not in a
+# comment: in comment.sh (the exact input of a review), bash reads
+# "echo #\" as a comment, so lines 2 and 4 are comments too, and the curl
+# subshell of line 3 runs. After x=1\, the shell joins the # line first:
+# x=1#;curl … runs the curl (lines 5-6). The gate does not decide which
+# of the two it is: in the q and tls modes, a line that ends in a
+# backslash before a line that starts with # is a finding, and the # line
+# is skipped as a comment. The call of line 3 is a finding too. The
+# controls: a comment line, a continuation, a # line after a continuation
+# that ended, and a backslash in a double quote that stays open.
+@test "curl gate: a backslash at the end of a line before a # line is a finding" {
+  local f="${BATS_TEST_TMPDIR}/comment.sh" good="${BATS_TEST_TMPDIR}/comment-good.sh"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'SH'
+echo #\
+#'
+( "curl" -u u:p https://h )
+#'
+x=1\
+#;curl -u u:p https://h.example/c1
+SH
+  cat > "${good}" <<'SH'
+# a comment
+echo a \
+  b
+y=1\
+z=2
+#;curl -u u:p https://h.example/c2
+echo "a\
+#b"
+SH
+  local b="a backslash at the end of a line before a # line the gate cannot place"
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  run curl_gate q "${f}"
+  assert_failure 1
+  assert_output "${f}:1: ${b}
+${f}:3: ${q}
+${f}:5: ${b}"
+  run curl_gate tls "${f}"
+  assert_failure 1
+  assert_output "${f}:1: ${b}
+${f}:3: ${t}
+${f}:5: ${b}"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+}
+
+# The same rule in a YAML block: in lit.yaml (the exact input of a
+# review), YAML removes the indentation, and bash runs x=1#;curl …. The
+# gate kept the indentation in the joined line (x=1  #;curl …), so the
+# curl was a comment. Now the line of the backslash is a finding in the q
+# and tls modes. The controls: a literal block with a continuation and a
+# comment line, and a folded block.
+@test "curl gate: a backslash at the end of a line of a YAML block before a # line is a finding" {
+  local f="${BATS_TEST_TMPDIR}/lit.yaml" good="${BATS_TEST_TMPDIR}/lit-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'YAML'
+run: |
+  x=1\
+  #;curl -u u:p https://h
+YAML
+  cat > "${good}" <<'YAML'
+lit: |
+  echo a \
+    b
+  # a comment
+fold: >
+  echo a
+  echo b
+YAML
+  local b="a backslash at the end of a line before a # line the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${f}"
+    assert_failure 1
+    assert_output "${f}:2: ${b}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+}
+
+# A tag (!!str, !x, !<…>) and an anchor (&a), in any order, can come
+# before the | or > of a block header, and a header can be the value of a
+# list item in a list item (- - >) or of a key in a list item. In
+# tag.yaml (the exact input of a review), the gate did not see the
+# folded block, so the backslash rule of a folded block did not run: bash
+# reads cat <<EOF and runs the $( ) in the unquoted body. Now each such
+# header starts a block. A | or > after a tag or an anchor that the gate
+# still cannot read as a header (props.yaml:1), and a header on a line of
+# its own (props.yaml:3), are findings in the q and tls modes. The
+# control: a literal block after a tag.
+@test "curl gate: a tag or an anchor before a YAML block header, and a nested list item, start the block" {
+  local f="${BATS_TEST_TMPDIR}/tag.yaml" nest="${BATS_TEST_TMPDIR}/nest.yaml"
+  local props="${BATS_TEST_TMPDIR}/props.yaml" good="${BATS_TEST_TMPDIR}/tag-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'YAML'
+run: !!str >
+  cat <\
+
+  <EOF
+
+  EOF
+  '$(curl -u u:p https://h)'
+
+  EOF
+YAML
+  cat > "${nest}" <<'YAML'
+- - >
+    cat <\
+
+    <EOF
+- key: &a !x >
+    cu\
+
+    rl -u u:p https://h.example/n1
+YAML
+  cat > "${props}" <<'YAML'
+x: !x a > b
+run: &a
+  |
+  echo a
+YAML
+  cat > "${good}" <<'YAML'
+tag: !!str |
+  echo a \
+    b
+YAML
+  local fb="a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
+  local h="a YAML block header the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${f}" "${nest}" "${props}"
+    assert_failure 1
+    assert_output "${f}:2: ${fb}
+${nest}:2: ${fb}
+${nest}:6: ${fb}
+${props}:1: ${h}
+${props}:3: ${h}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${f}" "${nest}" "${props}" "${good}"
+  assert_success
+  assert_output ""
+}
+
+# The operand of a redirection is one shell word, with its quotes and
+# escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
+# command only in a command position: in "echo if curl" the curl is an
+# argument, no call, and so a finding of the backstop in the q and tls
+# modes (lines 4 to 6). The controls: a -q after an operand with white
+# space in quotes or in a $( ), and curl after if, then, ! and time in a
+# command position (also after ; with no space).
+@test "curl gate: a redirection operand is one shell word, and a keyword starts a command only in a command position" {
+  local bad="${BATS_TEST_TMPDIR}/redir-bad.sh" good="${BATS_TEST_TMPDIR}/redir-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+curl >"/tmp/log -q " -u u:p https://h.example/r1
+curl 2>'/tmp/a -q ' -u u:p https://h.example/r2
+curl >/tmp/a\ -q -u u:p https://h.example/r3
+echo if curl -u u:p https://h.example/r4
+echo then curl -u u:p https://h.example/r5
+echo ! curl -u u:p https://h.example/r6
+SH
+  cat > "${good}" <<'SH'
+curl >"/tmp/a b" -q -sS https://h.example/k1
+curl 2>"$(printf '%s' x) y" -q -sS https://h.example/k2
+if curl -q -sS https://h.example/k3; then :; fi
+if true; then curl -q -sS https://h.example/k4; fi
+while ! curl -q -sS https://h.example/k5; do :; done
+x;then curl -q -sS https://h.example/k6
+time curl -q -sS https://h.example/k7
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place"
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${bad}:1: ${q}
+${bad}:2: ${q}
+${bad}:3: ${q}
+${bad}:4: ${c}
+${bad}:5: ${c}
+${bad}:6: ${c}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${bad}:1: ${t}
+${bad}:2: ${t}
+${bad}:3: ${t}
+${bad}:4: ${c}
+${bad}:5: ${c}
+${bad}:6: ${c}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${bad}:1 credential
+${bad}:2 credential
+${bad}:3 credential"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  local want=""
+  for n in 1 2 3 4 5 6 7; do want+="${good}:${n}"$'\n'; done
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${want%$'\n'}"
+}
+
+# An alias or a function named curl: the gate checks the source text, not
+# the command that a curl call runs, so each definition is a finding in
+# the q mode. The calls in a function body stay calls. The controls name
+# curl in no definition: a function that calls curl, and the words alias
+# and function as arguments.
+@test "curl gate: an alias or a function named curl is a finding in the q mode" {
+  local bad="${BATS_TEST_TMPDIR}/shadow-bad.sh" good="${BATS_TEST_TMPDIR}/shadow-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+alias curl='command curl -s'
+alias ll='ls -l' curl=wget
+alias 'curl=command curl -s'
+curl() { command curl -q "$@"; }
+curl () { command curl -q "$@"; }
+function curl { command curl -q "$@"; }
+function curl() { :; }
+SH
+  cat > "${good}" <<'SH'
+x() { curl -q -sS https://h.example/s1; }
+echo function curl # curl-gate: not a call
+echo alias curl=x # curl-gate: not a call
+curl_alias=1
+SH
+  local s="an alias or a function named curl: the gate cannot check what a curl call runs"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local want=""
+  for n in 1 2 3 4 5 6 7; do
+    want+="${bad}:${n}: ${s}"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${bad}:4: ${t}
+${bad}:5: ${t}
+${bad}:6: ${t}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${bad}:4
+${bad}:5
+${bad}:6"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:1"
 }
 
 # The credential forms: each call of cred.sh carries one form, each call
@@ -533,7 +1452,7 @@ other.sh: the allowlist entry names a file that this run does not read (a stale 
   list=$(sed -n 's/^ *TLS_LOG_VARS="\([^"]*\)"$/\1/p' "${yaml}")
   [ "${list}" = "${_HTTP_TLS_LOG_VARS[*]}" ]
   first_unset=$(grep -n '^ *unset \${TLS_LOG_VARS}' "${yaml}" | head -1 | cut -d: -f1)
-  first_curl=$(grep -nE '^ *curl -q ' "${yaml}" | head -1 | cut -d: -f1)
+  first_curl=$(grep -nE '^ *(bounded [0-9]+ )?curl -q ' "${yaml}" | head -1 | cut -d: -f1)
   [ -n "${first_unset}" ] && [ -n "${first_curl}" ]
   (( first_unset < first_curl ))
 }
@@ -938,6 +1857,8 @@ _hosted_one() {
 
 _hosted_setup() {
   _kubehz_api_setup
+  # A hosted create needs a version (provision_hosted refuses a spec without one).
+  printf '  kubernetes:\n    version: v1.31.10\n' >> "${YAML}"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
 }
 

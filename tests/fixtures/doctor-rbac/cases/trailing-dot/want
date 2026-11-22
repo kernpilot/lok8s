@@ -1,0 +1,2 @@
+  ℹ RBAC migration check of system-upgrade-controller skipped: spec.bootstrap has system-upgrade-controller-cluster-admin, which owns the cluster-admin binding
+  ✓ redis-operator: no RBAC migration leftovers

@@ -25,7 +25,10 @@ kubehz::build_cluster_payload() {
   kind=$(yq -r '.kind' "${cluster_yaml}")
   provider=$(yq -r '.spec.provider // "hetzner"' "${cluster_yaml}")
   region=$(yq -r '.spec.hcloud.region // .spec.aws.region // "fsn1"' "${cluster_yaml}")
-  k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+  # An unset version (kubehz::_hosted_version prints "") is left out of
+  # the payload. The bare read printed the word "null", which went out as
+  # the version string "null" (issue #272). Go twin: buildClusterPayload.
+  k8s_version=$(kubehz::_hosted_version "${cluster_yaml}")
   cp_replicas=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
   hosting=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
   access=$(yq -r '.spec.kubehz.access // "none"' "${cluster_yaml}")
@@ -39,9 +42,19 @@ kubehz::build_cluster_payload() {
     --argjson controlPlaneReplicas "${cp_replicas}" \
     --arg hosting "${hosting}" \
     --arg access "${access}" \
-    '{domain: $domain, kind: $kind, provider: $provider, region: $region,
-      kubernetesVersion: $kubernetesVersion, controlPlaneReplicas: $controlPlaneReplicas,
-      hosting: $hosting, access: $access}'
+    '{domain: $domain, kind: $kind, provider: $provider, region: $region}
+      + (if $kubernetesVersion != "" then {kubernetesVersion: $kubernetesVersion} else {} end)
+      + {controlPlaneReplicas: $controlPlaneReplicas, hosting: $hosting, access: $access}'
+}
+
+# kubehz::_hosted_version <cluster_yaml>: spec.kubernetes.version on
+# stdout, or "" when it is unset: no key, a YAML null, false or an empty
+# string (`//` fires on null and on false). A number keeps its text ("0",
+# "1.30"). kubehz::build_cluster_payload and the refusal in
+# kubehz::provision_hosted use this one read. Go twin:
+# specDoc.kubernetesVersion.
+kubehz::_hosted_version() {
+  yq -r '.spec.kubernetes.version // ""' "${1}"
 }
 
 # Wait for a hosted cluster to reach Running state.
@@ -131,16 +144,29 @@ kubehz::render_capacity_rejection() {
 
 # Provision a cluster via the kubehz hosted API.
 # Creates the cluster, waits for it, and downloads the kubeconfig.
+# A spec with no spec.kubernetes.version is refused first, before any
+# request: the platform needs the version and refuses a create without it
+# (HTTP 400, a missing field). Go twin: ProvisionHosted.
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
 kubehz::provision_hosted() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
+  local k8s_version
+  k8s_version=$(kubehz::_hosted_version "${cluster_yaml}") || k8s_version=""
+  if [[ -z "${k8s_version}" ]]; then
+    error "kubehz: spec.kubernetes.version is not set in ${cluster_yaml}. A hosted cluster needs a Kubernetes version, so no cluster was created. Set it, then run the command again."
+    return 1
+  fi
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   # The kubeconfig path is checked before the create: a path that the
-  # write refuses (a link to nothing, a directory) stops the provision
-  # here, so a refusal creates no cluster (kubehz::_private_target, the
-  # check of kubehz::_write_private).
+  # write refuses (a link of another user, a link to nothing, a
+  # directory, a directory that another user can write into) stops the
+  # provision here, so a refusal creates no cluster
+  # (kubehz::_private_target, the check of kubehz::_write_private). A
+  # .kubeconfig directory that is not there yet passes: the write makes
+  # it with mode 0700, and the second check accepts that mode, so the
+  # second check refuses no directory that lo made.
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   kubehz::_private_target "${kubeconfig_path}" > /dev/null || return 1
 
@@ -204,8 +230,13 @@ kubehz::provision_hosted() {
 
   # Download kubeconfig. kubehz::_write_private: a private temp file beside
   # the kubeconfig, renamed onto it only after a complete download. A
-  # failed download leaves the old file as it was.
-  mkdir -p "$(dirname "${kubeconfig_path}")"
+  # failed download leaves the old file as it was. Each directory that
+  # mkdir makes here (the parents too) gets mode 0700 whatever the umask
+  # of the caller: the subshell sets umask 077 for mkdir only (Go twin:
+  # os.MkdirAll with 0o700). So the second check accepts it.
+  local kubeconfig_dir
+  kubeconfig_dir=$(dirname -- "${kubeconfig_path}")
+  ( umask 077 && mkdir -p -- "${kubeconfig_dir}" )
   if ! kubehz::_write_private "${kubeconfig_path}" \
     kubehz::_hosted_kubeconfig_get "${api_url}" "${cluster_id}"; then
     error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
@@ -248,80 +279,395 @@ kubehz::_hosted_kubeconfig_get() {
 
 # kubehz::_write_private <dest> <command...>: run the command with its
 # stdout in a new private file, and put that file at <dest> only when the
-# command succeeds. The temp file is beside the file (mode 0600: mktemp
-# under umask 077), and one rename onto the exact path replaces the file
+# command succeeds. The temp file is beside the file (the name
+# <file>.XXXXXX), and one rename onto the exact path replaces the file
 # (kubehz::_publish_private). So <dest> is the old file or the complete new
-# one, never a part, and never readable by others. A failed command or
-# rename leaves the old file as it was and removes the temp file.
+# one, never a part. A failed command or rename leaves the old file as it
+# was and removes the temp file.
+# The temp file is made and opened once (kubehz::_create_private): an
+# exclusive create (noclobber, umask 077) into a descriptor, and a check
+# of the open file through its path before the command runs. The command
+# writes into that descriptor, not to the path: a link that another
+# process puts at the temp path after the create does not get the
+# content, and the rename refuses a temp path that is not the file of the
+# descriptor.
 # A <dest> that is a symlink is resolved (kubehz::_private_target): the
 # temp file goes beside the file that the link names, and the rename
 # replaces that file, so the link stays. A link to nothing, a link that
 # cannot be resolved and a directory are refused (one error line).
+# The threat model: a process of this user is trusted, because it can
+# read the file anyway. Another user is not. Before the create, the call
+# resolves <dest> in one walk (kubehz::_private_link_hops). It refuses a
+# <dest> that is a link of another user, or that follows one, a link in a
+# directory that another user can write into, a name that it cannot look
+# up, and a directory of the file that another user can write into
+# (kubehz::_private_dir_ok). Thus only this user and root can write into a
+# directory without the sticky bit. In a directory with the sticky bit,
+# another user cannot rename or remove a file or a link of this user, and
+# the call renames there only with mv -T. The end of the walk is not
+# resolved again: a link that another user puts there after the walk (at
+# a name that was not there) is replaced by mv -T, not followed. Under
+# this model, these steps are safe:
+# - The traps and a failed rename remove the temp file by its path after
+#   a check: no other user can put another file at that path between the
+#   check and the remove.
+# - The create through a redirection and the check of the mode through
+#   the path see the file of this run, for the same cause. A default ACL
+#   of the directory comes from its owner, this user or root.
+# - Between the check before the rename and the rename, no other user can
+#   replace the temp file or put a directory at the file.
+# What stays: a process of this user, an ACL that lets another user write
+# into the directory (the check reads the mode bits only), and the
+# parents of the directory. Another user who can write into a parent can
+# put a directory of their own in its place.
 # INT, TERM and HUP remove the temp file, then end the shell with that
-# signal. The traps are set before the temp file exists and read its path
-# when they run, so a signal while mktemp runs is covered too. The INT,
-# TERM and HUP traps of the caller come back when the function returns.
-# Not covered: SIGKILL, and a signal to the whole process group while
-# mktemp runs (mktemp then ends before it gives the name). Either can
-# leave the temp file (mode 0600, the name <file>.XXXXXX). A signal during
-# the download takes effect when curl ends (the trap runs after the
-# current command; the call sets no time limit).
+# signal (kubehz::_write_private_trap). The traps are set before the temp
+# file exists and read its path when they run, and they remove it only
+# while it is the file of the descriptor (kubehz::_private_temp_ours).
+# A signal before the rename keeps the old file. Just before the rename,
+# the call clears the path that the traps read, and from there until the
+# rename and its cleanup are done, a signal is only recorded: the call
+# then ends the shell with it. So a signal during or after the rename
+# removes nothing, also not a file that another process put at the old
+# temp path, and it keeps the new file. After a failed rename, the call
+# removes the temp file only while it is still the file of the
+# descriptor (the rename did not move it).
+# Each INT, TERM and HUP trap of the caller comes back when the function
+# returns, and a signal that had no trap goes back to the default
+# (kubehz::_restore_trap).
+# Not covered: SIGKILL, which can leave the temp file (mode 0600, the name
+# <file>.XXXXXX). A process of this user that writes into the directory of
+# the file: a FIFO that it puts at the new name before the create makes
+# the create wait for a reader, and a file that it puts at the temp path
+# between the check before the rename and the rename is renamed onto the
+# file. In a directory with the sticky bit, another user can make the
+# write fail (a file or a FIFO at the name), but cannot replace a file of
+# this user. A signal during the download takes effect when curl ends
+# (the trap runs after the current command; the call sets no time limit).
 # Status 0 when <dest> holds the new content, else 1.
 kubehz::_write_private() {
   (( $# >= 2 )) || {
     error "kubehz::_write_private: it takes a file and a command (<dest> <command...>), not $# argument(s); it writes nothing"
     return 1
   }
-  local dest="${1}" target sig saved_traps rc=0
-  # The trap reads the temp path at run time: a name of its own, so that no
-  # local of the command (a function in this shell) hides it.
-  local _kubehz_wp_tmp=""
+  local dest="${1}" target sig trap_int trap_term trap_hup rc=0
+  # The traps read these when they run: names of their own, so that no
+  # local of the command (a function in this shell) hides them.
+  # _kubehz_wp_tmp is the path that the traps remove (empty before the
+  # create and from just before the rename on), _kubehz_wp_name the name
+  # of the temp file for the steps after that, _kubehz_wp_fd its
+  # descriptor, and _kubehz_wp_hold is 1 while a signal is only recorded
+  # (in _kubehz_wp_sig).
+  local _kubehz_wp_tmp="" _kubehz_wp_name="" _kubehz_wp_fd="" _kubehz_wp_hold="" _kubehz_wp_sig=""
   shift
   target=$(kubehz::_private_target "${dest}") || return 1
-  saved_traps=$(trap -p INT TERM HUP)
+  trap_int=$(trap -p INT)
+  trap_term=$(trap -p TERM)
+  trap_hup=$(trap -p HUP)
   for sig in INT TERM HUP; do
-    # shellcheck disable=SC2064 # the signal name now, the path when the trap runs
-    trap "[[ -z \"\${_kubehz_wp_tmp:-}\" ]] || rm -f -- \"\${_kubehz_wp_tmp}\"; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
+    # shellcheck disable=SC2064 # the signal name now
+    trap "kubehz::_write_private_trap ${sig}" "${sig}"
   done
-  if ! _kubehz_wp_tmp=$(umask 077 && mktemp "${target}.XXXXXX"); then
+  if ! kubehz::_create_private "${target}"; then
+    rc=1
+  elif ! "$@" >&"${_kubehz_wp_fd}"; then
+    rc=1
+  else
+    _kubehz_wp_hold=1
     _kubehz_wp_tmp=""
-    error "Cannot create a temp file beside ${target}"
-    rc=1
-  elif ! "$@" > "${_kubehz_wp_tmp}"; then
-    rc=1
-  elif ! kubehz::_publish_private "${_kubehz_wp_tmp}" "${target}" "${dest}"; then
-    rc=1
+    kubehz::_publish_private "${_kubehz_wp_name}" "${target}" "${dest}" "${_kubehz_wp_fd}" || rc=1
   fi
-  if (( rc != 0 )) && [[ -n "${_kubehz_wp_tmp}" ]]; then
-    rm -f -- "${_kubehz_wp_tmp}"
+  if (( rc != 0 )) && [[ -n "${_kubehz_wp_name}" ]] \
+    && kubehz::_private_temp_ours "${_kubehz_wp_name}" "${_kubehz_wp_fd}"; then
+    rm -f -- "${_kubehz_wp_name}"
   fi
   _kubehz_wp_tmp=""
-  trap - INT TERM HUP
-  eval "${saved_traps}"
+  if [[ -n "${_kubehz_wp_fd}" ]]; then
+    exec {_kubehz_wp_fd}>&-
+  fi
+  _kubehz_wp_hold=""
+  if [[ -n "${_kubehz_wp_sig}" ]]; then
+    kubehz::_write_private_trap "${_kubehz_wp_sig}"
+  fi
+  kubehz::_restore_trap INT "${trap_int}"
+  kubehz::_restore_trap TERM "${trap_term}"
+  kubehz::_restore_trap HUP "${trap_hup}"
   return "${rc}"
 }
 
-# kubehz::_private_target <dest>: the file that a write of <dest> replaces,
-# on stdout: <dest>, or for a symlink the file that it names (readlink -f).
-# A link to nothing, a link that cannot be resolved and a directory are
-# refused with one error line, status 1.
-kubehz::_private_target() {
-  local dest="${1}" target="${1}"
-  if [[ -L "${dest}" ]]; then
-    target=""
-    if [[ -e "${dest}" ]]; then
-      target=$(readlink -f -- "${dest}" 2>/dev/null) || target=""
-    fi
-    [[ -n "${target}" ]] || {
-      error "Cannot resolve the symlink ${dest}"
-      return 1
-    }
+# kubehz::_write_private_trap <signal>: the INT, TERM and HUP trap of
+# kubehz::_write_private. While _kubehz_wp_hold is set (the rename), it
+# only records the signal. Else it removes the temp file while that file
+# is the file of the descriptor, and then ends the shell with the signal.
+kubehz::_write_private_trap() {
+  if [[ -n "${_kubehz_wp_hold:-}" ]]; then
+    _kubehz_wp_sig="${1}"
+    return 0
   fi
-  [[ ! -d "${target}" ]] || {
+  if [[ -n "${_kubehz_wp_tmp:-}" ]] && kubehz::_private_temp_ours "${_kubehz_wp_tmp}" "${_kubehz_wp_fd:-}"; then
+    rm -f -- "${_kubehz_wp_tmp}"
+  fi
+  trap - "${1}"
+  kill -"${1}" "${BASHPID}"
+}
+
+# kubehz::_create_private <target>: make the temp file of
+# kubehz::_write_private beside <target> and open it once, into the
+# descriptor _kubehz_wp_fd. mktemp -u gives a new name only. The create is
+# one open with noclobber under umask 077: noclobber opens a path that
+# does not exist with O_EXCL, so the create fails on a file or a link that
+# is at that name. The call sets _kubehz_wp_tmp before the open, so a
+# signal just after it removes the new file (the traps remove only the
+# file of the descriptor). Then the open file must be a regular file at
+# the path, not a link, of this user, mode 0600, and the same file as the
+# descriptor: a check through the path, once, before the command writes.
+# The noclobber option and the umask of the caller come back after the
+# open. One error line on each failure, status 1.
+kubehz::_create_private() {
+  local target="${1}" mask noclobber=0
+  if ! _kubehz_wp_name=$(mktemp -u "${target}.XXXXXX" 2>/dev/null) || [[ -z "${_kubehz_wp_name}" ]]; then
+    _kubehz_wp_name=""
+    error "Cannot create a temp file beside ${target}"
+    return 1
+  fi
+  mask=$(umask)
+  [[ $- != *C* ]] || noclobber=1
+  _kubehz_wp_tmp="${_kubehz_wp_name}"
+  umask 077
+  set -C
+  { exec {_kubehz_wp_fd}>"${_kubehz_wp_name}"; } 2>/dev/null || _kubehz_wp_fd=""
+  (( noclobber )) || set +C
+  umask "${mask}"
+  if [[ -z "${_kubehz_wp_fd}" ]]; then
+    _kubehz_wp_tmp=""
+    error "Cannot create a temp file beside ${target}"
+    return 1
+  fi
+  if ! kubehz::_private_temp_ours "${_kubehz_wp_name}" "${_kubehz_wp_fd}" \
+    || [[ ! -O "${_kubehz_wp_name}" ]] || ! kubehz::_mode_is_0600 "${_kubehz_wp_name}"; then
+    error "The temp file ${_kubehz_wp_name} is not a new file of this user with mode 0600: nothing is written"
+    return 1
+  fi
+}
+
+# kubehz::_private_temp_ours <path> <fd>: status 0 when <path> is the file
+# that the descriptor <fd> holds open: a regular file at <path>, not a
+# link, and the same file (device and inode) as the descriptor. A regular
+# file that the descriptor holds is the file that the create of this run
+# made: noclobber never opens a regular file that exists.
+kubehz::_private_temp_ours() {
+  [[ -n "${2}" && -f "/dev/fd/${2}" && -f "${1}" && ! -L "${1}" && "/dev/fd/${2}" -ef "${1}" ]]
+}
+
+# kubehz::_mode_is_0600 <path>: status 0 when the mode of <path> is 0600
+# (find -perm: the stat of GNU and of BSD take other options).
+kubehz::_mode_is_0600() {
+  local p="${1}"
+  [[ "${p}" == /* ]] || p="./${p}"
+  [[ "$(find "${p}" -prune -perm 600 -print 2>/dev/null)" == "${p}" ]]
+}
+
+# kubehz::_restore_trap <signal> <saved>: give <signal> the trap back that
+# trap -p <signal> printed before (<saved>), or the default when <saved>
+# is empty (the signal had no trap). The eval replaces the trap of
+# kubehz::_write_private at once, so the trap of the caller is never the
+# default in between.
+kubehz::_restore_trap() {
+  if [[ -n "${2}" ]]; then
+    eval "${2}"
+  else
+    trap - "${1}"
+  fi
+}
+
+# kubehz::_private_target <dest>: the file that a write of <dest> replaces,
+# on stdout: <dest>, or for a symlink the file that it names, from one
+# walk (kubehz::_private_link_hops). The walk checks each link of the
+# chain, and its end is not resolved again: a second resolution (such as
+# readlink -f) would follow a link that another user puts at a name after
+# the walk. A link to nothing, a link that cannot be resolved, a directory
+# and a file in a directory that another user can write into
+# (kubehz::_private_dir_ok) are refused with one error line, status 1.
+# The path on stdout is the end of the walk as it is: dirname does not
+# clean a ".." after a link to a directory, so the check, the create and
+# the rename name the same directory. Go twin: privateTarget.
+kubehz::_private_target() {
+  local dest="${1}" end target
+  end=$(kubehz::_private_link_hops "${dest}") || return 1
+  target="${end:2}"
+  [[ "${end:0:1}" != d ]] || {
     error "${dest} is a directory, not a file"
     return 1
   }
+  kubehz::_private_dir_ok "$(dirname -- "${target}")" || return 1
   printf '%s\n' "${target}"
+}
+
+# kubehz::_private_link_hops <dest>: the one walk of the last name of
+# <dest>: the link at <dest>, then the link that it names, and so on. On
+# stdout, one line: the type of the entry at the end of the walk (the
+# first character of its mode in ls -l, or n when nothing is there), a
+# space, and the path of that entry. The walk reads each name once
+# (kubehz::_lstat_line: the type and the owner come from the same line of
+# ls -ldn), and it follows a link only after these checks: the link
+# belongs to this user or root, and no other user can replace a file in
+# the directory of the link (kubehz::_private_dir_ok, with the argument
+# link), so the link cannot change before readlink reads it. In a
+# directory with the sticky bit, another user can put a link at a name
+# that is not there: the rename onto the exact path (mv -T) replaces that
+# link, and does not follow it. A link of another user (it can point at a
+# file of this user), a link whose owner cannot be read, a name whose
+# lookup fails for a cause other than "not there" (then the walk cannot
+# tell that it is no link), a link to nothing and a chain of more than 8
+# links are refused with one error line, status 1. A relative link names
+# a path from the directory of the link (the text before the last "/",
+# not cleaned). A link to a directory on the way (not the last name) is
+# not checked here. Go twin: privateWalk.
+kubehz::_private_link_hops() {
+  local dest="${1}" p="${1}" next line uid me hops=0 rc
+  me=$(id -u 2>/dev/null) || me=""
+  while :; do
+    rc=0
+    line=$(kubehz::_lstat_line "${p}") || rc=$?
+    if (( rc == 2 )); then
+      error "Cannot read the path ${p}: nothing is written"
+      return 1
+    fi
+    if (( rc == 1 )); then
+      if (( hops > 0 )); then
+        error "Cannot resolve the symlink ${dest}"
+        return 1
+      fi
+      printf 'n %s\n' "${p}"
+      return 0
+    fi
+    if [[ "${line}" != l* ]]; then
+      printf '%s %s\n' "${line:0:1}" "${p}"
+      return 0
+    fi
+    if (( ++hops > 8 )); then
+      error "Cannot resolve the symlink ${dest}"
+      return 1
+    fi
+    uid=""
+    read -r _ _ uid _ <<< "${line}"
+    if [[ ! "${uid}" =~ ^[0-9]+$ ]]; then
+      error "Cannot read the owner of the link ${p}: nothing is written"
+      return 1
+    fi
+    if [[ "${uid}" != 0 && "${uid}" != "${me}" ]]; then
+      error "The link ${p} belongs to uid ${uid}, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own."
+      return 1
+    fi
+    kubehz::_private_dir_ok "$(dirname -- "${p}")" link || return 1
+    if ! next=$(readlink -- "${p}" 2>/dev/null) || [[ -z "${next}" ]]; then
+      error "Cannot resolve the symlink ${dest}"
+      return 1
+    fi
+    if [[ "${next}" != /* ]]; then
+      if [[ "${p}" == */* ]]; then
+        next="${p%/*}/${next}"
+      else
+        next="./${next}"
+      fi
+    fi
+    p="${next}"
+  done
+}
+
+# kubehz::_lstat_line <path>: one lookup of the entry at <path> itself (a
+# link is not followed). Status 0: <path> is there, and the line of
+# LC_ALL=C ls -ldn is on stdout. Status 1: <path> is not there: ls fails,
+# and its error output is one line that ends in the C text of ENOENT
+# (": No such file or directory") or of ENOTDIR (": Not a directory": a
+# part of the path before the last name is not a directory, so no entry
+# can be there). GNU, BSD and busybox ls put the text of the error at the
+# end of the line. Status 2: the lookup cannot tell, because it failed for
+# another cause (EIO, ESTALE, EACCES, and so on), or because its output is
+# not one line of ls. -e and -L cannot tell these apart: both are false
+# on each error. Go twin: the error of os.Lstat (privateNotThere).
+kubehz::_lstat_line() {
+  local out rc=0
+  out=$(LC_ALL=C ls -ldn -- "${1}" 2>&1) || rc=$?
+  if (( rc == 0 )); then
+    [[ "${out}" != *$'\n'* && "${out}" =~ ^[-dlcbps][-rwxsStT]{9} ]] || return 2
+    printf '%s\n' "${out}"
+    return 0
+  fi
+  [[ "${out}" != *$'\n'* ]] || return 2
+  [[ "${out}" == *": No such file or directory" || "${out}" == *": Not a directory" ]] || return 2
+  return 1
+}
+
+# kubehz::_private_dir_ok <dir> [link]: status 0 when no other user can
+# replace a file in <dir>. It refuses, with one error line and status 1:
+# - a <dir> whose lookup fails for a cause other than "not there"
+#   (kubehz::_lstat_line: EIO, ESTALE, a parent that this user cannot
+#   search, a parent that is a file), a <dir> that is not there when its
+#   parent is not a directory that this user can search, and a line of ls
+#   that the check cannot read;
+# - a path that is there but is not a directory (also a link to nothing);
+# - a directory that belongs to a user other than this user or root (that
+#   user can change its mode);
+# - without the sticky bit: a world-writable directory, and a
+#   group-writable one whatever its group (a group can have other
+#   members);
+# - with the sticky bit, a directory that others can write into when mv
+#   has no -T (kubehz::_mv_exact_ok). The sticky bit lets only the owner
+#   of a file rename or remove it, but a mv without -T moves the file into
+#   a directory that another user puts at its name. The argument link (the
+#   directory of a link of the walk, kubehz::_private_link_hops) skips
+#   this case: the walk only reads the link there, and renames nothing
+#   into that directory.
+# A directory that is not there passes when its parent can be searched:
+# the write makes it with mode 0700, and the second check reads it. The
+# check reads the mode bits only, not an ACL, and the directory only, not
+# its parents (see kubehz::_write_private). ls -ldnL gives the mode, the
+# uid and the gid in the same form on GNU and BSD (their stat takes other
+# options), and it follows a link, as the create does.
+kubehz::_private_dir_ok() {
+  local dir="${1}" line="" mode="" uid="" gid="" me parent rc=0
+  kubehz::_lstat_line "${dir}" > /dev/null || rc=$?
+  if (( rc == 1 )); then
+    parent=$(dirname -- "${dir}")
+    if [[ -d "${parent}" && -x "${parent}" ]]; then
+      return 0
+    fi
+  fi
+  if (( rc != 0 )); then
+    error "Cannot read the owner and the mode of the directory ${dir}: nothing is written"
+    return 1
+  fi
+  if [[ ! -d "${dir}" ]]; then
+    error "The path ${dir} is not a directory: nothing is written"
+    return 1
+  fi
+  line=$(LC_ALL=C ls -ldnL -- "${dir}" 2>/dev/null) || line=""
+  read -r mode _ uid gid _ <<< "${line}"
+  if [[ ! "${mode}" =~ ^d[-rwxsStT]{9} || ! "${uid}" =~ ^[0-9]+$ || ! "${gid}" =~ ^[0-9]+$ ]]; then
+    error "Cannot read the owner and the mode of the directory ${dir}: nothing is written"
+    return 1
+  fi
+  me=$(id -u 2>/dev/null) || me=""
+  if [[ "${uid}" != 0 && "${uid}" != "${me}" ]]; then
+    error "The directory ${dir} belongs to uid ${uid}, not to this user or to root, so another user can replace a file in it: nothing is written. Use a directory of your own."
+    return 1
+  fi
+  if [[ "${mode:9:1}" == [tT] ]]; then
+    if [[ "${2:-}" != link ]] && [[ "${mode:5:1}" == w || "${mode:8:1}" == w ]] && ! kubehz::_mv_exact_ok; then
+      error "The directory ${dir} has the sticky bit and other users can write into it, but this mv has no -T, so another user can put a directory at the file before the rename: nothing is written. Use a directory of your own, or a mv that takes -T (GNU coreutils)."
+      return 1
+    fi
+    return 0
+  fi
+  if [[ "${mode:8:1}" == w ]]; then
+    error "The directory ${dir} is world-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w ${dir}, or use a directory of your own."
+    return 1
+  fi
+  if [[ "${mode:5:1}" == w ]]; then
+    error "The directory ${dir} is group-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w ${dir}, or use a directory of your own."
+    return 1
+  fi
 }
 
 # _KUBEHZ_MV_EXACT: 1 when mv takes -T (GNU coreutils and others: the
@@ -345,16 +691,24 @@ kubehz::_mv_exact_ok() {
   [[ "${_KUBEHZ_MV_EXACT}" == 1 ]]
 }
 
-# kubehz::_publish_private <tmp> <target> <dest>: rename <tmp> onto the
-# exact path <target>. With mv -T the rename fails when <target> is a
-# directory (another operation can put one there during the download).
-# A mv without -T would move <tmp> into a directory: there the call
-# refuses a directory just before the rename. After the rename, <target>
-# must be a regular file. If it is not (a directory took its place between
-# the check and the rename of a mv without -T), the new file is removed
-# from it by its exact path. One error line on each failure, status 1.
+# kubehz::_publish_private <tmp> <target> <dest> <fd>: rename <tmp> onto
+# the exact path <target>. Just before the rename, <tmp> must still be the
+# file of the descriptor <fd> (kubehz::_private_temp_ours): else another
+# process replaced it, and the call renames nothing. With mv -T the rename
+# fails when <target> is a directory (another operation can put one there
+# during the download). A mv without -T would move <tmp> into a
+# directory: there the call refuses a directory just before the rename.
+# After the rename, <target> must be a regular file. If it is not, a
+# directory (it can be a mount) can have taken its place between the
+# check and the rename of a mv without -T: the error line names the path
+# where the rename may have put the new file, and nothing is removed. One
+# error line on each failure, status 1.
 kubehz::_publish_private() {
-  local tmp="${1}" target="${2}" dest="${3}"
+  local tmp="${1}" target="${2}" dest="${3}" fd="${4}" moved=""
+  kubehz::_private_temp_ours "${tmp}" "${fd}" || {
+    error "The temp file ${tmp} is not the file that this run wrote: nothing is renamed to ${target}"
+    return 1
+  }
   if kubehz::_mv_exact_ok; then
     if ! mv -f -T -- "${tmp}" "${target}" 2>/dev/null; then
       if [[ -d "${target}" ]]; then
@@ -369,14 +723,18 @@ kubehz::_publish_private() {
       error "${dest} is a directory, not a file"
       return 1
     }
+    moved="${target}/${tmp##*/}"
     mv -f -- "${tmp}" "${target}" 2>/dev/null || {
       error "Cannot rename the temp file to ${target}"
       return 1
     }
   fi
   if [[ -L "${target}" || ! -f "${target}" ]]; then
-    rm -f -- "${target:?}/${tmp##*/}"
-    error "${target} is not a regular file after the rename: the new file is removed"
+    if [[ -n "${moved}" ]]; then
+      error "${target} is not a regular file after the rename: the rename may have moved the new file to ${moved}"
+    else
+      error "${target} is not a regular file after the rename"
+    fi
     return 1
   fi
 }

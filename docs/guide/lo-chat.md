@@ -37,6 +37,9 @@ model runtime. Run the steps in the project directory.
      lo toolchain install --groups core,local,bash
      ```
 
+   `argsh.so` belongs in the `.bin/` directory of the project, next to
+   `argsh`, also when you export PATH_BIN.
+
 2. Download the `lochat` engine of the `lo` you run and the checksums of
    its release into a temporary directory, then verify the engine. This
    step uses the network.
@@ -59,7 +62,13 @@ model runtime. Run the steps in the project directory.
    rm -rf "${T}"
    ```
 
-   `lo chat` looks for `.bin/lochat` first, then for `lochat` on PATH.
+   `lo chat` looks for `lochat` in PATH_BIN first, then on PATH. PATH_BIN
+   is the `.bin/` directory of the project. If you export PATH_BIN with
+   another directory, install the engine into that directory. A chat that
+   `lok8s.yaml` routes to the bash implementation (see
+   [Choosing the implementation](/reference/cli#choosing-the-implementation))
+   ignores an exported PATH_BIN and uses the `.bin/` directory of the
+   project.
 
 4. Install a local model runtime and pull a model (see
    [Choosing a model](#choosing-a-model)).
@@ -222,4 +231,6 @@ defaults), or the path in `$LO_CHAT_CONFIG`. Backends are conductor brains:
 > The engine is a separate static Go binary (`lochat`, source in `ai/lochat/`).
 > It drives the `mcp` builtin from `argsh.so`. When `lo chat` reports that
 > `argsh.so` is missing, install the `bash` group of the toolchain (see
-> [Set up](#set-up)) or run `argsh builtins install`.
+> [Set up](#set-up)) or run `argsh builtins install --force --path .bin` in
+> the project directory. This command installs the latest release of
+> `argsh.so`.

@@ -2,18 +2,22 @@ package execx
 
 // runner_test.go covers the default Runner: env merge, Dir, a name with a
 // path separator, an unresolvable tool, the interrupt on cancel, the wait
-// after it (WaitDelay), the state of the child (Exited), and the variables
-// that the child does not inherit (Unset).
+// after it (WaitDelay), the state of the child (Exited), the variables
+// that the child does not inherit (Unset), and the stop of a process group
+// (ProcessGroup).
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -188,6 +192,85 @@ func TestRunWithWaitDelayKillsAChildThatIgnoresTheInterrupt(t *testing.T) {
 	if took > 3*time.Second {
 		t.Errorf("Run returned %s after the cancel, want about the delay (300ms)", took)
 	}
+}
+
+// A Cmd with ProcessGroup stops the whole process group of the child on a
+// cancelled context: the child ends on the SIGTERM, and its own child
+// ignores SIGTERM and gets the SIGKILL after the WaitDelay. When Run
+// returns, that grandchild is gone. Without ProcessGroup it would outlive
+// Run: the SIGINT of the default reaches the child alone.
+func TestRunProcessGroupStopsTheChildrenOfTheChild(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out lockedBuffer
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- NewRunner(nil).Run(ctx, Cmd{
+			Name:         "/bin/sh",
+			Args:         []string{"-c", `sh -c 'trap "" TERM; echo $$ > "$0"; echo up; exec sleep 30' "$0" & wait`, pidFile},
+			Stdout:       &out,
+			Stderr:       &out,
+			WaitDelay:    300 * time.Millisecond,
+			ProcessGroup: true,
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "up") {
+		if time.Now().After(deadline) {
+			t.Fatal("the grandchild did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	start := time.Now()
+	select {
+	case <-errCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return in 10 s after the cancel")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("Run returned %s after the cancel, want about the delay (300ms)", took)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processGone(pid) {
+		t.Errorf("the grandchild (pid %d) still runs after Run returned", pid)
+	}
+}
+
+// processGone reports that pid does not exist (kill(pid, 0) fails with
+// ESRCH), or is a zombie that its new parent has not reaped yet.
+func processGone(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	f := statFields(raw)
+	return len(f) > 0 && f[0] == "Z"
+}
+
+// statFields returns the fields of /proc/<pid>/stat after the name, which
+// ends at the last ")" (the name itself can hold ") "): the state first,
+// then the parent pid and the process group.
+func statFields(raw []byte) []string {
+	i := bytes.LastIndexByte(raw, ')')
+	if i < 0 {
+		return nil
+	}
+	return strings.Fields(string(raw[i+1:]))
 }
 
 // After the cancel, Run returns the error of the context also when the

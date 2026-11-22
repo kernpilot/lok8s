@@ -1,0 +1,1 @@
+fail 1 dial tcp: lookup CANARY on 127.0.0.53:53: no such host

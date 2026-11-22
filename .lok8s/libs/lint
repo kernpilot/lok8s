@@ -509,13 +509,14 @@ lint::bootstrap() {
   local -a entries=()
   mapfile -t entries < <(bootstrap::_resolve_entries "${spec_file}" "${kind}")
 
-  local entry b_name b_dir b_inline b_env b_wait b_deps
+  local entry b_name b_dir b_inline b_env b_wait b_deps b_explicit b_key suc=0
   for entry in "${entries[@]}"; do
     [[ -n "${entry}" ]] || continue
     # _parse_entry decodes scalar vs map form and validates the entry shape,
     # handing back the resolved addon name + dir through namerefs.
+    b_key=""
     if ! bootstrap::_parse_entry \
-        "${domain}" "${entry}" b_name b_dir b_inline b_env b_wait b_deps; then
+        "${domain}" "${entry}" b_name b_dir b_inline b_env b_wait b_deps b_explicit b_key; then
       # _parse_entry already emitted a specific "bootstrap: ..." error.
       errs=$(( errs + 1 ))
       continue
@@ -527,9 +528,31 @@ lint::bootstrap() {
       error "  spec.bootstrap entry not found: ${entry} (resolved to ${b_dir})"
       errs=$(( errs + 1 ))
     fi
+    # The addon counts only as a bare entry name, as in `lo doctor`, also with
+    # a trailing "/" or "/." (spec::is_addon).
+    if [[ "${b_key}" != /* && "${b_key}" != ./* && "${b_key}" != ../* ]] && spec::is_addon "${b_dir}" system-upgrade-controller; then
+      suc=1
+    fi
   done
+  (( ! suc )) || lint::_suc_kubectl "${spec_file}"
 
   return "${errs}"
+}
+
+# lint::_suc_kubectl <spec_file> — warns when spec.kubernetes.version is a minor
+# that the kubectl image of system-upgrade-controller does not serve, with the
+# line of `lo doctor` (utils/spec.sh; Go: Linter.sucKubectl). A version that is
+# not set, cannot be read or is not vX.Y or vX.Y.Z gets no line here; only
+# `lo doctor` reports it. The version check of lint (lint::kubernetes_version)
+# reads a Lo spec only, and it accepts every image tag, `latest` too. Warnings
+# only: it returns 0.
+lint::_suc_kubectl() {
+  local version verdict
+  version=$(spec::kubernetes_version "${1}" 2>/dev/null) || return 0
+  [[ -n "${version}" ]] || return 0
+  verdict="$(spec::suc_kubectl "${version}")"
+  [[ "${verdict}" != out\ * ]] || warn "  $(spec::suc_kubectl_out_of_range_line "${verdict#out }")"
+  return 0
 }
 
 # -- Kustomization references -------------------------------------------------

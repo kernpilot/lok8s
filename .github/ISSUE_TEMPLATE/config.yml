@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/kernpilot/lok8s/security/advisories/new
     about: Report security issues privately — please do not open a public issue.
   - name: Documentation
-    url: https://kernpilot.github.io/lok8s/
+    url: https://lok8s.io/
     about: Guides and reference for the lo CLI, drivers, and addons.

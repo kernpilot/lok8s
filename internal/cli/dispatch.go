@@ -75,6 +75,9 @@ func newDispatcher(cmd *cobra.Command, paths *config.Paths) *provision.Dispatche
 
 	kc := kubehzContext(cmd, paths)
 	kc.Runner = runner
+	// --print-token of lo provision and lo up (printTokenFlag); a command
+	// without the flag gets false.
+	kc.PrintToken, _ = cmd.Flags().GetBool("print-token")
 	loader := &bridge.Loader{Paths: paths, Runner: runner, Stdout: stdout, Stderr: stderr}
 
 	hooks := kc.ProvisionHooks()

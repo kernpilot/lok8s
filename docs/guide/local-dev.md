@@ -281,7 +281,12 @@ nameserver of the node does not change.
 
 The field needs **kind v0.18.0 or later**. An older kind binary stops with an
 unknown-field error on the config. A node image from before kind v0.18.0
-ignores the field, and its nodes keep the host search domains.
+ignores the field, and its nodes keep the host search domains. `lo doctor`
+checks the kind version: an older kind is a failure when the active domain
+uses the Lo driver, and when there is no active domain (no name, or no
+`cluster.lok8s.yaml` and no `deploy.lok8s.yaml`) or doctor cannot read the
+driver of its spec. For a domain of another driver, it is a warning. See
+[`lo doctor`](../reference/cli.md#lo-doctor).
 
 Short host names no longer resolve on the nodes either, not only in pods. This
 applies to image pulls (containerd resolves a registry host on the node) and

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/interrupt"
@@ -35,21 +36,49 @@ func buildClusterPayload(clusterYAML string) []byte {
 	} else {
 		return nil
 	}
-	return compactJSON(
-		jsonPair{"domain", doc.Raw("spec", "cluster", "domain")},
-		jsonPair{"kind", doc.Raw("kind")},
-		jsonPair{"provider", doc.Or("hetzner", "spec", "provider")},
-		jsonPair{"region", doc.OrChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
-		jsonPair{"kubernetesVersion", doc.Raw("spec", "kubernetes", "version")},
+	pairs := []jsonPair{
+		{"domain", doc.Raw("spec", "cluster", "domain")},
+		{"kind", doc.Raw("kind")},
+		{"provider", doc.Or("hetzner", "spec", "provider")},
+		{"region", doc.OrChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
+	}
+	// An unset version (kubernetesVersion: "") is left out of the payload.
+	// The bare read gave the word "null", which went out as the version
+	// string "null" (issue #272). Bash: the jq branch that adds the key
+	// only when it is not empty.
+	if v := doc.kubernetesVersion(); v != "" {
+		pairs = append(pairs, jsonPair{"kubernetesVersion", v})
+	}
+	pairs = append(pairs,
 		jsonPair{"controlPlaneReplicas", replicasJSON},
 		jsonPair{"hosting", doc.Or("self", "spec", "kubehz", "hosting")},
 		jsonPair{"access", doc.Or("none", "spec", "kubehz", "access")},
 	)
+	return compactJSON(pairs...)
+}
+
+// kubernetesVersion is spec.kubernetes.version, or "" when it is unset: no
+// key, a YAML null, false or an empty string (yq's
+// `.spec.kubernetes.version // ""`: `//` fires on null and on false). A
+// number keeps its text ("0", "1.30"). The payload and the refusal in
+// ProvisionHosted use this one read. Bash: kubehz::_hosted_version.
+func (d specDoc) kubernetesVersion() string {
+	return d.Or("", "spec", "kubernetes", "version")
+}
+
+// missingVersionLine is the refusal of a hosted spec with no
+// spec.kubernetes.version (bash: kubehz::provision_hosted, the same text).
+func missingVersionLine(clusterYAML string) string {
+	return "kubehz: spec.kubernetes.version is not set in " + clusterYAML +
+		". A hosted cluster needs a Kubernetes version, so no cluster was created. Set it, then run the command again."
 }
 
 // waitForCluster ports kubehz::wait_for_cluster: poll GET /api/clusters/{id}
 // at 10-second intervals up to timeout seconds.
 func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, timeout int) error {
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	c.debugf("Waiting for hosted cluster %s to become ready (timeout: %ds)", clusterID, timeout)
 	auth := withBearer(c.getenv("KUBEHZ_TOKEN"))
 	for elapsed := 0; elapsed < timeout; elapsed += 10 {
@@ -198,10 +227,24 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 // written by writePrivateFile (a 0600 temp file and one rename): a failed
 // download or write leaves the old file as it was. The kubeconfig path is
 // checked before the create: a path that the write refuses stops the
-// provision there, so a refusal creates no cluster.
+// provision there, so a refusal creates no cluster. A .kubeconfig
+// directory that is not there yet passes: the write makes it with mode
+// 0700, and the second check accepts that mode, so the second check
+// refuses no directory that lo made. A spec with no
+// spec.kubernetes.version is refused first, before any request: the
+// platform needs the version and refuses a create without it (HTTP 400,
+// a missing field).
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
+	if loadSpec(clusterYAML).kubernetesVersion() == "" {
+		c.errorf("%s", missingVersionLine(clusterYAML))
+		return ErrHandled
+	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	apiURL := cfg.APIURL
-	// bash: kubehz::_private_target before the POST.
+	// bash: kubehz::_private_target before the POST (also the directory
+	// check, privateDirRefusal).
 	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
 	if _, err := privateTarget(kubeconfigPath); err != nil {
 		c.errorf("%s", err)
@@ -247,7 +290,11 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o755); err != nil {
+	// Mode 0700 (at most, under the umask): the second check
+	// (privateTarget in writePrivateFile) refuses a directory that another
+	// user can write into, and must not refuse the directory made here
+	// (bash: mkdir -p under umask 077).
+	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o700); err != nil {
 		return err
 	}
 	// A failed download leaves the old kubeconfig as it was: the file is
@@ -292,12 +339,38 @@ func (e privateFileError) Error() string { return string(e) }
 // deferred removal deletes the temp file on each return with an error.
 // A dest that is a symlink is resolved (privateTarget): the temp file goes
 // beside the file that the link names, and the rename replaces that file,
-// so the link stays. A link to nothing, a link that cannot be resolved and
-// a directory are refused (privateFileError). os.Rename is a rename onto
-// the exact path: it fails when another operation put a directory there
-// during the download (it never moves the file into it, as a mv without
-// -T does), so bash's check after the rename has no twin here. A failed
-// rename is a privateFileError with the text of bash.
+// so the link stays. A link of another user, a link to nothing, a link
+// that cannot be resolved and a directory are refused (privateFileError).
+// The threat model: a process of this user is trusted, because it can
+// read the file anyway. Another user is not. Before the create,
+// privateTarget resolves dest in one walk (privateWalk). It refuses a
+// dest that is a link of another user, or that follows one, a link in a
+// directory that another user can write into, a name that it cannot look
+// up, and a directory of the file that another user can write into
+// (privateDirRefusal), with the texts of bash. Thus only this user and
+// root can write into a directory without the sticky bit, and in a
+// directory with the sticky bit another user cannot rename or remove a
+// file or a link of this user. The end of the walk is not resolved again:
+// a link that another user puts there after the walk (at a name that was
+// not there) is replaced by os.Rename, not followed. Under this model,
+// these steps are safe:
+//   - The deferred removal takes the temp file by its path: no other user
+//     can put another file at that path before the removal.
+//   - os.CreateTemp makes the file with mode 0600 (O_EXCL), and the data
+//     goes through its descriptor. A default ACL of the directory comes
+//     from its owner, this user or root.
+//   - Between the write and os.Rename, no other user can replace the temp
+//     file or put a directory at the file. os.Rename goes onto the exact
+//     path: it fails on a directory (it never moves the file into it, as a
+//     mv without -T does), so bash's check after the rename has no twin
+//     here, and a directory with the sticky bit passes.
+//
+// What stays: a process of this user, an ACL that lets another user write
+// into the directory (the check reads the mode bits only), and the parents
+// of the directory. Another user who can write into a parent can put a
+// directory of their own in its place. In a directory with the sticky
+// bit, another user can make the write fail, but cannot replace a file of
+// this user. A failed rename is a privateFileError with the text of bash.
 // Signals: INT and TERM (interrupt.Watch) and HUP (interrupt.CatchHangup,
 // for the time of the call) cancel the contexts and do not stop lo in the
 // middle of this function: the write ends, and the rename or the deferred
@@ -311,7 +384,7 @@ func writePrivateFile(ctx context.Context, dest string, data []byte) (err error)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".*")
+	tmp, err := os.CreateTemp(privateDir(target), filepath.Base(target)+".*")
 	if err != nil {
 		return privateFileError("Cannot create a temp file beside " + target)
 	}
@@ -341,23 +414,50 @@ func writePrivateFile(ctx context.Context, dest string, data []byte) (err error)
 var renameFile = os.Rename
 
 // privateTarget ports kubehz::_private_target: the file that a write of
-// dest replaces (dest, or for a symlink the file that it names). A link
-// to nothing, a link that cannot be resolved and a directory are refused
+// dest replaces (dest, or for a symlink the file that it names), from one
+// walk (privateWalk). The walk checks each link of the chain, and its end
+// is not resolved again: a second resolution would follow a link that
+// another user puts at a name after the walk. A link to nothing, a link
+// that cannot be resolved, a directory and a file in a directory that
+// another user can write into (privateDirRefusal) are refused
 // (privateFileError, the text of bash).
 func privateTarget(dest string) (string, error) {
-	target := dest
-	info, lerr := os.Lstat(dest)
-	if lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-		var err error
-		if target, err = filepath.EvalSymlinks(dest); err != nil {
-			return "", privateFileError("Cannot resolve the symlink " + dest)
-		}
-		info, lerr = os.Stat(target)
+	target, info, refused := privateWalk(dest)
+	if refused != "" {
+		return "", privateFileError(refused)
 	}
-	if lerr == nil && info.IsDir() {
+	if info != nil && info.IsDir() {
 		return "", privateFileError(dest + " is a directory, not a file")
 	}
+	if refused := privateDirRefusal(privateDir(target)); refused != "" {
+		return "", privateFileError(refused)
+	}
 	return target, nil
+}
+
+// privateDir is the directory of the path p as bash dirname gives it: the
+// text before the last "/" (a "/" at the end of p does not count), without
+// the "/" at its end, "/" for a name in the root, and "." for a name
+// without a "/". Unlike filepath.Dir, it does not clean the path. The end
+// of privateWalk can hold a ".." after a link to a directory, and the
+// kernel reads that ".." from the directory that the link names: a
+// cleaned path would name another directory than the one that the create
+// and the rename use.
+func privateDir(p string) string {
+	if p == "" {
+		return "."
+	}
+	if p = strings.TrimRight(p, "/"); p == "" {
+		return "/"
+	}
+	i := strings.LastIndex(p, "/")
+	if i < 0 {
+		return "."
+	}
+	if d := strings.TrimRight(p[:i], "/"); d != "" {
+		return d
+	}
+	return "/"
 }
 
 // DestroyHosted ports kubehz::destroy_hosted: resolve the cluster id from
@@ -368,6 +468,9 @@ func (c *Context) DestroyHosted(ctx context.Context, cfg *Config, domain, cluste
 	apiURL := cfg.APIURL
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
+	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
 	}
 
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)

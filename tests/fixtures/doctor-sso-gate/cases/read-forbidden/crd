@@ -1,0 +1,1 @@
+fail 1 Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io "securitypolicies.gateway.envoyproxy.io" is forbidden: User "CANARY" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope

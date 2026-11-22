@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -136,6 +137,15 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return err
 	}
 
+	// 1c. Check the Robot credentials BEFORE the infrastructure step too: a
+	// control character in HROBOT_USER or HROBOT_PASSWORD stops the apply,
+	// and it must not do so after the servers exist. Apply checks them
+	// again for a direct caller. The bash twin checks only inside
+	// kubeone::apply, after the servers exist.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
+
 	// 2. Provision infrastructure via the provider contract. Guarded:
 	// without it a failed INFRASTRUCTURE reconcile would fall through to
 	// the manifest render and `kubeone apply` against hosts that were
@@ -220,6 +230,17 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 
 	workDir := d.workDir(domain)
 
+	// 0. Check the Robot credentials before any step. Reset refuses a
+	// control character in them, and a failed reset only warns: the
+	// provider destroy would then delete the cloud servers, and the
+	// bare-metal workers would keep their Kubernetes install with no
+	// control plane left to reset them. So a refusal here resets nothing,
+	// destroys nothing and keeps the kubeconfig. The bash twin has no
+	// check in driver::destroy.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
+
 	// 1. Reset Kubernetes (kubeone reset). Fail-soft: warn and continue
 	// with the infrastructure destroy.
 	if fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
@@ -281,6 +302,17 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	}
 	tfjson := fsutil.FileExists(filepath.Join(workDir, "output.json"))
 
+	// The Robot credentials go to the pre-apply steps (the bridge child that
+	// names the Robot servers and renders the CCM Secret) and to kubeone
+	// (robotEnv). A control character in either is refused first, with the
+	// two lines of http::credential_ok and no child. The bash twin checks in
+	// kubeone::_name_robot_workers, after the stale-worker cleanup and only
+	// when both are set; here each set value is checked, before every step,
+	// because robotEnv passes each one on alone.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
+
 	// Pre-apply steps (stale-worker cleanup, Robot naming, addon render) —
 	// injectable, ports with the addon engine.
 	if d.Hooks.PrepareApply != nil {
@@ -330,6 +362,12 @@ func (d *Driver) Reset(ctx context.Context, workDir string) error {
 		ui.ErrorTo(d.stderr(), "kubeone.yaml not found in %s", workDir)
 		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
+	// kubeone reset gets the Robot credentials too (robotEnv): the same
+	// check as in Apply, for a direct caller. The bash kubeone::reset has
+	// none. Destroy checks them before it calls Reset.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
 	args := []string{"reset", "--manifest", manifest, "--auto-approve"}
 	if tf := filepath.Join(workDir, "output.json"); fsutil.FileExists(tf) {
 		args = append(args, "--tfjson", tf)
@@ -374,6 +412,8 @@ func KubeconfigPath(workDir, clusterName string) string {
 
 // robotEnv mirrors the env exports of the bash apply subshell: the Hetzner
 // Robot credentials ride along under every alias the CCM tooling reads.
+// Apply and Reset refuse a value with a control character before they call
+// it (credentials.NoControl).
 func robotEnv() []string {
 	var env []string
 	if u := os.Getenv("HROBOT_USER"); u != "" {

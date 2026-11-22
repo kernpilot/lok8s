@@ -45,6 +45,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/credentials"
 )
 
 // Agent-key environment (the names the platform docs and the create answer use).
@@ -392,8 +394,9 @@ func writeTokenCache(file string, e tokenCacheEntry) error {
 }
 
 // isControl reports a C0 control character or DEL. The bash twin tests the
-// same set under LC_ALL=C (kubehz::token_has_control).
-func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
+// same set under LC_ALL=C (kubehz::token_has_control). The set is the one
+// of credentials.IsControl; the other packages use it too.
+func isControl(r rune) bool { return credentials.IsControl(r) }
 
 // printable keeps an endpoint's error text to one line of plain characters.
 func printable(s string, limit int) string {

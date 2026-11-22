@@ -30,10 +30,11 @@ import (
 //   - Secret → the secrets.lok8s.dev generator (kustomize/plugins/secret),
 //     imported as a package: the same Run the standalone kustomize-secret
 //     binary's main calls, argv[1] = config path, PATH_SECRETS/
-//     LOK8S_SECRETS_* from the environment. Failure prints "secret plugin:
-//     <err>" like plugin.Fail.
+//     LOK8S_SECRETS_* from the environment. Failure prints each line of
+//     the error as "secret plugin: <line>" (plugin.WriteFailure, as
+//     plugin.Fail does).
 //   - ChartRenderer → khelm as a library (khelm.go), reproducing the khelm
-//     v2.8.0 kustomize-plugin mode. Failure prints "khelm: <err>" like its
+//     v2.9.0 kustomize-plugin mode. Failure prints "khelm: <err>" like its
 //     log.Fatalf.
 //
 // The match is on the LAST TWO path elements (…/secret/Secret,
@@ -56,7 +57,7 @@ func DispatchPlugin(ctx context.Context, args []string, stdin io.Reader, stdout,
 		}
 		applyPluginEnv(args[0], secretPluginRel)
 		if err := secret.Run(args, stdin, stdout, plugin.DefaultEnv); err != nil {
-			fmt.Fprintln(stderr, "secret plugin:", err)
+			plugin.WriteFailure(stderr, err)
 			return true, 1
 		}
 		return true, 0

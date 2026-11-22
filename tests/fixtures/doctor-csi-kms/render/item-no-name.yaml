@@ -1,0 +1,78 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    csi-kms.lok8s.dev/option: kms-config
+    lok8s.dev/category: storage
+    lok8s.dev/name: rook-ceph-csi-kms
+    lok8s.dev/type: system
+  namespace: rook-ceph
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - csi-kms-connection-details
+    resources:
+      - configmaps
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    csi-kms.lok8s.dev/option: metadata
+    lok8s.dev/category: storage
+    lok8s.dev/name: rook-ceph-csi-kms
+    lok8s.dev/type: system
+  name: rook-ceph-csi-kms-metadata
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    csi-kms.lok8s.dev/option: kms-config
+    lok8s.dev/category: storage
+    lok8s.dev/name: rook-ceph-csi-kms
+    lok8s.dev/type: system
+  name: rook-ceph-csi-kms-config
+  namespace: rook-ceph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rook-ceph-csi-kms-config
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-nodeplugin-sa
+    namespace: rook-ceph
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa
+    namespace: rook-ceph
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    csi-kms.lok8s.dev/option: metadata
+    lok8s.dev/category: storage
+    lok8s.dev/name: rook-ceph-csi-kms
+    lok8s.dev/type: system
+  name: rook-ceph-csi-kms-metadata
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-csi-kms-metadata
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-nodeplugin-sa
+    namespace: rook-ceph
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa
+    namespace: rook-ceph

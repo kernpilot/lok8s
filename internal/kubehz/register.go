@@ -100,6 +100,11 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err != nil {
 		return err
 	}
+	// Before the register: it makes the platform mint a claim key, and
+	// that key needs the hcloud token for its upload.
+	if !c.credentialOK("HCLOUD_TOKEN") {
+		return ErrHandled
+	}
 
 	body, err := c.registerPost(ctx, apiURL, bearer{},
 		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"claimKey", true}))
@@ -116,7 +121,7 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	}
 	// The announce hands out a one-time bind secret; keep it for the deploy.
 	// The agent sends it on its register, so the api adopts this row.
-	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
+	c.persistResponseBindSecret(domain, v)
 
 	hcloudAuth := withBearer(c.getenv("HCLOUD_TOKEN"))
 	// Replace by name, but only our own key: a stale claim key of this
@@ -138,9 +143,32 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	c.echo("kubehz: cluster '%s' registered (pending). Claim key '%s' uploaded to your Hetzner Cloud account.", domain, keyName)
 	c.echo("kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:")
 	c.echo("  curl -X POST %s/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\", apiURL)
+	if !c.claimTicketShown() {
+		c.echo("       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"%s\"}'", claimTicketHidden)
+		c.echo("  fingerprint: %s   (in Hetzner Console -> Security -> SSH keys, key '%s'; 'lo kubehz register --domain %s --print-token' registers again and shows a new ticket)", claimTicketHidden, keyName, domain)
+		return nil
+	}
 	c.echo("       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"%s\"}'", fingerprint)
 	c.echo("  fingerprint: %s   (also visible in Hetzner Console -> Security -> SSH keys)", fingerprint)
 	return nil
+}
+
+// claimTicketHidden is what the register prints in place of the claim
+// ticket, in the curl hint and on the fingerprint line. The log filter of
+// the provision workflows writes the same text in place of a ticket.
+const claimTicketHidden = "<hidden: one-time claim ticket>"
+
+// claimTicketShown reports whether the register prints the one-time claim
+// ticket: with --print-token (PrintToken), or when stdout is a terminal
+// and the environment is not a CI run (ui.NonInteractive: a runner can
+// give a pty). Only the stdout writer counts, not stderr. Any signed-in
+// user who has the ticket can claim the cluster. A pipe or a file (a CI
+// log, a captured output) is a copy that nobody asked for, and the ticket
+// stays in the Hetzner Console, where the next line points. The bash twin
+// checks `[[ -t 1 ]]`, verbose::noninteractive and its show_ticket
+// argument.
+func (c *Context) claimTicketShown() bool {
+	return c.PrintToken || (ui.For(c.out()).TTY && !ui.NonInteractive(c.getenv))
 }
 
 // directClaim ports kubehz::direct_claim — register a cluster ATTRIBUTED
@@ -149,6 +177,9 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 // it then hands the platform the hcloud token (sent ONLY on the HTTPS api
 // URL, never printed). Fail-soft: an error means "fall back".
 func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterYAML, apiURL string) error {
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	fingerprint, err := c.SSHFingerprint(ctx, clusterYAML)
 	if err != nil {
 		c.warnf("Could not extract SSH fingerprint for %s", domain)
@@ -173,7 +204,7 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 	}
 	// The announce hands out a one-time bind secret; keep it for the deploy.
 	// The agent sends it on its register, so the api adopts this row.
-	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
+	c.persistResponseBindSecret(domain, v)
 	c.echo("kubehz: cluster '%s' registered and claimed to your account (%s).", domain, clusterID)
 
 	// Optionally connect the hcloud token for dashboard-driven provisioning.
@@ -185,6 +216,12 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 		hcloudToken := c.getenv("HCLOUD_TOKEN")
 		if hcloudToken == "" {
 			c.warnf("spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect.")
+			return nil
+		}
+		// The token goes in the JSON body, where a control character is
+		// escaped and sent. The register above did not carry the token.
+		if !c.credentialOK("HCLOUD_TOKEN") {
+			c.warnf("kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard).")
 			return nil
 		}
 		cred, err := c.fetch(ctx, "POST", apiURL+"/api/credentials", auth,
@@ -311,7 +348,7 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 	}
 	// The announce hands out a one-time bind secret; keep it for the deploy.
 	// The agent sends it on its register, so the api adopts this row.
-	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
+	c.persistResponseBindSecret(domain, v)
 
 	c.debugf("Cluster registered with kubehz (pending claim): %s", clusterID)
 	// The fingerprint is public (not a secret), so it is safe to print; the
@@ -335,6 +372,9 @@ var errNotRegistered = errors.New("kubehz: no cluster registered for domain")
 // domain is errNotRegistered — deregister/destroy branch on the distinction
 // so a lookup FAILURE is never reported as "not registered".
 func (c *Context) ResolveClusterID(ctx context.Context, domain, apiURL string) (string, error) {
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return "", ErrHandled
+	}
 	body, err := c.fetch(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return "", err
@@ -370,7 +410,7 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 
 	// deregister skips validate_config (reachable standalone), so guard each
 	// call by its own URL.
-	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
+	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil || !c.credentialOK("KUBEHZ_TOKEN") {
 		rc = ErrHandled
 	} else {
 		clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
@@ -404,7 +444,7 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 	// result as it is.
 	if hcloudToken := c.getenv("HCLOUD_TOKEN"); hcloudToken != "" {
 		hcloudAPI := c.hcloudAPIBase()
-		if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err == nil {
+		if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err == nil && c.credentialOK("HCLOUD_TOKEN") {
 			auth := withBearer(hcloudToken)
 			keyID, _ := c.findOwnClaimKey(ctx, hcloudAPI, auth, "kubehz-claim-"+domain, domain, "delete")
 			if keyID != "" {

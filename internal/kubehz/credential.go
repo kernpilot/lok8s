@@ -1,0 +1,22 @@
+package kubehz
+
+import "github.com/kernpilot/lok8s/internal/credentials"
+
+// credentialOK ports http::credential_ok: it succeeds when no named
+// environment variable holds a control character (isControl). Each refused
+// variable gets the error of the bash twin, with its name. Each entry point
+// calls it before its first request that carries the credential. The check
+// itself is credentials.NoControl, over the context's environment and
+// stderr; the kubeone driver calls it too.
+//
+// The bash twin puts a credential on a curl config line, and a control
+// character ends that line: the rest becomes a curl option. The Go client
+// refuses a CR or a line feed in a header only as a transport error (the
+// caller then says "unreachable"), and it sends a tab. A credential in a JSON
+// body (the hcloud token of the token connect) goes out with each control
+// character escaped. A common cause is a CR at the end of a value from a file
+// with CRLF line ends. An unset or empty variable passes: the caller decides
+// on that.
+func (c *Context) credentialOK(names ...string) bool {
+	return credentials.NoControl(c.getenv, c.errOut(), names...) == nil
+}

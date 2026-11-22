@@ -23,13 +23,13 @@ const (
 	// mapping the drift test enforces.
 	KustomizeCLI = "v5.8.1"
 	// KhelmVersion is the khelm release: the library lo-full links
-	// (go.mod: github.com/mgoltzsche/khelm/v2 v2.8.0) and the ChartRenderer
+	// (go.mod: github.com/mgoltzsche/khelm/v2 v2.9.0) and the ChartRenderer
 	// binary b installs under .kustomize/ for lo core.
-	KhelmVersion = "2.8.0"
-	// HelmVersion is helm.sh/helm/v3 as khelm v2.8.0 requires it — pinned in
+	KhelmVersion = "2.9.0"
+	// HelmVersion is helm.sh/helm/v3 as khelm v2.9.0 requires it — pinned in
 	// go.mod as well, so the in-process chart inflation is the helm the khelm
 	// binary was built from.
-	HelmVersion = "3.21.2"
+	HelmVersion = "3.22.1"
 )
 
 // YQVersion is the yq release the bash implementation is tested with: the
@@ -51,9 +51,16 @@ const YQVersion = "v4.54.3"
 // until b installs kubectl from dl.k8s.io. A test in internal/assets ties
 // the image's kind and kubectl downloads to these two: bump a pin, the image
 // URL and its sums together.
+//
+// KindDefaultNodeVersion is the tag of the default node image of
+// KindVersion: a Lo cluster without spec.kubernetes.version runs it when
+// kind is the pinned release. `lo doctor` names it (bash: the same literal
+// in .lok8s/utils/spec.sh). TestKindDefaultNodeVersionFollowsKindVersion
+// fails when KindVersion moves and this constant does not.
 const (
-	KubectlVersion = "v1.36.2"
-	KindVersion    = "v0.32.0"
+	KubectlVersion         = "v1.36.2"
+	KindVersion            = "v0.32.0"
+	KindDefaultNodeVersion = "v1.36.1"
 )
 
 // floatingEntries are the template entries that carry no version, each with

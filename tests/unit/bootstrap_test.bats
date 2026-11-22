@@ -4085,6 +4085,146 @@ b wait="
 rook-ceph-cluster"
 }
 
+# --- the written forms of a cilium entry -------------------------------------
+# Shared with the Go twin (internal/bootstrap/entryforms_test.go). Each of the
+# 12 cases under tests/fixtures/bare-entry/cases holds the cluster spec
+# (cluster.lok8s.yaml), the audit status (audit) and the hint of
+# `lo addons --detail` (hint). Nine cases also hold the result of a KubeOne
+# full provision (skip: skip or apply) and of --only cilium (only: kept or the
+# error line). The three cases without skip and only are forms that the two
+# bootstraps resolve differently before they read the dir name: for
+# `a/cilium/.` (nested-trailing-dot) Go applies the addon cilium and bash finds
+# no addon; for `cilium/..` (dot-dot) and `.` (dot) bash goes on with the dir
+# as written and Go finds no addon. The addon dir goes to .lok8s/addons/cilium
+# and to clusters/test.lok8s.dev/cilium (the dir of a `./cilium` path entry).
+_entry_setup() {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry" d
+  for d in "${PATH_LOK8S}/addons/cilium" "${PATH_CLUSTERS}/test.lok8s.dev/cilium"; do
+    mkdir -p "${d}"
+    cp "${fx}/addon/chart.yaml" "${fx}/addon/values.yaml" "${d}/"
+  done
+  cp "${fx}/cases/${1}/cluster.lok8s.yaml" "${CLUSTER_YAML}"
+  ENTRY_WANT="$(cat "${fx}/cases/${1}/${2}")"
+}
+
+_entry_skip_case() {
+  _entry_setup "${1}" skip
+  export LOK8S_BOOTSTRAP_ONLY=0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  case "${ENTRY_WANT}" in
+    skip)
+      assert_output --partial "[bootstrap] cilium is applied by the KubeOne driver on a full provision — skipping"
+      [ ! -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+      ;;
+    apply)
+      refute_output --partial "is applied by the KubeOne driver on a full provision"
+      [ -f "${BATS_TEST_TMPDIR}/last_merged.yaml" ]
+      ;;
+    *)
+      echo "bad want: ${ENTRY_WANT}" >&2
+      return 1
+      ;;
+  esac
+}
+
+_entry_only_case() {
+  _entry_setup "${1}" only
+  : > "${BATS_TEST_TMPDIR}/only.log"
+  bootstrap::_apply_one() { echo "$1" >> "${BATS_TEST_TMPDIR}/only.log"; return 0; }
+  local bootstrap_select="cilium"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  if [[ "${ENTRY_WANT}" == kept ]]; then
+    assert_success
+    [ "$(wc -l < "${BATS_TEST_TMPDIR}/only.log")" -eq 1 ]
+  else
+    assert_failure
+    assert_output --partial "${ENTRY_WANT}"
+    [ ! -s "${BATS_TEST_TMPDIR}/only.log" ]
+  fi
+}
+
+# The case dirs, by name: a lost or an extra case dir fails here (the tests
+# above and their Go twins read only the cases that are there).
+@test "the shared cases of a cilium entry are the 12 expected dirs" {
+  local fx="${_PROJECT_ROOT}/tests/fixtures/bare-entry/cases" d
+  local -a got=() want=(bare dot dot-dot nested-trailing-dot path
+    path-trailing-dot path-trailing-dot-slash path-trailing-slash trailing-dot
+    trailing-dot-slash trailing-double-slash trailing-slash)
+  for d in "${fx}"/*; do
+    if [[ -d "${d}" ]]; then
+      got+=("${d##*/}")
+    fi
+  done
+  mapfile -t got < <(printf '%s\n' "${got[@]}" | LC_ALL=C sort)
+  if [[ "${got[*]}" != "${want[*]}" ]]; then
+    printf 'case dirs: %s\nwant:      %s\n' "${got[*]}" "${want[*]}" >&2
+    return 1
+  fi
+}
+
+@test "KubeOne full provision: a bare cilium is left to the driver" { _entry_skip_case bare; }
+@test "KubeOne full provision: a bare cilium/ is left to the driver" { _entry_skip_case trailing-slash; }
+@test "KubeOne full provision: a bare cilium/. is left to the driver" { _entry_skip_case trailing-dot; }
+@test "KubeOne full provision: a bare cilium/./ is left to the driver" { _entry_skip_case trailing-dot-slash; }
+@test "KubeOne full provision: a bare cilium// is left to the driver" { _entry_skip_case trailing-double-slash; }
+@test "KubeOne full provision: a path entry ./cilium is left to the driver" { _entry_skip_case path; }
+@test "KubeOne full provision: a path entry ./cilium/ is left to the driver" { _entry_skip_case path-trailing-slash; }
+@test "KubeOne full provision: a path entry ./cilium/. is not cilium and renders" { _entry_skip_case path-trailing-dot; }
+@test "KubeOne full provision: a path entry ./cilium/./ is not cilium and renders" { _entry_skip_case path-trailing-dot-slash; }
+
+@test "bootstrap::apply --only cilium selects a bare cilium" { _entry_only_case bare; }
+@test "bootstrap::apply --only cilium selects a bare cilium/" { _entry_only_case trailing-slash; }
+@test "bootstrap::apply --only cilium selects a bare cilium/." { _entry_only_case trailing-dot; }
+@test "bootstrap::apply --only cilium selects a bare cilium/./" { _entry_only_case trailing-dot-slash; }
+@test "bootstrap::apply --only cilium selects a bare cilium//" { _entry_only_case trailing-double-slash; }
+@test "bootstrap::apply --only cilium selects a path entry ./cilium" { _entry_only_case path; }
+@test "bootstrap::apply --only cilium selects a path entry ./cilium/" { _entry_only_case path-trailing-slash; }
+@test "bootstrap::apply --only cilium does not select a path entry ./cilium/." { _entry_only_case path-trailing-dot; }
+@test "bootstrap::apply --only cilium does not select a path entry ./cilium/./" { _entry_only_case path-trailing-dot-slash; }
+
+# The dry run passes the key to the skip too.
+@test "bootstrap::apply --dry-run: a bare cilium/. is skipped on a KubeOne full provision" {
+  _entry_setup trailing-dot skip
+  export LOK8S_BOOTSTRAP_ONLY=0
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line "bootstrap dry-run: cilium/.: skipped"
+}
+
+# Without the key (a direct call, as before the key existed), the skip reads
+# the dir name as written. With the key of a bare entry it reads it as Go
+# does (spec::entry_base); with the key of a path entry it reads the dir as
+# written.
+@test "bootstrap::_skip_reason reads the dir name with the key, and as written without it" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_ONLY=0
+  run bootstrap::_skip_reason "/x/addons/cilium/." kubeone
+  assert_failure
+  assert_output ""
+  run bootstrap::_skip_reason "/x/addons/cilium/." kubeone "cilium/."
+  assert_success
+  assert_output --partial "[bootstrap] cilium is applied by the KubeOne driver on a full provision"
+  run bootstrap::_skip_reason "/x/clusters/d/./cilium/." kubeone "./cilium/."
+  assert_failure
+  assert_output ""
+}
+
+@test "bootstrap::_apply_one without the key reads the dir name as written" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  addons::render() { echo "RENDER_CALLED" >&2; return 1; }
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium/." "capi" "hetzner" "/kc" "" "" ""
+  assert_failure
+  assert_output --partial "RENDER_CALLED"
+  refute_output --partial "platform-owned"
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium/." "capi" "hetzner" "/kc" "" "" "" "cilium/."
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+}
+
 # Two entries may share a name (a basename collision nothing depends on).
 # Their report lines add the key as written, so the two lines differ and each
 # names the --only value that selects that one entry.
@@ -4856,9 +4996,16 @@ _dry_plugin_stopped() {
 # grace makes the check send KILL to a plugin that ignores TERM. Every
 # signal goes to the plugin or to the check, and the watchdog sends no USR1
 # (the stop came before the time limit).
+# The test reads the first signal that goes to the plugin, not the first
+# line of the log. The test waits only until the plugin runs, so its TERM
+# can come before the check sets its stop traps. The check then only notes
+# the TERM, and when the traps are set, it sends the TERM again to itself
+# (addons::dry_run_boundary). That TERM runs the stop, which sends TERM to
+# the plugin. So one TERM of the check to itself can come before the TERM
+# to the plugin, and no other signal can.
 @test "the dry run's plugin check stop sends TERM to the plugin first and no signal to the watchdog" {
   _dry_need_clock
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc pid sub i
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc pid sub i first
   _ADDONS_DRYRUN_CHECK_GRACE=1
   mkdir -p "${m}" "${b}"
   : > "${log}"
@@ -4875,7 +5022,10 @@ _dry_plugin_stopped() {
   wait "${job}" 2>/dev/null || rc=$?
   unset -f kill
   (( rc == 143 )) || { echo "the check returned ${rc}, want 143: $(<"${b}.out")"; return 1; }
-  [[ "$(head -n 1 "${log}")" == "${sub} -TERM ${pid}" ]] || { echo "the stop's first signal is not TERM to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
+  first=$(awk -v p="${pid}" '$3 == p { print; exit }' "${log}")
+  [[ "${first}" == "${sub} -TERM ${pid}" ]] || { echo "the stop's first signal to the plugin is not TERM from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! awk -v p="${pid}" -v s="${sub}" '$3 == p { exit } { n++; if ($0 != s " -TERM " s) bad = 1 } END { exit !(bad || n > 1) }' "${log}" \
+    || { echo "a signal other than one TERM of the check to itself came before the TERM to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
   grep -qx -- "${sub} -KILL ${pid}" "${log}" || { echo "the check sent no KILL after the grace: $(tr '\n' ' ' < "${log}")"; return 1; }
   ! awk -v p="${pid}" -v s="${sub}" '$3 != p && $3 != s { bad = 1 } END { exit !bad }' "${log}" \
     || { echo "a signal went to a process that is neither the plugin nor the check (the watchdog): $(tr '\n' ' ' < "${log}")"; return 1; }
@@ -5477,7 +5627,7 @@ EOF
 _fake_helm() {
   export FAKE_HELM="${BATS_TEST_TMPDIR}/fakehelm"
   mkdir -p "${FAKE_HELM}/bin"
-  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'v3.22.1+g0000000\n' > "${FAKE_HELM}/version"
   printf 'common\t0.1.0  \thttps://charts.example\tok      \n' > "${FAKE_HELM}/deplist"
   : > "${FAKE_HELM}/lint"
   cat > "${FAKE_HELM}/bin/helm" <<'SH'
@@ -5586,7 +5736,7 @@ SH
   : > "${b}/report"
   run _gate "chart: charts/app"
   assert_failure
-  assert_output "${p} helm dependency list printed no dependency table (helm v3.21.2+g0000000). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
+  assert_output "${p} helm dependency list printed no dependency table (helm v3.22.1+g0000000). Use helm v3.22.1, or use the Go implementation (lok8s.yaml: spec.implementation)."
   [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
   rm "${FAKE_HELM}/table"
   : > "${b}/report"
@@ -5610,7 +5760,7 @@ SH
   run _gate "chart: charts/app"
   assert_failure
   assert_output "${p} ${needs} Found: v3.2.4+g0000000. ${use_go}"
-  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'v3.22.1+g0000000\n' > "${FAKE_HELM}/version"
   # No helm at all: a PATH with yq and the system tools only.
   mkdir -p "${FAKE_HELM}/nohelm"
   ln -s "$(command -v yq)" "${FAKE_HELM}/nohelm/yq"
@@ -5628,7 +5778,7 @@ SH
   run _gate "chart: charts/app"
   assert_failure
   assert_output "${p} dependency common is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
-  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'v3.22.1+g0000000\n' > "${FAKE_HELM}/version"
 
   # A chart without dependencies, and a remote chart (a repository: khelm
   # pulls it into its cache), run. The config file argument stands in when
@@ -5898,6 +6048,7 @@ SH
 # The same with REAL sops material when the toolchain has sops, ssh-keygen
 # and ssh-to-age: the normal key discovery (SOPS_AGE_KEY) decrypts and the
 # file is diffed; another key fails and the run exits 2.
+# bats test_tags=real-sops
 @test "bootstrap::apply --dry-run: restore.d with real sops (right key diffs, wrong key rc 2)" {
   local t
   for t in sops ssh-keygen ssh-to-age; do
@@ -6189,6 +6340,40 @@ SH
   [ ! -s "${KLOG}" ]
   [ -f "${dir}/01-testcni.diff" ]
   [ ! -s "${dir}/01-testcni.diff" ]
+}
+
+# The pass that removes the non-deterministic objects from the diff input
+# can fail. Here a yq function fails for that pass only (the only yq call
+# with --header-preprocess=false); each other yq call of the dry run runs
+# the real yq. The entry is then an error, not unchanged, and kubectl diff
+# does not run. The Go twin returns an error there too.
+@test "bootstrap::apply --dry-run --ignore-nondeterministic: a failed pass without the non-deterministic objects is an error" {
+  write_cluster_spec "testcni"
+  export RENDERS="${BATS_TEST_TMPDIR}/renders" YQ_FAILED="${BATS_TEST_TMPDIR}/yq.failed"
+  : > "${RENDERS}"; : > "${YQ_FAILED}"
+  kustomize() {
+    echo x >> "${RENDERS}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stable\n  namespace: kube-system\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: cilium-ca\n  namespace: kube-system\ndata:\n  ca.crt: Q0Et%d\n' "$(wc -l < "${RENDERS}")"
+  }
+  yq() {
+    if [[ " $* " == *" --header-preprocess=false "* ]]; then
+      cat > /dev/null
+      echo x >> "${YQ_FAILED}"
+      return 5
+    fi
+    command yq "$@"
+  }
+  export -f kustomize yq
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 bootstrap_ignore_nondet=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [ "$(wc -l < "${YQ_FAILED}")" -eq 1 ]
+  assert_line "[error] bootstrap: testcni: cannot remove the non-deterministic objects from the diff input"
+  assert_line "bootstrap dry-run: testcni: error"
+  refute_output --partial "testcni: unchanged"
+  assert_output --partial " errors=1 "
+  [ ! -s "${KLOG}" ]
 }
 
 # Item D: an entry whose YAML declares a KRM function is marked partial

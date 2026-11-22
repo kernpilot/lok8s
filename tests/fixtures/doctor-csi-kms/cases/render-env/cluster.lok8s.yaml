@@ -1,0 +1,13 @@
+apiVersion: lok8s.dev/v1
+kind: KubeOne
+metadata:
+  name: rbac-test
+spec:
+  bootstrap:
+    - cilium
+    - rook-ceph
+    - rook-ceph-csi-kms:
+        values:
+          kms: [metadata]
+        env:
+          LOK8S_USER_KMS_NAMESPACE: rook-ceph

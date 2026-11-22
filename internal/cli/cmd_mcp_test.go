@@ -29,7 +29,8 @@ import (
 
 // argshMcpTools is the surface the argsh `lo mcp` builtin advertised
 // (captured from `.lok8s/lo mcp` tools/list, 2026-09-02; the kubehz node
-// leaves re-captured 2026-09-13). The ophis surface must stay a superset of
+// leaves re-captured 2026-09-13; lo_secrets_remove-key added with the
+// command, 2026-11-19). The ophis surface must stay a superset of
 // it under the documented renames (argshMcpRenames).
 var argshMcpTools = []string{
 	"lo_addons", "lo_ai_check", "lo_ai_link", "lo_ai_skills", "lo_ai_unlink", "lo_audit",
@@ -44,6 +45,7 @@ var argshMcpTools = []string{
 	"lo_registry_clean", "lo_registry_down", "lo_registry_status", "lo_registry_up",
 	"lo_secrets_add-key", "lo_secrets_allow", "lo_secrets_decrypt", "lo_secrets_encrypt",
 	"lo_secrets_env", "lo_secrets_init", "lo_secrets_list", "lo_secrets_path", "lo_secrets_print",
+	"lo_secrets_remove-key",
 	"lo_secrets_set", "lo_status", "lo_tilt_ci", "lo_tilt_down", "lo_tilt_preflight",
 	"lo_tilt_restart", "lo_tilt_status", "lo_tilt_up", "lo_trust", "lo_up", "lo_use", "lo_version",
 }
@@ -198,6 +200,110 @@ func TestMcpExposureGates(t *testing.T) {
 	}
 }
 
+// TestMcpAllowEnvRaisesTheFlagTier pins the rule that the help text states:
+// LO_MCP_ALLOW adds to the --allow-* flags, and the higher of the two tiers
+// applies. It runs the real `lo mcp tools` command (the flag parse, resolve
+// and the tool list over the in-memory transport). It only lists the tools
+// and calls none of them.
+func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     string
+		unset   bool // LO_MCP_ALLOW is not set; env is ignored
+		args    []string
+		want    []string
+		absent  []string
+		wantErr string
+	}{{
+		name: "LO_MCP_ALLOW=destructive with --allow-mutating exposes a destructive tool",
+		env:  "destructive",
+		args: []string{"--allow-mutating"},
+		want: []string{"lo_down", "lo_build"},
+	}, {
+		name:   "no LO_MCP_ALLOW with --allow-mutating does not list a destructive tool",
+		unset:  true,
+		args:   []string{"--allow-mutating"},
+		want:   []string{"lo_build"},
+		absent: []string{"lo_down"},
+	}, {
+		name:   "an empty LO_MCP_ALLOW with --allow-mutating acts as unset",
+		env:    "",
+		args:   []string{"--allow-mutating"},
+		want:   []string{"lo_build"},
+		absent: []string{"lo_down"},
+	}, {
+		name: "LO_MCP_ALLOW=mutating keeps the destructive tools of --allow-destructive",
+		env:  "mutating",
+		args: []string{"--allow-destructive"},
+		want: []string{"lo_down", "lo_build"},
+	}, {
+		// The setup that the kubehz guide recommends for an editor config.
+		name:   "LO_MCP_ALLOW=mutating with no flag lists a mutating tool and does not list a destructive tool",
+		env:    "mutating",
+		args:   []string{}, // not nil: cobra reads os.Args when the args are nil
+		want:   []string{"lo_build"},
+		absent: []string{"lo_down"},
+	}, {
+		name:    "LO_MCP_ALLOW=bogus is an error, also with --allow-mutating",
+		env:     "bogus",
+		args:    []string{"--allow-mutating"},
+		wantErr: `LO_MCP_ALLOW="bogus": want "mutating" or "destructive"`,
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(mcpAllowEnv, tc.env) // restores the outer value after the case
+			if tc.unset {
+				if err := os.Unsetenv(mcpAllowEnv); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := newMcpTools(synthProject(t))
+			var out, errOut strings.Builder
+			c.SetOut(&out)
+			c.SetErr(&errOut)
+			c.SetArgs(tc.args)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			err := c.ExecuteContext(ctx)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("lo mcp tools %v: err = %v, want %q", tc.args, err, tc.wantErr)
+				}
+				if out.Len() != 0 {
+					t.Errorf("a refused LO_MCP_ALLOW value still printed tools:\n%s", out.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("lo mcp tools %v: %v (stderr: %s)", tc.args, err, errOut.String())
+			}
+			names := map[string]bool{}
+			for line := range strings.Lines(out.String()) {
+				if f := strings.Fields(line); len(f) > 0 {
+					names[f[0]] = true
+				}
+			}
+			if len(names) == 0 {
+				t.Fatalf("lo mcp tools %v printed no tools", tc.args)
+			}
+			env := fmt.Sprintf("LO_MCP_ALLOW=%q", tc.env)
+			if tc.unset {
+				env = "LO_MCP_ALLOW not set"
+			}
+			for _, name := range tc.want {
+				if !names[name] {
+					t.Errorf("%s, lo mcp tools %v: %s missing", env, tc.args, name)
+				}
+			}
+			for _, name := range tc.absent {
+				if names[name] {
+					t.Errorf("%s, lo mcp tools %v: %s exposed", env, tc.args, name)
+				}
+			}
+		})
+	}
+}
+
 // ── tool list from the real tree ───────────────────────────────────────
 
 func TestMcpToolsDefaultReadonlyOnly(t *testing.T) {
@@ -302,6 +408,86 @@ func TestMcpToolsDestructiveOptInIsSupersetOfArgsh(t *testing.T) {
 	}
 }
 
+// TestMcpDrainToolHidesTheForceItRefuses: a drain always refuses the global
+// --force, so its tool does not offer it, also with --allow-destructive.
+// lo_down reads --force, so its tool keeps it.
+func TestMcpDrainToolHidesTheForceItRefuses(t *testing.T) {
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	drain := tools["lo_kubehz_node_drain"]
+	if drain == nil {
+		t.Fatal("lo_kubehz_node_drain missing with --allow-destructive")
+	}
+	flags := flagNames(t, drain)
+	if flags["force"] {
+		t.Error("--force on lo_kubehz_node_drain, which always refuses it")
+	}
+	if !flags["evict-unmanaged"] {
+		t.Error("--evict-unmanaged missing on lo_kubehz_node_drain")
+	}
+	if tools["lo_down"] == nil || !flagNames(t, tools["lo_down"])["force"] {
+		t.Error("--force missing on lo_down with --allow-destructive")
+	}
+}
+
+// TestMcpNodeToolsHideTheClusterTheyRefuse: the node verbs always refuse
+// the global --cluster/-s, so their tools do not offer it, also with
+// --allow-destructive. The test walks every leaf of `kubehz node` in the MCP
+// tree: a new node verb without a `cluster` entry in mcpRefusedFlags fails
+// it. Each tool keeps its own target flag (--space-id or --cluster-id).
+// lo_down reads --cluster (the kind cluster), so its tool keeps it.
+func TestMcpNodeToolsHideTheClusterTheyRefuse(t *testing.T) {
+	node, _, err := newMCPTree(synthProject(t)).Find([]string{"kubehz", "node"})
+	if err != nil || node.CommandPath() != "lo kubehz node" {
+		t.Fatalf("lo kubehz node is not in the MCP tree (%v)", err)
+	}
+	leaves := node.Commands()
+	if len(leaves) < 6 {
+		t.Fatalf("lo kubehz node has %d leaves, want at least 6 (the check proves nothing on fewer)", len(leaves))
+	}
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	for _, leaf := range leaves {
+		path := leaf.CommandPath()
+		if !mcpRefusedFlags[path]["cluster"] {
+			t.Errorf("mcpRefusedFlags has no cluster entry for %q", path)
+		}
+		name := strings.ReplaceAll(path, " ", "_")
+		tool := tools[name]
+		if tool == nil {
+			t.Errorf("%s missing with --allow-destructive", name)
+			continue
+		}
+		flags := flagNames(t, tool)
+		if flags["cluster"] {
+			t.Errorf("--cluster on %s, which always refuses it", name)
+		}
+		if !flags["space-id"] && !flags["cluster-id"] {
+			t.Errorf("%s has neither --space-id nor --cluster-id", name)
+		}
+	}
+	if tools["lo_down"] == nil || !flagNames(t, tools["lo_down"])["cluster"] {
+		t.Error("--cluster missing on lo_down with --allow-destructive")
+	}
+}
+
+// TestMcpRefusedFlagsNameRealFlags: every entry of mcpRefusedFlags names a
+// command of the MCP tree and a flag that this command has. A renamed command
+// or flag would otherwise make the entry do nothing.
+func TestMcpRefusedFlagsNameRealFlags(t *testing.T) {
+	root := newMCPTree(synthProject(t))
+	for path, refused := range mcpRefusedFlags {
+		cmd, _, err := root.Find(strings.Fields(path)[1:])
+		if err != nil || cmd.CommandPath() != path {
+			t.Errorf("mcpRefusedFlags: %q is no command of the MCP tree (%v)", path, err)
+			continue
+		}
+		for name := range refused {
+			if cmd.Flag(name) == nil {
+				t.Errorf("mcpRefusedFlags: %q has no flag --%s", path, name)
+			}
+		}
+	}
+}
+
 func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 	tools := mcpToolNames(t, mcpExposure{destructive: true})
 	for name, tool := range tools {
@@ -321,8 +507,25 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 	if flagNames(t, tools["lo_kubehz_claim"])["nonce"] {
 		t.Error("lo_kubehz_claim exposes --nonce")
 	}
+	// --print-token puts the one-time claim ticket on a stdout that is not
+	// a terminal, which is the stdout of an agent.
+	for _, name := range []string{"lo_kubehz_register", "lo_provision", "lo_up"} {
+		if tools[name] == nil {
+			t.Errorf("%s is gone: the --print-token check proves nothing", name)
+		} else if flagNames(t, tools[name])["print-token"] {
+			t.Errorf("%s exposes --print-token (it prints the claim ticket)", name)
+		}
+	}
 	if flagNames(t, tools["lo_secrets_decrypt"])["ssh-key"] || flagNames(t, tools["lo_kubehz_handover_preseed"])["ssh-key"] {
 		t.Error("--ssh-key exposed")
+	}
+	// Trust on first use for the host that gets the CA keys is a person's
+	// choice, never an agent's.
+	if flagNames(t, tools["lo_kubehz_handover_preseed"])["accept-new-host-key"] {
+		t.Error("lo_kubehz_handover_preseed exposes --accept-new-host-key")
+	}
+	if !flagNames(t, tools["lo_kubehz_handover_preseed"])["known-hosts"] {
+		t.Error("lo_kubehz_handover_preseed lost --known-hosts: the --accept-new-host-key check proves nothing")
 	}
 	if !flagNames(t, tools["lo_kubehz_deploy"])["dry-run"] {
 		t.Error("lo_kubehz_deploy lost its --dry-run flag")
@@ -468,6 +671,12 @@ func TestMcpDefaultEnvCarriesToolchainPathAndBase(t *testing.T) {
 }
 
 func TestMcpCommandTree(t *testing.T) {
+	// The readonly check below needs LO_MCP_ALLOW unset: an exported
+	// LO_MCP_ALLOW=destructive would list lo_up.
+	t.Setenv(mcpAllowEnv, "") // restores the outer value after the test
+	if err := os.Unsetenv(mcpAllowEnv); err != nil {
+		t.Fatal(err)
+	}
 	root := NewRoot(synthProject(t))
 	for _, path := range [][]string{{"mcp"}, {"mcp", "start"}, {"mcp", "serve"}, {"mcp", "tools"}, {"mcp", "claude", "enable"}, {"mcp", "vscode", "enable"}, {"mcp", "cursor", "enable"}} {
 		cmd, _, err := root.Find(path)
@@ -697,6 +906,17 @@ func TestMcpAgentToolsTakeNoFlagThatMovesTheBearer(t *testing.T) {
 // its argv (toolCallArgvEnv) and exits.
 func mcpCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, args []string) *mcp.CallToolResult {
 	t.Helper()
+	res, err := mcpTryCall(t, x, tool, flags, args)
+	if err != nil {
+		t.Fatalf("tools/call %s: %v", tool, err)
+	}
+	return res
+}
+
+// mcpTryCall is mcpCall, but it returns the error of the call: the server
+// refuses arguments that the input schema does not allow with an error.
+func mcpTryCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, args []string) (*mcp.CallToolResult, error) {
+	t.Helper()
 	t.Setenv(toolCallArgvEnv, "1")
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
@@ -709,11 +929,35 @@ func mcpCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, arg
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close(); cancel(); <-served }()
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"flags": flags, "args": args}})
-	if err != nil {
-		t.Fatalf("tools/call %s: %v", tool, err)
+	return session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"flags": flags, "args": args}})
+}
+
+// TestMcpRefusesAHiddenFlagAndRunsNothing: a call that sends a flag that
+// the tool's schema does not show is refused, and no process starts. The
+// schema refuses such a flag (additionalProperties: false); this test fails
+// if a library update drops that. The same call without the hidden flag runs.
+func TestMcpRefusesAHiddenFlagAndRunsNothing(t *testing.T) {
+	x := mcpExposure{destructive: true}
+	for _, flags := range []map[string]any{
+		{"name": "worker-1", "cluster": "kind-1"},
+		{"name": "worker-1", "force": true},
+	} {
+		res, err := mcpTryCall(t, x, "lo_kubehz_node_drain", flags, []string{})
+		switch {
+		case err == nil && strings.Contains(resultText(res), toolCallArgvMark):
+			t.Errorf("flags %v: a process ran: %q", flags, resultText(res))
+		case err == nil && !res.IsError:
+			t.Errorf("flags %v: the call was not refused: %q", flags, resultText(res))
+		case err == nil:
+			t.Logf("flags %v: refused: %.160s", flags, resultText(res))
+		default:
+			t.Logf("flags %v: refused: %v", flags, err)
+		}
 	}
-	return res
+	res, err := mcpTryCall(t, x, "lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{})
+	if err != nil || !strings.Contains(resultText(res), toolCallArgvMark+"kubehz node drain --name worker-1") {
+		t.Errorf("the call without a hidden flag did not run: err=%v", err)
+	}
 }
 
 // resultText is every text block of a tool result, joined.
@@ -731,16 +975,40 @@ func resultText(res *mcp.CallToolResult) string {
 // positional argument that starts with "-" is an MCP error and no process
 // starts. ophis puts the model's arguments after the flags, so "-o" or
 // "--force" there would parse as a flag the schema does not offer.
+//
+// The drain tool has its own selector (mcpRefusedFlags), so it gets the same
+// calls: "--force" or "-s" there would set a flag that its schema hides.
 func TestMcpRefusesADashArgumentAndRunsNothing(t *testing.T) {
-	for _, args := range [][]string{{"sp-1a2b3c4d", "-o", "json"}, {"sp-1a2b3c4d", "--force"}, {"-"}} {
-		res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, args)
+	for _, c := range []struct {
+		tool  string
+		flags map[string]any
+		args  []string
+	}{
+		{"lo_kubehz_space_get", map[string]any{}, []string{"sp-1a2b3c4d", "-o", "json"}},
+		{"lo_kubehz_space_get", map[string]any{}, []string{"sp-1a2b3c4d", "--force"}},
+		{"lo_kubehz_space_get", map[string]any{}, []string{"-"}},
+		{"lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{"--force"}},
+		{"lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{"-s", "kind-1"}},
+	} {
+		res := mcpCall(t, mcpExposure{destructive: true}, c.tool, c.flags, c.args)
 		text := resultText(res)
 		if !res.IsError || !strings.Contains(text, "starts with a dash") || !strings.Contains(text, "Nothing ran") {
-			t.Errorf("args %q: isError=%v text=%q, want the refusal", args, res.IsError, text)
+			t.Errorf("%s args %q: isError=%v text=%q, want the refusal", c.tool, c.args, res.IsError, text)
 		}
 		if strings.Contains(text, toolCallArgvMark) {
-			t.Errorf("args %q: a process ran: %q", args, text)
+			t.Errorf("%s args %q: a process ran: %q", c.tool, c.args, text)
 		}
+	}
+}
+
+// TestMcpDoesNotEchoAPrivateKeyArgument: a dash argument with the shape of
+// a private key (the first line of a PEM block) is refused like any dash
+// argument, and the refusal does not print it.
+func TestMcpDoesNotEchoAPrivateKeyArgument(t *testing.T) {
+	res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, []string{"-----BEGIN OPENSSH PRIVATE KEY-----"})
+	text := resultText(res)
+	if !res.IsError || !strings.Contains(text, "starts with a dash") || strings.Contains(text, "OPENSSH") {
+		t.Errorf("isError=%v text=%q, want the refusal without the argument", res.IsError, text)
 	}
 }
 
@@ -794,7 +1062,7 @@ func TestMcpTierCountsMatchTheDocs(t *testing.T) {
 	}{
 		{mcpExposure{}, 29},
 		{mcpExposure{mutating: true}, 55},
-		{mcpExposure{destructive: true}, 98},
+		{mcpExposure{destructive: true}, 99},
 	} {
 		if got := len(mcpToolNames(t, tc.x)); got != tc.want {
 			t.Errorf("%+v: %d tools, want %d (update the count here and in docs/reference/cli.md)", tc.x, got, tc.want)

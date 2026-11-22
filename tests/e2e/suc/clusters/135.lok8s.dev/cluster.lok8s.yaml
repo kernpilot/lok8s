@@ -1,0 +1,45 @@
+# Slot 135 — the suc scenario. The system-upgrade-controller addon as
+# shipped, and one real Plan.
+#
+# One control plane, plain-HTTP registries. The kind config turns the
+# default CNI off, so cilium comes first: without a CNI no pod gets an
+# address, and the controller never starts. The addon is the subject;
+# the Plan comes from the test (tests/e2e/suc/plan.yaml), the way a
+# consumer's own target supplies it.
+#
+# network.name and network.cidr are written out even though the slot
+# defaults would supply both. They are the scenario's ownership prefix:
+# every container, volume and network the run may touch is named after
+# them, and the harness refuses to act on a name it did not derive from
+# this file (e2e::guard_name).
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-suc
+spec:
+  runtime: kind
+  kubernetes:
+    # Not the framework default (v1.31.12). The addon's kubectl image
+    # (rancher/kuberlr-kubectl v8.1.1) bundles kubectl 1.34 to 1.36, and
+    # kuberlr allows one minor version of skew, so the drain works on 1.33
+    # to 1.37 only. The addon renders for 1.35, so the scenario runs on
+    # 1.35: the v1.35.0 image of the release notes of kind v0.31.0, the
+    # kind that .bin/b.lock pins.
+    version: v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+  cluster:
+    domain: 135.lok8s.dev
+  network:
+    name: e2e-suc
+    cidr: 10.125.135.0/24
+  registries:
+    # Plain HTTP keeps this scenario off the Secret plugin and the dev CA.
+    tls: false
+    shared:
+      enabled: false
+  bootstrap:
+    # A global gate: the CNI is Ready before the addon applies.
+    - cilium:
+        wait: true
+    # A leaf entry: the bootstrap does not wait for it. The test waits for
+    # the Deployment and the Plan CRD itself, with its own bounds.
+    - system-upgrade-controller

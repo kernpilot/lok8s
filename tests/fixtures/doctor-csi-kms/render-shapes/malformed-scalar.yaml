@@ -1,0 +1,4 @@
+kind: Role
+metadata: {name: a, namespace: ns}
+---
+CANARY

@@ -1,0 +1,1 @@
+  ! rook-ceph-csi-kms RBAC leftovers not checked: spec.bootstrap has path entries (./targets/a, ./targets/rook-ceph-csi-kms, ../shared/kms, 1 more entry, 1 entry with an unusual name), which can render these objects too

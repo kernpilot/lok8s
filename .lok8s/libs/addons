@@ -14,6 +14,7 @@ import ^utils/types
 import ^utils/domain
 import ^utils/verbose
 import ^utils/template
+import ^utils/spec
 
 main::addons() {
   local domain="${domain:-${DOMAIN_NAME:-}}" detail=0
@@ -300,14 +301,16 @@ addons::detail() {
   printf '%-24s  %-14s  %-8s  %-10s  %s\n' "NAME" "CATEGORY" "TYPE" "VERSION" "CONFIGURE"
   printf '%-24s  %-14s  %-8s  %-10s  %s\n' "----" "--------" "----" "-------" "---------"
 
-  local e nm dr inl ev wt dp count=0
+  local e nm dr inl ev wt dp ex key count=0
   for e in "${entries[@]+"${entries[@]}"}"; do
     [[ -n "${e}" ]] || continue
-    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
-    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
     count=$(( count + 1 ))
+    # The addon name of the hint, as Go reads it (spec::entry_base): a bare
+    # `cilium/.` gets the hint of cilium.
     local base
-    base=$(basename "${dr}")
+    base="$(spec::entry_base "${key}" "${dr}")"
     if [[ "${dr}" == "${addons_dir}/"* ]]; then
       # Framework addon.
       local cat type version hint
@@ -796,7 +799,7 @@ builds_deps() {
   done
   (( any )) || return 1
   # The statuses and the lint message below are helm v3's (the helm khelm
-  # v2.8.0 is built from): another helm cannot check this chart. `helm lint`
+  # v2.9.0 is built from): another helm cannot check this chart. `helm lint`
   # checks the dependencies since helm v3.3.0; an older helm would pass an
   # archive that .helmignore hides.
   local version minor
@@ -851,7 +854,7 @@ builds_deps() {
     fi
   done <<< "${list}"
   if (( ! header )) && [[ "${list}" != "WARNING: no dependencies at "* ]]; then
-    refuse "helm dependency list printed no dependency table (helm ${version}). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
+    refuse "helm dependency list printed no dependency table (helm ${version}). Use helm v3.22.1, or use the Go implementation (lok8s.yaml: spec.implementation)."
     return 0
   fi
   local missing

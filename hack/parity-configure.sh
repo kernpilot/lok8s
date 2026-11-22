@@ -560,6 +560,50 @@ check PATH_SECRETS doctor                   # active alpha.dev (kind lo)
 check PATH_SECRETS doctor --domain gamma.app           # Deploy -> alpha.dev
 check PATH_SECRETS doctor --domain nowhere.dev         # active domain has no spec
 check PATH_SECRETS doctor --domain prov.dev            # provider / infrastructure section (hetzner, offline)
+# sso.dev — sso-gate in spec.bootstrap and no .kubeconfig/sso.yaml: the
+# SecurityPolicy CRD check prints its skip line before any kubectl read, so
+# no cluster is reached. The domain is made here, after the earlier cases.
+mkdir -p "${CL}/sso.dev"
+cat > "${CL}/sso.dev/cluster.lok8s.yaml" <<'EOF'
+kind: KubeOne
+apiVersion: lok8s.dev/v1
+metadata:
+  name: sso
+spec:
+  bootstrap:
+    - cilium
+    - envoy-gateway
+    - sso-gate
+EOF
+[[ ! -e "${PROJ}/.kubeconfig/sso.yaml" ]] || fail "doctor: the sso.dev case needs no kubeconfig"
+check PATH_SECRETS doctor --domain sso.dev             # sso-gate: the CRD check skips without a kubeconfig
+# suc.dev — system-upgrade-controller in spec.bootstrap on a Lo cluster with
+# Kubernetes v1.31.12, below the range of the addon's kubectl image: lint and
+# doctor print the same warning, and the text is pinned on each side. The
+# spec only is read, so no cluster is reached. The domain is made here,
+# after the earlier cases.
+mkdir -p "${CL}/suc.dev"
+cat > "${CL}/suc.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: suc
+spec:
+  kubernetes:
+    version: v1.31.12
+  bootstrap:
+    - cilium
+    - system-upgrade-controller
+EOF
+suc_line="system-upgrade-controller: the kubectl image of the drain container serves Kubernetes 1.33 to 1.37, not 1.31, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from 1.33 to 1.37, or use a Plan without cordon or drain"
+check - lint --domain suc.dev                          # the kubectl range warning of lint
+for side in bash go; do
+  kver_pin "${side}: lint suc.dev warns about the kubectl range" "${WORK}/${side}.err" "[warn]   ${suc_line}"
+done
+check PATH_SECRETS doctor --domain suc.dev             # the kubectl range warning of doctor
+for side in bash go; do
+  kver_pin "${side}: doctor suc.dev warns about the kubectl range" "${WORK}/${side}.out" "  ! ${suc_line}"
+done
 parity::select "${PROJ}" go
 if (cd "${PROJ}" && "${LO_BIN}" doctor </dev/null 2>/dev/null || true) | grep -q 'PATH_SECRETS unset (per-domain stores; the flat store is retired)'; then
   echo "ok: doctor: the binary reports PATH_SECRETS unset"
@@ -640,6 +684,40 @@ PARITY_ROUTE_GO=doctor check - doctor --domain gamma.app
 # tree never sees the flag (argsh would reject it).
 check PATH_SECRETS doctor --no-color               # native vs the shim; the D35 line
 PARITY_ROUTE_GO=doctor check - doctor --no-color   # routed on both sides
-PARITY_ROUTE_GO=version check - version
+# lo version runs each tool that it finds, docker included: the probe
+# stubs (parity::probe_case). doctor runs some of the tools that it finds
+# too (envsubst --version, mkcert -CAROOT, kind version; the binary also
+# runs bash), but not docker: no domain here has a registry file. So the
+# doctor cases run with the real toolchain.
+PARITY_ROUTE_GO=version parity::probe_case "${PROJ}" check - version
+
+# The coreutils line (doctor::_coreutils, doctorCoreutils): when lok8s.yaml
+# routes commands to bash, both doctors warn if the first line of
+# `stat --version` does not name GNU coreutils. A stub stat first on PATH
+# gives the BSD answer to --version and runs the real stat for any other
+# argv. The Go side routes only version, so the Go doctor runs natively and
+# also prints its implementation line (allowed); the bash side runs the
+# whole tree. Each side must print the warning: two sides without it also
+# diff equal. With nothing routed, the Go doctor prints no warning. The
+# cases above run with the stat of the host (GNU coreutils), where both
+# sides print no coreutils line.
+cu_line="  ! bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+cu_stat="$(command -v stat)" || cu_stat=""
+if [[ -z "${cu_stat}" ]]; then
+  fail "doctor: no stat on PATH for the coreutils case"
+else
+  mkdir -p "${WORK}/cu-bin"
+  printf '#!/usr/bin/env bash\nif [[ "$*" == --version ]]; then\n  echo "stat: illegal option -- -" >&2\n  exit 1\nfi\nexec %q "$@"\n' "${cu_stat}" > "${WORK}/cu-bin/stat"
+  chmod +x "${WORK}/cu-bin/stat"
+  PATH="${WORK}/cu-bin:${PATH}" PARITY_ROUTE_GO=version check 'PATH_SECRETS|implementation: go; bash for version; tree ' doctor
+  for side in bash go; do
+    kver_pin "${side}: doctor warns without GNU coreutils" "${WORK}/${side}.out" "${cu_line}"
+  done
+  parity::select "${PROJ}" go
+  (cd "${PROJ}" && PATH="${WORK}/cu-bin:${PATH}" "${LO_BIN}" doctor </dev/null >"${WORK}/go.out" 2>"${WORK}/go.err") || true
+  kver_pin "go: doctor ran with nothing routed" "${WORK}/go.out" "--- environment ---"
+  kver_pin "go: doctor prints no coreutils line with nothing routed" "${WORK}/go.out" "${cu_line}" absent
+  rm -rf "${WORK}/cu-bin"
+fi
 
 report

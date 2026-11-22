@@ -3,7 +3,7 @@
   "tool": {
     "b": "v4.18.8"
   },
-  "timestamp": "2026-11-09T13:58:07Z",
+  "timestamp": "2026-11-22T07:41:25Z",
   "binaries": [
     {
       "name": "argsh",
@@ -84,8 +84,8 @@
     },
     {
       "name": "khelm",
-      "version": "v2.8.0",
-      "sha256": "f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c",
+      "version": "v2.9.0",
+      "sha256": "ab507f6ac1dd4e5c2d68b570a0722c8129d06a12919c912b3a26bf9cb7cf0593",
       "source": "github.com/mgoltzsche/khelm",
       "provider": "github"
     },
@@ -117,6 +117,13 @@
       "sha256": "9ac12154b0532204c9f637b8d63c8460924eb489e54caa5f68bf5a985f1bb0a9",
       "source": "github.com/fentas/b",
       "preset": true
+    },
+    {
+      "name": "shellcheck",
+      "version": "v0.11.0",
+      "sha256": "4da528ddb3a4d1b7b24a59d4e16eb2f5fd960f4bd9a3708a15baddbdf1d5a55b",
+      "source": "github.com/koalaman/shellcheck",
+      "provider": "github"
     }
   ]
 }

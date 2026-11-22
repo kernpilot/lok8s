@@ -123,6 +123,9 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
 	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		c.echo("Status:  unknown (API unreachable: %s)", apiURL)
@@ -245,6 +248,9 @@ func (c *Context) Assess(ctx context.Context, domain string) error {
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
 	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
 	if err != nil {
 		c.errorf("kubehz: no cluster found for %s — is it registered + claimed, and is KUBEHZ_TOKEN set?", domain)
@@ -366,9 +372,12 @@ func jstrings(v any) []string {
 // ── claim-code / claim / re-enroll (against the AMBIENT kubeconfig) ──
 
 const (
-	agentNamespace  = "kubehz-system"
-	agentSecret     = "kubehz-agent" // #nosec G101 -- the Secret's NAME; its content never leaves the cluster
-	agentConfigName = "kubehz-agent-config"
+	agentNamespace = "kubehz-system"
+	agentSecret    = "kubehz-agent" // #nosec G101 -- the Secret's NAME; its content never leaves the cluster
+	// agentStateName is the ConfigMap of the agent's markers (the claim nonce
+	// among them). It is apart from kubehz-agent-config, the agent's
+	// configuration, which the agent cannot read or change through the API.
+	agentStateName = "kubehz-agent-state"
 )
 
 // ClaimCode is `lo kubehz claim-code`: print the one-time claim code (C)
@@ -460,8 +469,11 @@ func (c *Context) Claim(ctx context.Context, nonce string) error {
 		c.errorf("invalid claim nonce: expected a dashboard-minted khzn_… value (20-200 chars); nothing was placed")
 		return ErrHandled
 	}
-	if err := c.runQuiet(ctx, "kubectl", "-n", agentNamespace, "get", "configmap", agentConfigName); err != nil {
-		c.errorf("configmap/%s not found in %s. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster.", agentConfigName, agentNamespace)
+	// An agent that an older lo deployed has no kubehz-agent-state: it keeps
+	// its markers on kubehz-agent-config and does not read a nonce here.
+	// `lo kubehz deploy` adds the ConfigMap.
+	if err := c.runQuiet(ctx, "kubectl", "-n", agentNamespace, "get", "configmap", agentStateName); err != nil {
+		c.errorf("configmap/%s not found in %s. Deploy the heartbeat agent first, or run 'lo kubehz deploy' again for an agent that an older lo deployed (see docs/guide/kubehz.md), and point your kubeconfig at the cluster.", agentStateName, agentNamespace)
 		return ErrHandled
 	}
 	// One call, both annotations: the value and its placement stamp. The
@@ -477,11 +489,11 @@ func (c *Context) Claim(ctx context.Context, nonce string) error {
 	}
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl",
-		Args: []string{"-n", agentNamespace, "patch", "configmap", agentConfigName,
+		Args: []string{"-n", agentNamespace, "patch", "configmap", agentStateName,
 			"--type", "merge", "--patch-file", "/dev/stdin"},
 		Stdin: bytes.NewReader(patch), Stdout: io.Discard, Stderr: c.errOut(),
 	}); err != nil {
-		c.errorf("could not annotate configmap/%s — check your kubeconfig permissions", agentConfigName)
+		c.errorf("could not annotate configmap/%s — check your kubeconfig permissions", agentStateName)
 		return ErrHandled
 	}
 	c.echo("kubehz: claim nonce placed for the agent.")
@@ -519,6 +531,11 @@ func (c *Context) ReEnroll(ctx context.Context, domain string) error {
 	}
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
+	}
+	// Before the kubectl read below: that read does not carry the token,
+	// but the bash twin refuses first, and nothing else runs on a refusal.
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
 	}
 	token := c.getenv("KUBEHZ_TOKEN")
 	if token == "" {

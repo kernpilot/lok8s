@@ -1943,7 +1943,6 @@ lo kubehz claim --nonce <khzn_…> [flags]
 ### Examples
 
 ```
-  lo kubehz claim --nonce khzn_2f9c1e
   lo kubehz claim --nonce - < nonce.txt
 ```
 
@@ -2208,13 +2207,14 @@ lo kubehz handover preseed --bundle <path> --node <ip> [flags]
 ### Options
 
 ```
-  -b, --bundle string        Export bundle: a directory or .tar.gz with the contract keys
-  -h, --help                 help for preseed
-      --known-hosts string   known_hosts file for the node's host key (default: ssh's own); a new host is recorded, a changed key fails
-  -n, --node string          Target node address (kubeone node0) to place the PKI on
-  -p, --port int             SSH port (default 22)
-  -i, --ssh-key string       SSH private key file
-  -u, --user string          SSH user (default "root")
+      --accept-new-host-key   Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)
+  -b, --bundle string         Export bundle: a directory or .tar.gz with the contract keys
+  -h, --help                  help for preseed
+      --known-hosts string    known_hosts file with the node's host key (default: ssh's own files); the file must exist, and an unknown or changed key fails
+  -n, --node string           Target node address (kubeone node0) to place the PKI on
+  -p, --port int              SSH port (default 22)
+  -i, --ssh-key string        SSH private key file
+  -u, --user string           SSH user (default "root")
 ```
 
 ### SEE ALSO
@@ -2512,7 +2512,8 @@ lo kubehz register [flags]
 ### Options
 
 ```
-  -h, --help   help for register
+  -h, --help          help for register
+      --print-token   Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
 ```
 
 ### SEE ALSO
@@ -2918,10 +2919,14 @@ claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
 result lands in the model's transcript. Neither is chat: it passes its
 arguments on unread. A call whose positional argument starts with "-" is
 refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
-nonce, ...) are never exposed either.
+nonce, ...) are never exposed either. A flag that a command always
+refuses is not in that tool's schema: the global --cluster on the kubehz
+node verbs (they take --cluster-id or --space-id), and --force on kubehz
+node drain (it takes --evict-unmanaged).
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
-for editor configs (flags win).
+for editor configs. It adds to the flags: the higher of the two tiers
+applies.
 
 Transports: 'start' serves stdio (what editors launch); 'serve' serves
 streamable HTTP on loopback — it has no authentication, keep it there.
@@ -3220,7 +3225,7 @@ lo mcp serve [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating
+      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
       --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
   -h, --help                help for serve
       --host string         Address to listen on (default "127.0.0.1")
@@ -3250,7 +3255,7 @@ lo mcp start [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating
+      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
       --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
   -h, --help                help for start
       --log-level string    Server log level on stderr (debug, info, warn, error) (default "info")
@@ -3278,7 +3283,7 @@ lo mcp tools [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating
+      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
       --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
   -h, --help                help for tools
       --json                Print the full tool definitions (schemas, annotations) as JSON
@@ -3437,6 +3442,7 @@ lo provision [flags]
       --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
       --no-diff                   Dry run without the kubectl diff: render only, no cluster access
       --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
+      --print-token               Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
       --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
       --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
@@ -3713,6 +3719,7 @@ lo secrets [flags]
 * [lo secrets list](#lo-secrets-list)	 - List secrets
 * [lo secrets path](#lo-secrets-path)	 - Resolve the secrets path for the current context
 * [lo secrets print](#lo-secrets-print)	 - Print secret(s)
+* [lo secrets remove-key](#lo-secrets-remove-key)	 - Remove an age recipient and re-key the store
 * [lo secrets set](#lo-secrets-set)	 - Write a literal value into the secret cache
 
 ## lo secrets add-key
@@ -3937,6 +3944,85 @@ lo secrets print [pattern...] [flags]
   -c, --copy       Copy secret(s) to clipboard (--only-one is implied)
   -h, --help       help for print
   -o, --only-one   Only print one secret (error if multiple matches)
+```
+
+### SEE ALSO
+
+* [lo secrets](#lo-secrets)	 - Manage secrets (encrypt/decrypt/set)
+
+## lo secrets remove-key
+
+Remove an age recipient and re-key the store
+
+### Synopsis
+
+Remove an age recipient from every creation rule in .sops.yaml, then
+re-encrypt every managed Secret.*.enc file of the selected stores from its
+plaintext, each with a new data key: the labels are not trusted to choose
+the files. Without --all that is the store of the current domain; with
+--all, every domain store. The flat store is not re-keyed. A warning names
+each other store that still lists the recipient. A recipient that is in no
+rule and on no .enc label is a warning, not a refusal: the command then
+re-keys every managed file and changes no rule, so a mistyped key re-keys
+every file.
+
+Before the first write, the command refuses:
+  - a key argument that looks like a private key (it is not printed),
+  - a YAML tag under creation_rules other than !!str, !!seq or !!map, or a
+    mapping key in .sops.yaml that is not a string,
+  - a recipient outside a single-quoted age: list (an unquoted list, an
+    escaped string, a YAML list, key_groups, an alias or a merge key),
+  - the last recipient of a rule,
+  - a store path or an .enc file that it cannot stat or read (a dangling
+    symlink included), or a directory in a store that it cannot read,
+  - a managed .enc file that it re-keys and that is a symlink: the re-key
+    does not write through a link (replace the link with the file that it
+    names, or remove it from the store),
+  - another .enc file in a store: a name that ends in .enc, at any depth,
+    that is not a Secret.*.enc file at the top of the store (the re-key
+    does not rewrite it; re-key or remove it by hand),
+  - an .enc file whose sops metadata holds a member twice (re-encrypt it
+    with sops from its plaintext),
+  - an .enc file whose sops metadata does not parse or lists no age
+    recipient (the command reads the recipients from that metadata),
+  - an .enc file that matches no creation rule, a rule with a recipient that
+    is not age, or a rule with an age recipient that does not parse,
+  - without --skip-orphans, an .enc file with no decrypted twin: the re-key
+    cannot rewrite that file, so it keeps the removed recipient,
+  - a managed .enc file that holds other bytes than its decrypted twin, one
+    that your age identity cannot decrypt, or a twin that it cannot read:
+    the command decrypts each file in memory to compare it with its twin,
+    and the re-key encrypts the twin.
+
+The command holds the lock .sops.yaml.lock for the whole run, and waits for
+it LO_SECRETS_LOCK_WAIT seconds (60 by default). When .sops.yaml is a
+symlink, the lock is next to the file that it names. If the re-key stops after
+the .sops.yaml write, run the same command again to resume it. At the end
+it prints the number of creation rules that changed, of .enc files whose
+labels listed the recipient, and of .enc files that it re-keyed. Commit the
+.enc files together with .sops.yaml.
+
+A removal does not revoke what the key already read. Its holder can still
+decrypt the older .enc files in the git history, and keeps every value it
+decrypted before. Rotate those secrets after the removal.
+
+```
+lo secrets remove-key <key> [flags]
+```
+
+### Examples
+
+```
+  lo secrets remove-key ~/.ssh/old_ed25519.pub
+  lo secrets remove-key age1<recipient> --all
+```
+
+### Options
+
+```
+  -a, --all            Re-key every domain store, not just the current one
+  -h, --help           help for remove-key
+      --skip-orphans   Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)
 ```
 
 ### SEE ALSO
@@ -4252,7 +4338,7 @@ Install the pinned toolchain via b
 Provision a project's toolchain with b (github.com/fentas/b):
 
   1. .bin/b.yaml from the template pinned to this lo (kustomize v5.8.1,
-     khelm v2.8.0, the secrets.lok8s.dev Secret plugin at this lo's version,
+     khelm v2.9.0, the secrets.lok8s.dev Secret plugin at this lo's version,
      plus kubectl; kind/tilt/mkcert for --groups local; kubeone/hcloud for cloud;
      argsh/yq/jq/envsubst/sops/ssh-to-age for bash, the runtime of the frozen
      bash implementation and the provider plugins, carried commented out).
@@ -4337,6 +4423,7 @@ lo up [flags]
       --ci tilt ci        Headless: build+deploy+wait-ready via tilt ci, exit with real status (no TTY/browser)
   -h, --help              help for up
   -o, --open-tilt         Open Tilt in a browser (interactive mode only)
+      --print-token       Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
   -t, --timeout tilt ci   Readiness timeout for --ci (e.g. 300s, 10m); passed to tilt ci
 ```
 

@@ -155,11 +155,18 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 // other names are passed to the render process but not
 // envsubst-whitelisted.
 func jobEnv(job Job) map[string]string {
+	return EnvMap(job.EnvLines)
+}
+
+// EnvMap parses the KEY=value lines of an entry's env (Entry.EnvLines) into
+// the map that addons.Render takes. `lo doctor` renders an entry with it as
+// the bootstrap does.
+func EnvMap(lines string) map[string]string {
 	env := map[string]string{}
-	if job.EnvLines == "" {
+	if lines == "" {
 		return env
 	}
-	for kv := range strings.SplitSeq(job.EnvLines, "\n") {
+	for kv := range strings.SplitSeq(lines, "\n") {
 		if kv == "" {
 			continue
 		}

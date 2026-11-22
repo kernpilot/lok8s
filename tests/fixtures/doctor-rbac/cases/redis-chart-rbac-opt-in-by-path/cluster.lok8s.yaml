@@ -1,0 +1,8 @@
+apiVersion: lok8s.dev/v1
+kind: KubeOne
+metadata:
+  name: rbac-test
+spec:
+  bootstrap:
+    - redis-operator
+    - /.lok8s/addons/redis-operator-chart-rbac

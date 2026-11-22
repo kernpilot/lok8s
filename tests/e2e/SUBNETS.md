@@ -18,6 +18,7 @@ or with each other.
 | 132  | `132.lok8s.dev` | `shared-registries` | First of two domains sharing one mirror set |
 | 133  | `133.lok8s.dev` | `shared-registries` | Second domain — reuses that set          |
 | 134  | `134.lok8s.dev` | `lifecycle`       | up / up again / down / up / destroy, and the prompts |
+| 135  | `135.lok8s.dev` | `suc`             | The system-upgrade-controller addon and one real Plan |
 | 200  | (shared)        | (shared mirrors)  | Pull-through registry network — the framework default |
 | 201  | (shared)        | `shared-registries` | Its own mirror network (`e2e-shr-net`)   |
 

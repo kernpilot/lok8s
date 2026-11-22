@@ -6,7 +6,7 @@ plus the optional `driver::export` and `driver::post_provision` hooks — see be
 for a specific way of creating Kubernetes clusters. Bootstrap addons
 (CNI, LB, etc.) are **not** part of the driver contract — they live at
 the framework level in `.lok8s/libs/bootstrap` and run identically
-across every driver. See the [Driver Contract reference](https://kernpilot.github.io/lok8s/reference/kind-contract).
+across every driver. See the [Driver Contract reference](https://lok8s.io/reference/kind-contract).
 
 | Driver | Path | Purpose |
 |--------|------|---------|
@@ -67,13 +67,13 @@ applied by `.lok8s/libs/bootstrap` after `driver::provision` succeeds
 ```
 
 Listed in `spec.bootstrap: [cilium, metallb]`. See the
-[Addons guide](https://kernpilot.github.io/lok8s/guide/addons) for
+[Addons guide](https://lok8s.io/guide/addons) for
 authoring and the `base < driver < provider < inline` values
 precedence chain.
 
 ## Documentation
 
-- [Concepts — Cluster Kinds](https://kernpilot.github.io/lok8s/guide/concepts#cluster-kinds)
-- [Specs Reference](https://kernpilot.github.io/lok8s/reference/specs)
-- [Addons Guide](https://kernpilot.github.io/lok8s/guide/addons)
-- [Driver Contract](https://kernpilot.github.io/lok8s/reference/kind-contract)
+- [Concepts — Cluster Kinds](https://lok8s.io/guide/concepts#cluster-kinds-drivers)
+- [Specs Reference](https://lok8s.io/reference/specs)
+- [Addons Guide](https://lok8s.io/guide/addons)
+- [Driver Contract](https://lok8s.io/reference/kind-contract)

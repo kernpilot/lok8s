@@ -3,8 +3,11 @@ package cli
 // lo doctor — environment + toolchain preflight diagnostics.
 // Go port of .lok8s/libs/doctor; output is byte-identical. Reports bash
 // version (argsh needs >= 4.3), required/optional tool presence, the PATH_*
-// environment, whether the secrets plugin is built, and the active domain.
-// Exits non-zero when a REQUIRED prerequisite is missing.
+// environment, whether the secrets plugin is built, the active domain, the
+// RBAC migration leftovers of its cluster (cmd_doctor_rbac.go), and the
+// rook-ceph-csi-kms objects that the current values do not render
+// (cmd_doctor_csikms.go). Exits non-zero when a REQUIRED prerequisite is
+// missing.
 //
 // Tool checks are PATH-based (`command -v`) on purpose, NOT execx.Look:
 // doctor's job is diagnosing the toolchain an operator's shell will actually
@@ -125,15 +128,32 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	// Each section reports whether a REQUIRED check failed; every failure
 	// keeps printing so the report is complete.
 	fail := !doctorRuntimeSection(ctx, r, path, out)
-	if !doctorToolsSection(ctx, r, path, out) {
+	if !doctorToolsSection(ctx, r, paths, d, path, out) {
 		fail = true
 	}
-	if !doctorEnvironmentSection(ctx, paths, d, path, toolchainFlag, out) {
+	if !doctorEnvironmentSection(ctx, r, paths, d, path, toolchainFlag, out) {
 		fail = true
 	}
 	doctorTLSSection(ctx, r, path, d, out)
 	doctorRegistryTLS(ctx, r, paths, d, out)
 	doctorDomainSection(paths, d, out)
+	// The RBAC migration check of the domain's cluster (advisory; it sends
+	// only GET requests, and the credential plugin of the kubeconfig runs
+	// as kubectl runs it; cmd_doctor_rbac.go). Its lines come after the
+	// lines of the domain section; the two checks below follow them.
+	doctorRBACLeftovers(ctx, r, paths, d, path, bootstrapEntries(paths), out)
+	// The rook-ceph-csi-kms objects that the current values do not render
+	// (advisory, with the same GET requests and plugin caveat;
+	// cmd_doctor_csikms.go).
+	doctorKMSLeftovers(ctx, r, paths, d, path, kmsEntries(paths), out)
+	// The SecurityPolicy CRD of envoy-gateway, when spec.bootstrap has
+	// sso-gate as an entry name (advisory; one kubectl read of the CRD, GET
+	// requests only, with the same plugin caveat; cmd_doctor_ssogate.go).
+	doctorSSOGateMergeType(ctx, r, paths, d, path, bootstrapEntries(paths), out)
+	// The Kubernetes minors that the kubectl image of system-upgrade-
+	// controller serves, when spec.bootstrap has the addon as an entry name
+	// (advisory; it reads the spec only; cmd_doctor_suc.go).
+	doctorSUCKubectl(paths, d, bootstrapEntries(paths), out)
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit
 	// code.
@@ -170,8 +190,9 @@ func doctorRuntimeSection(ctx context.Context, r execx.Runner, path string, out 
 	return false
 }
 
-// doctorToolsSection is `--- tools ---`.
-func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io.Writer) bool {
+// doctorToolsSection is `--- tools ---`. d is the active domain: it decides
+// whether an older kind is a failure (kindFails).
+func doctorToolsSection(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, out io.Writer) bool {
 	fmt.Fprintln(out)
 	ui.Section(out, "tools")
 	ok := true
@@ -190,6 +211,13 @@ func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io
 		ok = false
 	}
 	for _, t := range doctorToolsPost {
+		if t.name == "kind" {
+			// kind has a minimum release (doctorKind).
+			if !doctorKind(ctx, r, out, path, t.purpose, kindFails(paths, d)) {
+				ok = false
+			}
+			continue
+		}
 		if !doctorTool(out, path, t.name, t.required, t.purpose) {
 			ok = false
 		}
@@ -197,9 +225,98 @@ func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io
 	return ok
 }
 
+// doctorKindMin is the oldest kind release that the Lo driver can use. The
+// kind config that lo up renders sets networking.dnsSearch
+// (internal/driver/lo/render.go), and kind reads that field from v0.18.0.
+// An older kind stops at `kind create` with an unknown-field error. Bash
+// twin: DOCTOR_KIND_MIN in .lok8s/libs/doctor.
+const doctorKindMin = "v0.18.0"
+
+// kindVersionRe matches the version field of `kind version`, which prints
+// "kind v0.32.0 go1.25.5 linux/amd64" (a pre-release:
+// "kind v0.31.0-alpha.12+<commit> ..."). It reads major.minor.patch, and
+// after them only a "-", a "+" or the end. A number has 9 digits at most,
+// so the bash twin compares it with shell arithmetic and gets the same
+// result.
+var kindVersionRe = regexp.MustCompile(`^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+]|$)`)
+
+// doctorKind is the kind line of the tools section (bash: doctor::_kind).
+// kind is optional: when it is absent, the line is a warning. When it is
+// present, it must be doctorKindMin or later. An older kind is a failure
+// (false) when fails is true (kindFails), else a warning with the same
+// text. Only major.minor.patch counts (toolchain.OlderRelease), so a
+// pre-release of a later release passes. A failed `kind version`, or an
+// output without the version field, is a warning.
+func doctorKind(ctx context.Context, r execx.Runner, w io.Writer, path, purpose string, fails bool) bool {
+	kind, ok := toolchain.LookPath(path, "kind")
+	if !ok {
+		doctorWarn(w, "kind not found (optional) — "+purpose)
+		return true
+	}
+	need := "lo up needs kind " + doctorKindMin + " or later for networking.dnsSearch"
+	got, older, known := kindRelease(ctx, r, kind)
+	switch {
+	case !known:
+		doctorWarn(w, "kind — "+purpose+"; version unknown, "+need)
+		return true
+	case older:
+		msg := "kind " + got + " — " + purpose + "; " + need + " (fix: b update kind)"
+		if !fails {
+			doctorWarn(w, msg)
+			return true
+		}
+		doctorBad(w, msg)
+		return false
+	}
+	doctorOK(w, "kind — "+purpose)
+	return true
+}
+
+// kindFails reports whether an older kind is a failure for the active
+// domain d (bash: doctor::_kind_fails). It is when d uses the Lo driver
+// (lo up runs kind for it), and when there is no active domain: d is
+// empty, or domain.Driver cannot read the driver of d (no
+// cluster.lok8s.yaml and no deploy.lok8s.yaml, or a spec without a kind or
+// with a malformed one). For a domain of another driver, a deploy domain
+// included, an older kind is a warning.
+func kindFails(paths *config.Paths, d string) bool {
+	if d == "" {
+		return true
+	}
+	drv, err := domain.Driver(paths.Clusters, d)
+	return err != nil || drv == "lo"
+}
+
+// kindRelease runs `kind version` and returns the release (vX.Y.Z, the
+// matched numbers only, so no other byte of the output reaches the
+// report), whether it is older than doctorKindMin, and whether the version
+// is known. The fields of the first line are split at spaces and tabs only
+// (as bash `read` splits them); the first field must be "kind".
+func kindRelease(ctx context.Context, r execx.Runner, kind string) (string, bool, bool) {
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: kind, Args: []string{"version"}})
+	if err != nil {
+		return "", false, false
+	}
+	line, _, _ := strings.Cut(string(out), "\n")
+	f := strings.FieldsFunc(line, func(c rune) bool { return c == ' ' || c == '\t' })
+	if len(f) < 2 || f[0] != "kind" {
+		return "", false, false
+	}
+	m := kindVersionRe.FindStringSubmatch(f[1])
+	if m == nil {
+		return "", false, false
+	}
+	release := m[1] + "." + m[2] + "." + m[3]
+	older, err := toolchain.OlderRelease(release, doctorKindMin)
+	if err != nil {
+		return "", false, false
+	}
+	return "v" + release, older, true
+}
+
 // doctorEnvironmentSection is `--- environment ---` plus the toolchain
 // section it decides on.
-func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, d, path string, toolchainFlag bool, out io.Writer) bool {
+func doctorEnvironmentSection(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, toolchainFlag bool, out io.Writer) bool {
 	fmt.Fprintln(out)
 	ui.Section(out, "environment")
 	doctorDir(out, "PATH_BASE", paths.Base)
@@ -233,6 +350,7 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, d, path 
 	doctorAssets(out, paths)
 	doctorImplementation(out, paths)
 	ok := doctorBashMode(out, paths, d)
+	doctorCoreutils(ctx, r, out, paths, path)
 
 	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
 		return doctorToolchain(ctx, out, paths, pluginHome, path) && ok
@@ -401,6 +519,52 @@ func doctorBashMode(w io.Writer, paths *config.Paths, d string) bool {
 	}
 	doctorOK(w, "bash mode (spec.implementation, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")
 	return true
+}
+
+// doctorCoreutilsWarning is the warning of doctorCoreutils. The bash twin
+// (doctor::_coreutils in libs/doctor) prints the same text.
+const doctorCoreutilsWarning = "bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+
+// doctorCoreutils is the coreutils line of the bash implementation. The
+// frozen bash libs (kubehz, bootstrap) use forms that GNU coreutils and
+// uutils coreutils have, BSD and BusyBox do not: stat -c, mv -T, ln -T,
+// realpath -e. On a BSD or BusyBox userland they fail mid-run. The line is
+// a warning, printed only when lok8s.yaml routes commands to bash (default
+// bash, or bash.commands; also a route of one command such as version:
+// lint, audit and provision load libs/bootstrap too) and the first line of
+// `stat --version` contains neither "GNU coreutils" nor "uutils
+// coreutils". Otherwise it prints nothing, so the doctor output stays
+// byte-identical to the bash twin (doctor::_coreutils), which runs the
+// same probe.
+func doctorCoreutils(ctx context.Context, r execx.Runner, w io.Writer, paths *config.Paths, path string) {
+	if rt := newRouting(paths); rt.problem() != nil || !rt.active() {
+		return
+	}
+	if doctorStatFlavor(ctx, r, path) == "gnu" {
+		return
+	}
+	doctorWarn(w, doctorCoreutilsWarning)
+}
+
+// doctorStatFlavor probes stat as doctorEnvsubstFlavor probes envsubst:
+// "gnu" (the GNU forms work) when the first line of `stat --version`
+// (stdout) contains "GNU coreutils" (GNU: "stat (GNU coreutils) 9.5") or
+// "uutils coreutils" (uutils: "stat (uutils coreutils) 0.2.2"), else
+// "other". BSD and macOS stat answer "illegal option" on stderr, BusyBox
+// "unrecognized option" and its usage on stderr: both print nothing on
+// stdout. The exit code does not decide. It runs the stat that LookPath
+// found, the first on PATH.
+func doctorStatFlavor(ctx context.Context, r execx.Runner, path string) string {
+	stat, ok := toolchain.LookPath(path, "stat")
+	if !ok {
+		return "other"
+	}
+	out, _ := execx.Output(ctx, r, execx.Cmd{Name: stat, Args: []string{"--version"}})
+	line, _, _ := strings.Cut(string(out), "\n")
+	if strings.Contains(line, "GNU coreutils") || strings.Contains(line, "uutils coreutils") {
+		return "gnu"
+	}
+	return "other"
 }
 
 // bashModeNeeds names what in the project runs on the bash tree: the

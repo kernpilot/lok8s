@@ -108,7 +108,7 @@ func bootstrapEntries(paths *config.Paths) addons.EntryResolver {
 			if err != nil {
 				continue
 			}
-			out = append(out, addons.Resolved{Name: e.Name, Dir: e.Dir, Builtin: e.Builtin})
+			out = append(out, addons.Resolved{Name: e.Name, Dir: e.Dir, Builtin: e.Builtin, Inline: e.Inline, Env: bootstrap.EnvMap(e.EnvLines)})
 		}
 		return out
 	}

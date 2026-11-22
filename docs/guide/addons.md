@@ -55,7 +55,7 @@ v3.3 or later on `PATH` for it). The exit code is 0 when nothing would change, 1
 completed diff found a change, and 2 for all other failures.
 
 The two implementations decide the chart dependency check the same way. The
-Go implementation uses the Helm v3.21.2 library (the loader and the status
+Go implementation uses the Helm v3.22.1 library (the loader and the status
 rule of `helm dependency list`). The bash implementation runs `helm
 dependency list` and `helm lint` and reads only the table on stdout (helm's
 log lines on stderr, for example about a symlinked subchart, are not part of
@@ -77,7 +77,7 @@ whose render writes into the chart directory.
   `requirements.yaml` that replaces the dependencies. Helm (and khelm) then
   read only `requirements.yaml`, but the bash implementation reads both
   files and is inconclusive.
-- A helm v3 release other than v3.21.2 can give a different status for a
+- A helm v3 release other than v3.22.1 can give a different status for a
   dependency. Then either implementation can be the inconclusive one.
 
 The dry run prevents accidental side effects of legitimate addon code and
@@ -385,6 +385,10 @@ un-converged, so re-run `lo up` / `lo provision` to reconcile once you fix the
 underlying cause.
 
 ## Framework addons
+
+The table lists a part of the addons that lok8s ships. `lo addons` lists all
+of them, and the [published addon index](/guide/inventory#the-published-addon-index)
+gives the pinned chart versions.
 
 | Addon | What it installs | Chart |
 |-------|-----------------|-------|
@@ -810,18 +814,62 @@ Three consequences:
   apply (`kubectl apply --server-side`, and every GitOps controller) with
   `.spec.mergeType: field not declared in schema`, while a client-side
   apply drops the field **silently** and leaves you with the replace
-  behaviour. Check the CRD before you trust the field:
+  behaviour. Check the CRD before you trust the field. When
+  `spec.bootstrap` has the entry name `sso-gate`, `lo doctor` does this
+  check for you (a path entry, such as `/.lok8s/addons/sso-gate`, gets
+  no line). It reads the CRD from the domain's cluster with one kubectl
+  command, which sends GET requests only (the CRD, and the API discovery
+  when the cache of kubectl has no answer). It prints one line after the
+  other lines of the domain section:
 
   ```console
+  $ lo doctor --domain <domain>
+    ✓ sso-gate: the SecurityPolicy CRD declares spec.mergeType
+  ```
+
+  The check reads the version `v1alpha1` (the version that `sso-gate`
+  applies) and the storage version of the CRD. The apiserver stores each
+  object in the storage version, and removes the fields that the schema
+  of that version does not declare. There are two `✗` lines:
+
+  - `v1alpha1` does not declare the field: envoy-gateway is older than
+    v1.8.0. Upgrade it first, then reconcile `sso-gate`.
+  - The storage version is another version, and it does not declare the
+    field: the apiserver removes the field when it stores the policy.
+    Reinstall the CRDs of envoy-gateway first, then reconcile `sso-gate`.
+
+  When more than one case applies, the check prints one line: a
+  `v1alpha1` that is not served gives the `!` line, also when it does
+  not declare the field, and when `v1alpha1` does not declare the field,
+  its `✗` line wins over the line of the storage version.
+
+  The line is advisory: it does not change the exit code of `lo doctor`,
+  so a script must read the line, not the exit code. A `!` or `ℹ` line
+  gives the reason when the check did not run (for example: no
+  kubeconfig, no kubectl, no CRD, a CRD that does not serve `v1alpha1`,
+  or no answer in 30 s). The bash implementation (`lok8s.yaml`
+  `spec.implementation`) also needs yq to read `spec.bootstrap` (without
+  yq, the line of the RBAC migration check says so, and this check
+  prints no line) and jq to read the CRD (without jq, a `!` line). The
+  Go implementation needs neither. When the check did not run, or
+  without `lo doctor`, do the same check by hand:
+
+  ```console
+  $ kubectl get customresourcedefinitions.apiextensions.k8s.io securitypolicies.gateway.envoyproxy.io \
+      -o jsonpath='{range .spec.versions[*]}{.name} served={.served} storage={.storage}{"\n"}{end}'
+  v1alpha1 served=true storage=true
   $ JP='{.spec.versions[?(@.name=="v1alpha1")]'
   $ JP="${JP}.schema.openAPIV3Schema.properties.spec.properties.mergeType.type}"
-  $ kubectl get crd securitypolicies.gateway.envoyproxy.io -o jsonpath="${JP}"
+  $ kubectl get customresourcedefinitions.apiextensions.k8s.io securitypolicies.gateway.envoyproxy.io \
+      -o jsonpath="${JP}"
   string     # empty output = your Envoy Gateway is too old
   ```
 
-  (Select the version by name, not by `versions[0]`: the order of that
-  list is not a contract. Running this for you from `lo doctor` is
-  [kernpilot/lok8s#141](https://github.com/kernpilot/lok8s/issues/141).)
+  `v1alpha1` must be served. When the storage version is another
+  version, set `JP` again with the name of the storage version in place
+  of `v1alpha1`, and run the last command again: it must print `string`
+  too. (Both select a version by name, not by `versions[0]`: the order
+  of that list is not a contract.)
 
 - **Upgrade Envoy Gateway before the policy reconciles.** Under `lo up`
   that ordering comes free from `dependsOn: [envoy-gateway]`, and a
@@ -1206,7 +1254,8 @@ Every object that the addon renders carries two labels:
 The bootstrap applies without prune. When an option goes, or the bindings
 change from cluster-wide to `tenantNamespaces`, the objects of the earlier
 apply stay, and their grants with them. The cleanup selects all the
-addon's objects by `lok8s.dev/name`.
+addon's objects by `lok8s.dev/name`. `lo doctor` finds these objects for
+you (see [change the options](#rook-ceph-csi-kms-change-the-options)).
 
 ::: warning Upgrade note: the entry needs `values.kms`
 An entry without `values.kms` (the form of earlier releases) stops the
@@ -1248,6 +1297,46 @@ Between steps 2 and 3 the plugins have none of these grants. A volume
 operation that needs them fails and is tried again after the apply. Your
 own bindings to the addon's roles (CephFS, below) do not carry the label,
 so they stay.
+
+`lo doctor` compares the cluster with the current values. It renders the
+entry of `spec.bootstrap` as the bootstrap does (offline: the chart is
+local), reads the roles and bindings with the label
+`lok8s.dev/name=rook-ceph-csi-kms`, and prints one line for each object
+that the render does not hold. Such an object is a candidate leftover: a
+label does not prove that the addon made it. A binding gets its delete
+command. A Role or a ClusterRole gets one only when no binding outside the
+candidates refers to it, and a ClusterRole only when it has no
+`rbac.authorization.k8s.io/aggregate-to-*` label and no aggregation
+selector of another ClusterRole selects it. For these checks, doctor reads
+all RoleBindings, ClusterRoleBindings and ClusterRoles without the label, so
+your own CephFS bindings (below) and your own aggregated ClusterRoles count
+too:
+
+```console
+$ lo doctor
+...
+  ! rook-ceph-csi-kms: ClusterRole rook-ceph-csi-kms-vaulttokens (option vaulttokens) is a candidate leftover: it has the label lok8s.dev/name=rook-ceph-csi-kms, and the current values do not render it. It keeps its grant. No binding outside the candidates refers to it. If no other tool manages it, delete it: kubectl --kubeconfig '/path/to/project/.kubeconfig/my-cluster.yaml' delete clusterrole rook-ceph-csi-kms-vaulttokens
+```
+
+So you can also change the options without the gap between steps 2 and 3:
+
+1. Render first, and stop if the render fails:
+   `lo bootstrap --only rook-ceph-csi-kms --dry-run`.
+2. Apply: `lo bootstrap --only rook-ceph-csi-kms`.
+3. Run `lo doctor`. Run each delete command that it prints for an object
+   that no other tool manages. Until you delete them, those objects keep
+   their grants.
+
+When you remove the addon from `spec.bootstrap` and keep `rook-ceph`,
+`lo doctor` prints each object with the label as a candidate. Doctor does
+not render a path entry of `spec.bootstrap` (its kustomize plugins can
+read the secret store), and a path entry can render these objects too. So
+with a path entry, a candidate makes doctor say that it did not check. An
+entry that does not parse stops the check too. Doctor sends only GET
+requests: you run the delete. A kubeconfig exec credential plugin runs as
+kubectl runs it, and lo does not limit what it does. Doctor prints a name
+only in the DNS-1123 form, and counts the other objects in one line with
+the command that lists them (see [`lo doctor`](../reference/cli.md#lo-doctor)).
 
 The bindings name the RBD ServiceAccounts only. A cluster that also runs
 the CephFS driver with a KMS binds both CephFS ServiceAccounts to the same
@@ -1317,7 +1406,8 @@ no
 ```
 
 After a cleanup, no object of an earlier apply is left: the next command
-lists only the objects of the current options.
+lists only the objects of the current options, and `lo doctor` prints no
+`rook-ceph-csi-kms` line.
 
 ```console
 $ kubectl get clusterrolebinding,clusterrole,rolebinding,role --all-namespaces -l lok8s.dev/name=rook-ceph-csi-kms -L csi-kms.lok8s.dev/option
@@ -1462,6 +1552,51 @@ $ kubectl auth can-i update leases/system-upgrade-controller -n cattle-system --
 yes
 ```
 
+`lo doctor` finds the old binding for you. It reads the ClusterRoleBindings
+of the active domain's cluster and reports each one that gives the
+controller's ServiceAccount `cluster-admin`, under any name (an older
+upstream manifest used `system-upgrade`):
+
+```console
+$ lo doctor
+...
+--- domain ---
+  ✓ active: example.org (kind kubeone)
+  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin. Keep it only on purpose, else delete it: kubectl --kubeconfig '/home/me/project/.kubeconfig/example.yaml' delete clusterrolebinding system-upgrade-controller
+```
+
+The delete command names the kubeconfig that doctor read, in single
+quotes, and it is the rest of its line. A binding counts in each form of
+the ServiceAccount: the ServiceAccount itself, the User name of its token
+(`system:serviceaccount:cattle-system:system-upgrade-controller`), or a
+group of its token (`system:serviceaccounts:cattle-system`,
+`system:serviceaccounts`, `system:authenticated`). A delete removes the
+whole binding, so doctor prints a delete command only for a binding of
+the ServiceAccount alone. For a grant through a group, the line names the
+binding and says to review it. For a binding with other subjects, the
+line names the binding and the count of the other subjects, and says to
+remove the ServiceAccount from its subjects (for example with
+`kubectl edit`).
+
+Doctor sends only GET requests: you run the delete. When doctor finds a leftover and
+no binding gives the ServiceAccount `lok8s-system-upgrade-controller`
+yet, it first says to apply the bootstrap. A cluster without leftovers
+prints `✓ system-upgrade-controller: no RBAC migration leftovers`. The
+check needs the domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`)
+and the right to list ClusterRoleBindings and ClusterRoles. Doctor reads
+them with that kubeconfig, so its credential plugin
+(`users[].user.exec`) runs as kubectl runs it and can ask you to log in;
+lo does not limit what the plugin does. Each read stops after 30 s. The
+check does not run when `spec.bootstrap` has
+`system-upgrade-controller-cluster-admin`. Doctor finds that opt-in addon
+only as a bare entry name, not as a path entry, so the line of each
+`cluster-admin` binding says "Keep it only on purpose, else delete it:"
+before the command. A line without a command (a binding with other
+subjects, or an unusual name) also says to keep the grant only on
+purpose. Doctor prints a binding name only when it is a DNS-1123
+subdomain. For any other name, the line has no name and no delete
+command.
+
 The `can-i` lines are spot checks. Until now cluster-admin hid any call
 the new roles miss. Restart the controller, run one Plan that does what
 your Plans do (cordon, drain, Secrets), and look for `forbidden` in the
@@ -1508,6 +1643,9 @@ the bootstrap applies without prune, so the binding stays. Delete it too:
 $ kubectl delete clusterrolebinding system-upgrade-controller
 ```
 
+After the opt-out, `lo doctor` reports the binding as
+`migration incomplete` until you delete it.
+
 #### Images
 
 `values.yaml` pins both images by digest: the controller
@@ -1522,6 +1660,33 @@ says how). The kubectl image has no Windows variant, and the chart uses it
 for Windows nodes too: a cordon or drain on a Windows node still fails to
 pull it. The images a Plan names for its own containers are not pinned
 here.
+
+#### Kubernetes versions
+
+The pinned kubectl image serves Kubernetes 1.33 to 1.37 only. It bundles
+kubectl v1.34.8, v1.35.5 and v1.36.1, its binary downloads are off, and
+kuberlr accepts one minor of skew. On another minor, a Plan with cordon or
+drain fails at once in its drain container, with `kuberlr: ensure compatible
+kubectl available: the right kubectl is missing`. The Job retries and the
+Plan never completes. A Plan without cordon and drain is not affected.
+
+When `spec.bootstrap` has `system-upgrade-controller` as an entry name, `lo
+doctor` and `lo lint` compare `spec.kubernetes.version` with the range:
+
+- A minor outside the range gets a warning in both commands: `system-upgrade-controller: the kubectl image of the drain container serves Kubernetes 1.33 to 1.37, not 1.31, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from 1.33 to 1.37, or use a Plan without cordon or drain`.
+- In the range, `lo doctor` prints a check mark line.
+- A Lo cluster without a version runs the default node image of the
+  installed kind (`v1.36.1` with the pinned kind `v0.32.0`), which is in
+  the range. `lo doctor` prints an info line that names it.
+- A version that is not `vX.Y` or `vX.Y.Z` (a Lo cluster can use any image
+  tag), or one that cannot be read, gets a `not checked` line from `lo
+  doctor`.
+
+To fix a warning, set `spec.kubernetes.version` to a version in the range,
+or use Plans without `spec.cordon` and `spec.drain`. No release of the image
+serves every minor from 1.31 to 1.36, so the addon keeps the pin. A test
+(`internal/addons/suc_test.go`) fails when the tag of the pin changes and
+the range does not.
 
 ### redis-operator: narrowed RBAC, no aggregation into admin {#redis-operator}
 
@@ -1686,8 +1851,12 @@ A RedisCluster that you add later needs exec back first: put the
 ClusterRoleBinding document back into `rbac.yaml` (or run
 `lo assets update addons/redis-operator --force`), apply the bootstrap,
 then create the RedisCluster. Without exec, the operator logs `forbidden`
-for `pods/exec` and the cluster does not form. `lo doctor` does not warn
-about this yet ([#315](https://github.com/kernpilot/lok8s/issues/315)).
+for `pods/exec` and the cluster does not form. When no ClusterRoleBinding
+gives the operator's ServiceAccount create on `pods/exec`, `lo doctor`
+prints a note (`ℹ redis-operator: no ClusterRoleBinding gives the
+redis-operator ServiceAccount create on pods/exec. …`). Doctor reads RBAC
+only and cannot see RedisCluster objects, so the line is a note, not a
+warning ([#315](https://github.com/kernpilot/lok8s/issues/315)).
 
 ::: warning Upgrade note: update the ejected copy, delete the old ClusterRole and binding once
 `lo` ejects an addon into `.lok8s/addons/<name>/` on first use and never
@@ -1718,6 +1887,50 @@ $ kubectl auth can-i update leases/6cab913b.redis.opstreelabs.in \
     -n redis-operator --as="${SA}"
 yes
 ```
+
+`lo doctor` finds the old objects for you. It reads the ClusterRoleBindings
+and ClusterRoles of the active domain's cluster and prints one
+`! migration incomplete: …` line for each of these:
+
+- a ClusterRoleBinding, under any name, that gives the operator's
+  ServiceAccount `redis-operator` or `cluster-admin`, or
+  `lok8s-redis-operator-chart-rbac` when `spec.bootstrap` does not have
+  the opt-in addon (see below);
+- the ClusterRole `redis-operator`;
+- its labels `rbac.authorization.k8s.io/aggregate-to-admin`,
+  `rbac.authorization.k8s.io/aggregate-to-edit` and
+  `rbac.authorization.k8s.io/aggregate-to-view` with the value `true`:
+  the built-in roles keep the copied rules until the delete. Doctor
+  prints no other label key.
+
+The binding lines end with the delete command, which names the
+kubeconfig that doctor read. As for the system-upgrade-controller, a
+binding counts in each form of the ServiceAccount (the User name of its
+token, `system:serviceaccount:redis-operator:redis-operator`, and the
+groups of its token), and doctor prints no delete command for a grant
+through a group or for a binding with other subjects: the line names the
+binding and says what to do.
+
+A delete of the ClusterRole `redis-operator` ends the grant of every
+binding that refers to it. When a ClusterRoleBinding gives the role to
+other subjects than the operator's ServiceAccount (a group, a user,
+another ServiceAccount), the role line names those bindings and has no
+delete command: give their subjects another role first. Doctor does not
+read RoleBindings, so the role line also says to check that no
+RoleBinding refers to the role before the delete.
+
+Doctor sends only GET requests: you run the deletes. When doctor finds a leftover and
+no binding gives the ServiceAccount `lok8s-redis-operator` yet, it first
+says to apply the bootstrap. A cluster without leftovers prints
+`✓ redis-operator: no RBAC migration leftovers`. The check needs the
+domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`) and the right to
+list ClusterRoleBindings and ClusterRoles. Doctor reads them with that
+kubeconfig, so its credential plugin (`users[].user.exec`) runs as kubectl
+runs it and can ask you to log in; lo does not limit what the plugin does.
+Each read stops after 30 s. Doctor finds the opt-in
+addon only as a bare entry name (`- redis-operator-chart-rbac`), not as a
+path entry, so the line for its binding says "Keep it only on purpose,
+else delete it:" before the command.
 
 The removal from `admin` is asynchronous. The delete of the labelled
 ClusterRole queues the clusterrole-aggregation controller, which then
@@ -1810,6 +2023,10 @@ the bootstrap applies without prune. Delete the objects too:
 $ kubectl delete clusterrolebinding lok8s-redis-operator-chart-rbac
 $ kubectl delete clusterrole lok8s-redis-operator-chart-rbac
 ```
+
+After the opt-out, `lo doctor` reports the binding as
+`migration incomplete` until you delete it. It does not report the
+ClusterRole: without a binding it grants nothing.
 
 If namespace admins must manage Redis CRs, do not use the opt-in addon for
 that. Give them a ClusterRole in a target with only the

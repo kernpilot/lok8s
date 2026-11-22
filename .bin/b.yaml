@@ -61,7 +61,7 @@ binaries:
   # for LO_RENDER=exec. Also the frozen bash implementation (a routed command)
   # and the parity harnesses. The pins consumers get are generated from
   # internal/toolchain/pins.go (kustomize v5.8.1 ↔ api v0.21.1, khelm
-  # v2.8.0, drift-tested against go.mod). This contributor file pins the
+  # v2.9.0, drift-tested against go.mod). This contributor file pins the
   # same releases: the render byte-parity tests compare these binaries
   # with the libraries lo-full links. A floating pin installed khelm
   # v3.0.0 (2026-10-18) and failed TestBuildInProcessMatchesPinnedBinaryChart
@@ -75,9 +75,9 @@ binaries:
   # implementation's dry-run chart gate (`lo bootstrap --dry-run` routed to
   # bash) runs `helm dependency list` and `helm lint`, read-only, and needs
   # a helm v3 on PATH. helm is not in this file: install it yourself for
-  # that (CI pins v3.21.2 for the real-helm bats tests).
+  # that (CI pins v3.22.1 for the real-helm bats tests).
   github.com/mgoltzsche/khelm:
-    version: v2.8.0
+    version: v2.9.0
     file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
     groups: [kustomize]
 
@@ -99,6 +99,16 @@ binaries:
   github.com/kubermatic/kubeone:
     groups: [kubeone]
 
+  # shellcheck: the local lint of one shell file before CI, with the
+  # repository's .shellcheckrc (TESTING.md, "Shell lint"). The gating job
+  # (the ShellCheck job of ci.yml) lints in the argsh container of
+  # hack/lint-shell.sh, which bundles this release: bump this pin with that
+  # image digest. No profile selects the `lint` group, so a consumer never
+  # gets this entry (internal/toolchain/shellcheck_test.go).
+  github.com/koalaman/shellcheck:
+    version: v0.11.0
+    groups: [lint]
+
 #
 # ── Env-sync profiles
 # Consumers install with: b env add github.com/kernpilot/lok8s#<profile>
@@ -110,6 +120,7 @@ binaries:
 #   local     ⊇ core,kustomize — local dev (kind + Tilt)
 #   capi      ⊇ local         — CAPI provisioning
 #   kubeone   ⊇ local         — KubeOne provisioning
+#   (lint is in no profile: contributor tools only)
 
 profiles:
   core:

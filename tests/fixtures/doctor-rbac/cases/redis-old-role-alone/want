@@ -1,0 +1,1 @@
+  ! migration incomplete: ClusterRole redis-operator, the old role of the chart, is still in the cluster. Doctor does not read RoleBindings: check that none refers to it, and then delete it: kubectl --kubeconfig '@BASE@/.kubeconfig/rbac-test.yaml' delete clusterrole redis-operator

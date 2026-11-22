@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // Run is the canonical kustomize exec plugin entrypoint. Each
@@ -72,9 +73,32 @@ func OpenSpec(argv []string, stdin io.Reader) (io.Reader, func(), error) {
 	return stdin, nil, nil
 }
 
-// Fail prints err to stderr and exits with code 1. Use as the
-// terminating action of a plugin's main function.
+// Fail prints err to stderr (WriteFailure) and exits with code 1. Use as
+// the terminating action of a plugin's main function.
 func Fail(err error) {
-	fmt.Fprintln(os.Stderr, "secret plugin:", err)
+	WriteFailure(os.Stderr, err)
 	os.Exit(1)
+}
+
+// WriteFailure writes err to w as the failure of the Secret plugin: each
+// line of its text with the prefix "secret plugin: ". A refusal of more
+// lines (a *storeguard.Stop) thus keeps the prefix on each line, and a
+// reader that filters the lines of the plugin by the prefix gets all of
+// them. A text of one line prints as before. An empty line of the text (or
+// a line of spaces only: a trailing newline, a blank line between two
+// paragraphs) prints nothing. A text with no other line prints one line,
+// the prefix only, as an empty text did before. Fail, and the callers that
+// run the plugin in their own process, print with it.
+func WriteFailure(w io.Writer, err error) {
+	printed := false
+	for line := range strings.SplitSeq(err.Error(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fmt.Fprintln(w, "secret plugin:", line)
+		printed = true
+	}
+	if !printed {
+		fmt.Fprintln(w, "secret plugin:", "")
+	}
 }

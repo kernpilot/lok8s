@@ -98,9 +98,25 @@ func kubehzSimple(paths *config.Paths, use, alias, short string, spec commandSpe
 }
 
 func newKubehzRegister(paths *config.Paths) *cobra.Command {
-	return kubehzSimple(paths, "register", "r", "Register cluster with kubehz", commandSpec{destructive: true},
-		func(c *kubehz.Context, cmd *cobra.Command, d string) error { return c.Register(cmd.Context(), d) })
+	c := kubehzSimple(paths, "register", "r", "Register cluster with kubehz", commandSpec{destructive: true},
+		func(c *kubehz.Context, cmd *cobra.Command, d string) error {
+			c.PrintToken, _ = cmd.Flags().GetBool("print-token")
+			return c.Register(cmd.Context(), d)
+		})
+	printTokenFlag(c)
+	return c
 }
+
+// printTokenFlag adds --print-token to a command that can register a
+// cluster with a claim key (lo kubehz register, lo provision, lo up). The
+// word "token" keeps the flag out of the lo mcp tool schema.
+func printTokenFlag(c *cobra.Command) {
+	c.Flags().Bool("print-token", false, claimTicketFlagHelp)
+}
+
+// claimTicketFlagHelp is the help of --print-token, the same text as the
+// bash twin.
+const claimTicketFlagHelp = "Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not \"false\"): that output then holds a secret"
 
 func newKubehzDeregister(paths *config.Paths) *cobra.Command {
 	return kubehzSimple(paths, "deregister", "d", "Remove cluster from kubehz", commandSpec{destructive: true},
@@ -469,9 +485,11 @@ func newKubehzHandoverPreseed(paths *config.Paths) *cobra.Command {
 			port, _ := cmd.Flags().GetInt("port")
 			sshKey, _ := cmd.Flags().GetString("ssh-key")
 			knownHosts, _ := cmd.Flags().GetString("known-hosts")
+			acceptNew, _ := cmd.Flags().GetBool("accept-new-host-key")
 			ambientMainEnv(cmd, paths)
 			return kubehzRun(kubehzContext(cmd, paths).HandoverPreseed(cmd.Context(), kubehz.PreseedOpts{
 				Bundle: bundle, Node: node, User: user, Port: port, SSHKey: sshKey, KnownHosts: knownHosts,
+				AcceptNewHostKey: acceptNew,
 			}))
 		},
 	}
@@ -481,6 +499,9 @@ func newKubehzHandoverPreseed(paths *config.Paths) *cobra.Command {
 	f.StringP("user", "u", "root", "SSH user")
 	f.IntP("port", "p", 22, "SSH port")
 	f.StringP("ssh-key", "i", "", "SSH private key file")
-	f.String("known-hosts", "", "known_hosts file for the node's host key (default: ssh's own); a new host is recorded, a changed key fails")
+	f.String("known-hosts", "", "known_hosts file with the node's host key (default: ssh's own files); the file must exist, and an unknown or changed key fails")
+	// The word "key" keeps this flag out of the MCP tools (mcpSensitiveFlag):
+	// only a person opts in to trust on first use.
+	f.Bool("accept-new-host-key", false, "Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)")
 	return c
 }

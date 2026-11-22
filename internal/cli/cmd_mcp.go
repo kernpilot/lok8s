@@ -31,6 +31,9 @@ package cli
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
 //     `--verbose N`, which cobra would take as a stray positional);
+//   - a flag that a command always refuses is not in that tool's schema
+//     (mcpRefusedFlags: the global --cluster on the `kubehz node` verbs,
+//     and --force on `kubehz node drain`);
 //   - a command that parses its own argv (DisableFlagParsing: `lo chat`) is
 //     never exposed: the flag policy cannot see what reaches it, and
 //     `lo chat --lo <path>` would run any file with the server's
@@ -54,6 +57,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +68,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/secrets"
 )
 
 // Exposure tiers, ordered by the opt-in they need.
@@ -82,8 +87,12 @@ type mcpExposure struct {
 	destructive bool
 }
 
-// resolve folds LO_MCP_ALLOW into the flag state (flags win) and applies
-// "destructive implies mutating".
+// resolve folds LO_MCP_ALLOW into the flag state and applies "destructive
+// implies mutating". The environment only adds to the flags: the higher of
+// the two tiers applies. Thus --allow-mutating with LO_MCP_ALLOW=destructive
+// exposes the destructive commands. LO_MCP_ALLOW=mutating does not take them
+// away from --allow-destructive. An empty value acts as unset. Any other
+// value is an error, also when a flag is set.
 func (x *mcpExposure) resolve() error {
 	switch v := os.Getenv(mcpAllowEnv); v {
 	case "":
@@ -240,22 +249,51 @@ func mcpHiddenSubtree(cmd *cobra.Command) bool {
 	return false
 }
 
-// mcpSelectors is the single ophis selector: leaves only (dispatchers are
-// traversed, not exposed, as in the argsh server), outside hidden subtrees,
-// never a command that parses its own argv, gated by tier, with the flag
-// policy on local and inherited flags alike, and every call through
-// mcpNoDashArgs.
+// mcpRefusedFlags are flags that one command always refuses, by command
+// path. That tool's schema does not show them, also with --allow-destructive.
+// The node verbs refuse the global --cluster/-s, which names the kind cluster
+// lo manages (kubehz.Context.RejectGlobalClusterFlag, RejectSpaceClusterFlag):
+// their own flags are --cluster-id and --space-id. A drain also refuses the
+// global --force/-f (kubehz.Context.NodeDrain): its own flag for
+// `kubectl drain --force` is --evict-unmanaged.
+var mcpRefusedFlags = map[string]map[string]bool{
+	"lo kubehz node cordon":   {"cluster": true},
+	"lo kubehz node uncordon": {"cluster": true},
+	"lo kubehz node drain":    {"cluster": true, "force": true},
+	"lo kubehz node join":     {"cluster": true},
+	"lo kubehz node remove":   {"cluster": true},
+	"lo kubehz node status":   {"cluster": true},
+}
+
+// mcpSelectors are the ophis selectors. Each selects leaves only
+// (dispatchers are traversed, not exposed, as in the argsh server), outside
+// hidden subtrees, never a command that parses its own argv, gated by tier,
+// with the flag policy on local and inherited flags alike, and every call
+// through mcpNoDashArgs. ophis uses the first selector that matches a
+// command, and its flag selectors get no command. Thus each command of
+// mcpRefusedFlags gets its own selector, before the general one.
 func mcpSelectors(x mcpExposure) []ophis.Selector {
-	flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) }
-	return []ophis.Selector{{
-		CmdSelector: func(cmd *cobra.Command) bool {
-			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && !cmd.DisableFlagParsing &&
-				cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
-		},
-		LocalFlagSelector:     flagOK,
-		InheritedFlagSelector: flagOK,
-		Middleware:            mcpNoDashArgs,
-	}}
+	exposed := func(cmd *cobra.Command) bool {
+		return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && !cmd.DisableFlagParsing &&
+			cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
+	}
+	selector := func(cmdOK func(*cobra.Command) bool, refused map[string]bool) ophis.Selector {
+		flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) && !refused[f.Name] }
+		return ophis.Selector{
+			CmdSelector:           cmdOK,
+			LocalFlagSelector:     flagOK,
+			InheritedFlagSelector: flagOK,
+			Middleware:            mcpNoDashArgs,
+		}
+	}
+	paths := slices.Sorted(maps.Keys(mcpRefusedFlags))
+	selectors := make([]ophis.Selector, 0, len(paths)+1)
+	for _, path := range paths {
+		selectors = append(selectors, selector(func(cmd *cobra.Command) bool {
+			return cmd.CommandPath() == path && exposed(cmd)
+		}, mcpRefusedFlags[path]))
+	}
+	return append(selectors, selector(exposed, nil))
 }
 
 // mcpNoDashArgs refuses a call when one of the model's positional arguments
@@ -267,7 +305,7 @@ func mcpSelectors(x mcpExposure) []ophis.Selector {
 func mcpNoDashArgs(ctx context.Context, req *mcp.CallToolRequest, in ophis.ToolInput, next ophis.ExecuteFunc) (*mcp.CallToolResult, ophis.ToolOutput, error) {
 	for _, a := range in.Args {
 		if strings.HasPrefix(a, "-") {
-			return nil, ophis.ToolOutput{}, fmt.Errorf("lo mcp: the argument %q starts with a dash. Set flags in \"flags\", not in \"args\". Nothing ran", a)
+			return nil, ophis.ToolOutput{}, fmt.Errorf("lo mcp: the argument %s starts with a dash. Set flags in \"flags\", not in \"args\". Nothing ran", secrets.QuoteArg(a))
 		}
 	}
 	return next(ctx, req, in)
@@ -361,7 +399,7 @@ func mcpExposureFlags(cmd *cobra.Command, x *mcpExposure) {
 	f.BoolVar(&x.mutating, "allow-mutating", false,
 		"Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)")
 	f.BoolVar(&x.destructive, "allow-destructive", false,
-		"Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating")
+		"Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating")
 }
 
 const mcpLong = `Serve the lo commands to AI agents and editors as MCP tools.
@@ -388,10 +426,14 @@ claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
 result lands in the model's transcript. Neither is chat: it passes its
 arguments on unread. A call whose positional argument starts with "-" is
 refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
-nonce, ...) are never exposed either.
+nonce, ...) are never exposed either. A flag that a command always
+refuses is not in that tool's schema: the global --cluster on the kubehz
+node verbs (they take --cluster-id or --space-id), and --force on kubehz
+node drain (it takes --evict-unmanaged).
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
-for editor configs (flags win).
+for editor configs. It adds to the flags: the higher of the two tiers
+applies.
 
 Transports: 'start' serves stdio (what editors launch); 'serve' serves
 streamable HTTP on loopback — it has no authentication, keep it there.

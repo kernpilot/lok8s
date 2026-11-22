@@ -710,6 +710,7 @@ Trade-offs to know:
 - **File size limit** of 1 MiB on `file:` reads
 - **Atomic writes** to the cache (tmp file + rename) so concurrent reads never see partial data
 - **0600 file mode** on cache entries
+- **The checks of `lo secrets set`** before each cache write, and on a cache miss before the generator runs (an `env:` entry and an `update: true` entry get their value first, so for them only the write is refused): no path part in a name, a namespace or a key, no entry name that ends in `.enc` (in any letter case), no write through a symlink, and a store `.gitignore` that keeps the plaintext out of git (the lok8s block is written first, an unsafe file is refused). A refusal has the text of `set`: a file of a store `clusters/<domain>/secrets` is named relative to the project, a file of any other store relative to the parent directory of the store, and a failed write names no command. A dry run does the same checks and writes nothing; it cannot tell that a write will fail. The store directory is synced after a new `.gitignore` and after each entry. See [Secrets → Committing secrets](/guide/secrets#committing-secrets-sops-age)
 - **0700 directory mode** on the cache root
 - **No secret values logged** to stderr at any verbosity
 - **bcrypt cost 10** for htpasswd (apache default)
@@ -725,6 +726,10 @@ type of a value. It never prints the value: a spec value can be a secret
 secret plugin: line 14:13: passwd.NUXT_SESSION_PASSWORD: passwd length must be > 0
 secret plugin: line 6:13: passwd.PASSWORD: cannot unmarshal !!str value into int
 ```
+
+An error of more lines (for example a refusal of the store `.gitignore`,
+one line for each cause and a final line) prints each line with the prefix
+`secret plugin: `. An empty line of the error prints nothing.
 
 kustomize writes the generator config again before the plugin reads it, so
 the line is a line of that copy. The section and the key say where the

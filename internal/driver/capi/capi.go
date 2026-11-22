@@ -400,7 +400,9 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 		return "Unknown", nil
 	}
 
-	// bash: `$(kubectl … 2>/dev/null)`.
+	// bash: `$(kubectl … 2>/dev/null)`, under capi::_status_bounded.
+	ctx, cancel := context.WithTimeout(ctx, statusReadBound)
+	defer cancel()
 	out, err := execx.Output(ctx, d.deps.Runner, execx.Cmd{
 		Name: "kubectl",
 		Args: []string{
@@ -408,12 +410,27 @@ func (d *Driver) Status(ctx context.Context, domain string) (string, error) {
 			"--kubeconfig", d.kubeconfigPath(mgmtDomain),
 			"-o", "jsonpath={.status.phase}",
 		},
+		WaitDelay:    statusReadGrace,
+		ProcessGroup: true,
 	})
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return "NotFound", nil
 	}
 	return string(out), nil
 }
+
+// statusReadBound bounds the whole status read of Status (bash:
+// capi::_status_bound), as a context deadline: a management cluster that
+// does not answer, or an exec credential plugin of its kubeconfig, then
+// cannot stop the caller (`lo status`, the operator). The read runs as its
+// own process group (execx.Cmd.ProcessGroup): at the bound the group gets
+// SIGTERM, and SIGKILL after statusReadGrace, so the plugin stops too. A
+// read that the bound stopped gives NotFound, as a failed read does. The
+// bash twin uses timeout(1) with the same 10 s and 2 s.
+// statusReadBound is a variable so that a test can make it short.
+const statusReadGrace = 2 * time.Second
+
+var statusReadBound = 10 * time.Second
 
 // Kubeconfig returns the standard kubeconfig path (bash:
 // driver::kubeconfig) — written under the workload cluster's metadata.name

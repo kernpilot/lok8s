@@ -1,0 +1,1 @@
+  ✗ sso-gate: the SecurityPolicy CRD has no spec.mergeType, so envoy-gateway is older than v1.8.0: upgrade it first, then reconcile sso-gate

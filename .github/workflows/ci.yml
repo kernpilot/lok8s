@@ -103,7 +103,7 @@ jobs:
         # variable, so the bats tests tagged `real-helm` (the bash dry-run
         # chart gate against the real helm on real charts), in any file of
         # tests/unit/, skip there. This step runs them on the runner: helm
-        # v3.21.2 (the helm that khelm v2.8.0 and lo link,
+        # v3.22.1 (the helm that khelm v2.9.0 and lo link,
         # internal/toolchain/pins.go) and bats with its two libraries at the
         # versions e2e.yml pins, each tarball checksum-verified. CI=true
         # (Actions sets it) makes a missing helm v3 fail the test; the step
@@ -111,9 +111,9 @@ jobs:
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
-          HELM_VERSION=3.21.2
+          HELM_VERSION=3.22.1
           curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o "${tmp}/helm.tar.gz"
-          echo "0a745198de24545d0055cd8414bc8d2ba10363ef5f5d38369ea1b399671cc083  ${tmp}/helm.tar.gz" | sha256sum -c -
+          echo "896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea  ${tmp}/helm.tar.gz" | sha256sum -c -
           tar -xzf "${tmp}/helm.tar.gz" -C "${tmp}" linux-amd64/helm
           install -m 0755 "${tmp}/linux-amd64/helm" "${HOME}/.local/bin/helm"
           install_tarball() { # <repo> <tag> <sha256> <dest>
@@ -139,6 +139,55 @@ jobs:
           echo "${out}"
           grep -q '^ok ' <<< "${out}" || { echo "::error::no real-helm bats test ran"; exit 1; }
           if grep -q '# skip' <<< "${out}"; then echo "::error::a real-helm bats test skipped"; exit 1; fi
+
+      - name: Real-sops bats tests (native, ssh-keygen and the b-installed sops)
+        # The argsh container of "Run unit tests" has no ssh-keygen, so the
+        # bats tests tagged `real-sops` (the secret re-key against the real
+        # sops, with throwaway keys) skip there. This step runs them on the
+        # runner: its ssh-keygen, the sops and ssh-to-age that `b install`
+        # put in .bin, and the bats and libraries that the step above
+        # installed. It downloads nothing. .bin comes first on PATH, and the
+        # step fails before bats runs when sops or ssh-to-age resolves to
+        # another file. The TAP output goes through tee into a log, under
+        # pipefail (as in "Provision & register" of spinup.yml), so a failed
+        # test fails the step. The step also fails when the plan is not 1..14
+        # (the fourteen tagged tests) or when a test skipped.
+        run: |
+          set -euo pipefail
+          export PATH="${GITHUB_WORKSPACE}/.bin:${HOME}/.local/bin:${PATH}"
+          bats --version
+          for tool in sops ssh-to-age; do
+            got="$(command -v "${tool}" || true)"
+            if [[ "${got}" != "${GITHUB_WORKSPACE}/.bin/${tool}" ]]; then
+              echo "::error::${tool} resolves to '${got}', not to ${GITHUB_WORKSPACE}/.bin/${tool} (b install)"
+              exit 1
+            fi
+          done
+          echo "ssh-keygen: $(command -v ssh-keygen || echo none)"
+          log="$(mktemp)"
+          bats --filter-tags real-sops tests/unit/ | tee "${log}"
+          plan="$(head -n 1 "${log}")"
+          if [[ "${plan}" != "1..14" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..14"; exit 1; fi
+          if grep -q '# skip' "${log}"; then echo "::error::a real-sops bats test skipped"; exit 1; fi
+
+      - name: Real-git bats tests (native, the git of the runner)
+        # The argsh container of "Run unit tests" has no git, so the bats
+        # test tagged `real-git` (git as the oracle of the .gitignore that
+        # lo writes into a secrets store) skips there. This step runs it on
+        # the runner, with its git and the bats that the steps above
+        # installed. It downloads nothing. The step fails when git is
+        # missing, when the plan is not 1..1 (the one tagged test) or when
+        # the test skipped.
+        run: |
+          set -euo pipefail
+          export PATH="${GITHUB_WORKSPACE}/.bin:${HOME}/.local/bin:${PATH}"
+          bats --version
+          git --version
+          log="$(mktemp)"
+          bats --filter-tags real-git tests/unit/ | tee "${log}"
+          plan="$(head -n 1 "${log}")"
+          if [[ "${plan}" != "1..1" ]]; then echo "::error::the real-git TAP plan is '${plan}', not 1..1"; exit 1; fi
+          if grep -q '# skip' "${log}"; then echo "::error::a real-git bats test skipped"; exit 1; fi
 
       - name: CRD drift gate (lo crds check)
         # libs/crds calls itself "the CI drift gate" — this is the workflow

@@ -15,17 +15,20 @@ package kubehz
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +41,8 @@ import (
 var (
 	handoverPKIKeys    = []string{"ca.crt", "ca.key", "sa.pub", "sa.key", "front-proxy-ca.crt", "front-proxy-ca.key"}
 	handoverBundleKeys = append(append([]string{}, handoverPKIKeys...), "encryption-key", "snapshot-location", "endpoint-dns")
+	// The optional keys: read when they are there (bundleValue).
+	handoverOptionalKeys = []string{"encryption-provider", "encryption-key-name", "etcd-version"}
 )
 
 // ReceiveOpts carries the `handover receive` flags.
@@ -55,11 +60,14 @@ type PreseedOpts struct {
 	User   string
 	Port   int
 	SSHKey string
-	// KnownHosts is the known_hosts file ssh and scp verify the node's
-	// host key against ("" = ssh's default, ~/.ssh/known_hosts). A node
-	// seen for the first time is recorded (StrictHostKeyChecking
-	// accept-new); a changed key fails the transfer.
+	// KnownHosts is the known_hosts file ssh and scp check the node's host
+	// key against ("" = ssh's own files). It must be an existing regular
+	// file. An unknown or a changed key fails (StrictHostKeyChecking=yes).
 	KnownHosts string
+	// AcceptNewHostKey trusts an unknown host key on the first call only
+	// (accept-new), then checks that ssh recorded it, and every later call
+	// checks against that record.
+	AcceptNewHostKey bool
 }
 
 // resolveBundle ports handover::resolve_bundle: a directory is used as-is;
@@ -84,15 +92,48 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 			}
 			dir = d
 		}
-		_ = os.Chmod(dir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
+		if err := c.makePrivate(dir); err != nil {
+			c.removeDir(dir)
+			return "", err
+		}
 		if err := c.extractBundle(bundle, dir); err != nil {
-			_ = os.RemoveAll(dir)
+			c.removeDir(dir)
 			return "", err
 		}
 		return dir, nil
 	}
 	c.errorf("handover: bundle not found: %s", bundle)
 	return "", ErrHandled
+}
+
+// removeDir ports handover::remove_dir: remove a dir that can hold the
+// bundle's keys, and name it when that fails. The bash twin first gives
+// the owner rwx on each dir in it (a tar can leave a dir 0400 or 0500);
+// extractBundle makes every dir 0700, so the Go twin needs no such step.
+func (c *Context) removeDir(dir string) {
+	if err := os.RemoveAll(dir); err != nil {
+		c.errorf("handover: could not remove %s, which can hold the bundle's keys. Delete it yourself.", dir)
+	}
+}
+
+// makePrivate ports handover::make_private: set dir to 0700, then check
+// the mode it has. The bundle's keys land in it, so a failed chmod or a
+// file system that keeps group or other bits fails closed.
+func (c *Context) makePrivate(dir string) error {
+	if err := c.chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory: 0700 is owner-only
+		c.errorf("handover: cannot set %s to mode 700, so the bundle's keys would not be private in it. Check the file system of TMPDIR, then retry.", dir)
+		return ErrHandled
+	}
+	info, err := c.lstat(dir)
+	if err == nil && info.IsDir() && info.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	mode := "unknown"
+	if err == nil {
+		mode = strconv.FormatUint(uint64(info.Mode().Perm()), 8)
+	}
+	c.errorf("handover: %s has mode %s, not 700, so other users could read the bundle's keys in it. Check the archive and the file system of TMPDIR, then retry.", dir, mode)
+	return ErrHandled
 }
 
 // bundleEntryEscapes is the traversal guard's truth table: absolute paths
@@ -108,19 +149,37 @@ func bundleEntryEscapes(entry string) bool {
 }
 
 // extractBundle lists, guards, then extracts a .tar.gz (bash: `tar -tzf`
-// over every entry, then `tar -xzf`). Two passes over the file: the first
-// reads headers only, the second streams each file to disk, so the
-// archive is never held in memory.
+// and `tar -tvzf` over every entry, then `tar -xzf`). Two passes over the
+// file: the first reads headers only, the second streams each file to
+// disk, so the archive is never held in memory.
+//
+// Only regular files and directories: a link entry can name a file
+// outside the bundle (ca.key -> /etc/shadow), and preseed would send that
+// file to the node. Any other entry type refuses the whole bundle before
+// a byte is written. A path that escapes is refused at its entry, as the
+// bash traversal check reads every name before it reads the types.
 func (c *Context) extractBundle(bundle, dir string) error {
+	odd := false
 	guard := func(_ *tar.Reader, hdr *tar.Header) error {
 		if bundleEntryEscapes(hdr.Name) {
 			c.errorf("handover: refusing %s — archive entry escapes the bundle dir: %s", bundle, hdr.Name)
 			return ErrHandled
 		}
+		switch hdr.Typeflag {
+		case tar.TypeReg, tar.TypeDir:
+		case tar.TypeXGlobalHeader:
+			// pax metadata for the archive, not an entry: nothing lands.
+		default:
+			odd = true
+		}
 		return nil
 	}
 	if err := c.walkBundle(bundle, guard); err != nil {
 		return err
+	}
+	if odd {
+		c.errorf("handover: refusing %s: an archive entry is not a regular file or a directory (a link, a device or a FIFO)", bundle)
+		return ErrHandled
 	}
 	extract := func(tr *tar.Reader, hdr *tar.Header) error {
 		target := filepath.Join(dir, filepath.Clean("/"+hdr.Name))
@@ -131,9 +190,8 @@ func (c *Context) extractBundle(bundle, dir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
-			// #nosec G115 -- the conversion happens first; only the low 9 bits
-			// survive the &0o777 mask, so a wrapped value cannot widen the mode.
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fs.FileMode(hdr.Mode)&0o777|0o600)
+			// 0600 whatever mode the archive gives: the files are keys.
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 			if err != nil {
 				return err
 			}
@@ -142,12 +200,6 @@ func (c *Context) extractBundle(bundle, dir string) error {
 				return c.extractCopyError(bundle, target, err)
 			}
 			return out.Close()
-		case tar.TypeSymlink, tar.TypeLink:
-			// The bash `tar -xzf` extracted links. A link in a PKI bundle
-			// points nowhere useful and can point outside the private dir,
-			// so the binary skips it and says so. Deliberate deviation
-			// (catalogue D27).
-			c.debugf("handover: skipping link entry %s in %s (links are not extracted)", hdr.Name, bundle)
 		}
 		return nil
 	}
@@ -200,11 +252,31 @@ func (c *Context) notArchive(bundle string) error {
 }
 
 // validateBundle ports handover::validate_bundle: every contract §2 key must
-// exist and be non-empty; the error NAMES the missing key.
+// exist and be non-empty, and every key that is there (an optional one too)
+// must be a regular file with one name: not a link (Lstat), and not a hard
+// link (the link count). The handover reads and sends each key from the
+// bundle itself, never from a path that a link names or a second name of a
+// file outside the bundle, for a .tar.gz and for a directory the user
+// gives. The error NAMES the key.
 func (c *Context) validateBundle(dir string) error {
+	for _, key := range append(append([]string{}, handoverBundleKeys...), handoverOptionalKeys...) {
+		info, err := c.lstat(filepath.Join(dir, key))
+		if err != nil {
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			c.errorf("handover: bundle key %s is not a regular file (a link, a directory or a special file): %s/%s", key, dir, key)
+			return ErrHandled
+		}
+		// A link count that cannot be read fails too (singleLink).
+		if !singleLink(info) {
+			c.errorf("handover: bundle key %s has more than one name (a hard link), so it can be a file outside the bundle: %s/%s", key, dir, key)
+			return ErrHandled
+		}
+	}
 	for _, key := range handoverBundleKeys {
-		info, err := os.Stat(filepath.Join(dir, key))
-		if err != nil || info.IsDir() || info.Size() == 0 {
+		info, err := c.lstat(filepath.Join(dir, key))
+		if err != nil || info.Size() == 0 {
 			c.errorf("handover: bundle is incomplete — missing or empty key: %s (expected at %s/%s)", key, dir, key)
 			return ErrHandled
 		}
@@ -214,34 +286,86 @@ func (c *Context) validateBundle(dir string) error {
 
 // placePKI ports handover::place_pki: seed the exported PKI into
 // <k8sDir>/pki (kubeadm reuses EXISTING files instead of minting new ones).
+// The pki dir is set to 0700 and checked before a key lands in it: kubeadm
+// makes it 0755, and a dir of an earlier run can be open. Each file then
+// goes in through installFile (certs and sa.pub 0644, keys 0600). A
+// failure removes the files that this call placed, or names the ones it
+// could not remove.
 func (c *Context) placePKI(bundle, k8sDir string) error {
-	if err := os.MkdirAll(filepath.Join(k8sDir, "pki"), 0o755); err != nil {
+	pki := filepath.Join(k8sDir, "pki")
+	if err := os.MkdirAll(pki, 0o700); err != nil {
 		return err
 	}
+	if err := c.chmod(pki, 0o700); err != nil { // #nosec G302 -- a directory: 0700 is owner-only
+		c.errorf("handover: cannot set %s to mode 700, so the keys would not be private in it", pki)
+		return ErrHandled
+	}
+	if info, err := c.lstat(pki); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		c.errorf("handover: cannot set %s to mode 700, so the keys would not be private in it", pki)
+		return ErrHandled
+	}
+	var placed []string
 	for _, key := range handoverPKIKeys {
-		if err := copyFile(filepath.Join(bundle, key), filepath.Join(k8sDir, "pki", key)); err != nil {
-			c.errorf("handover: could not place %s into %s/pki", key, k8sDir)
+		// The PUBLIC halves (certs, sa.pub) are 0644; the keys are 0600.
+		mode := fs.FileMode(0o644)
+		if strings.HasSuffix(key, ".key") {
+			mode = 0o600
+		}
+		data, err := os.ReadFile(filepath.Join(bundle, key))
+		if err == nil {
+			err = c.installFile(filepath.Join(pki, key), data, mode)
+		}
+		if err != nil {
+			c.errorf("handover: could not place %s into %s with mode %s", key, pki, strconv.FormatUint(uint64(mode), 8))
+			var left []string
+			for _, k := range placed {
+				if rerr := os.Remove(filepath.Join(pki, k)); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+					left = append(left, filepath.Join(pki, k))
+				}
+			}
+			if len(left) > 0 {
+				c.errorf("handover: could not remove the files that this step placed: %s. Delete them yourself.", strings.Join(left, " "))
+			}
 			return ErrHandled
 		}
-	}
-	for _, f := range []string{"ca.crt", "front-proxy-ca.crt", "sa.pub"} {
-		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o644) // #nosec G302 -- the PUBLIC halves (certs, sa.pub); the keys stay 0600
-	}
-	for _, f := range []string{"ca.key", "front-proxy-ca.key", "sa.key"} {
-		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o600)
+		placed = append(placed, key)
 	}
 	return nil
 }
 
-// copyFile writes dst private (0600) from the first byte: the PKI copies
-// include CA and service-account KEYS, and a 0644 create followed by a
-// chmod leaves a readable window. placePKI widens the public halves after.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+// installFile ports handover::install_file: write data to dst with mode,
+// through a new file in the dir of dst. os.CreateTemp makes it 0600, chmod
+// sets the mode, and the rename replaces dst. Thus the bytes never land in
+// a file with a wider mode, and an existing dst (a run with --force) is
+// replaced: its own mode, a link there or a second name of it does not get
+// the bytes. A dir at dst (or a link to one) fails, as in the bash twin. On
+// a failure the new file goes, and dst is as it was. A new file that cannot
+// go is named: it can hold key bytes.
+func (c *Context) installFile(dst string, data []byte, mode fs.FileMode) error {
+	if info, err := os.Stat(dst); err == nil && info.IsDir() {
+		return errors.New(dst + " is a directory")
+	}
+	f, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o600)
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = c.chmod(tmp, mode)
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		if rerr := os.Remove(tmp); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			c.errorf("handover: could not remove %s, which can hold key bytes. Delete it yourself.", tmp)
+		}
+	}
+	return err
 }
 
 // stripQuery drops everything from '?' on — for URLs that carry a credential
@@ -269,7 +393,10 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 		if err != nil {
 			return "", err
 		}
-		_ = os.Chmod(d, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
+		if err := c.makePrivate(d); err != nil {
+			c.removeDir(d)
+			return "", err
+		}
 		workdir = d
 	}
 	out := filepath.Join(workdir, "kubehz-handover-snapshot.db")
@@ -287,16 +414,18 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 			c.errorf("handover: the snapshot lives at %s but no aws CLI is on this node — download it with any s3 client against the platform's object store and re-run with --snapshot <file>", location)
 			return "", ErrHandled
 		}
-		if err := touch600(out); err != nil {
+		if err := c.touch600(out); err != nil {
 			return "", err
 		}
 		if _, err := c.capture(ctx, false, "aws", "s3", "cp", location, out); err != nil {
 			c.errorf("handover: fetching %s via the aws CLI failed — download it yourself and re-run with --snapshot <file>", location)
 			return "", ErrHandled
 		}
-		_ = os.Chmod(out, 0o600)
+		if err := c.chmod(out, 0o600); err != nil {
+			return "", err
+		}
 	case strings.HasPrefix(location, "https://"):
-		if err := touch600(out); err != nil {
+		if err := c.touch600(out); err != nil {
 			return "", err
 		}
 		data, err := c.fetch(ctx, "GET", location, bearer{}, nil)
@@ -323,11 +452,11 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 }
 
 // touch600 is `: > out && chmod 600 out` — 0600 BEFORE any bytes land.
-func touch600(path string) error {
+func (c *Context) touch600(path string) error {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	return c.chmod(path, 0o600)
 }
 
 // memberIdentity ports handover::member_identity: the etcd member name +
@@ -488,11 +617,12 @@ func (c *Context) writeEncryptionConfig(bundle, k8sDir string) (string, error) {
 		"            - name: " + keyName + "\n" +
 		"              secret: " + key + "\n" +
 		"      - identity: {}\n"
-	if err := os.WriteFile(out, []byte(content), 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(out, 0o600); err != nil {
-		return "", err
+	// The file holds the key: installFile writes it 0600 from the first
+	// byte, also over a file of an earlier run (os.WriteFile keeps the mode
+	// of a file that is there).
+	if err := c.installFile(out, []byte(content), 0o600); err != nil {
+		c.errorf("handover: could not write %s with mode 600", out)
+		return "", ErrHandled
 	}
 	return out, nil
 }
@@ -513,6 +643,17 @@ func (c *Context) endpointDNS(bundle string) (string, error) {
 }
 
 // writeKubeadmConfig ports handover::write_kubeadm_config (v1beta4).
+//
+// The InitConfiguration sets one value: a TTL of 1 h (kubeadm's default is
+// 24 h) for the bootstrap token that kubeadm init creates. No later step of
+// the handover uses that token: verify and the untaint use admin.conf, and
+// --skip-token-print keeps it off the screen. No step of the handover joins
+// a node: a join after it needs a token of its own (for example from
+// `kubeadm token create --print-join-command` on this node), and lok8s does
+// not run that command. The cluster-info ConfigMap and the bootstrap RBAC
+// that joins need do not depend on this token, and init still creates
+// them. kubeadm fills in the default groups and usages. A TTL of 0 means
+// "never expires", so the value must stay above 0.
 func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error {
 	enc := filepath.Join(k8sDir, "kubehz-encryption-config.yaml")
 	dns, err := c.endpointDNS(bundle)
@@ -536,7 +677,12 @@ func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error 
 		"      hostPath: " + enc + "\n" +
 		"      mountPath: " + enc + "\n" +
 		"      readOnly: true\n" +
-		"      pathType: File\n"
+		"      pathType: File\n" +
+		"---\n" +
+		"apiVersion: kubeadm.k8s.io/v1beta4\n" +
+		"kind: InitConfiguration\n" +
+		"bootstrapTokens:\n" +
+		"  - ttl: 1h0m0s\n"
 	return os.WriteFile(out, []byte(content), 0o644) // #nosec G306 -- a static-pod manifest; the secret it mounts is its own 0600 file
 }
 
@@ -715,8 +861,10 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(workdir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
-	defer func() { _ = os.RemoveAll(workdir) }()
+	defer c.removeDir(workdir)
+	if err := c.makePrivate(workdir); err != nil {
+		return err
+	}
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
 	if err != nil {
@@ -770,11 +918,30 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 // HandoverPreseed ports handover::preseed — the thin kubeone variant: place
 // the six PKI files on node0 over SSH before `kubeone apply`.
 func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
-	// ssh reads the value of `-o UserKnownHostsFile=<path>` as a list of
-	// files separated by whitespace. A path with a space becomes two
-	// known_hosts files, and neither is the file the caller named.
-	if strings.ContainsAny(o.KnownHosts, " \t\r\n") {
-		c.errorf("handover: --known-hosts path must not contain whitespace: %q", o.KnownHosts)
+	// ssh reads the value of `-o UserKnownHostsFile=<path>` in its config
+	// language: it expands % tokens, ${VAR} and ~, it splits the value at
+	// whitespace, and quotes and backslashes change the split. The file
+	// checks here and ssh-keygen -f read the path as it is. So a path with
+	// such a byte is refused before any ssh call. A relative path is made
+	// absolute first (the working dir as it is, no link resolved), so the
+	// check reads the path that ssh gets.
+	knownHosts := o.KnownHosts
+	if knownHosts != "" && !strings.HasPrefix(knownHosts, "/") {
+		wd, err := os.Getwd()
+		if err != nil {
+			c.errorf("handover: cannot read the working directory for the relative --known-hosts path: %v", err)
+			return ErrHandled
+		}
+		knownHosts = wd + "/" + knownHosts
+	}
+	if sshPathUnsafe(knownHosts) {
+		c.errorf("handover: --known-hosts path must not hold %%, $, ~, \", ', \\, whitespace or a control byte, because ssh expands %%, $ and ~ in it and splits it at whitespace, quotes and backslashes: %s", quoteBytes(knownHosts, 0))
+		return ErrHandled
+	}
+	// A missing path, /dev/null, a dir, a FIFO or a device holds no key to
+	// check against, and ssh cannot record a key in it.
+	if knownHosts != "" && !readableRegularFile(knownHosts) {
+		c.errorf("handover: --known-hosts must name an existing regular file that you can read: %q", knownHosts)
 		return ErrHandled
 	}
 	user := o.User
@@ -789,8 +956,10 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(workdir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
-	defer func() { _ = os.RemoveAll(workdir) }()
+	defer c.removeDir(workdir)
+	if err := c.makePrivate(workdir); err != nil {
+		return err
+	}
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
 	if err != nil {
@@ -800,48 +969,518 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		return err
 	}
 
-	// The bash sent the PKI with `StrictHostKeyChecking=no` and
-	// `UserKnownHostsFile=/dev/null`: any host that answered on the address
-	// got the CA private keys. This is a deliberate deviation: the host key
-	// is recorded on first contact and verified after that, against a real
+	// These calls carry the CA private keys, so each one checks the host
+	// key (StrictHostKeyChecking=yes): an unknown or a changed key fails
+	// before a key leaves this machine. With --accept-new-host-key, only
+	// the first call (the mkdir, which sends no key) takes an unknown key
+	// and records it (accept-new). The handover then checks that the key is
+	// in the known_hosts file, and every later call uses yes. Never
+	// StrictHostKeyChecking=no or UserKnownHostsFile=/dev/null here. The bash
+	// twin (handover::preseed) uses the same options.
+	// With --known-hosts, GlobalKnownHostsFile=/dev/null makes that file the
+	// only known_hosts file: a key in the system files (/etc/ssh/
+	// ssh_known_hosts) is then no trust source.
+	// ControlMaster=no and ControlPath=none: a master connection that the
+	// user's ssh config opens or shares (ControlMaster, ControlPath) would
+	// carry these calls without a new host key check. ssh takes the first
+	// value it gets for an option, so these win over the config.
+	// NoHostAuthenticationForLocalhost=no: with yes, ssh skips the host key
+	// check for a loopback address (a node behind a forwarded port), also
+	// with StrictHostKeyChecking=yes. VerifyHostKeyDNS=no: with yes, ssh
+	// takes a key from a DNS SSHFP record that is in no known_hosts file.
+	// UpdateHostKeys=no: the node cannot add or remove keys in the
 	// known_hosts file.
-	sshOpts := []string{
-		"-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
-		"-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
-	}
-	if o.KnownHosts != "" {
-		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts)
+	sshOpts := []string{"-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+		"-o", "ControlMaster=no", "-o", "ControlPath=none",
+		"-o", "NoHostAuthenticationForLocalhost=no", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no"}
+	if knownHosts != "" {
+		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+knownHosts, "-o", "GlobalKnownHostsFile=/dev/null")
 	}
 	if o.SSHKey != "" {
 		sshOpts = append(sshOpts, "-i", o.SSHKey)
 	}
 	portStr := strconv.Itoa(port)
 	target := user + "@" + o.Node
-
-	ssh := func(remote string) error {
-		args := append(append([]string{}, sshOpts...), "-p", portStr, target, remote)
-		return c.run(ctx, "ssh", args...)
+	firstContact := "yes"
+	if o.AcceptNewHostKey {
+		firstContact = "accept-new"
+		c.warnf("handover: --accept-new-host-key: the first contact trusts the host key that %s shows, without a check", o.Node)
 	}
-	// umask 077 → the pki dir is 0700 from the start.
-	if err := ssh("umask 077 && mkdir -p /etc/kubernetes/pki"); err != nil {
-		c.errorf("handover: cannot reach %s over SSH", target)
-		c.errorf("handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
+	checked := func(policy string) []string {
+		return append([]string{"-o", "StrictHostKeyChecking=" + policy}, sshOpts...)
+	}
+	// Each ssh and scp call captures its stdout and its stderr, so no byte
+	// from the node reaches the terminal as it is. On success preseed
+	// shows none of it, except the stderr of the first call. On a failure
+	// it shows the lines of the call that failed (preseedStream). bash
+	// command substitution drops each NUL byte, so the twins read the same
+	// lines.
+	call := func(ctx context.Context, name string, args []string) (stdout, stderr string, err error) {
+		var outBuf, errBuf bytes.Buffer
+		err = c.Runner.Run(ctx, execx.Cmd{Name: name, Args: args, Stdout: &outBuf, Stderr: &errBuf})
+		return strings.ReplaceAll(outBuf.String(), "\x00", ""), strings.ReplaceAll(errBuf.String(), "\x00", ""), err
+	}
+	sshOn := func(ctx context.Context, policy, remote string) (string, string, error) {
+		return call(ctx, "ssh", append(checked(policy), "-p", portStr, target, remote))
+	}
+	ssh := func(policy, remote string) (string, string, error) {
+		return sshOn(ctx, policy, remote)
+	}
+	show := func(lines []string) {
+		for _, line := range lines {
+			c.echoErr("%s", line)
+		}
+	}
+	// The pki dir is 0700 before any key lands in it: umask 077 makes a new
+	// dir 0700, and chmod sets a dir that is there already (kubeadm makes it
+	// 0755). A chmod that fails fails the call.
+	firstCall := "the mkdir call on " + o.Node
+	stdout, stderr, err := ssh(firstContact, "umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki")
+	if err != nil {
+		c.errorf("handover: cannot reach %s over SSH, or cannot set /etc/kubernetes/pki on it to mode 700", target)
+		show(preseedStreams(firstCall, stdout, stderr))
+		if o.AcceptNewHostKey {
+			c.errorf("handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
+		} else {
+			c.errorf("handover: an unknown or changed host key also fails here. Compare the fingerprints of \"ssh-keyscan -p %s %s | ssh-keygen -lf -\" with \"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\" on the node's console, and add the key to the known_hosts file if they match. Or retry with --accept-new-host-key to trust the first contact.", portStr, o.Node)
+		}
 		return ErrHandled
 	}
-	// Per-file transfer with an IMMEDIATE per-key chmod.
-	for _, key := range handoverPKIKeys {
-		args := append(append([]string{}, sshOpts...), "-P", portStr, filepath.Join(bundleDir, key), target+":/etc/kubernetes/pki/"+key)
-		if err := c.run(ctx, "scp", args...); err != nil {
-			c.errorf("handover: copying %s to %s failed", key, o.Node)
-			return ErrHandled
+	// The stderr of the first call holds only what ssh prints at LogLevel
+	// ERROR. ssh does not print the line about a recorded host key at that
+	// level, so the recorded key is checked below.
+	show(preseedStream(firstCall, "stderr", stderr))
+	if o.AcceptNewHostKey {
+		recorded := knownHosts
+		if recorded == "" {
+			recorded = c.getenv("HOME") + "/.ssh/known_hosts"
 		}
-		if handoverPKIRe.MatchString(key) {
-			if err := ssh("chmod 600 /etc/kubernetes/pki/" + key); err != nil {
-				c.errorf("handover: could not chmod 600 /etc/kubernetes/pki/%s on %s — key material must not stay readable; fix the mode and re-run", key, o.Node)
-				return ErrHandled
+		if err := c.hostKeyRecorded(ctx, o.Node, port, recorded); err != nil {
+			return err
+		}
+	}
+
+	// scp writes into a file that is there already: a hard link at the
+	// destination gives the key bytes to its other name too, and a symlink
+	// sends them to its target. So each file goes to a new staging file in
+	// the 0700 pki dir first. One call checks the dirs and makes the files
+	// (umask 077 and mktemp: mode 0600) and prints their names, the scp
+	// calls fill them, and one call sets each mode and renames each file
+	// over its destination. A rename (mv -T) replaces a link or a file there
+	// and never writes through it. A failure removes the staging files, or
+	// names them when that fails too. The bash twin does the same steps.
+	// shown holds the lines of the call that failed.
+	var shown []string
+	stdout, stderr, err = ssh("yes", preseedStageCmd())
+	staged, failed := preseedStageResult(stdout, err == nil, o.Node)
+	if failed != "" {
+		shown = preseedStreams("the stage call on "+o.Node, stdout, stderr)
+	}
+	if failed == "" {
+		for i, key := range handoverPKIKeys {
+			args := append(checked("yes"), "-q", "-P", portStr, filepath.Join(bundleDir, key), target+":"+staged[i])
+			if stdout, stderr, err := call(ctx, "scp", args); err != nil {
+				failed = "copying " + key + " to " + o.Node + " failed"
+				shown = preseedStreams("the copy of "+key+" to "+o.Node, stdout, stderr)
+				break
 			}
 		}
 	}
+	if failed == "" {
+		stdout, stderr, err = ssh("yes", preseedInstallCmd(staged))
+		if err != nil {
+			// After a cancel or a timeout, an error of the ssh client, exit
+			// 255 (an ssh error, a lost connection too) or a signal, the
+			// node can run steps after the last line that came back.
+			failed = preseedInstallFailure(stdout, preseedInstallCause(ctx, err), o.Node)
+			shown = preseedStreams("the install call on "+o.Node, stdout, stderr)
+		}
+	}
+	if failed != "" {
+		c.errorf("handover: %s", failed)
+		show(shown)
+		if len(staged) > 0 {
+			// The staging files can hold key bytes, so a cancel or a
+			// timeout of ctx does not stop their cleanup: it runs on a
+			// context without them, with a timeout of its own. The bash
+			// twin also runs its cleanup after the install call ended.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preseedCleanupTimeout)
+			stdout, stderr, err := sshOn(cleanupCtx, "yes", "rm -f -- "+strings.Join(staged, " "))
+			cancel()
+			if err != nil {
+				c.errorf("handover: could not remove the staging files on %s; they can hold key bytes. Remove them yourself: %s", o.Node, strings.Join(staged, " "))
+				show(preseedStreams("the cleanup call on "+o.Node, stdout, stderr))
+			}
+		}
+		return ErrHandled
+	}
 	c.echo("handover: PKI pre-seeded on %s. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity.", o.Node)
 	return nil
+}
+
+// preseedPKIDir is the pki dir on the node that preseed writes into.
+const preseedPKIDir = "/etc/kubernetes/pki"
+
+// preseedCleanupTimeout bounds the cleanup call of preseed (the rm of the
+// staging files). That call also runs after a cancel or a timeout of the
+// context of preseed, so it has a timeout of its own.
+const preseedCleanupTimeout = 30 * time.Second
+
+// stagingName ports handover::staging_name: it reports whether name is the
+// shape of a staging file that preseed's mktemp makes for key:
+// /etc/kubernetes/pki/.<key>. and 10 ASCII letters or digits.
+func stagingName(key, name string) bool {
+	rest, ok := strings.CutPrefix(name, preseedPKIDir+"/."+key+".")
+	if !ok || len(rest) != 10 {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		b := rest[i]
+		if (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && (b < '0' || b > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// preseedTrustedDirs are the dirs on the path of the pki dir on the node,
+// from the top, that the stage call checks before it makes a staging file.
+// The owner of such a dir (or a user who can write it) could rename or
+// replace a dir below it, or put a link at a staging name between the
+// mktemp and the scp, and scp would write the key through it. So each one
+// must be a dir, not a link, with no write bit for the group or others.
+// Root must own the dirs in preseedRootDirs, and root or the ssh user the
+// others. The check trusts the mounts that root made: it does not read the
+// type of a file system.
+var preseedTrustedDirs = []string{"/", "/etc", "/etc/kubernetes", preseedPKIDir}
+
+// preseedRootDirs are the trusted dirs that only root may own.
+var preseedRootDirs = []string{"/", "/etc"}
+
+// preseedDirOwners ports handover::dir_owners: the find test of the owners
+// that the trusted dir may have, and the same owners in words.
+func preseedDirOwners(dir string) (test, who string) {
+	if slices.Contains(preseedRootDirs, dir) {
+		return "-uid 0", "root"
+	}
+	return `\( -uid 0 -o -uid "$(id -u)" \)`, "root or the ssh user"
+}
+
+// preseedStageCmd ports handover::stage_cmd: the remote command of the
+// stage call. Before each check it prints "check <dir> <uid> <mode>
+// <type>" (GNU stat), and after the checks "stage", so the last line of a
+// failed call names the dir that failed. Then it makes one staging file per
+// PKI key (umask 077 and mktemp: mode 0600) and prints its name.
+func preseedStageCmd() string {
+	steps := []string{"umask 077"}
+	for _, dir := range preseedTrustedDirs {
+		owners, _ := preseedDirOwners(dir)
+		steps = append(steps,
+			`echo "check `+dir+` $(stat -c '%u %a %F' -- `+dir+`)"`,
+			`test -n "$(find `+dir+` -maxdepth 0 -type d ! -perm /022 `+owners+` -print)"`)
+	}
+	steps = append(steps, "echo stage")
+	for _, key := range handoverPKIKeys {
+		steps = append(steps, "mktemp "+preseedPKIDir+"/."+key+".XXXXXXXXXX")
+	}
+	return strings.Join(steps, " && ")
+}
+
+// preseedStageResult ports the stage step of handover::preseed: it reads
+// the output of the stage call (preseedStageCmd); ok is false when the call
+// failed. With the expected lines, failed is empty and names holds the
+// staging names, one per PKI key, in order. Else failed says what is wrong,
+// and names holds each line that is a staging name of some key, so that the
+// cleanup can remove it. A line of another shape never goes into a command.
+func preseedStageResult(out string, ok bool, node string) (names []string, failed string) {
+	var lines []string
+	if s := strings.TrimRight(out, "\n"); s != "" {
+		lines = strings.Split(s, "\n")
+	}
+	if ok {
+		failed = preseedStageLines(lines, node)
+	} else {
+		failed = preseedStageFailure(lastLine(out), node)
+	}
+	if failed == "" {
+		return lines[len(preseedTrustedDirs)+1:], ""
+	}
+	for _, line := range lines {
+		for _, key := range handoverPKIKeys {
+			if stagingName(key, line) {
+				names = append(names, line)
+				break
+			}
+		}
+	}
+	return names, failed
+}
+
+// preseedStageFailure ports handover::stage_failure: the cause of a failed
+// stage call from the last line that it printed. A check line names the
+// dir that failed its check and what stat showed.
+func preseedStageFailure(last, node string) string {
+	for _, dir := range preseedTrustedDirs {
+		if facts, ok := strings.CutPrefix(last, "check "+dir+" "); ok {
+			_, who := preseedDirOwners(dir)
+			return dir + " on " + node + " must be a dir, not a link, that " + who + " owns, with no write bit for the group or others. stat shows (uid, mode, type) " +
+				preseedQuote(facts) + ". No key was sent"
+		}
+	}
+	return "could not make the staging files " + preseedPKIDir + "/.<key>.XXXXXXXXXX on " + node
+}
+
+// preseedStageLines ports handover::stage_lines: the problem with the
+// output of a stage call that passed, or "". It must be a check line per
+// trusted dir, "stage", then one staging name per PKI key, in order.
+func preseedStageLines(lines []string, node string) string {
+	at := func(i int) string {
+		if i < len(lines) {
+			return lines[i]
+		}
+		return ""
+	}
+	for i, dir := range preseedTrustedDirs {
+		if !strings.HasPrefix(at(i), "check "+dir+" ") {
+			return node + " printed " + preseedQuote(at(i)) + " where the stage call prints the check of " + dir
+		}
+	}
+	head := len(preseedTrustedDirs)
+	if at(head) != "stage" {
+		return node + " printed " + preseedQuote(at(head)) + ` where the stage call prints "stage"`
+	}
+	for i, key := range handoverPKIKeys {
+		if !stagingName(key, at(head+1+i)) {
+			return fmt.Sprintf("%s printed a staging name for %s that is not %s/.%s. and 10 letters or digits: %s",
+				node, key, preseedPKIDir, key, preseedQuote(at(head+1+i)))
+		}
+	}
+	if n := len(lines) - head - 1; n != len(handoverPKIKeys) {
+		return fmt.Sprintf("%s printed %d lines for %d staging names", node, n, len(handoverPKIKeys))
+	}
+	return ""
+}
+
+// preseedQuoteLimit is the number of bytes of a line from the node that a
+// message shows.
+const preseedQuoteLimit = 200
+
+// preseedQuote ports handover::quote: a line from the node, safe to print.
+// It shows the first preseedQuoteLimit bytes in double quotes. A byte below
+// 0x20, 0x7f and a byte from 0x80 shows as \xNN (so no terminal control,
+// C1 controls too, reaches the terminal), a backslash as \\ and a double
+// quote as \". A longer line also says how many bytes it has.
+func preseedQuote(s string) string { return quoteBytes(s, preseedQuoteLimit) }
+
+// quoteBytes ports handover::quote with its limit: s as preseedQuote shows
+// it, but with the first limit bytes. Limit 0 shows every byte (a path that
+// the user gave).
+func quoteBytes(s string, limit int) string {
+	n := len(s)
+	if limit > 0 && n > limit {
+		n = limit
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < n; i++ {
+		switch c := s[i]; {
+		case c == '\\':
+			b.WriteString(`\\`)
+		case c == '"':
+			b.WriteString(`\"`)
+		case c >= 0x20 && c < 0x7f:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		}
+	}
+	b.WriteByte('"')
+	if n < len(s) {
+		fmt.Fprintf(&b, " (the first %d of %d bytes)", n, len(s))
+	}
+	return b.String()
+}
+
+// preseedStreamLimit is the number of lines of one stream of an ssh or scp
+// call that preseed shows.
+const preseedStreamLimit = 20
+
+// preseedStream ports handover::stream: the lines of one stream (stdout or
+// stderr) of an ssh or scp call, safe to print. Each line is
+// "handover: <call>, <stream>: " and the line through preseedQuote, without
+// one CR at its end (ssh ends its own messages with CR LF, so "Host key
+// verification failed." stays readable). It shows at most
+// preseedStreamLimit lines; the last one that it shows then also says how
+// many lines it does not show.
+func preseedStream(call, stream, text string) []string {
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	var out []string
+	for i, line := range lines {
+		if i == preseedStreamLimit {
+			break
+		}
+		s := "handover: " + call + ", " + stream + ": " + preseedQuote(strings.TrimSuffix(line, "\r"))
+		if more := len(lines) - preseedStreamLimit; i == preseedStreamLimit-1 && more > 0 {
+			unit := "lines"
+			if more == 1 {
+				unit = "line"
+			}
+			s += fmt.Sprintf(" (%d more %s)", more, unit)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// preseedStreams ports handover::streams: the lines of the stdout and then
+// of the stderr of an ssh or scp call (preseedStream).
+func preseedStreams(call, stdout, stderr string) []string {
+	return append(preseedStream(call, "stdout", stdout), preseedStream(call, "stderr", stderr)...)
+}
+
+// sshPathUnsafe ports handover::ssh_path_unsafe: it reports whether path
+// holds a byte that ssh reads as syntax in the value of an -o option: % (a
+// token), $ (an environment variable), ~ (the home dir), a quote or a
+// backslash (they change how ssh splits the value), whitespace, or another
+// control byte (below 0x20, and 0x7f).
+func sshPathUnsafe(path string) bool {
+	for i := 0; i < len(path); i++ {
+		if b := path[i]; b <= ' ' || b == 0x7f || strings.IndexByte(`%$~"'\`, b) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// preseedInstallCmd ports handover::install_cmd: the remote command of the
+// install call for the staging names (one per PKI key, in order). First it
+// sets the mode of each staging file (the keys 0600, the certs and sa.pub
+// 0644), then it renames each over its destination. Before each step it
+// prints the step, so the last line of a failed call names the step that
+// failed.
+func preseedInstallCmd(staged []string) string {
+	var steps []string
+	for i, key := range handoverPKIKeys {
+		mode := "0644"
+		if handoverPKIRe.MatchString(key) {
+			mode = "0600"
+		}
+		steps = append(steps, "echo 'chmod "+key+"'", "chmod "+mode+" "+staged[i])
+	}
+	for i, key := range handoverPKIKeys {
+		steps = append(steps, "echo 'mv "+key+"'", "mv -f -T "+staged[i]+" "+preseedPKIDir+"/"+key)
+	}
+	return strings.Join(steps, " && ")
+}
+
+// preseedInstallCause names the end of a failed install call after which
+// the node can have run steps after the last line that came back, or
+// returns "" for a normal exit of the remote command. In this order: a
+// cancel or a timeout of ctx (a timeout when its deadline passed), an
+// error of the ssh client (it did not start, or its wait failed: no exit
+// status), exit 255 (an ssh error, a lost connection too) and an exit
+// above 128. That last one is a signal: ExitCode gives 128+N for a client
+// that a signal killed, and ssh gives the status of a remote command that
+// a signal killed as it is. bash cannot tell the two apart, so the twins
+// treat both the same.
+func preseedInstallCause(ctx context.Context, err error) string {
+	code := execx.ExitCode(err)
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "a timeout (" + context.Cause(ctx).Error() + ")"
+	case ctx.Err() != nil:
+		return "a cancel (" + context.Cause(ctx).Error() + ")"
+	case execx.LaunchFailed(err):
+		return "an error of the ssh client (" + err.Error() + ")"
+	case code == 255:
+		return "exit 255 (an ssh error, such as a lost connection)"
+	case code > 128:
+		return "exit " + strconv.Itoa(code) + " (a signal, to ssh or to a command on the node)"
+	}
+	return ""
+}
+
+// preseedInstallFailure ports handover::install_failure: the cause of a
+// failed install call from its output. A cause (preseedInstallCause) means
+// that the node can run steps after the last line that came back, so the
+// state is unknown whatever step that line names. Else the last line names
+// the step that failed, and a mv failure names the files that went into
+// place before it. A last line that names no step (text from the node's
+// shell) also says that the state is unknown. An unknown state names each
+// destination to check.
+func preseedInstallFailure(out, cause, node string) string {
+	last := lastLine(out)
+	dests := make([]string, 0, len(handoverPKIKeys))
+	for _, key := range handoverPKIKeys {
+		dests = append(dests, preseedPKIDir+"/"+key)
+	}
+	if cause != "" {
+		seen := "no step arrived, but steps can have run"
+		for _, key := range handoverPKIKeys {
+			if last == "chmod "+key || last == "mv "+key {
+				seen = `the last step that arrived is "` + last + `", and later steps can have run`
+			}
+		}
+		return "the install call on " + node + " ended with " + cause + ", so the state of the install is UNKNOWN: " +
+			seen + ". Check each of these files on " + node + ": " + strings.Join(dests, " ")
+	}
+	var placed []string
+	for _, key := range handoverPKIKeys {
+		switch last {
+		case "chmod " + key:
+			return "could not set the mode of the staging file of " + key + " on " + node + "; no file was moved into place"
+		case "mv " + key:
+			before := "none"
+			if len(placed) > 0 {
+				before = strings.Join(placed, " ")
+			}
+			return "could not move the staging file of " + key + " to " + preseedPKIDir + "/" + key + " on " + node + "; in place before it: " + before
+		}
+		placed = append(placed, key)
+	}
+	return "the install call on " + node + " failed, and its output names no step, so the state of the install is UNKNOWN. Check each of these files on " +
+		node + ": " + strings.Join(dests, " ")
+}
+
+// lastLine is bash "${out##*$'\n'}" after a command substitution: the
+// last line of out without its trailing newlines.
+func lastLine(out string) string {
+	out = strings.TrimRight(out, "\n")
+	return out[strings.LastIndexByte(out, '\n')+1:]
+}
+
+// readableRegularFile is bash `[[ -f path && -r path ]]`: it follows a
+// link, so a link to /dev/null fails too.
+func readableRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path) // #nosec G304 -- the caller's own --known-hosts path, opened only to see that it is readable
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// hostKeyRecorded ports handover::host_key_recorded: ssh must have recorded
+// the node's host key in the known_hosts file that it uses (--known-hosts,
+// else ssh's own user file), so the later calls check the key against that
+// record. ssh records a node in lowercase, and on a port other than 22 as
+// [node]:port. `ssh-keygen -F` also finds a hashed entry (HashKnownHosts).
+func (c *Context) hostKeyRecorded(ctx context.Context, node string, port int, file string) error {
+	host := strings.ToLower(node)
+	if port != 22 {
+		host = "[" + host + "]:" + strconv.Itoa(port)
+	}
+	if err := c.runQuiet(ctx, "ssh-keygen", "-F", host, "-f", file); err == nil {
+		return nil
+	}
+	c.errorf("handover: the host key of %s is not in %s after the first contact, so the next calls could not check it. Make sure that ssh can write that file (or name the file with --known-hosts), then retry.", host, file)
+	return ErrHandled
 }

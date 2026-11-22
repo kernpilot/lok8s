@@ -1,0 +1,221 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "rook-ceph-csi-kms-metadata",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "lok8s.dev/type": "system",
+          "lok8s.dev/category": "storage",
+          "csi-kms.lok8s.dev/option": "metadata",
+          "example.com/scope": "CANARY-scope"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/name": "rook-ceph-csi-kms"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "no-labels"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "lok8s.dev/type": "user"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "no-in"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchExpressions": [
+              {
+                "key": "lok8s.dev/category",
+                "operator": "In",
+                "values": [
+                  "network"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "no-notin"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchExpressions": [
+              {
+                "key": "lok8s.dev/type",
+                "operator": "NotIn",
+                "values": [
+                  "system"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "no-exists"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchExpressions": [
+              {
+                "key": "absent.example.com/x",
+                "operator": "Exists"
+              }
+            ]
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "no-dne"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchExpressions": [
+              {
+                "key": "example.com/scope",
+                "operator": "DoesNotExist"
+              }
+            ]
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "admin",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "rbac.authorization.k8s.io/aggregate-to-admin": "true"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "cluster-admin",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults"
+        }
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "edit",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults",
+          "rbac.authorization.k8s.io/aggregate-to-admin": "true"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "rbac.authorization.k8s.io/aggregate-to-edit": "true"
+            }
+          }
+        ]
+      },
+      "rules": []
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "view",
+        "labels": {
+          "kubernetes.io/bootstrapping": "rbac-defaults",
+          "rbac.authorization.k8s.io/aggregate-to-edit": "true"
+        }
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          {
+            "matchLabels": {
+              "rbac.authorization.k8s.io/aggregate-to-view": "true"
+            }
+          }
+        ]
+      },
+      "rules": []
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

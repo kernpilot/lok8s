@@ -98,6 +98,8 @@ type recordedReq struct {
 	Query  string
 	Auth   string
 	Body   string
+	// Header is every header of the request, Authorization too.
+	Header http.Header
 }
 
 type harness struct {
@@ -127,7 +129,7 @@ func newHarness(t *testing.T) *harness {
 		h.mu.Lock()
 		h.requests = append(h.requests, recordedReq{
 			Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery,
-			Auth: r.Header.Get("Authorization"), Body: string(body),
+			Auth: r.Header.Get("Authorization"), Body: string(body), Header: r.Header.Clone(),
 		})
 		h.mu.Unlock()
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -287,6 +289,9 @@ func readFile(t *testing.T, path string) string {
 type exitErr int
 
 func (e exitErr) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+
+// ExitCode is the status that execx.ExitCode reads.
+func (e exitErr) ExitCode() int { return int(e) }
 
 func loSpec(h *harness) string {
 	return h.writeSpec("test.kubehz.dev", "kind: Lo\nspec:\n  cluster:\n    domain: test.kubehz.dev\n")

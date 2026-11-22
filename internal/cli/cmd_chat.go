@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -67,8 +68,8 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 		}
 	}
 	if bin == "" {
-		ui.ErrorTo(stderr, "lochat binary not found. Build it once:")
-		ui.ErrorTo(stderr, `  go build -C ai/lochat -o "${PATH_BIN}/lochat" .`)
+		ui.ErrorTo(stderr, "lochat binary not found in %s or on PATH.", chatShownDir(paths.Bin))
+		ui.ErrorTo(stderr, "To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up")
 		return "", nil, assets.Tree{}, ErrHandled
 	}
 
@@ -93,14 +94,33 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	}
 
 	// Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an
-	// argsh builtin provided by argsh.so (loaded from beside the argsh
-	// binary). If that shared object is missing the bridge dies with
+	// argsh builtin provided by argsh.so. The argsh that the `lo` child
+	// sources reads ARGSH_BUILTIN_PATH and ${PATH_LIB}/argsh.so first, then
+	// ${PATH_BIN}/argsh.so, then the dirs of LD_LIBRARY_PATH and
+	// BASH_LOADABLES_PATH. It never loads argsh.so from beside the argsh
+	// binary. If that shared object is missing the bridge dies with
 	// "Invalid command: mcp" and the binary would just wait out its
 	// timeout — fail loudly and point at the fix.
 	if !argshBuiltinPresent(paths) {
-		ui.ErrorTo(stderr, "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it.")
-		ui.ErrorTo(stderr, "Install the matching builtin next to argsh, then retry:")
-		ui.ErrorTo(stderr, "  argsh builtins install")
+		// The error names the checked dir, and the hint installs there.
+		// Without --path, argsh installs into a writable exported PATH_BIN,
+		// else PATH_LIB, else a BASH_LOADABLES_PATH dir, else
+		// ~/.local/lib/bash, and its loader never reads ~/.local/lib/bash.
+		// Without --force, argsh writes nothing when it can load an argsh.so
+		// that ARGSH_BUILTIN_PATH or PATH_LIB names. The command takes the
+		// latest argsh release, not the version of the argsh in the dir. The
+		// path in the command is quoted for a POSIX shell. A dir with a
+		// control character is printed Go-quoted, with no command line.
+		// Bash keeps its old hint (deviation catalogue).
+		dir := projectBin(paths)
+		ui.ErrorTo(stderr, "argsh.so is missing from %s. 'lo chat' uses 'lo mcp', and 'lo mcp' is an argsh builtin in argsh.so.", chatShownDir(dir))
+		if rbacHasControl(dir) {
+			ui.ErrorTo(stderr, "The directory name has a control character, so lo does not show the command.")
+			ui.ErrorTo(stderr, "Install the latest release of argsh.so in that directory. Then try again.")
+		} else {
+			ui.ErrorTo(stderr, "To install the latest release of argsh.so in that directory, run this command. Then try again:")
+			ui.ErrorTo(stderr, "  argsh builtins install --force --path %s", rbacShQuote(dir))
+		}
 		return "", nil, assets.Tree{}, ErrHandled
 	}
 	tree, err := assets.BashTree(paths)
@@ -118,14 +138,24 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	return bin, argv, tree, nil
 }
 
-// argshBuiltinPresent checks for argsh.so next to the toolchain argsh (bash:
-// ${PATH_BIN}/argsh.so, else beside the argsh on PATH).
+// argshBuiltinPresent checks for argsh.so in the PATH_BIN of the `lo`
+// child: projectBin, which shimEnv puts in place of an exported PATH_BIN
+// (without an export, the child derives the same dir), not paths.Bin. The
+// child sources ${PATH_BIN}/argsh, and that argsh never loads argsh.so
+// from beside an argsh on PATH, so the check has no PATH fallback. The
+// other places of the argsh search are not checked. Bash reads
+// ${PATH_BIN}/argsh.so, else beside the argsh on PATH (deviation
+// catalogue: docs/reference/go-migration.md).
 func argshBuiltinPresent(paths *config.Paths) bool {
-	if fsutil.FileExists(filepath.Join(paths.Bin, "argsh.so")) {
-		return true
+	return fsutil.FileExists(filepath.Join(projectBin(paths), "argsh.so"))
+}
+
+// chatShownDir is dir as an error line shows it: as it is, or Go-quoted
+// (%q) when it has a control character (rbacHasControl). Such a character
+// can end the line or drive the terminal.
+func chatShownDir(dir string) string {
+	if rbacHasControl(dir) {
+		return strconv.Quote(dir)
 	}
-	if p, err := exec.LookPath("argsh"); err == nil {
-		return fsutil.FileExists(filepath.Join(filepath.Dir(p), "argsh.so"))
-	}
-	return false
+	return dir
 }

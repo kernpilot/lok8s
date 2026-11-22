@@ -7,20 +7,29 @@ package kubehz
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"gopkg.in/yaml.v3"
 )
 
 type hoHarness struct {
@@ -73,6 +82,15 @@ func (ho *hoHarness) mockNodeBinaries(overrides map[string]func(c execx.Cmd) err
 			_ = os.MkdirAll(filepath.Join(ho.etcdDir, "member"), 0o755)
 		case "ip":
 			io.WriteString(c.Stdout, "1.1.1.1 via 10.9.8.1 dev eth0 src 10.9.8.7 uid 0\n")
+		case "ssh":
+			// The stage call of preseed prints a check line per dir, "stage"
+			// and one staging name per key.
+			if strings.HasPrefix(c.Args[len(c.Args)-1], preseedStagePrefix) {
+				io.WriteString(c.Stdout, "check / 0 755 directory\ncheck /etc 0 755 directory\ncheck /etc/kubernetes 0 755 directory\ncheck /etc/kubernetes/pki 0 700 directory\nstage\n")
+				for _, k := range handoverPKIKeys {
+					io.WriteString(c.Stdout, preseedPKIDir+"/."+k+".Ab12Cd34Ef\n")
+				}
+			}
 		}
 		return nil
 	}
@@ -225,33 +243,482 @@ func TestHandoverExtractCopyErrorClassifiesByOperation(t *testing.T) {
 	}
 }
 
-// A link entry is skipped, and the skip is visible under DEBUG.
-func TestHandoverExtractBundleSkipsLinksAndSaysSo(t *testing.T) {
-	t.Setenv("DEBUG", "1")
-	ho := newHandover(t)
-	linked := filepath.Join(ho.base, "linked.tar.gz")
-	f, _ := os.Create(linked)
+// tarEntry is one header of writeTarGz; a regular entry gets body as its
+// content.
+type tarEntry struct {
+	hdr  tar.Header
+	body string
+}
+
+func writeTarGz(t *testing.T, out string, entries ...tarEntry) {
+	t.Helper()
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gz := gzip.NewWriter(f)
 	tw := tar.NewWriter(gz)
-	_ = tw.WriteHeader(&tar.Header{Name: "./ca.crt", Mode: 0o644, Size: 2, Typeflag: tar.TypeReg})
-	_, _ = tw.Write([]byte("x\n"))
-	_ = tw.WriteHeader(&tar.Header{Name: "./ca.key", Linkname: "/etc/passwd", Typeflag: tar.TypeSymlink})
-	_ = tw.WriteHeader(&tar.Header{Name: "./sa.key", Linkname: "./ca.crt", Typeflag: tar.TypeLink})
-	_ = tw.Close()
-	_ = gz.Close()
-	_ = f.Close()
-	dir := filepath.Join(ho.base, "work")
-	mustOK(t, ho.ctx.extractBundle(linked, dir), ho.output())
-	if !fsutil.Exists(filepath.Join(dir, "ca.crt")) {
-		t.Fatal("the regular entry was not extracted")
-	}
-	for _, name := range []string{"ca.key", "sa.key"} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
-			t.Fatalf("link entry %s was extracted", name)
+	for _, e := range entries {
+		hdr := e.hdr
+		if hdr.Mode == 0 {
+			hdr.Mode = 0o644
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			hdr.Size = int64(len(e.body))
+		}
+		if err := tw.WriteHeader(&hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(e.body)); err != nil {
+			t.Fatal(err)
 		}
 	}
-	mustContain(t, ho.output(), "handover: skipping link entry ./ca.key in "+linked+" (links are not extracted)")
-	mustContain(t, ho.output(), "handover: skipping link entry ./sa.key in "+linked)
+	for _, closer := range []io.Closer{tw, gz, f} {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A link entry can name a file outside the bundle, and preseed would send
+// that file to the node. A symlink with an entry through it can write
+// outside the dir. Each entry that is not a regular file or a directory
+// refuses the whole bundle before a byte lands, and the dir goes.
+func TestHandoverResolveBundleRefusesLinkEntries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		entries func(outside string) []tarEntry
+	}{
+		{"symlink", func(outside string) []tarEntry {
+			return []tarEntry{
+				{hdr: tar.Header{Name: "./ca.crt", Typeflag: tar.TypeReg}, body: "x\n"},
+				{hdr: tar.Header{Name: "./ca.key", Linkname: filepath.Join(outside, "secret"), Typeflag: tar.TypeSymlink}},
+			}
+		}},
+		{"hardlink", func(_ string) []tarEntry {
+			return []tarEntry{
+				{hdr: tar.Header{Name: "./ca.crt", Typeflag: tar.TypeReg}, body: "x\n"},
+				{hdr: tar.Header{Name: "./sa.key", Linkname: "./ca.crt", Typeflag: tar.TypeLink}},
+			}
+		}},
+		{"symlink then a file through it", func(outside string) []tarEntry {
+			return []tarEntry{
+				{hdr: tar.Header{Name: "./x", Linkname: outside, Typeflag: tar.TypeSymlink}},
+				{hdr: tar.Header{Name: "./x/payload", Typeflag: tar.TypeReg}, body: "pwned\n"},
+			}
+		}},
+		{"fifo", func(_ string) []tarEntry {
+			return []tarEntry{{hdr: tar.Header{Name: "./ca.key", Typeflag: tar.TypeFifo}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ho := newHandover(t)
+			outside := filepath.Join(ho.base, "outside")
+			if err := os.MkdirAll(outside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_ = os.WriteFile(filepath.Join(outside, "secret"), []byte("outside-secret\n"), 0o600)
+			tarball := filepath.Join(ho.base, "bundle.tar.gz")
+			writeTarGz(t, tarball, tc.entries(outside)...)
+			work := filepath.Join(ho.base, "work")
+			_ = os.MkdirAll(work, 0o700)
+			_, err := ho.ctx.resolveBundle(tarball, work)
+			mustErr(t, err)
+			mustContain(t, ho.output(), "handover: refusing "+tarball+": an archive entry is not a regular file or a directory (a link, a device or a FIFO)")
+			if _, err := os.Lstat(filepath.Join(work, "bundle")); err == nil {
+				t.Fatal("the bundle dir was not removed")
+			}
+			if entries, _ := os.ReadDir(outside); len(entries) != 1 || readFile(t, filepath.Join(outside, "secret")) != "outside-secret\n" {
+				t.Fatalf("the dir outside the bundle changed: %v", entries)
+			}
+		})
+	}
+}
+
+// A directory the user gives is read as it is. A key in it that is a link
+// (to a file outside the bundle) is refused before anything reads or sends
+// it: by preseed and by receive, for a required key and an optional one.
+func TestHandoverRefusesABundleKeyThatIsALink(t *testing.T) {
+	for _, tc := range []struct {
+		kind, key string
+	}{{"symlink", "ca.key"}, {"symlink", "encryption-provider"}, {"hard link", "ca.key"}, {"hard link", "encryption-provider"}} {
+		key := tc.key
+		t.Run(tc.kind+"/"+key, func(t *testing.T) {
+			ho := newHandover(t)
+			ho.mockNodeBinaries(nil)
+			elsewhere := filepath.Join(ho.base, "elsewhere")
+			_ = os.WriteFile(elsewhere, []byte("outside-secret-content\n"), 0o600)
+			path := filepath.Join(ho.bundle, key)
+			_ = os.Remove(path)
+			link, want := os.Symlink, "handover: bundle key "+key+" is not a regular file (a link, a directory or a special file): "+path
+			if tc.kind == "hard link" {
+				// A second name of a file outside the bundle.
+				link, want = os.Link, "handover: bundle key "+key+" has more than one name (a hard link), so it can be a file outside the bundle: "+path
+			}
+			if err := link(elsewhere, path); err != nil {
+				t.Fatal(err)
+			}
+
+			mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
+			mustContain(t, ho.output(), want)
+			ho.reset()
+			mustErr(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}))
+			mustContain(t, ho.output(), want)
+			mustNotContain(t, ho.output(), "outside-secret-content")
+			if len(ho.calls) != 0 || fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
+				t.Fatalf("a linked key went further: %v", ho.calls)
+			}
+		})
+	}
+	// A key that is a directory is not a regular file either.
+	ho := newHandover(t)
+	_ = os.Remove(filepath.Join(ho.bundle, "ca.key"))
+	_ = os.MkdirAll(filepath.Join(ho.bundle, "ca.key"), 0o700)
+	mustErr(t, ho.ctx.validateBundle(ho.bundle))
+	mustContain(t, ho.output(), "handover: bundle key ca.key is not a regular file")
+}
+
+// Extracted files are 0600 and dirs 0700, whatever modes the archive gives.
+func TestHandoverExtractBundleWritesPrivateModes(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	tarball := filepath.Join(ho.base, "bundle.tar.gz")
+	writeTarGz(t, tarball,
+		tarEntry{hdr: tar.Header{Name: "./", Mode: 0o777, Typeflag: tar.TypeDir}},
+		tarEntry{hdr: tar.Header{Name: "./sub/", Mode: 0o755, Typeflag: tar.TypeDir}},
+		tarEntry{hdr: tar.Header{Name: "./ca.key", Mode: 0o644, Typeflag: tar.TypeReg}, body: "k\n"},
+		tarEntry{hdr: tar.Header{Name: "./sub/f", Mode: 0o666, Typeflag: tar.TypeReg}, body: "f\n"},
+	)
+	work := filepath.Join(ho.base, "work")
+	_ = os.MkdirAll(work, 0o700)
+	dir, err := ho.ctx.resolveBundle(tarball, work)
+	mustOK(t, err, ho.output())
+	for path, want := range map[string]fs.FileMode{dir: 0o700, filepath.Join(dir, "sub"): 0o700,
+		filepath.Join(dir, "ca.key"): 0o600, filepath.Join(dir, "sub", "f"): 0o600} {
+		if info, err := os.Lstat(path); err != nil || info.Mode().Perm() != want {
+			t.Fatalf("%s: mode %v, want %o (%v)", path, info.Mode(), want, err)
+		}
+	}
+}
+
+// The private dirs hold the bundle's keys. A chmod that fails, or a file
+// system that leaves the dir open, stops the handover before anything
+// lands in it, and the dir goes (TMPDIR is empty after).
+func TestHandoverPrivateDirsFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		chmod func(string, fs.FileMode) error
+		want  string
+	}{
+		{"chmod fails", func(string, fs.FileMode) error { return errors.New("operation not permitted") },
+			"to mode 700, so the bundle's keys would not be private in it. Check the file system of TMPDIR, then retry."},
+		{"dir stays open", func(p string, _ fs.FileMode) error { return os.Chmod(p, 0o755) }, // #nosec G302 -- a test dir that must stay open
+			"has mode 755, not 700, so other users could read the bundle's keys in it."},
+	} {
+		for _, cmd := range []string{"receive", "preseed"} {
+			t.Run(tc.name+"/"+cmd, func(t *testing.T) {
+				ho := newHandover(t)
+				ho.mockNodeBinaries(nil)
+				scratch := filepath.Join(ho.base, "scratch")
+				_ = os.MkdirAll(scratch, 0o700)
+				t.Setenv("TMPDIR", scratch)
+				ho.ctx.Chmod = tc.chmod
+				var err error
+				if cmd == "receive" {
+					err = ho.receive(ReceiveOpts{Snapshot: ho.snapshot})
+				} else {
+					err = ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"})
+				}
+				mustErr(t, err)
+				mustContain(t, ho.output(), scratch+"/")
+				mustContain(t, ho.output(), tc.want)
+				if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
+					t.Fatalf("scratch left behind: %v", entries)
+				}
+				if len(ho.calls) != 0 {
+					t.Fatalf("ran with a dir that is not private: %v", ho.calls)
+				}
+			})
+		}
+	}
+	// The bundle dir of a .tar.gz gets the same check before the unpack.
+	ho := newHandover(t)
+	tarball := filepath.Join(ho.base, "bundle.tar.gz")
+	tarBundle(t, ho.bundle, tarball)
+	work := filepath.Join(ho.base, "work")
+	_ = os.MkdirAll(work, 0o700)
+	ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+		if p == filepath.Join(work, "bundle") {
+			return os.Chmod(p, 0o755) // #nosec G302 -- a test dir that must stay open
+		}
+		return os.Chmod(p, m)
+	}
+	_, err := ho.ctx.resolveBundle(tarball, work)
+	mustErr(t, err)
+	mustContain(t, ho.output(), "handover: "+filepath.Join(work, "bundle")+" has mode 755, not 700")
+	if _, err := os.Lstat(filepath.Join(work, "bundle")); err == nil {
+		t.Fatal("the open bundle dir was not removed")
+	}
+}
+
+// Each chmod of placePKI on its own: the pki dir, then the new file of
+// each of the six PKI files (before its rename). The step stops, and the
+// files that it placed go: no key is left.
+func TestHandoverPlacePKIStopsAtEachChmod(t *testing.T) {
+	t.Parallel()
+	for _, target := range append([]string{"pki"}, handoverPKIKeys...) {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			ho := newHandover(t)
+			pki := filepath.Join(ho.k8sDir, "pki")
+			ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+				if (target == "pki" && p == pki) || (filepath.Dir(p) == pki && strings.HasPrefix(filepath.Base(p), "."+target+".")) {
+					return errors.New("operation not permitted")
+				}
+				return os.Chmod(p, m)
+			}
+			mustErr(t, ho.ctx.placePKI(ho.bundle, ho.k8sDir))
+			if target == "pki" {
+				mustContain(t, ho.output(), "handover: cannot set "+pki+" to mode 700, so the keys would not be private in it")
+			} else {
+				mustContain(t, ho.output(), "handover: could not place "+target+" into "+pki+" with mode")
+			}
+			if entries, err := os.ReadDir(pki); err != nil || len(entries) != 0 {
+				t.Fatalf("left in %s: %v (%v)", pki, entries, err)
+			}
+		})
+	}
+}
+
+// A chmod that returns nil but leaves the pki dir open (a file system that
+// keeps the bits) fails closed too: placePKI reads the mode after it.
+func TestHandoverPlacePKIReadsTheModeOfThePKIDir(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	pki := filepath.Join(ho.k8sDir, "pki")
+	ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+		if p == pki {
+			return os.Chmod(p, 0o755) // #nosec G302 -- a test dir that must stay open
+		}
+		return os.Chmod(p, m)
+	}
+	mustErr(t, ho.ctx.placePKI(ho.bundle, ho.k8sDir))
+	mustContain(t, ho.output(), "handover: cannot set "+pki+" to mode 700, so the keys would not be private in it")
+	if entries, err := os.ReadDir(pki); err != nil || len(entries) != 0 {
+		t.Fatalf("left in %s: %v (%v)", pki, entries, err)
+	}
+}
+
+// kubeadm makes /etc/kubernetes/pki 0755, and a run with --force finds the
+// files of an earlier run. The dir is 0700 before a key lands in it, and
+// each file is replaced, not written into: a key of mode 0644 ends 0600, a
+// second name of it outside keeps the old bytes, and a link at a key name
+// is replaced, not followed.
+func TestHandoverPlacePKIReplacesAnOpenDirAndItsFiles(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	pki := filepath.Join(ho.k8sDir, "pki")
+	outside := filepath.Join(ho.base, "outside")
+	for _, d := range []string{pki, outside} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldKey := filepath.Join(pki, "ca.key")
+	if err := os.WriteFile(oldKey, []byte("old-ca-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for path, mode := range map[string]fs.FileMode{pki: 0o755, oldKey: 0o644} {
+		if err := os.Chmod(path, mode); err != nil { // #nosec G302 -- the open modes under test
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(oldKey, filepath.Join(outside, "second-name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(pki, "sa.key")); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, ho.ctx.placePKI(ho.bundle, ho.k8sDir), ho.output())
+	if info, err := os.Lstat(pki); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s: %v (%v), want 0700", pki, info.Mode(), err)
+	}
+	for _, key := range handoverPKIKeys {
+		want := fs.FileMode(0o644)
+		if strings.HasSuffix(key, ".key") {
+			want = 0o600
+		}
+		path := filepath.Join(pki, key)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != want || !singleLink(info) {
+			t.Fatalf("%s: %v (%v), want a regular file of mode %o with one name", key, info.Mode(), err, want)
+		}
+		if readFile(t, path) != readFile(t, filepath.Join(ho.bundle, key)) {
+			t.Fatalf("%s does not hold the bytes of the bundle", key)
+		}
+	}
+	if readFile(t, filepath.Join(outside, "second-name")) != "old-ca-key\n" || readFile(t, filepath.Join(outside, "secret")) != "outside-secret\n" {
+		t.Fatal("a file outside the pki dir changed")
+	}
+	if entries, _ := os.ReadDir(pki); len(entries) != len(handoverPKIKeys) {
+		t.Fatalf("a new file is left in %s: %v", pki, entries)
+	}
+}
+
+// The encryption config holds the key: it is written 0600 from the first
+// byte, also over a file of an earlier run with mode 0644. A chmod that
+// fails stops the step and leaves no file.
+func TestHandoverWriteEncryptionConfigReplacesAnOpenFile(t *testing.T) {
+	t.Parallel()
+	ho := newHandover(t)
+	out := filepath.Join(ho.k8sDir, "kubehz-encryption-config.yaml")
+	if err := os.MkdirAll(ho.k8sDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(out, 0o644); err != nil { // #nosec G302 -- the open mode under test
+		t.Fatal(err)
+	}
+	got, err := ho.ctx.writeEncryptionConfig(ho.bundle, ho.k8sDir)
+	mustOK(t, err, ho.output())
+	if info, err := os.Lstat(got); got != out || err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: %v (%v), want %s with mode 0600", got, info.Mode(), err, out)
+	}
+	// The key comes from the bundle file, so no key-like literal is in the test.
+	mustContain(t, readFile(t, out), "secret: "+readFile(t, filepath.Join(ho.bundle, "encryption-key")))
+
+	_ = os.Remove(out)
+	ho.reset()
+	ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+		if filepath.Dir(p) == ho.k8sDir && strings.HasPrefix(filepath.Base(p), ".kubehz-encryption-config.yaml.") {
+			return errors.New("operation not permitted")
+		}
+		return os.Chmod(p, m)
+	}
+	_, err = ho.ctx.writeEncryptionConfig(ho.bundle, ho.k8sDir)
+	mustErr(t, err)
+	mustContain(t, ho.output(), "handover: could not write "+out+" with mode 600")
+	if entries, _ := os.ReadDir(ho.k8sDir); len(entries) != 0 {
+		t.Fatalf("a file is left in %s: %v", ho.k8sDir, entries)
+	}
+}
+
+// A chmod that fails at the workdir or at the bundle dir of a .tar.gz
+// stops receive and preseed before anything runs, and TMPDIR is empty.
+func TestHandoverStopsAtTheWorkdirOrTheBundleDirChmod(t *testing.T) {
+	for _, at := range []string{"workdir", "bundle"} {
+		for _, cmd := range []string{"receive", "preseed"} {
+			t.Run(at+"/"+cmd, func(t *testing.T) {
+				ho := newHandover(t)
+				ho.mockNodeBinaries(nil)
+				scratch := filepath.Join(ho.base, "scratch")
+				_ = os.MkdirAll(scratch, 0o700)
+				t.Setenv("TMPDIR", scratch)
+				tarball := filepath.Join(ho.base, "bundle.tar.gz")
+				tarBundle(t, ho.bundle, tarball)
+				ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+					if (at == "workdir" && filepath.Dir(p) == scratch) ||
+						(at == "bundle" && filepath.Base(p) == "bundle" && filepath.Dir(filepath.Dir(p)) == scratch) {
+						return errors.New("operation not permitted")
+					}
+					return os.Chmod(p, m)
+				}
+				var err error
+				if cmd == "receive" {
+					err = ho.receive(ReceiveOpts{Bundle: tarball, Snapshot: ho.snapshot})
+				} else {
+					err = ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: tarball, Node: "203.0.113.7"})
+				}
+				mustErr(t, err)
+				mustContain(t, ho.output(), "handover: cannot set "+scratch+"/")
+				mustContain(t, ho.output(), " to mode 700, so the bundle's keys would not be private in it.")
+				if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
+					t.Fatalf("scratch left behind: %v", entries)
+				}
+				if len(ho.calls) != 0 || fsutil.Exists(filepath.Join(ho.k8sDir, "pki")) {
+					t.Fatalf("ran with a dir that is not private: %v", ho.calls)
+				}
+			})
+		}
+	}
+}
+
+// The downloaded snapshot is 0600 before its first byte (touch600) and
+// after the aws CLI wrote it. A chmod that fails at either stops the
+// receive before the restore, and the scratch goes.
+func TestHandoverReceiveStopsAtEachSnapshotChmod(t *testing.T) {
+	for _, nth := range []int{1, 2} {
+		t.Run(fmt.Sprint(nth), func(t *testing.T) {
+			ho := newHandover(t)
+			ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"aws": func(c execx.Cmd) error {
+				return os.WriteFile(c.Args[len(c.Args)-1], []byte("snapshot-bytes"), 0o600)
+			}})
+			lookPath := ho.ctx.LookPath
+			ho.ctx.LookPath = func(tool string) bool { return tool == "aws" || lookPath(tool) }
+			scratch := filepath.Join(ho.base, "scratch")
+			_ = os.MkdirAll(scratch, 0o700)
+			t.Setenv("TMPDIR", scratch)
+			seen := 0
+			ho.ctx.Chmod = func(p string, m fs.FileMode) error {
+				if filepath.Base(p) == "kubehz-handover-snapshot.db" {
+					if seen++; seen == nth {
+						return errors.New("operation not permitted")
+					}
+				}
+				return os.Chmod(p, m)
+			}
+			mustErr(t, ho.receive(ReceiveOpts{}))
+			if seen != nth {
+				t.Fatalf("the snapshot got %d chmod calls, want %d", seen, nth)
+			}
+			if downloaded := ho.lineIndex("aws ") >= 0; downloaded != (nth == 2) {
+				t.Fatalf("download ran: %v, want %v: %v", downloaded, nth == 2, ho.calls)
+			}
+			for _, tool := range []string{"etcdutl ", "etcdctl ", "kubeadm "} {
+				if ho.lineIndex(tool) >= 0 {
+					t.Fatalf("ran past a failed chmod of the snapshot: %v", ho.calls)
+				}
+			}
+			if entries, _ := os.ReadDir(scratch); len(entries) != 0 {
+				t.Fatalf("scratch left behind: %v", entries)
+			}
+		})
+	}
+}
+
+// A removal that fails names the dir: it can hold the bundle's keys.
+func TestHandoverRemoveDirNamesADirItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a dir without owner write")
+	}
+	t.Parallel()
+	ho := newHandover(t)
+	dir := filepath.Join(ho.base, "work")
+	held := filepath.Join(dir, "bundle")
+	if err := os.MkdirAll(held, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(held, "ca.key"), []byte("k\n"), 0o600)
+	if err := os.Chmod(held, 0o500); err != nil { // #nosec G302 -- a dir without owner write, on purpose
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(held, 0o700) }) // #nosec G302 -- lets t.TempDir remove it
+	ho.ctx.removeDir(dir)
+	mustContain(t, ho.output(), "handover: could not remove "+dir+", which can hold the bundle's keys. Delete it yourself.")
+	ho.reset()
+	_ = os.Chmod(held, 0o700) // #nosec G302 -- a private dir
+	ho.ctx.removeDir(dir)
+	mustNotContain(t, ho.output(), "could not remove")
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("%s is still there (%v)", dir, err)
+	}
 }
 
 // ── receive ──────────────────────────────────────────────
@@ -311,6 +778,47 @@ func TestHandoverReceiveGeneratedConfigsMatchBashGoldens(t *testing.T) {
 	}
 	if info, _ := os.Stat(enc); info.Mode().Perm() != 0o600 {
 		t.Fatal("encryption config mode")
+	}
+}
+
+// kubeadm init creates a bootstrap token with a TTL of 24 h by default. The
+// handover gives it 1 h: no later step of the handover uses the token. The
+// config is read as YAML, so a TTL in the wrong document fails too.
+func TestHandoverReceiveBootstrapTokenTTLIsOneHour(t *testing.T) {
+	ho := newHandover(t)
+	ho.mockNodeBinaries(nil)
+	mustOK(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}), ho.output())
+	dec := yaml.NewDecoder(strings.NewReader(readFile(t, filepath.Join(ho.k8sDir, "kubehz-handover-kubeadm.yaml"))))
+	var kinds, ttls []string
+	for {
+		var doc struct {
+			Kind            string `yaml:"kind"`
+			BootstrapTokens []struct {
+				TTL string `yaml:"ttl"`
+			} `yaml:"bootstrapTokens"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("the kubeadm config is not YAML: %v", err)
+		}
+		kinds = append(kinds, doc.Kind)
+		if doc.Kind == "InitConfiguration" {
+			for _, bt := range doc.BootstrapTokens {
+				ttls = append(ttls, bt.TTL)
+			}
+		}
+	}
+	if got := strings.Join(kinds, ","); got != "ClusterConfiguration,InitConfiguration" {
+		t.Fatalf("kubeadm config documents: %s", got)
+	}
+	if len(ttls) != 1 {
+		t.Fatalf("want one bootstrap token, got %d", len(ttls))
+	}
+	if d, err := time.ParseDuration(ttls[0]); err != nil || d != time.Hour {
+		t.Fatalf("bootstrap token ttl %q, want 1h", ttls[0])
 	}
 }
 
@@ -670,122 +1178,1225 @@ func TestHandoverWritersRejectInjection(t *testing.T) {
 
 // ── preseed ──────────────────────────────────────────────
 
-func TestHandoverPreseedVerifiesTheHostKey(t *testing.T) {
-	// The PKI must never go to a host whose key is unverified: every ssh
-	// and scp runs with StrictHostKeyChecking=accept-new and a real
-	// known_hosts file, never /dev/null.
-	ho := newHandover(t)
-	ho.mockNodeBinaries(nil)
-	mustOK(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: "/tmp/kh"}), ho.output())
+// sshCalls are the ssh and scp lines of a run (not ssh-keygen).
+func (ho *hoHarness) sshCalls() []string {
+	var out []string
 	for _, l := range ho.calls {
-		if !strings.HasPrefix(l, "ssh ") && !strings.HasPrefix(l, "scp ") {
-			continue
-		}
-		if !strings.Contains(l, "StrictHostKeyChecking=accept-new") || strings.Contains(l, "UserKnownHostsFile=/dev/null") {
-			t.Fatalf("host key not verified: %s", l)
-		}
-		if !strings.Contains(l, "UserKnownHostsFile=/tmp/kh") {
-			t.Fatalf("--known-hosts not passed: %s", l)
+		if strings.HasPrefix(l, "ssh ") || strings.HasPrefix(l, "scp ") {
+			out = append(out, l)
 		}
 	}
+	return out
+}
+
+func TestHandoverPreseedChecksTheHostKey(t *testing.T) {
+	// The PKI must never go to a host whose key is not known: every ssh and
+	// scp runs with StrictHostKeyChecking=yes (never accept-new or no, and
+	// never UserKnownHostsFile=/dev/null), and the default run asks
+	// ssh-keygen nothing. With --known-hosts, that file is the only
+	// known_hosts file (GlobalKnownHostsFile=/dev/null).
+	ho := newHandover(t)
+	ho.mockNodeBinaries(nil)
+	kh := filepath.Join(ho.base, "known_hosts")
+	_ = os.WriteFile(kh, nil, 0o600)
+	mustOK(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: kh}), ho.output())
+	calls := ho.sshCalls()
+	if len(calls) != 9 {
+		t.Fatalf("want 1 mkdir, 1 stage, 6 scp and 1 install, got %d:\n%s", len(calls), strings.Join(calls, "\n"))
+	}
+	for _, l := range calls {
+		if !strings.Contains(l, " -o StrictHostKeyChecking=yes ") || strings.Contains(l, "accept-new") ||
+			strings.Contains(l, "StrictHostKeyChecking=no") || strings.Contains(l, "UserKnownHostsFile=/dev/null") {
+			t.Fatalf("host key not checked: %s", l)
+		}
+		if !strings.Contains(l, " -o UserKnownHostsFile="+kh+" ") || !strings.Contains(l, " -o GlobalKnownHostsFile=/dev/null ") {
+			t.Fatalf("--known-hosts is not the only known_hosts file: %s", l)
+		}
+		// scp is quiet: no progress meter.
+		if strings.HasPrefix(l, "scp ") && !strings.Contains(l, " -q -P 22 ") {
+			t.Fatalf("scp without -q: %s", l)
+		}
+		noSharedConnection(t, l)
+		noConfigBypass(t, l)
+	}
+	if !strings.HasPrefix(calls[0], "ssh ") || !strings.HasSuffix(calls[0], " "+preseedMkdir) {
+		t.Fatalf("the first call must make the pki dir 0700: %s", calls[0])
+	}
+	if ho.lineIndex("ssh-keygen ") >= 0 {
+		t.Fatalf("the default run checks no record: %v", ho.calls)
+	}
+	mustNotContain(t, ho.output(), "--accept-new-host-key: the first contact")
 	// Without the flag ssh's own known_hosts is used: no UserKnownHostsFile at all.
 	ho = newHandover(t)
 	ho.mockNodeBinaries(nil)
 	mustOK(t, ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}), ho.output())
-	for _, l := range ho.calls {
-		if (strings.HasPrefix(l, "ssh ") || strings.HasPrefix(l, "scp ")) && strings.Contains(l, "UserKnownHostsFile") {
-			t.Fatalf("default run must leave the known_hosts file to ssh: %s", l)
+	for _, l := range ho.sshCalls() {
+		if strings.Contains(l, "KnownHostsFile") || !strings.Contains(l, " -o StrictHostKeyChecking=yes ") {
+			t.Fatalf("default run must check against ssh's own known_hosts files: %s", l)
+		}
+		noSharedConnection(t, l)
+		noConfigBypass(t, l)
+	}
+}
+
+// noConfigBypass fails when an ssh or scp line lacks an option that keeps
+// the user's ssh config from skipping the host key check
+// (NoHostAuthenticationForLocalhost), from taking a key that is in no
+// known_hosts file (VerifyHostKeyDNS), or from letting the node change that
+// file (UpdateHostKeys).
+func noConfigBypass(t *testing.T, line string) {
+	t.Helper()
+	for _, opt := range []string{"NoHostAuthenticationForLocalhost=no", "VerifyHostKeyDNS=no", "UpdateHostKeys=no"} {
+		if !strings.Contains(line, " -o "+opt+" ") {
+			t.Fatalf("no -o %s, so the user's ssh config can weaken the host key check: %s", opt, line)
 		}
 	}
 }
 
-// ssh splits an -o value on whitespace, so such a --known-hosts path is
-// refused before the first connection.
-func TestHandoverPreseedRefusesWhitespaceInKnownHosts(t *testing.T) {
-	t.Parallel()
-	ho := newHandover(t)
-	ho.mockNodeBinaries(nil)
-	err := ho.ctx.HandoverPreseed(context.Background(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: "/tmp/known hosts"})
-	mustErr(t, err)
-	mustContain(t, ho.output(), `handover: --known-hosts path must not contain whitespace: "/tmp/known hosts"`)
-	if len(ho.calls) != 0 {
-		t.Fatalf("nothing may run with a broken ssh option: %v", ho.calls)
+// preseedMkdir is the remote command of the first preseed call: the pki
+// dir is 0700 before a key lands in it, also when kubeadm made it 0755.
+const preseedMkdir = "umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki"
+
+// preseedStage is the remote command of the stage call, spelled out: a
+// check of each dir on the path of the pki dir, from the top (each prints
+// its stat line first; root must own / and /etc), "stage", then a staging
+// file per key. The bats suite spells out the same bytes.
+const preseedStage = `umask 077` +
+	` && echo "check / $(stat -c '%u %a %F' -- /)"` +
+	` && test -n "$(find / -maxdepth 0 -type d ! -perm /022 -uid 0 -print)"` +
+	` && echo "check /etc $(stat -c '%u %a %F' -- /etc)"` +
+	` && test -n "$(find /etc -maxdepth 0 -type d ! -perm /022 -uid 0 -print)"` +
+	` && echo "check /etc/kubernetes $(stat -c '%u %a %F' -- /etc/kubernetes)"` +
+	` && test -n "$(find /etc/kubernetes -maxdepth 0 -type d ! -perm /022 \( -uid 0 -o -uid "$(id -u)" \) -print)"` +
+	` && echo "check /etc/kubernetes/pki $(stat -c '%u %a %F' -- /etc/kubernetes/pki)"` +
+	` && test -n "$(find /etc/kubernetes/pki -maxdepth 0 -type d ! -perm /022 \( -uid 0 -o -uid "$(id -u)" \) -print)"` +
+	` && echo stage` +
+	` && mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.ca.key.XXXXXXXXXX` +
+	` && mktemp /etc/kubernetes/pki/.sa.pub.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.sa.key.XXXXXXXXXX` +
+	` && mktemp /etc/kubernetes/pki/.front-proxy-ca.crt.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.front-proxy-ca.key.XXXXXXXXXX`
+
+// preseedStagePrefix is the start of the stage call, to find it.
+const preseedStagePrefix = `umask 077 && echo "check `
+
+// noSharedConnection fails when an ssh or scp line can use a master
+// connection that the user's ssh config opens or shares: such a call
+// would skip the host key check of a new connection.
+func noSharedConnection(t *testing.T, line string) {
+	t.Helper()
+	if !strings.Contains(line, " -o ControlMaster=no ") || !strings.Contains(line, " -o ControlPath=none ") {
+		t.Fatalf("a shared ssh connection could skip the host key check: %s", line)
 	}
 }
 
-func TestHandoverPreseedTransfersSixFilesWithImmediateChmod(t *testing.T) {
+// --accept-new-host-key trusts an unknown key on the first call only: the
+// mkdir (no key on it) takes it (accept-new), ssh-keygen then finds it in
+// the known_hosts file, and every later call (the scp calls with the keys)
+// uses yes. ssh records a node in lowercase, as [node]:port off port 22.
+func TestHandoverPreseedAcceptNewHostKeyTrustsTheFirstCallOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name, node string
+		port       int
+		ownFile    bool
+		host       string
+	}{
+		{"own file, port 22", "203.0.113.7", 0, true, "203.0.113.7"},
+		{"ssh's file, port 2222", "Node.Example", 2222, false, "[node.example]:2222"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ho := newHandover(t)
+			ho.mockNodeBinaries(nil)
+			home := filepath.Join(ho.base, "home")
+			ho.env["HOME"] = home
+			file := filepath.Join(home, ".ssh", "known_hosts")
+			o := PreseedOpts{Bundle: ho.bundle, Node: tc.node, Port: tc.port, AcceptNewHostKey: true}
+			if tc.ownFile {
+				file = filepath.Join(ho.base, "known_hosts")
+				_ = os.WriteFile(file, nil, 0o600)
+				o.KnownHosts = file
+			}
+			mustOK(t, ho.ctx.HandoverPreseed(t.Context(), o), ho.output())
+			calls := ho.sshCalls()
+			if len(calls) != 9 || !strings.HasPrefix(calls[0], "ssh -o StrictHostKeyChecking=accept-new ") ||
+				!strings.HasSuffix(calls[0], " "+preseedMkdir) {
+				t.Fatalf("the first call must be the mkdir with accept-new:\n%s", strings.Join(calls, "\n"))
+			}
+			noConfigBypass(t, calls[0])
+			for _, l := range calls[1:] {
+				if !strings.Contains(l, " -o StrictHostKeyChecking=yes ") || strings.Contains(l, "accept-new") {
+					t.Fatalf("a later call does not check the recorded key: %s", l)
+				}
+				noConfigBypass(t, l)
+			}
+			keygen := ho.lineIndex("ssh-keygen ")
+			if want := "ssh-keygen -F " + tc.host + " -f " + file; keygen < 0 || ho.calls[keygen] != want {
+				t.Fatalf("record check:\n%s\nwant %s", strings.Join(ho.calls, "\n"), want)
+			}
+			if keygen <= ho.lineIndex("ssh ") || keygen >= ho.lineIndex("scp ") {
+				t.Fatalf("the record check must run after the first call and before the first scp:\n%s", strings.Join(ho.calls, "\n"))
+			}
+			warning := "handover: --accept-new-host-key: the first contact trusts the host key that " + tc.node + " shows, without a check"
+			if n := strings.Count(ho.output(), warning); n != 1 {
+				t.Fatalf("want the warning once, got %d:\n%s", n, ho.output())
+			}
+		})
+	}
+}
+
+// A key that ssh did not record (a file it cannot write, for example)
+// fails closed after the first call: no key goes out.
+func TestHandoverPreseedUnrecordedHostKeyFailsClosed(t *testing.T) {
+	ho := newHandover(t)
+	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh-keygen": func(execx.Cmd) error { return exitErr(1) }})
+	kh := filepath.Join(ho.base, "known_hosts")
+	_ = os.WriteFile(kh, nil, 0o600)
+	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: kh, AcceptNewHostKey: true}))
+	mustContain(t, ho.output(), "handover: the host key of 203.0.113.7 is not in "+kh+" after the first contact, so the next calls could not check it.")
+	if calls := ho.sshCalls(); len(calls) != 1 || !strings.HasPrefix(calls[0], "ssh ") {
+		t.Fatalf("only the first call may run: %v", calls)
+	}
+}
+
+// A --known-hosts that is not a readable regular file holds no key to check
+// against, and ssh cannot record one in it: refused before any ssh.
+func TestHandoverPreseedRefusesAKnownHostsThatIsNotARegularFile(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	fifo := filepath.Join(base, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "dir")
+	_ = os.MkdirAll(dir, 0o700)
+	link := filepath.Join(base, "link-to-null")
+	if err := os.Symlink("/dev/null", link); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(base, "missing"), "/dev/null", dir, fifo, "/dev/zero", link} {
+		ho := newHandover(t)
+		ho.mockNodeBinaries(nil)
+		mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: path, AcceptNewHostKey: true}))
+		mustContain(t, ho.output(), fmt.Sprintf("handover: --known-hosts must name an existing regular file that you can read: %q", path))
+		if len(ho.calls) != 0 {
+			t.Fatalf("%s: ran with a known_hosts that holds no key: %v", path, ho.calls)
+		}
+	}
+}
+
+// preseedKnownHostsRefusal is the start of the refusal of a --known-hosts
+// path that ssh would expand or split; the quoted path follows it.
+const preseedKnownHostsRefusal = `handover: --known-hosts path must not hold %, $, ~, ", ', \, whitespace or a control byte, ` +
+	`because ssh expands %, $ and ~ in it and splits it at whitespace, quotes and backslashes: `
+
+// ssh expands % tokens, ${VAR} and ~ in an -o value and splits it at
+// whitespace, quotes and backslashes, so a --known-hosts path with such a
+// byte, or with a control byte, is refused before any ssh call. The file is
+// there, so the refusal is not the check of a regular file.
+func TestHandoverPreseedRefusesAKnownHostsPathThatSSHExpandsOrSplits(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, tc := range []struct{ name, shown string }{
+		{"kh%h", "kh%h"},
+		{"kh$x", "kh$x"},
+		{"kh~x", "kh~x"},
+		{`kh"x`, `kh\"x`},
+		{"kh'x", "kh'x"},
+		{`kh\x`, `kh\\x`},
+		{"kh x", "kh x"},
+		{"kh\tx", `kh\x09x`},
+		{"kh\x1bx", `kh\x1bx`},
+		{"kh\x7fx", `kh\x7fx`},
+	} {
+		path := dir + "/" + tc.name
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ho := newHandover(t)
+		ho.mockNodeBinaries(nil)
+		mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: path}))
+		mustContain(t, ho.output(), preseedKnownHostsRefusal+`"`+dir+"/"+tc.shown+`"`)
+		mustNotContain(t, ho.output(), "\x1b")
+		if len(ho.calls) != 0 {
+			t.Fatalf("%q: ran with a path that ssh reads in another way: %v", tc.name, ho.calls)
+		}
+	}
+}
+
+// A relative --known-hosts path is made absolute from the working dir as it
+// is, before the check: the ssh calls get the absolute path, and a working
+// dir whose name holds a $ is refused.
+func TestHandoverPreseedMakesARelativeKnownHostsPathAbsolute(t *testing.T) {
 	ho := newHandover(t)
 	ho.mockNodeBinaries(nil)
+	work := ho.base + "/work"
+	bad := ho.base + "/a$b"
+	for _, d := range []string{work, bad} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(d+"/known_hosts", nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(work)
+	mustOK(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: "known_hosts"}), ho.output())
+	calls := ho.sshCalls()
+	if len(calls) != 9 {
+		t.Fatalf("want 9 ssh and scp calls, got %d:\n%s", len(calls), strings.Join(calls, "\n"))
+	}
+	for _, l := range calls {
+		if !strings.Contains(l, " -o UserKnownHostsFile="+work+"/known_hosts ") {
+			t.Fatalf("the known_hosts path is not absolute: %s", l)
+		}
+	}
+	ho = newHandover(t)
+	ho.mockNodeBinaries(nil)
+	t.Chdir(bad)
+	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", KnownHosts: "known_hosts"}))
+	mustContain(t, ho.output(), preseedKnownHostsRefusal+`"`+bad+`/known_hosts"`)
+	if len(ho.calls) != 0 {
+		t.Fatalf("ran with a path that ssh reads in another way: %v", ho.calls)
+	}
+}
+
+// The options that preseed gives ssh make ssh read the --known-hosts path
+// as it is, and no global known_hosts file. A real ssh prints the config
+// that it would use (-G) and exits: it opens no connection, and -F
+// /dev/null reads no config file.
+func TestHandoverPreseedSSHReadsTheKnownHostsPathAsItIs(t *testing.T) {
+	sshBin, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("no ssh on PATH: the check of what ssh reads from the options needs one")
+	}
+	ho := newHandover(t)
+	home := ho.base + "/home"
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kh := ho.base + "/known_hosts"
+	if err := os.WriteFile(kh, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var printed string
+	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh": func(c execx.Cmd) error {
+		g := exec.Command(sshBin, append([]string{"-F", "/dev/null", "-G"}, c.Args...)...)
+		g.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+		out, err := g.Output()
+		if err != nil {
+			t.Fatalf("ssh -G: %v", err)
+		}
+		printed = string(out)
+		// Stop after the first call.
+		return exitErr(1)
+	}})
+	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "node.invalid", KnownHosts: kh}))
+	lines := strings.Split(printed, "\n")
+	if !slices.Contains(lines, "userknownhostsfile "+kh) || !slices.Contains(lines, "globalknownhostsfile /dev/null") {
+		t.Fatalf("ssh does not read the known_hosts path as it is (want %s and /dev/null):\n%s", kh, printed)
+	}
+}
+
+// nodeHook can change or fail one call of the fake node before it runs. It
+// gets the remote command of an ssh call, or the destination of an scp
+// call. It returns the command to run (or the destination to write), or an
+// error that fails the call.
+type nodeHook func(c execx.Cmd, cmd string) (string, error)
+
+// fakeNode is a node for preseed under root. ssh runs the remote command
+// with sh in the C locale: each /etc/kubernetes in it points into root, and
+// its output maps back. scp writes the source into its destination as scp
+// does: into a file that is there already, also through a hard link or a
+// symlink. root/etc/kubernetes is a 0755 dir of the test user.
+func fakeNode(t *testing.T, root string, hook nodeHook) map[string]func(c execx.Cmd) error {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("the node commands need GNU mv -T, stat -c and find -perm /mode")
+	}
+	k8s := filepath.Join(root, "etc", "kubernetes")
+	if err := os.MkdirAll(k8s, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(k8s, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(c execx.Cmd, cmd string) (string, error) {
+		if hook == nil {
+			return cmd, nil
+		}
+		return hook(c, cmd)
+	}
+	return map[string]func(c execx.Cmd) error{
+		"ssh": func(c execx.Cmd) error {
+			cmd, err := run(c, c.Args[len(c.Args)-1])
+			if err != nil {
+				return err
+			}
+			var out bytes.Buffer
+			sh := exec.Command("sh", "-c", strings.ReplaceAll(cmd, "/etc/kubernetes", root+"/etc/kubernetes"))
+			sh.Env = append(os.Environ(), "LC_ALL=C")
+			sh.Stdout, sh.Stderr = &out, c.Stderr
+			err = sh.Run()
+			if c.Stdout != nil {
+				_, _ = io.WriteString(c.Stdout, strings.ReplaceAll(out.String(), root, ""))
+			}
+			return err
+		},
+		"scp": func(c execx.Cmd) error {
+			dst, err := run(c, c.Args[len(c.Args)-1])
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(c.Args[len(c.Args)-2])
+			if err != nil {
+				return err
+			}
+			_, path, _ := strings.Cut(dst, ":")
+			return os.WriteFile(root+path, data, 0o644)
+		},
+	}
+}
+
+// stagingLeft lists the dot files in the pki dir of the fake node: each
+// staging file that preseed made and did not remove.
+func stagingLeft(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root + preseedPKIDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			left = append(left, preseedPKIDir+"/"+e.Name())
+		}
+	}
+	return left
+}
+
+// installedPKI fails unless each key is a file with one name in the pki
+// dir of the fake node, with the bytes of the bundle and the mode of its
+// kind (keys 0600, the certs and sa.pub 0644).
+func (ho *hoHarness) installedPKI(t *testing.T, root string, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		path := root + preseedPKIDir + "/" + key
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Nlink != 1 {
+			t.Fatalf("%s is not a file with one name: %v %v", path, info, err)
+		}
+		mode := fs.FileMode(0o644)
+		if strings.HasSuffix(key, ".key") {
+			mode = 0o600
+		}
+		if info.Mode().Perm() != mode {
+			t.Fatalf("%s has mode %v, want %v", path, info.Mode().Perm(), mode)
+		}
+		got, _ := os.ReadFile(path)
+		want, _ := os.ReadFile(filepath.Join(ho.bundle, key))
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s does not hold the bundle's bytes", path)
+		}
+	}
+}
+
+// Each file goes to a new staging file in the pki dir, and one call sets
+// the modes and renames each over its destination: 1 mkdir, 1 stage, 6 scp
+// to the staging names and 1 install call. Nothing of the restore goes out.
+func TestHandoverPreseedStagesThenRenamesEachFile(t *testing.T) {
+	ho := newHandover(t)
+	root := filepath.Join(ho.base, "node")
+	ho.mockNodeBinaries(fakeNode(t, root, nil))
 	mustOK(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}), ho.output())
 	mustContain(t, ho.output(), "PKI pre-seeded on 203.0.113.7")
-	if ho.lineIndex("ssh ") < 0 || !strings.Contains(ho.calls[ho.lineIndex("ssh ")], "umask 077 && mkdir -p /etc/kubernetes/pki") {
-		t.Fatalf("mkdir: %v", ho.calls)
+	calls := ho.sshCalls()
+	if len(calls) != 9 {
+		t.Fatalf("want 1 mkdir, 1 stage, 6 scp and 1 install, got %d:\n%s", len(calls), strings.Join(calls, "\n"))
 	}
-	scps := 0
-	for _, l := range ho.calls {
-		if strings.HasPrefix(l, "scp ") {
-			scps++
-			if strings.Contains(l, "encryption-key") || strings.Contains(l, "snapshot-location") {
-				t.Fatalf("restore-only artifact on the wire: %s", l)
-			}
+	if !strings.HasSuffix(calls[0], " "+preseedMkdir) || !strings.HasPrefix(calls[1], "ssh ") ||
+		!strings.HasSuffix(calls[1], " -p 22 root@203.0.113.7 "+preseedStage) {
+		t.Fatalf("the mkdir, then the stage call:\n%s", strings.Join(calls, "\n"))
+	}
+	for i, key := range handoverPKIKeys {
+		re := regexp.MustCompile(`^scp .* -P 22 ` + regexp.QuoteMeta(ho.bundle+"/"+key) +
+			` root@203\.0\.113\.7:/etc/kubernetes/pki/\.` + regexp.QuoteMeta(key) + `\.[A-Za-z0-9]{10}$`)
+		if !re.MatchString(calls[2+i]) {
+			t.Fatalf("scp %d does not go to the staging file of %s: %s", i, key, calls[2+i])
 		}
 	}
-	if scps != 6 {
-		t.Fatalf("scp count %d", scps)
+	if !strings.HasPrefix(calls[8], "ssh ") || !strings.Contains(calls[8], " && echo 'mv ca.crt' && mv -f -T /etc/kubernetes/pki/.ca.crt.") {
+		t.Fatalf("the last call must install the files: %s", calls[8])
 	}
-	for _, k := range handoverPKIKeys {
-		if ho.lineIndex("scp ") < 0 || !ho.runner.anyCall(ho.bundle+"/"+k+" root@203.0.113.7:/etc/kubernetes/pki/"+k) {
-			t.Fatalf("%s not transferred", k)
+	for _, l := range calls {
+		if strings.Contains(l, "encryption-key") || strings.Contains(l, "snapshot-location") {
+			t.Fatalf("restore-only artifact on the wire: %s", l)
 		}
 	}
-	chmodCA, scpSAPub := -1, -1
-	for i, l := range ho.calls {
-		if strings.Contains(l, "chmod 600 /etc/kubernetes/pki/ca.key") && chmodCA < 0 {
-			chmodCA = i
-		}
-		if strings.HasPrefix(l, "scp ") && strings.Contains(l, "/sa.pub") && scpSAPub < 0 {
-			scpSAPub = i
-		}
-	}
-	if chmodCA < 0 || scpSAPub < 0 || chmodCA > scpSAPub {
-		t.Fatalf("per-file chmod order: ca=%d sa.pub=%d", chmodCA, scpSAPub)
-	}
-	for _, k := range []string{"sa.key", "front-proxy-ca.key"} {
-		if !ho.runner.anyCall("chmod 600 /etc/kubernetes/pki/" + k) {
-			t.Fatalf("%s not tightened", k)
-		}
-	}
-	if !ho.runner.anyCall("-p 22 root@203.0.113.7") || !ho.runner.anyCall("-P 22 ") {
-		t.Fatalf("ssh/scp port args: %v", ho.calls)
+	ho.installedPKI(t, root, handoverPKIKeys...)
+	if left := stagingLeft(t, root); len(left) != 0 {
+		t.Fatalf("staging files left: %v", left)
 	}
 }
 
-func TestHandoverPreseedMidTransferFailure(t *testing.T) {
+// A hard link or a symlink at a destination is replaced: the rename never
+// writes through it, so its target never gets the key bytes. A symlink to
+// a dir is replaced too; mv -T does not move the file into the dir.
+func TestHandoverPreseedReplacesALinkAtADestination(t *testing.T) {
 	ho := newHandover(t)
-	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{
-		"scp": func(c execx.Cmd) error {
-			if strings.Contains(argvLine(c), "/sa.key ") {
-				return exitErr(1)
+	root := filepath.Join(ho.base, "node")
+	ho.mockNodeBinaries(fakeNode(t, root, nil))
+	pki := root + preseedPKIDir
+	outside := filepath.Join(root, "outside")
+	for _, d := range []string{pki, filepath.Join(outside, "dir")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := []byte("old bytes\n")
+	for _, f := range []string{"hard", "soft"} {
+		if err := os.WriteFile(filepath.Join(outside, f), old, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(filepath.Join(outside, "hard"), filepath.Join(pki, "ca.key")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "soft"), filepath.Join(pki, "sa.key")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "dir"), filepath.Join(pki, "front-proxy-ca.key")); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}), ho.output())
+	for _, f := range []string{"hard", "soft"} {
+		if got, _ := os.ReadFile(filepath.Join(outside, f)); !bytes.Equal(got, old) {
+			t.Fatalf("the link target %s got other bytes: %q", f, got)
+		}
+	}
+	if entries, _ := os.ReadDir(filepath.Join(outside, "dir")); len(entries) != 0 {
+		t.Fatalf("a file went into the dir of the symlink: %v", entries)
+	}
+	ho.installedPKI(t, root, handoverPKIKeys...)
+	if left := stagingLeft(t, root); len(left) != 0 {
+		t.Fatalf("staging files left: %v", left)
+	}
+}
+
+// preseedDests are the six destinations of preseed on the node.
+const preseedDests = "/etc/kubernetes/pki/ca.crt /etc/kubernetes/pki/ca.key /etc/kubernetes/pki/sa.pub /etc/kubernetes/pki/sa.key " +
+	"/etc/kubernetes/pki/front-proxy-ca.crt /etc/kubernetes/pki/front-proxy-ca.key"
+
+// preseedHostileLine is a line that a node can print where a staging name
+// belongs: a terminal control (ESC), a backslash, a double quote, a C1
+// control in UTF-8 (CSI), a NUL byte and 250 more bytes. printf on the fake
+// node makes the bytes.
+const preseedHostileLine = `printf '\033[2J\\"\302\233\000%s\n' "$(printf 'A%.0s' $(seq 1 250))"`
+
+// preseedHostileQuoted is that line as a message shows it: escaped, the NUL
+// byte dropped (as bash command substitution does), and bounded to 200 of
+// its 258 bytes (8 bytes of controls, then 192 of the 250 letters).
+var preseedHostileQuoted = `"\x1b[2J\\\"\xc2\x9b` + strings.Repeat("A", 192) + `" (the first 200 of 258 bytes)`
+
+// Each failure step stops preseed, names the step and removes the staging
+// files: the stage call, a staging name of another shape, a valid name of
+// another key, a name twice, a line with terminal controls, text before the
+// check lines, a wrong stage marker, an extra line, the copy, the chmod, the
+// mv, an install call that fails and names no step, and an install call
+// whose ssh connection fails (exit 255) before a step or after the install
+// ran. A name of another shape goes into no later call, and no message
+// carries a raw ESC byte.
+func TestHandoverPreseedEachFailureStepRemovesTheStagingFiles(t *testing.T) {
+	isInstall := func(cmd string) bool { return strings.Contains(cmd, " && mv -f -T ") }
+	dropStaging := func(root, key string) {
+		entries, _ := os.ReadDir(root + preseedPKIDir)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "."+key+".") {
+				_ = os.Remove(root + preseedPKIDir + "/" + e.Name())
 			}
-			return nil
-		},
-	})
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		hook   func(root string) nodeHook
+		want   string
+		scps   int
+		placed []string
+	}{
+		{"the stage call fails at sa.key", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				return strings.Replace(cmd, "mktemp /etc/kubernetes/pki/.sa.key.XXXXXXXXXX", "false", 1), nil
+			}
+		}, "handover: could not make the staging files /etc/kubernetes/pki/.<key>.XXXXXXXXXX on 203.0.113.7", 0, nil},
+		{"a staging name of another shape", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				return strings.Replace(cmd, "mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX", "echo /etc/kubernetes/pki/.ca.crt.AAAAAAAAA-", 1), nil
+			}
+		}, `handover: 203.0.113.7 printed a staging name for ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: "/etc/kubernetes/pki/.ca.crt.AAAAAAAAA-"`, 0, nil},
+		{"a valid name of another key", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				return strings.Replace(cmd, "mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX", "echo /etc/kubernetes/pki/.ca.key.Ab12Cd34Ef", 1), nil
+			}
+		}, `handover: 203.0.113.7 printed a staging name for ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: "/etc/kubernetes/pki/.ca.key.Ab12Cd34Ef"`, 0, nil},
+		{"a name twice", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				cmd = strings.Replace(cmd, "mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX", "echo /etc/kubernetes/pki/.ca.crt.Ab12Cd34Ef", 1)
+				return strings.Replace(cmd, "mktemp /etc/kubernetes/pki/.ca.key.XXXXXXXXXX", "echo /etc/kubernetes/pki/.ca.crt.Ab12Cd34Ef", 1), nil
+			}
+		}, `handover: 203.0.113.7 printed a staging name for ca.key that is not /etc/kubernetes/pki/.ca.key. and 10 letters or digits: "/etc/kubernetes/pki/.ca.crt.Ab12Cd34Ef"`, 0, nil},
+		{"a line with terminal controls", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				return strings.Replace(cmd, "mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX", preseedHostileLine, 1), nil
+			}
+		}, "handover: 203.0.113.7 printed a staging name for ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: " + preseedHostileQuoted, 0, nil},
+		{"text before the check lines", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if strings.HasPrefix(cmd, preseedStagePrefix) {
+					return "echo 'Welcome to the node' && " + cmd, nil
+				}
+				return cmd, nil
+			}
+		}, `handover: 203.0.113.7 printed "Welcome to the node" where the stage call prints the check of /`, 0, nil},
+		{"a wrong stage marker", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				return strings.Replace(cmd, " && echo stage && ", " && echo staged && ", 1), nil
+			}
+		}, `handover: 203.0.113.7 printed "staged" where the stage call prints "stage"`, 0, nil},
+		{"an extra line", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if strings.HasPrefix(cmd, preseedStagePrefix) {
+					return cmd + " && echo extra", nil
+				}
+				return cmd, nil
+			}
+		}, "handover: 203.0.113.7 printed 7 lines for 6 staging names", 0, nil},
+		{"the copy fails at sa.key", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if c.Name == "scp" && strings.Contains(cmd, "/.sa.key.") {
+					return "", exitErr(1)
+				}
+				return cmd, nil
+			}
+		}, "handover: copying sa.key to 203.0.113.7 failed", 4, nil},
+		{"the chmod fails at ca.key", func(root string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if isInstall(cmd) {
+					dropStaging(root, "ca.key")
+				}
+				return cmd, nil
+			}
+		}, "handover: could not set the mode of the staging file of ca.key on 203.0.113.7; no file was moved into place", 6, nil},
+		{"the mv fails at sa.key", func(root string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if isInstall(cmd) {
+					_ = os.MkdirAll(root+preseedPKIDir+"/sa.key/held", 0o700)
+				}
+				return cmd, nil
+			}
+		}, "handover: could not move the staging file of sa.key to /etc/kubernetes/pki/sa.key on 203.0.113.7; in place before it: ca.crt ca.key sa.pub", 6,
+			[]string{"ca.crt", "ca.key", "sa.pub"}},
+		{"the install call fails and names no step", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if isInstall(cmd) {
+					return "", exitErr(1)
+				}
+				return cmd, nil
+			}
+		}, "handover: the install call on 203.0.113.7 failed, and its output names no step, so the state of the install is UNKNOWN. Check each of these files on 203.0.113.7: " +
+			preseedDests, 6, nil},
+		{"the ssh connection of the install call fails before a step", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if isInstall(cmd) {
+					return "", exitErr(255)
+				}
+				return cmd, nil
+			}
+		}, "handover: the install call on 203.0.113.7 ended with exit 255 (an ssh error, such as a lost connection), so the state of the install is UNKNOWN: " +
+			"no step arrived, but steps can have run. Check each of these files on 203.0.113.7: " + preseedDests, 6, nil},
+		// The node runs the whole install, but the connection drops after
+		// the third step line came back: each file is in place, and the
+		// last step line is not where the install stopped.
+		{"the ssh connection drops after the install ran", func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				if isInstall(cmd) {
+					return "{ " + cmd + "; } | sed -n 1,3p; exit 255", nil
+				}
+				return cmd, nil
+			}
+		}, "handover: the install call on 203.0.113.7 ended with exit 255 (an ssh error, such as a lost connection), so the state of the install is UNKNOWN: " +
+			`the last step that arrived is "chmod sa.pub", and later steps can have run. Check each of these files on 203.0.113.7: ` + preseedDests, 6,
+			handoverPKIKeys},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ho := newHandover(t)
+			root := filepath.Join(ho.base, "node")
+			ho.mockNodeBinaries(fakeNode(t, root, tc.hook(root)))
+			mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
+			mustContain(t, ho.output(), tc.want)
+			mustNotContain(t, ho.output(), "PKI pre-seeded")
+			mustNotContain(t, ho.output(), "could not remove the staging files")
+			mustNotContain(t, ho.output(), "\x1b")
+			calls := ho.sshCalls()
+			if last := calls[len(calls)-1]; !strings.HasPrefix(last, "ssh ") || !strings.Contains(last, " root@203.0.113.7 rm -f -- /etc/kubernetes/pki/.") {
+				t.Fatalf("the last call must remove the staging files:\n%s", strings.Join(calls, "\n"))
+			}
+			scps := 0
+			for _, l := range calls {
+				if strings.HasPrefix(l, "scp ") {
+					scps++
+				}
+				if strings.Contains(l, "AAAAAAAAA-") {
+					t.Fatalf("a name of another shape went into a call: %s", l)
+				}
+			}
+			if scps != tc.scps {
+				t.Fatalf("want %d scp calls, got %d:\n%s", tc.scps, scps, strings.Join(calls, "\n"))
+			}
+			if left := stagingLeft(t, root); len(left) != 0 {
+				t.Fatalf("staging files left: %v", left)
+			}
+			ho.installedPKI(t, root, tc.placed...)
+			for _, key := range handoverPKIKeys[len(tc.placed):] {
+				if info, err := os.Lstat(root + preseedPKIDir + "/" + key); err == nil && !info.IsDir() {
+					t.Fatalf("%s went into place after the failure", key)
+				}
+			}
+		})
+	}
+}
+
+// After the node ran the install call, an end of the call that is not a
+// normal exit of the remote command makes the state of the install
+// UNKNOWN, also when the last line that came back is a chmod or a mv
+// step: a signal (exit 128+N, of the ssh client or of a remote command),
+// an error of the ssh client (it did not start, or its wait failed) and a
+// cancel. The fake ssh returns what osRunner returns for each: a killed
+// client is a real *exec.ExitError of SIGKILL. Exit 0 pre-seeds. The table
+// above has exit 255. The cleanup call also runs after a cancel, on a
+// context that is not done and that has a deadline of its own. When that
+// call fails, preseed names the staging files.
+func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
+	isInstall := func(c execx.Cmd) bool { return strings.Contains(c.Args[len(c.Args)-1], " && mv -f -T ") }
+	unknown := func(cause, seen string) string {
+		return "handover: the install call on 203.0.113.7 ended with " + cause + ", so the state of the install is UNKNOWN: " + seen +
+			". Check each of these files on 203.0.113.7: " + preseedDests
+	}
+	const (
+		third     = `the last step that arrived is "chmod sa.pub", and later steps can have run`
+		seventh   = `the last step that arrived is "mv ca.crt", and later steps can have run`
+		none      = "no step arrived, but steps can have run"
+		killed    = "exit 137 (a signal, to ssh or to a command on the node)"
+		clientErr = "an error of the ssh client ("
+		canceled  = "a cancel (context canceled)"
+		// preseeded starts the line of a preseed that ends with exit 0.
+		preseeded = "handover: PKI pre-seeded on 203.0.113.7."
+	)
+	// cutAt runs the whole install on the node, but only its first n step
+	// lines come back. cut gives the first three.
+	cutAt := func(n int) func(cmd string) string {
+		return func(cmd string) string { return fmt.Sprintf("{ %s; } | sed -n 1,%dp", cmd, n) }
+	}
+	cut := cutAt(3)
+	// run is the client status of the install call: ssh runs the remote
+	// command on the fake node and gives the status of its sh.
+	run := func(ssh func() error, _ context.CancelFunc) error { return ssh() }
+	for _, tc := range []struct {
+		name string
+		// node changes the remote command of the install call (nil: as it is).
+		node func(cmd string) string
+		// status is what the install call returns. ssh runs the call on the
+		// fake node, and cancel cancels the context of preseed.
+		status   func(ssh func() error, cancel context.CancelFunc) error
+		want     string
+		placed   []string
+		signaled bool
+		// cleanupFails fails the cleanup call (the rm of the staging files).
+		cleanupFails bool
+	}{
+		{"ssh exits 0 after the install", nil, run, preseeded, handoverPKIKeys, false, false},
+		{"ssh dies of SIGKILL after the third step line", func(cmd string) string { return cut(cmd) + "; kill -KILL $$" }, run,
+			unknown(killed, third), handoverPKIKeys, true, false},
+		{"ssh dies of SIGKILL after the seventh step line, a mv step", func(cmd string) string { return cutAt(7)(cmd) + "; kill -KILL $$" }, run,
+			unknown(killed, seventh), handoverPKIKeys, true, false},
+		{"ssh dies of SIGKILL before a step line", func(cmd string) string { return "kill -KILL $$; " + cmd }, run,
+			unknown(killed, none), nil, true, false},
+		{"ssh exits 137 for a remote command that a signal killed after the third step line",
+			func(cmd string) string { return cut(cmd) + "; exit 137" }, run, unknown(killed, third), handoverPKIKeys, false, false},
+		{"the ssh client does not start", nil, func(func() error, context.CancelFunc) error {
+			return fmt.Errorf("ssh: %w", execx.ErrNotFound)
+		}, unknown(clientErr+"ssh: "+execx.ErrNotFound.Error()+")", none), nil, false, false},
+		// exec.ErrWaitDelay stands for a wait error that gives no exit
+		// status. osRunner sets no WaitDelay for these calls, so it does
+		// not return this error itself.
+		{"the wait of the ssh client fails after the third step line", cut, func(ssh func() error, _ context.CancelFunc) error {
+			if err := ssh(); err != nil {
+				return err
+			}
+			return exec.ErrWaitDelay
+		}, unknown(clientErr+exec.ErrWaitDelay.Error()+")", third), handoverPKIKeys, false, false},
+		// A cancel after the child ended with 0: Wait gives ctx.Err().
+		{"a cancel, then ssh exits 0 after the third step line", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			err := ssh()
+			cancel()
+			if err != nil {
+				return err
+			}
+			return context.Canceled
+		}, unknown(canceled, third), handoverPKIKeys, false, false},
+		{"a cancel, then ssh exits 1 after the third step line", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			_ = ssh()
+			cancel()
+			return exitErr(1)
+		}, unknown(canceled, third), handoverPKIKeys, false, false},
+		{"a cancel, then ssh exits 1 after the third step line, and the cleanup fails", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			_ = ssh()
+			cancel()
+			return exitErr(1)
+		}, unknown(canceled, third), handoverPKIKeys, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancelCtx := context.WithCancel(t.Context())
+			defer cancelCtx()
+			ho := newHandover(t)
+			root := filepath.Join(ho.base, "node")
+			node := fakeNode(t, root, func(c execx.Cmd, cmd string) (string, error) {
+				if tc.node != nil && isInstall(c) {
+					return tc.node(cmd), nil
+				}
+				return cmd, nil
+			})
+			ssh := node["ssh"]
+			var installErr error
+			var cleanupCtx context.Context
+			node["ssh"] = func(c execx.Cmd) error {
+				if !isInstall(c) {
+					// exec.CommandContext starts no call on a context that
+					// is done. The fake reads the context of the call.
+					callCtx := ho.runner.ctx
+					cleanup := strings.HasPrefix(c.Args[len(c.Args)-1], "rm -f -- ")
+					if cleanup {
+						cleanupCtx = callCtx
+					}
+					if err := callCtx.Err(); err != nil {
+						return err
+					}
+					if cleanup && tc.cleanupFails {
+						return exitErr(1)
+					}
+					return ssh(c)
+				}
+				installErr = tc.status(func() error { return ssh(c) }, cancelCtx)
+				return installErr
+			}
+			ho.mockNodeBinaries(node)
+			err := ho.ctx.HandoverPreseed(ctx, PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"})
+			out := ho.output()
+			if tc.want == preseeded {
+				mustOK(t, err, out)
+				mustContain(t, out, tc.want)
+				mustNotContain(t, out, "UNKNOWN")
+			} else {
+				mustErr(t, err)
+				mustContain(t, out, tc.want)
+				mustNotContain(t, out, "PKI pre-seeded")
+				mustNotContain(t, out, "no file was moved")
+				mustNotContain(t, out, "could not move the staging file")
+				calls := ho.sshCalls()
+				if last := calls[len(calls)-1]; !strings.HasPrefix(last, "ssh ") || !strings.Contains(last, " root@203.0.113.7 rm -f -- /etc/kubernetes/pki/.") {
+					t.Fatalf("the last call must remove the staging files:\n%s", strings.Join(calls, "\n"))
+				}
+				// The cleanup call also runs after a cancel: on a context
+				// that is not done, with a deadline of its own.
+				if dl, ok := cleanupCtx.Deadline(); !ok || time.Until(dl) > preseedCleanupTimeout {
+					t.Fatalf("the cleanup call must have a deadline of at most %v, got %v %v", preseedCleanupTimeout, dl, ok)
+				}
+				// When the cleanup call fails, preseed names the staging
+				// files (here the install moved each one).
+				if tc.cleanupFails {
+					mustContain(t, out, "handover: could not remove the staging files on 203.0.113.7; they can hold key bytes. Remove them yourself: /etc/kubernetes/pki/.")
+				} else {
+					mustNotContain(t, out, "could not remove the staging files")
+				}
+			}
+			if tc.signaled {
+				xe, ok := errors.AsType[*exec.ExitError](installErr)
+				if !ok {
+					t.Fatalf("the fake ssh must return an *exec.ExitError, got %T: %v", installErr, installErr)
+				}
+				if ws, ok := xe.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+					t.Fatalf("the fake ssh must die of SIGKILL, got %v", xe)
+				}
+			}
+			ho.installedPKI(t, root, tc.placed...)
+			for _, key := range handoverPKIKeys[len(tc.placed):] {
+				if info, err := os.Lstat(root + preseedPKIDir + "/" + key); err == nil && !info.IsDir() {
+					t.Fatalf("%s went into place, but the node did not run its mv", key)
+				}
+			}
+			if left := stagingLeft(t, root); len(left) != 0 {
+				t.Fatalf("staging files left: %v", left)
+			}
+		})
+	}
+}
+
+// The cause of an install call that ends after the context of preseed is
+// done says "a timeout" when its deadline passed, else "a cancel".
+func TestPreseedInstallCauseNamesATimeoutOrACancel(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{"a cancel", canceled, context.Canceled, "a cancel (context canceled)"},
+		{"a cancel after exit 1", canceled, exitErr(1), "a cancel (context canceled)"},
+		{"a deadline that passed", expired, context.DeadlineExceeded, "a timeout (context deadline exceeded)"},
+		{"a deadline that passed after exit 1", expired, exitErr(1), "a timeout (context deadline exceeded)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preseedInstallCause(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("preseedInstallCause = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The stage call refuses before its first mktemp, so before any scp, when
+// a dir on the path of the pki dir is not a dir (a link or a file), has a
+// write bit for the group or others, or has an owner that it may not have:
+// root for / and /etc, root or the ssh user for /etc/kubernetes and the pki
+// dir. The message names the dir and what stat showed. No staging file is
+// made, so no cleanup call runs.
+func TestHandoverPreseedRefusesAnUntrustedDir(t *testing.T) {
+	uid := os.Getuid()
+	// checkAt makes the check of dir in the stage call read another path.
+	checkAt := func(dir, path string) func(string) nodeHook {
+		return func(string) nodeHook {
+			return func(c execx.Cmd, cmd string) (string, error) {
+				cmd = strings.Replace(cmd, "-- "+dir+")", "-- "+path+")", 1)
+				return strings.Replace(cmd, "find "+dir+" -maxdepth", "find "+path+" -maxdepth", 1), nil
+			}
+		}
+	}
+	// As root, a dir of "another user" goes to uid 4242 first.
+	other := uid
+	if uid == 0 {
+		other = 4242
+	}
+	for _, tc := range []struct {
+		name, dir, facts string
+		setup            func(t *testing.T, root string)
+		hook             func(root string) nodeHook
+		otherOwner       bool
+	}{
+		{"/etc/kubernetes with a group write bit", "/etc/kubernetes", fmt.Sprintf("%d 775 directory", uid),
+			func(t *testing.T, root string) {
+				if err := os.Chmod(root+"/etc/kubernetes", 0o775); err != nil {
+					t.Fatal(err)
+				}
+			}, nil, false},
+		{"the pki dir is a symlink to a dir", preseedPKIDir, fmt.Sprintf("%d 777 symbolic link", uid),
+			func(t *testing.T, root string) {
+				if err := os.MkdirAll(root+"/outside", 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(root+"/outside", root+preseedPKIDir); err != nil {
+					t.Fatal(err)
+				}
+			}, nil, false},
+		{"the pki dir is a file", preseedPKIDir, fmt.Sprintf("%d 600 regular empty file", uid), nil,
+			func(root string) nodeHook {
+				return func(c execx.Cmd, cmd string) (string, error) {
+					if strings.HasPrefix(cmd, preseedStagePrefix) {
+						if err := os.Remove(root + preseedPKIDir); err != nil {
+							return "", err
+						}
+						if err := os.WriteFile(root+preseedPKIDir, nil, 0o600); err != nil {
+							return "", err
+						}
+					}
+					return cmd, nil
+				}
+			}, false},
+		{"/etc/kubernetes of another user", "/etc/kubernetes", "", nil, nil, true},
+		// /tmp is a dir of root that others can write.
+		{"/ with a write bit for others", "/", "0 1777 directory",
+			func(t *testing.T, _ string) {
+				if info, err := os.Lstat("/tmp"); err != nil || !info.IsDir() || info.Mode().Perm() != 0o777 ||
+					info.Sys().(*syscall.Stat_t).Uid != 0 {
+					t.Skip("this case reads /tmp as a dir of root with mode 1777, and /tmp is not")
+				}
+			}, checkAt("/", "/tmp"), false},
+		// The ssh user may own /etc/kubernetes, but not /etc. The check of
+		// /etc reads root/etc (checkAt below), a dir of the ssh user.
+		{"/etc of the ssh user", "/etc", fmt.Sprintf("%d 755 directory", other),
+			func(t *testing.T, root string) {
+				if err := os.Chmod(root+"/etc", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if uid == 0 {
+					if err := os.Chown(root+"/etc", other, -1); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ho := newHandover(t)
+			root := filepath.Join(ho.base, "node")
+			hook := nodeHook(nil)
+			if tc.hook != nil {
+				hook = tc.hook(root)
+			}
+			if tc.dir == "/etc" {
+				// The fake node answers id -u with the owner of root/etc
+				// (as root, 4242), so the ssh user owns that dir, and a
+				// rule that lets the ssh user own /etc lets it pass.
+				at := checkAt("/etc", root+"/etc")(root)
+				hook = func(c execx.Cmd, cmd string) (string, error) {
+					cmd, err := at(c, cmd)
+					return strings.ReplaceAll(cmd, `"$(id -u)"`, fmt.Sprintf(`"%d"`, other)), err
+				}
+			}
+			if tc.otherOwner {
+				// The ssh user is another uid than the owner of the dir:
+				// the fake node answers id -u with that uid. As root, the
+				// dir goes to uid 4242 first, because root passes -uid 0.
+				owner := other
+				tc.facts = fmt.Sprintf("%d 755 directory", owner)
+				tc.setup = func(t *testing.T, root string) {
+					if uid == 0 {
+						if err := os.Chown(root+"/etc/kubernetes", owner, -1); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				hook = func(c execx.Cmd, cmd string) (string, error) {
+					return strings.ReplaceAll(cmd, `"$(id -u)"`, fmt.Sprintf(`"%d"`, owner+1)), nil
+				}
+			}
+			ho.mockNodeBinaries(fakeNode(t, root, hook))
+			if tc.setup != nil {
+				tc.setup(t, root)
+			}
+			mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
+			who := "root or the ssh user"
+			if tc.dir == "/" || tc.dir == "/etc" {
+				who = "root"
+			}
+			mustContain(t, ho.output(), "handover: "+tc.dir+" on 203.0.113.7 must be a dir, not a link, that "+who+" owns,"+
+				" with no write bit for the group or others. stat shows (uid, mode, type) \""+tc.facts+"\". No key was sent")
+			calls := ho.sshCalls()
+			if len(calls) != 2 || !strings.HasSuffix(calls[1], " "+preseedStage) {
+				t.Fatalf("want the mkdir and the stage call only (no scp, no cleanup):\n%s", strings.Join(calls, "\n"))
+			}
+			for _, dir := range []string{root + preseedPKIDir, root + "/outside"} {
+				if entries, err := os.ReadDir(dir); err == nil && len(entries) != 0 {
+					t.Fatalf("a file was made in %s: %v", dir, entries)
+				}
+			}
+		})
+	}
+}
+
+// A cleanup call that fails names each staging file, and those are the
+// files that are left.
+func TestHandoverPreseedNamesTheStagingFilesItCannotRemove(t *testing.T) {
+	ho := newHandover(t)
+	root := filepath.Join(ho.base, "node")
+	ho.mockNodeBinaries(fakeNode(t, root, func(c execx.Cmd, cmd string) (string, error) {
+		if (c.Name == "scp" && strings.Contains(cmd, "/.sa.key.")) || strings.HasPrefix(cmd, "rm -f -- ") {
+			return "", exitErr(1)
+		}
+		return cmd, nil
+	}))
 	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
-	mustContain(t, ho.output(), "copying sa.key")
-	if !ho.runner.anyCall("chmod 600 /etc/kubernetes/pki/ca.key") {
-		t.Fatal("ca.key was not tightened before the failure")
+	mustContain(t, ho.output(), "handover: copying sa.key to 203.0.113.7 failed")
+	left := stagingLeft(t, root)
+	if len(left) != len(handoverPKIKeys) {
+		t.Fatalf("want a staging file per key, got %v", left)
 	}
-	if ho.runner.anyCall("front-proxy-ca.crt") {
-		t.Fatal("transfer continued past the failure")
+	prefix := "handover: could not remove the staging files on 203.0.113.7; they can hold key bytes. Remove them yourself: "
+	i := strings.Index(ho.output(), prefix)
+	if i < 0 {
+		t.Fatalf("the staging files are not named:\n%s", ho.output())
 	}
+	named := strings.Fields(strings.SplitN(ho.output()[i+len(prefix):], "\n", 2)[0])
+	slices.Sort(named)
+	if !slices.Equal(named, left) {
+		t.Fatalf("named %v, left %v", named, left)
+	}
+}
+
+// A new file of installFile that cannot go is named: it can hold key bytes.
+func TestHandoverInstallFileNamesATempFileItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a file from a dir without write, so the removal cannot fail")
+	}
+	ho := newHandover(t)
+	dir := filepath.Join(ho.base, "pki")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	// The chmod fails after it took the write bit of the dir, so the
+	// removal of the new file fails too.
+	ho.ctx.Chmod = func(string, fs.FileMode) error {
+		if err := os.Chmod(dir, 0o500); err != nil {
+			return err
+		}
+		return errors.New("operation not permitted")
+	}
+	mustErr(t, ho.ctx.installFile(filepath.Join(dir, "ca.key"), []byte("key bytes"), 0o600))
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), ".ca.key.") {
+		t.Fatalf("want the one new file left, got %v", entries)
+	}
+	mustContain(t, ho.output(), "handover: could not remove "+filepath.Join(dir, entries[0].Name())+", which can hold key bytes. Delete it yourself.")
 }
 
 func TestHandoverPreseedUnreachableNode(t *testing.T) {
 	ho := newHandover(t)
-	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh": func(c execx.Cmd) error { return exitErr(255) }})
+	// ssh ends its own messages with CR LF; the message stays readable.
+	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh": func(c execx.Cmd) error {
+		_, _ = io.WriteString(c.Stderr, "Host key verification failed.\r\n")
+		return exitErr(255)
+	}})
 	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"}))
 	mustContain(t, ho.output(), "cannot reach")
+	mustContain(t, ho.output(), `handover: the mkdir call on 203.0.113.7, stderr: "Host key verification failed."`+"\n")
+	mustContain(t, ho.output(), `handover: an unknown or changed host key also fails here. Compare the fingerprints of "ssh-keyscan -p 22 203.0.113.7 | ssh-keygen -lf -" with "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub" on the node's console, and add the key to the known_hosts file if they match.`)
+	mustContain(t, ho.output(), "Or retry with --accept-new-host-key to trust the first contact.")
 	if ho.runner.anyCall("scp ") {
 		t.Fatal("scp ran")
+	}
+	// With the opt-in an unknown key cannot fail the first call; a changed one can.
+	ho = newHandover(t)
+	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{"ssh": func(c execx.Cmd) error { return exitErr(255) }})
+	mustErr(t, ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7", AcceptNewHostKey: true}))
+	mustContain(t, ho.output(), "handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
+	mustNotContain(t, ho.output(), "Or retry with --accept-new-host-key")
+	if ho.runner.anyCall("scp ") || ho.lineIndex("ssh-keygen ") >= 0 {
+		t.Fatal("ran past the failed first call")
+	}
+}
+
+// controlLine is a remote command that prints "<ESC>[2J<what>" on stdout
+// and "<ESC>[2J<what> err" on stderr: a terminal control on each stream.
+func controlLine(what string) string {
+	return `printf '\033[2J` + what + `\n' && printf '\033[2J` + what + ` err\n' >&2`
+}
+
+// Each ssh and scp call captures both of its streams. On success preseed
+// shows only the stderr of the first call; on a failure it shows each line
+// of the call that failed, and of a cleanup call that fails, quoted. No raw
+// ESC byte of the node reaches the output.
+func TestHandoverPreseedShowsTheOutputOfTheNodeOnlyQuoted(t *testing.T) {
+	isMkdir := func(cmd string) bool { return cmd == preseedMkdir }
+	for _, tc := range []struct {
+		name      string
+		hook      nodeHook
+		ok        bool
+		want, not []string
+	}{
+		{"success", func(c execx.Cmd, cmd string) (string, error) {
+			switch {
+			case c.Name == "scp":
+				_, _ = io.WriteString(c.Stdout, "\x1b[2Jlater\n")
+				_, _ = io.WriteString(c.Stderr, "\x1b[2Jlater err\n")
+				return cmd, nil
+			case isMkdir(cmd):
+				return controlLine("mkdir") + " && " + cmd, nil
+			case strings.HasPrefix(cmd, preseedStagePrefix):
+				return `printf '\033[2Jlater err\n' >&2 && ` + cmd, nil
+			}
+			return controlLine("later") + " && " + cmd, nil
+		}, true,
+			[]string{`handover: the mkdir call on 203.0.113.7, stderr: "\x1b[2Jmkdir err"`},
+			[]string{"stdout:", "later"}},
+		{"the mkdir call fails", func(c execx.Cmd, cmd string) (string, error) {
+			if isMkdir(cmd) {
+				return controlLine("mkdir") + " && exit 255", nil
+			}
+			return cmd, nil
+		}, false,
+			[]string{
+				`handover: the mkdir call on 203.0.113.7, stdout: "\x1b[2Jmkdir"`,
+				`handover: the mkdir call on 203.0.113.7, stderr: "\x1b[2Jmkdir err"`,
+			}, nil},
+		{"an scp and the cleanup call fail", func(c execx.Cmd, cmd string) (string, error) {
+			switch {
+			case c.Name == "scp" && strings.Contains(cmd, "/.sa.key."):
+				_, _ = io.WriteString(c.Stdout, "\x1b[2Jscp\n")
+				_, _ = io.WriteString(c.Stderr, "\x1b[2Jscp err\n")
+				return "", exitErr(1)
+			case strings.HasPrefix(cmd, "rm -f -- "):
+				return controlLine("rm") + " && exit 1", nil
+			}
+			return cmd, nil
+		}, false,
+			[]string{
+				`handover: the copy of sa.key to 203.0.113.7, stdout: "\x1b[2Jscp"`,
+				`handover: the copy of sa.key to 203.0.113.7, stderr: "\x1b[2Jscp err"`,
+				`handover: the cleanup call on 203.0.113.7, stdout: "\x1b[2Jrm"`,
+				`handover: the cleanup call on 203.0.113.7, stderr: "\x1b[2Jrm err"`,
+			}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ho := newHandover(t)
+			ho.mockNodeBinaries(fakeNode(t, filepath.Join(ho.base, "node"), tc.hook))
+			err := ho.ctx.HandoverPreseed(t.Context(), PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"})
+			if tc.ok {
+				mustOK(t, err, ho.output())
+			} else {
+				mustErr(t, err)
+			}
+			for _, w := range tc.want {
+				mustContain(t, ho.output(), w+"\n")
+			}
+			for _, n := range tc.not {
+				mustNotContain(t, ho.output(), n)
+			}
+			mustNotContain(t, ho.output(), "\x1b")
+		})
+	}
+}
+
+// A line of the node in a message shows at most 200 bytes: a line of
+// exactly 200 bytes gets no suffix, a line of 201 does. A stream shows at
+// most 20 lines: the 20th says how many lines it does not show. One CR at
+// the end of a line is dropped.
+func TestHandoverPreseedBoundsWhatItShows(t *testing.T) {
+	a200, a201 := strings.Repeat("A", 200), strings.Repeat("A", 201)
+	if got, want := preseedQuote(a200), `"`+a200+`"`; got != want {
+		t.Fatalf("200 bytes: %s", got)
+	}
+	if got, want := preseedQuote(a201), `"`+a200+`" (the first 200 of 201 bytes)`; got != want {
+		t.Fatalf("201 bytes: %s", got)
+	}
+	numbered := func(n int) string {
+		var b strings.Builder
+		for i := 1; i <= n; i++ {
+			fmt.Fprintf(&b, "%d\r\n", i)
+		}
+		return b.String()
+	}
+	for _, tc := range []struct {
+		lines int
+		last  string
+	}{
+		{20, `handover: c, stdout: "20"`},
+		{21, `handover: c, stdout: "20" (1 more line)`},
+		{25, `handover: c, stdout: "20" (5 more lines)`},
+	} {
+		got := preseedStream("c", "stdout", numbered(tc.lines))
+		if len(got) != 20 || got[0] != `handover: c, stdout: "1"` || got[19] != tc.last {
+			t.Fatalf("%d lines:\n%s", tc.lines, strings.Join(got, "\n"))
+		}
+	}
+	if got := preseedStreams("c", "\n\n", ""); len(got) != 0 {
+		t.Fatalf("an empty stream shows lines: %v", got)
 	}
 }

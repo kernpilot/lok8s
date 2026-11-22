@@ -252,6 +252,7 @@ _allowed_kind_reads() {
 .lok8s/libs/kubehz/hosted|kind=$(yq -r '.kind' "${cluster_yaml}")
 .lok8s/utils/kapply.sh|yq -r 'select(.kind == "Deployment"
 .lok8s/utils/kapply.sh|label=$(printf '%s\n' "${sel}" | yq 'select(document_index == 0) | .kind + "/" + .metadata.name'
+.lok8s/libs/doctor|select(documentIndex == 0 and .kind == "Project")
 ALLOW
 }
 # Reasons, in the same order:
@@ -284,6 +285,8 @@ ALLOW
 #   utils/kapply.sh (label) — the kind and the name of the first manifest
 #                       object that the immutable-field heal recreates, for
 #                       its log line: a Kubernetes object kind.
+#   libs/doctor       — the kind of lok8s.yaml (a Project document), read to
+#                       find the selected implementation. Not a cluster spec.
 
 # Every spelling the sweep is claimed to cover, as a line it must match. This
 # is the gate's real anti-vacuity check: it does not depend on any particular

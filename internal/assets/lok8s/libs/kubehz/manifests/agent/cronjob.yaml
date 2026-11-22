@@ -7,11 +7,23 @@ metadata:
     app.kubernetes.io/name: kubehz-agent
     app.kubernetes.io/part-of: kubehz
 spec:
+  # 'lo kubehz deploy' applies the CronJob suspended, deletes its Jobs by the
+  # jobTemplate labels below, waits until their pods have ended, stages the
+  # bind secret, and then sets suspend to false. So no agent pod runs between
+  # the apply and the stage, unless the CronJob controller acts on a copy of
+  # the CronJob from before the suspended apply and starts a Job after the
+  # pod wait. An apply of these manifests without the deploy leaves the
+  # CronJob suspended.
+  suspend: true
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   jobTemplate:
+    metadata:
+      labels:
+        app: kubehz-heartbeat
+        app.kubernetes.io/name: kubehz-agent
     spec:
       backoffLimit: 1
       activeDeadlineSeconds: 120
@@ -35,8 +47,9 @@ spec:
               effect: NoSchedule
           containers:
             - name: heartbeat
-              # alpine/k8s carries a shell + bash/curl/kubectl/sha256sum/coreutils
-              # AND jq/awk (both load-bearing for the assessment block), which
+              # alpine/k8s is an Alpine image: /bin/sh, timeout, sha256sum, od
+              # and awk are BusyBox applets (no coreutils). It adds bash, curl,
+              # kubectl AND jq (load-bearing for the assessment block), which
               # the bootstrap + heartbeat script needs. The previous
               # registry.k8s.io/kubectl image is DISTROLESS (no shell) — the script
               # could never run on it. Pinned by digest (supply chain). No openssl
@@ -67,7 +80,79 @@ spec:
                   # shellcheck disable=SC2086 # the names split on the spaces
                   unset ${TLS_LOG_VARS} TLS_LOG_VAR
 
-                  # ── Agent identity: self-generated, create-if-absent, NEVER rotated ──
+                  # ── The tick budget ──
+                  # activeDeadlineSeconds (120 s from the start of the Job) kills
+                  # the pod, and a tick that is killed puts nothing back: a time
+                  # that the send gate wrote stays, and the next assessment comes
+                  # after 24 h. Each call has a bound, but the bounds sum to far
+                  # more than 120 s: a kubectl call takes at most 7 s (TERM after
+                  # 5 s, KILL 2 s later), the node list 32 s, a heartbeat POST
+                  # 17 s, and a tick with an assessment makes about 30 kubectl
+                  # calls and 4 curl calls. So the tick has a budget.
+                  # `bounded SECS CMD ARGS` runs `timeout -k 2 SECS CMD ARGS` only
+                  # when SECS + 2 seconds end before BUDGET_END. Else it starts
+                  # nothing, writes one line to the log, and fails at once (exit
+                  # 124, as a timeout), and the caller takes its path for a call
+                  # that timed out. Each kubectl and curl call runs under it, and
+                  # each jq and awk step too: the local work on an answer (the PV
+                  # list, the services of a large cluster) counts against the
+                  # budget, and a step that hangs stops at its bound. The budget
+                  # ends at TICK_END, 90 s after the script starts, and the
+                  # heartbeat POST comes first:
+                  #   READ_END (17 s before TICK_END): every call before the
+                  #     heartbeat, so that one POST always fits after them;
+                  #   PROBE_END (34 s before TICK_END): the send gate and the
+                  #     assessment probes, so that the POST and its plain retry
+                  #     fit after them;
+                  #   TICK_END: the POSTs and every call after them.
+                  # One call runs outside the budget: the write-back of the send
+                  # gate (at most 7 s, once per tick). So the calls and the steps
+                  # under `bounded` end at the latest 97 s after the script
+                  # starts, plus less than 1 s: the budget counts whole seconds.
+                  # That bound leaves out the pod start and the image pull
+                  # before the script, the local work between two checks (shell
+                  # builtins and short text filters such as sed, sort and base64),
+                  # and a second pod when backoffLimit runs the Job again:
+                  # activeDeadlineSeconds counts from the start of the Job, not of
+                  # the pod.
+                  # The budget reads the seconds since boot (the first field of
+                  # /proc/uptime). A step of the wall clock does not move them. On
+                  # the wall clock, a step back would make the budget longer. The wall
+                  # clock (date) gives only the times that leave the pod: the time
+                  # of the send gate and the timestamps. Without a number in
+                  # /proc/uptime, the budget uses the wall clock, and the tick logs
+                  # one line.
+                  # The log line goes to fd 4 (stderr): most callers send the
+                  # stderr of a call to /dev/null.
+                  exec 4>&2
+                  mono_now() {
+                    read -r MONO_UP _ < /proc/uptime && echo "${MONO_UP%%.*}"
+                  }
+                  case "$(mono_now 2>/dev/null)" in
+                    ''|*[!0-9]*)
+                      echo "kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move" >&2
+                      mono_now() {
+                        date -u +%s
+                      } ;;
+                  esac
+                  TICK_END=$(( $(mono_now) + 90 ))
+                  READ_END=$(( TICK_END - 17 ))
+                  PROBE_END=$(( TICK_END - 34 ))
+                  BUDGET_END="${READ_END}"
+                  budget_fits() {
+                    [ $(( $(mono_now) + $1 )) -le "${BUDGET_END}" ]
+                  }
+                  bounded() {
+                    if ! budget_fits $(( $1 + 2 )); then
+                      echo "kubehz: tick budget: ${2} ${3} not started: it can take $(( $1 + 2 ))s, and the budget ends in $(( BUDGET_END - $(mono_now) ))s" >&4
+                      return 124
+                    fi
+                    BOUND_SECS="$1"
+                    shift
+                    timeout -k 2 "${BOUND_SECS}" "$@"
+                  }
+
+                  # ── Agent identity: self-generated, filled once, NEVER rotated ──
                   # One Secret (kubehz-system/kubehz-agent) holds two 256-bit values:
                   #   agent-token A = khz_agt_<hex32> — the live heartbeat credential,
                   #     sent as `Authorization: Bearer A`. It NEVER transits a browser
@@ -93,25 +178,73 @@ spec:
                     fi
                   }
 
-                  if ! kubectl get secret kubehz-agent -n kubehz-system >/dev/null 2>&1; then
-                    NEW_A="khz_agt_$(rand_hex)"
-                    NEW_C="khzc_$(rand_hex)"
-                    # create-if-absent; tolerate a concurrent creator so we never rotate.
-                    # A and C reach kubectl as an env file on stdin, never on argv: every
-                    # process on the node can read argv (ps, /proc/<pid>/cmdline).
-                    printf 'agent-token=%s\nclaim-code=%s\n' "${NEW_A}" "${NEW_C}" |
-                      kubectl create secret generic kubehz-agent -n kubehz-system \
-                      --from-env-file=/dev/stdin >/dev/null 2>&1 || true
-                    NEW_A=""
-                    NEW_C=""
+                  # Every kubectl call of this script runs under `bounded 5` (the
+                  # node list: `bounded 30`), except the write-back of the send
+                  # gate (`timeout -k 2 5`, below). The marker read below says
+                  # why the bound is outside kubectl.
+                  #
+                  # The deploy creates the Secret empty (identity-secret.yaml).
+                  # The agent's RBAC holds get and patch on that one name, and
+                  # no create. The read gives the Secret's resourceVersion, the
+                  # number of entries in its data, and the keys of the identity
+                  # that have a value (A, C), never a value. A read never shows
+                  # stringData: the apiserver merges it into data on a write.
+                  # Only a Secret with no entry at all gets A and C, in one merge
+                  # patch, which carries the resourceVersion of the read: when the
+                  # Secret changed after the read (another tick filled it), the
+                  # apiserver refuses the patch (409 Conflict), and the read-back
+                  # below gets the values of the tick that won. A Secret with an
+                  # entry is never written, whatever its value, so A and C never
+                  # rotate. With A and C it holds the identity. With other entries
+                  # (one of the two keys, an empty value, another key) the tick
+                  # logs one line, does not write, and uses the values that the
+                  # read-back gets: the heartbeat needs A, the register A and C. A
+                  # Secret that the agent cannot read (absent, or no RBAC) stays as
+                  # it is: the agent cannot create it, and the tick has no identity
+                  # (no register, no heartbeat).
+                  if ID_STATE=$(bounded 5 kubectl get secret kubehz-agent -n kubehz-system \
+                      -o 'go-template={{.metadata.resourceVersion}} {{with .data}}{{len .}} {{if index . "agent-token"}}A{{end}}{{if index . "claim-code"}}C{{end}}{{end}}' 2>/dev/null); then
+                    ID_RV="${ID_STATE%% *}"
+                    ID_KEYS="${ID_STATE#* }"
+                    # The patch takes the resourceVersion as it is, so it must be
+                    # digits only (etcd and kine give digits): no quote can end
+                    # the JSON string.
+                    case "${ID_RV}" in
+                      ''|*[!0-9]*)
+                        echo "kubehz: Secret kubehz-agent in kubehz-system has no resourceVersion of digits; the agent does not fill it" >&2
+                        ID_KEYS="unknown" ;;
+                    esac
+                    # ID_KEYS: empty for a Secret with no entry, else the number of
+                    # entries, a space, and A and C for the keys with a value.
+                    case "${ID_KEYS}" in
+                      '')
+                        NEW_A="khz_agt_$(rand_hex)"
+                        NEW_C="khzc_$(rand_hex)"
+                        # A and C reach kubectl in the patch on stdin, never on argv: every
+                        # process on the node can read argv (ps, /proc/<pid>/cmdline).
+                        printf '{"metadata":{"resourceVersion":"%s"},"stringData":{"agent-token":"%s","claim-code":"%s"}}' \
+                          "${ID_RV}" "${NEW_A}" "${NEW_C}" |
+                          bounded 5 kubectl patch secret kubehz-agent -n kubehz-system \
+                          --type=merge --patch-file=/dev/stdin >/dev/null 2>&1 \
+                          || echo "kubehz: the fill of Secret kubehz-agent did not land (another tick filled it, or the patch failed); the values are read back from the Secret" >&2
+                        NEW_A=""
+                        NEW_C=""
+                        ;;
+                      unknown|*' AC') ;;
+                      *)
+                        echo "kubehz: Secret kubehz-agent in kubehz-system has data, but not both an agent-token and a claim-code with a value; the agent does not write it" >&2
+                        ;;
+                    esac
+                  else
+                    echo "kubehz: cannot read Secret kubehz-agent in kubehz-system; the deploy creates it: run 'lo kubehz deploy'" >&2
                   fi
 
                   # Always read the authoritative values back from the Secret (not the
                   # just-generated ones), so a concurrent creator's values win — no
                   # rotation, ever. The Secret is the single source of truth for A and C.
-                  AGENT_TOKEN=$(kubectl get secret kubehz-agent -n kubehz-system \
+                  AGENT_TOKEN=$(bounded 5 kubectl get secret kubehz-agent -n kubehz-system \
                     -o jsonpath='{.data.agent-token}' 2>/dev/null | base64 -d)
-                  CLAIM_CODE=$(kubectl get secret kubehz-agent -n kubehz-system \
+                  CLAIM_CODE=$(bounded 5 kubectl get secret kubehz-agent -n kubehz-system \
                     -o jsonpath='{.data.claim-code}' 2>/dev/null | base64 -d)
 
                   # ── Self-register: POST {domain, sha256(A), sha256(C)} — HASHES ONLY ──
@@ -126,17 +259,21 @@ spec:
                     # staged (optional env from kubehz-agent-bind). Present: the
                     # register ADOPTS the announced row wherever it lives now
                     # (pending, claimed or attributed) instead of minting a
-                    # sibling. Sent only when it is exactly 64 hex, so a garbled
+                    # sibling. Sent only as 64 hex or khzb_ and 64 hex, so a garbled
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
                     # Absent: the api does not adopt an announced row by
                     # domain alone, so the register gets a separate
-                    # pending row. That is why the deploy stages the Secret
-                    # before it applies this CronJob.
+                    # pending row. The deploy stages the Secret while this
+                    # CronJob is suspended, after it deleted the Jobs and
+                    # their pods ended. LC_ALL=C makes the classes
+                    # byte-wise. An env value cannot hold a NUL (execve
+                    # strings end at one), and this grep is BusyBox, so the
+                    # check does not use -a.
                     BIND_FIELD=""
                     if [ -n "${BIND_SECRET}" ] \
-                      && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
-                      && printf %s "${BIND_SECRET}" | grep -Eq '^[0-9a-f]{64}$'; then
+                      && [ "$(printf %s "${BIND_SECRET}" | LC_ALL=C wc -l)" -eq 0 ] \
+                      && printf %s "${BIND_SECRET}" | LC_ALL=C grep -Eq '^(khzb_)?[0-9a-f]{64}$'; then
                       BIND_FIELD=$(printf ',"bindSecret":"%s"' "${BIND_SECRET}")
                     fi
                     REGISTER_PAYLOAD=$(printf \
@@ -148,7 +285,7 @@ spec:
                     # XDG_CONFIG_HOME). A trace-ascii line there would log the bearer or
                     # the body. curl obeys -q only as its first argument.
                     printf '%s' "${REGISTER_PAYLOAD}" |
-                      curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
+                      bounded 10 curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
                       -H "Content-Type: application/json" \
                       --data-binary @- >/dev/null 2>&1 \
                       || echo "kubehz: agent-register attempt failed; retrying next tick" >&2
@@ -198,7 +335,7 @@ spec:
                   # NOT usable: kubectl rejects it (`--output must be 'yaml' or
                   # 'json'`). /version is already reachable (used as the apiserver
                   # health fallback below), so no extra RBAC is needed.
-                  KUBE_VERSION=$(kubectl get --raw /version 2>/dev/null | \
+                  KUBE_VERSION=$(bounded 5 kubectl get --raw /version 2>/dev/null | \
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
 
                   # Nodes: ONE list call for all nodes, and jq makes the
@@ -233,10 +370,13 @@ spec:
                   # shell keeps no copy of it. The script sets no pipefail,
                   # so the pipe's status is jq's. A failed or empty kubectl
                   # answer gives jq no input, and jq -e fails on no input; a
-                  # body without .items fails too. `timeout 30` bounds a
-                  # stalled apiserver below the job's 120 s deadline.
+                  # body without .items fails too. `bounded 30` bounds
+                  # a stalled apiserver below the job's 120 s deadline. jq
+                  # starts with the call and has the same bound (`timeout -k 2
+                  # 30`), so the pipe ends within the bound that the budget check
+                  # of the call counted.
                   NODES_OK=""
-                  if NODE_LIST=$(timeout 30 kubectl get --raw /api/v1/nodes 2>/dev/null | jq -ce '[.items[] |
+                  if NODE_LIST=$(bounded 30 kubectl get --raw /api/v1/nodes 2>/dev/null | timeout -k 2 30 jq -ce '[.items[] |
                         (.metadata.labels // {}) as $l | {
                           name: .metadata.name,
                           status: ([.status.conditions[]? | select(.type == "Ready") | .status][0]
@@ -253,13 +393,14 @@ spec:
                   # heartbeat. Keep this cap at or under the api's. A larger
                   # cluster reports its first 500 nodes AND logs the
                   # truncation to stderr (never a silent drop). NODE_TOTAL
-                  # stays the true count.
+                  # stays the true count. When its step fails or does not start,
+                  # the count is unknown (NODES_OK empty), never 0.
                   NODE_CAP=500
-                  NODE_TOTAL=$(printf '%s' "${NODE_LIST}" | jq 'length' 2>/dev/null) || NODE_TOTAL=0
+                  NODE_TOTAL=$(printf '%s' "${NODE_LIST}" | bounded 5 jq 'length' 2>/dev/null) || { NODE_TOTAL=0; NODES_OK=""; }
                   [ "${NODE_TOTAL}" -gt "${NODE_CAP}" ] && echo "kubehz: heartbeat summarizes the first ${NODE_CAP} of ${NODE_TOTAL} nodes" >&2
-                  NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
+                  NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | bounded 5 jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
 
-                  CERT_EXPIRY=$(kubectl get csr -o json 2>/dev/null | \
+                  CERT_EXPIRY=$(bounded 5 kubectl get csr -o json 2>/dev/null | \
                     sed -n 's/.*"expirationTimestamp": *"\([^"]*\)".*/\1/p' | \
                     sort | head -1)
                   [ -z "${CERT_EXPIRY}" ] && CERT_EXPIRY="unknown"
@@ -271,7 +412,7 @@ spec:
                   # result -> apiserver, the per-check lines -> etcd. 2>&1 on
                   # purpose: on HTTP 500 kubectl embeds the [+]/[-] check lines
                   # in its error text, which is exactly what we parse.
-                  READYZ=$(kubectl get --raw '/readyz?verbose' 2>&1) && READYZ_OK=true || READYZ_OK=false
+                  READYZ=$(bounded 5 kubectl get --raw '/readyz?verbose' 2>&1) && READYZ_OK=true || READYZ_OK=false
 
                   APISERVER_STATUS=""
                   if [ "${READYZ_OK}" = "true" ]; then
@@ -279,7 +420,7 @@ spec:
                   else
                     case "${READYZ}" in
                       *"[-]"*) APISERVER_STATUS="Unhealthy" ;;
-                      *) kubectl get --raw /version >/dev/null 2>&1 && APISERVER_STATUS="Healthy" || true ;;
+                      *) bounded 5 kubectl get --raw /version >/dev/null 2>&1 && APISERVER_STATUS="Healthy" || true ;;
                     esac
                   fi
 
@@ -302,7 +443,7 @@ spec:
                   # pods. No matching pods (managed/external control plane) ->
                   # omit the component rather than report a false Unhealthy.
                   for comp in kube-scheduler kube-controller-manager; do
-                    ready=$(kubectl get pods -n kube-system -l "component=${comp}" \
+                    ready=$(bounded 5 kubectl get pods -n kube-system -l "component=${comp}" \
                       -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ready=""
                     cstatus=""
                     case "${ready}" in
@@ -321,33 +462,55 @@ spec:
                   # the tick after the platform requested one via the heartbeat
                   # response's desired actions[] ("assess"). The pod is
                   # ephemeral (CronJob), so the gate marker persists as
-                  # annotations on the kubehz-agent-config ConfigMap:
+                  # annotations on the kubehz-agent-state ConfigMap:
                   #   kubehz.cloud/last-assessment  (epoch seconds of last send)
                   #   kubehz.cloud/assess-requested ("true" = send next tick)
                   # get/patch on that ONE ConfigMap comes from the
-                  # kubehz-agent-marker Role. An UNREADABLE marker (old install
-                  # without the new RBAC) sends NOTHING — fail-closed beats
-                  # spamming a full assessment every 5-minute tick.
+                  # kubehz-agent-marker Role. The agent has no access to
+                  # kubehz-agent-config (its configuration, which the pod gets
+                  # through envFrom), so it cannot change its own API URL. An
+                  # UNREADABLE marker (an install without kubehz-agent-state,
+                  # until `lo kubehz deploy` runs again) sends NOTHING:
+                  # fail-closed beats spamming a full assessment every 5-minute
+                  # tick. A marker that the agent can read but not write sends
+                  # nothing either (the send gate below).
                   #
-                  # `timeout 5` bounds a kubectl call, never a kubectl
-                  # client flag. Any client-config flag (--request-timeout,
-                  # --server, --kubeconfig, --context, --token, ...) makes
-                  # kubectl skip the in-cluster config and dial
-                  # localhost:8080, so the call always fails in this pod.
+                  # An install made before kubehz-agent-state kept these markers
+                  # on kubehz-agent-config. The agent does not read them there.
+                  # So the first tick after the upgrade finds no last-assessment
+                  # and sends one assessment (the platform takes a repeat, and it
+                  # can ask for one at any time with "assess"). The desired-state
+                  # poll gets one full answer, and a claim nonce placed before the
+                  # upgrade is not echoed: place a new one.
+                  #
+                  # `bounded 5` (`timeout -k 2 5`) bounds a kubectl call, never
+                  # a kubectl client flag. Any client-config flag
+                  # (--request-timeout, --server, --kubeconfig, --context,
+                  # --token, ...) makes kubectl skip the in-cluster config and
+                  # dial localhost:8080, so the call always fails in this pod.
                   # The marker read failed like that on every tick: the 24h
                   # gate, the claim nonce and the desired-state poll were
-                  # off. `timeout 5 CMD` is the busybox syntax and the
-                  # coreutils syntax.
+                  # off. `timeout -k 2 5 CMD` is the syntax of the BusyBox
+                  # applet and of GNU coreutils, and both take -k: TERM
+                  # after 5 s, then KILL 2 s later if the call still runs.
+                  # A tick with no budget left for the read skips it with its
+                  # own line (MARKER_BUDGET), not the line for a marker that
+                  # the agent cannot read.
                   NOW_EPOCH=$(date -u +%s)
                   ASSESS_NOW=""
                   ASSESS_REQ=""
+                  LAST_ASSESS=""
                   MARKER_OK=""
+                  MARKER_BUDGET=""
                   MARKER=""
-                  if MARKER=$(timeout 5 kubectl get configmap kubehz-agent-config -n kubehz-system \
+                  if ! budget_fits 7; then
+                    MARKER_BUDGET=1
+                    echo "kubehz: assessment and desired-state poll skipped: the tick budget is spent; the next tick tries again" >&2
+                  elif MARKER=$(bounded 5 kubectl get configmap kubehz-agent-state -n kubehz-system \
                       -o jsonpath='{.metadata.annotations}' 2>/dev/null); then
                     MARKER_OK=1
-                    LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
-                    ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
+                    LAST_ASSESS=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
+                    ASSESS_REQ=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
                     case "${LAST_ASSESS}" in
                       ''|*[!0-9]*) ASSESS_NOW=1 ;;
                       *) [ $(( NOW_EPOCH - LAST_ASSESS )) -lt 86400 ] || ASSESS_NOW=1 ;;
@@ -367,8 +530,8 @@ spec:
                   # the marker Role's existing get/patch — no new RBAC.
                   CLAIM_NONCE=""
                   if [ -n "${MARKER_OK}" ]; then
-                    CLAIM_NONCE=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce" // ""' 2>/dev/null) || CLAIM_NONCE=""
-                    CLAIM_PLACED=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce-placed" // ""' 2>/dev/null) || CLAIM_PLACED=""
+                    CLAIM_NONCE=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/claim-nonce" // ""' 2>/dev/null) || CLAIM_NONCE=""
+                    CLAIM_PLACED=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/claim-nonce-placed" // ""' 2>/dev/null) || CLAIM_PLACED=""
                     if [ -n "${CLAIM_NONCE}" ]; then
                       # Expire a dead nonce so it never echoes forever: the
                       # api's challenge TTL is 15 minutes (900s, the server
@@ -393,7 +556,7 @@ spec:
                           fi ;;
                       esac
                       if [ -z "${CLAIM_LIVE}" ]; then
-                        if kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                        if bounded 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                           "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1; then
                           echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
                         else
@@ -407,6 +570,75 @@ spec:
                   [ -z "${CLAIM_NONCE}" ] || CLAIM_FIELD='"claim": {"nonce": "'"${CLAIM_NONCE}"'"},'
 
                   ASSESSMENT=""
+                  # The send gate: first write the marker, then send, then put
+                  # the marker back if no assessment went out.
+                  # Write first: an assessment goes out only after this tick
+                  # has stored the time of the send. With a marker that the
+                  # agent can read but not write (RBAC without the patch, or
+                  # an admission webhook that refuses it), a write after the
+                  # send never lands, the 24h marker never moves, and the
+                  # agent sends the full assessment on every 5-minute tick.
+                  # Only a stored write proves that the next tick sees the new
+                  # time. The same call removes a pending assess request, so
+                  # the request is used up only together with the new time
+                  # (one annotate call, one PATCH). If this write fails, the
+                  # tick sends the plain heartbeat and logs one line, and the
+                  # probes do not run. A write that the apiserver refused keeps
+                  # the request. A write that the apiserver stored, but whose
+                  # answer came after the bound (the timeout killed kubectl),
+                  # stays stored: the agent cannot tell it from a refusal, so
+                  # it puts nothing back. The new time holds and the request is
+                  # used up, so the next assessment comes after the 24h window
+                  # or on a new platform request: one lost window.
+                  # Put back when no assessment went out: a probe had no
+                  # answer, the assembly failed, the beat was skipped, or both
+                  # POSTs failed. assess_write_back (below) puts back the
+                  # values that the marker read saw, so the next tick tries
+                  # again. If that write fails too, the next assessment comes
+                  # after the 24h window or on a platform request: one lost
+                  # assessment, never a loop. A delivered or a rejected
+                  # assessment keeps the new time.
+                  # The gate and the probes run on the shorter budget,
+                  # PROBE_END. With no room for the gate and one probe, the
+                  # tick writes nothing and sends no assessment (its own line);
+                  # the request stays.
+                  GATE_WRITTEN=""
+                  BUDGET_END="${PROBE_END}"
+                  if [ -n "${ASSESS_NOW}" ] && ! budget_fits 14; then
+                    echo "kubehz: assessment not sent: the tick budget has no room for the probes; the next tick tries again" >&2
+                    ASSESS_NOW=""
+                  fi
+                  if [ -n "${ASSESS_NOW}" ]; then
+                    GATE_REQ=""
+                    [ "${ASSESS_REQ}" != "true" ] || GATE_REQ="kubehz.cloud/assess-requested-"
+                    if bounded 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                        "kubehz.cloud/last-assessment=${NOW_EPOCH}" ${GATE_REQ:+"${GATE_REQ}"} >/dev/null 2>&1; then
+                      GATE_WRITTEN=1
+                    else
+                      echo "kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'" >&2
+                      ASSESS_NOW=""
+                    fi
+                  fi
+                  # assess_write_back: the gate wrote the marker and this tick
+                  # sends no assessment. One annotate call puts back
+                  # last-assessment as the marker read saw it (its old value,
+                  # or no annotation) and the assess request that the gate
+                  # removed. It runs once per tick at most. It is the one call
+                  # outside the tick budget (`timeout -k 2 5`, not `bounded`):
+                  # the budget keeps its 7 s free, so a tick that ran out of
+                  # budget can still put the marker back.
+                  assess_write_back() {
+                    [ -n "${GATE_WRITTEN}" ] || return 0
+                    GATE_WRITTEN=""
+                    WB_LAST="kubehz.cloud/last-assessment-"
+                    [ -z "${LAST_ASSESS}" ] || WB_LAST="kubehz.cloud/last-assessment=${LAST_ASSESS}"
+                    WB_REQ=""
+                    [ "${ASSESS_REQ}" != "true" ] || WB_REQ="kubehz.cloud/assess-requested=true"
+                    timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                      "${WB_LAST}" ${WB_REQ:+"${WB_REQ}"} >/dev/null 2>&1 \
+                      || echo "kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system;" \
+                        "the next assessment comes after the 24h window or on a platform request" >&2
+                  }
                   if [ -n "${ASSESS_NOW}" ]; then
                     # datastore + etcdReachable: etcd static pods in kube-system
                     # are the primary probe; with none visible, the
@@ -414,22 +646,24 @@ spec:
                     # or a unix socket -> kine); neither pod visible (managed /
                     # external CP) -> "unknown". Reachability falls back to the
                     # /readyz etcd check captured above.
-                    # Every assessment probe runs under `timeout 5` (see the
-                    # marker read above): a stalled apiserver degrades THAT probe
-                    # instead of eating the whole beat (activeDeadlineSeconds
-                    # is the backstop, but it kills the beat with it).
+                    # Every assessment probe runs under `bounded 5` (see the
+                    # marker read above): a stalled apiserver degrades THAT
+                    # probe instead of eating the whole beat. A probe that no
+                    # longer fits in PROBE_END does not start, and the tick
+                    # defers the assessment (below).
                     # A field the contract has no "unknown" value for (a count,
                     # a list, capiManaged) must come from a call that answered:
                     # a failed or timed-out call is UNKNOWN, never 0 or [].
                     # UNKNOWN collects those fields. With any of them, this tick
                     # sends no assessment (the api has no null for them), the
-                    # 24h marker does not move, and the next tick probes again.
+                    # gate's marker write is put back (assess_write_back), and
+                    # the next tick probes again.
                     UNKNOWN=""
-                    APISERVER_ARGS=$(timeout 5 kubectl get pods -n kube-system -l component=kube-apiserver \
+                    APISERVER_ARGS=$(bounded 5 kubectl get pods -n kube-system -l component=kube-apiserver \
                       -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' 2>/dev/null) || APISERVER_ARGS=""
                     DATASTORE="unknown"
                     ETCD_REACHABLE=false
-                    ETCD_READY=$(timeout 5 kubectl get pods -n kube-system -l component=etcd \
+                    ETCD_READY=$(bounded 5 kubectl get pods -n kube-system -l component=etcd \
                       -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ETCD_READY=""
                     case "${ETCD_READY}" in
                       *[![:space:]]*)
@@ -449,7 +683,7 @@ spec:
                     # capiManaged: the CRD answers -> true; NotFound -> false;
                     # any other failure (a timeout) -> unknown.
                     CAPI=""
-                    if CAPI_OUT=$(timeout 5 kubectl get crd clusters.cluster.x-k8s.io -o name 2>&1); then
+                    if CAPI_OUT=$(bounded 5 kubectl get crd clusters.cluster.x-k8s.io -o name 2>&1); then
                       CAPI=true
                     else
                       case "${CAPI_OUT}" in *"(NotFound)"*) CAPI=false ;; esac
@@ -459,7 +693,7 @@ spec:
                     # CNI guess from the kube-system daemonsets; only kube-proxy
                     # present -> "kube-proxy-only" (no CNI daemonset visible).
                     CNI="unknown"
-                    DS_NAMES=$(timeout 5 kubectl get daemonsets -n kube-system \
+                    DS_NAMES=$(bounded 5 kubectl get daemonsets -n kube-system \
                       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || DS_NAMES=""
                     case "${DS_NAMES}" in
                       *cilium*)     CNI="cilium" ;;
@@ -473,7 +707,7 @@ spec:
                     # flag for the service half; null when neither is visible.
                     POD_CIDR=""
                     SERVICE_CIDR=""
-                    KUBEADM_CFG=$(timeout 5 kubectl get configmap kubeadm-config -n kube-system \
+                    KUBEADM_CFG=$(bounded 5 kubectl get configmap kubeadm-config -n kube-system \
                       -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null) || KUBEADM_CFG=""
                     if [ -n "${KUBEADM_CFG}" ]; then
                       POD_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *podSubnet: *//p' | head -1)
@@ -484,31 +718,33 @@ spec:
                         sed -n 's/.*--service-cluster-ip-range=\([^" ]*\).*/\1/p' | head -1)
                     fi
 
-                    SC_RAW=$(timeout 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
+                    SC_RAW=$(bounded 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
                     SC_JSON=$(printf '%s' "${SC_RAW}" | \
-                      jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
+                      bounded 5 jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
                           isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
                         2>/dev/null) || SC_JSON=""
                     [ -n "${SC_JSON}" ] || { UNKNOWN="${UNKNOWN} storageClasses"; SC_JSON="[]"; }
                     # The api's zod schema caps arrays at 50 — an uncapped list
                     # 400s the WHOLE heartbeat. Cap here (first 50, logged, never
                     # a silent drop) so the beat always fits the contract.
-                    SC_TOTAL=$(printf '%s' "${SC_JSON}" | jq 'length' 2>/dev/null) || SC_TOTAL=0
+                    SC_TOTAL=$(printf '%s' "${SC_JSON}" | bounded 5 jq 'length' 2>/dev/null) || { UNKNOWN="${UNKNOWN} storageClasses"; SC_TOTAL=0; }
                     if [ "${SC_TOTAL:-0}" -gt 50 ]; then
                       echo "kubehz: assessment reports the first 50 of ${SC_TOTAL} StorageClasses" >&2
-                      SC_JSON=$(printf '%s' "${SC_JSON}" | jq -c '.[:50]' 2>/dev/null) || SC_JSON="[]"
+                      SC_JSON=$(printf '%s' "${SC_JSON}" | bounded 5 jq -c '.[:50]' 2>/dev/null) || { UNKNOWN="${UNKNOWN} storageClasses"; SC_JSON="[]"; }
                     fi
 
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
-                    # awk converts capacities to Gi and groups by provisioner.
-                    PV_RAW=$(timeout 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
+                    # awk converts capacities to Gi and groups by provisioner. Each
+                    # step runs under `bounded 5`: one that fails, times out or does
+                    # not start leaves the summary unknown, never zero PVs.
+                    PV_RAW=$(bounded 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
                     # `.items |` first: input that is not a PV list fails jq,
                     # and the summary is unknown instead of zero PVs.
                     PV_LINES=$(printf '%s' "${PV_RAW}" | \
-                      jq -er '.items | map([(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
+                      bounded 5 jq -er '.items | map([(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
                           (.spec.capacity.storage // "0")] | @tsv) | join("\n")' 2>/dev/null) || {
                       UNKNOWN="${UNKNOWN} pvSummary"; PV_LINES=""; }
-                    PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
+                    PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | bounded 5 awk -F'\t' '
                       function gi(s,  n, u) {
                         n = s + 0; u = s
                         sub(/^[0-9.]+/, "", u)
@@ -535,28 +771,28 @@ spec:
                           printf "%s\"%s\":{\"count\":%d,\"totalGi\":%s}", sep, p, c[p], fmt(g[p]); sep = ","
                         }
                         printf "}}"
-                      }') || PV_SUMMARY='{"count":0,"totalGi":0,"byProvisioner":{}}'
+                      }') || { UNKNOWN="${UNKNOWN} pvSummary"; PV_SUMMARY=""; }
 
                     # The counts: each from a call that answered, else unknown.
                     # An empty kubectl answer makes jq print nothing.
-                    LB_RAW=$(timeout 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
+                    LB_RAW=$(bounded 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
                     LB_COUNT=$(printf '%s' "${LB_RAW}" | \
-                      jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
+                      bounded 5 jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
                     [ -n "${LB_COUNT}" ] || UNKNOWN="${UNKNOWN} loadBalancers"
-                    VW_RAW=$(timeout 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
-                    VALIDATING=$(printf '%s' "${VW_RAW}" | jq '.items | length' 2>/dev/null) || VALIDATING=""
+                    VW_RAW=$(bounded 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
+                    VALIDATING=$(printf '%s' "${VW_RAW}" | bounded 5 jq '.items | length' 2>/dev/null) || VALIDATING=""
                     [ -n "${VALIDATING}" ] || UNKNOWN="${UNKNOWN} webhooks.validating"
-                    MW_RAW=$(timeout 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
-                    MUTATING=$(printf '%s' "${MW_RAW}" | jq '.items | length' 2>/dev/null) || MUTATING=""
+                    MW_RAW=$(bounded 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
+                    MUTATING=$(printf '%s' "${MW_RAW}" | bounded 5 jq '.items | length' 2>/dev/null) || MUTATING=""
                     [ -n "${MUTATING}" ] || UNKNOWN="${UNKNOWN} webhooks.mutating"
 
                     # cpNodes: the control-plane label, else the legacy master
                     # label. `grep -c` prints 0 and exits 1 on no line.
                     CP_NODES=""
-                    if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null); then
+                    if CP_NAMES=$(bounded 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null); then
                       CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
                       if [ "${CP_NODES}" = "0" ]; then
-                        if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null); then
+                        if CP_NAMES=$(bounded 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null); then
                           CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
                         else
                           CP_NODES=""
@@ -571,10 +807,17 @@ spec:
                     # Assembled with jq (in the alpine/k8s image) so a probe
                     # value can never break the JSON; any assembly failure
                     # drops the assessment, never the heartbeat.
-                    if [ -n "${UNKNOWN}" ]; then
+                    # Each probe needs 7 s of budget to start. When 7 s still
+                    # fit now, they fitted at each earlier probe too, so every
+                    # probe ran. When they do not fit, a probe can have been
+                    # skipped, and a field with an "unknown" value (datastore,
+                    # cni) would read as a fact: defer the whole assessment.
+                    if ! budget_fits 7; then
+                      echo "kubehz: assessment deferred: the tick budget ran out during the probes; the next tick probes again" >&2
+                    elif [ -n "${UNKNOWN}" ]; then
                       echo "kubehz: assessment deferred: no answer for${UNKNOWN}; the next tick probes again" >&2
                     else
-                      ASSESSMENT=$(jq -cn \
+                      ASSESSMENT=$(bounded 5 jq -cn \
                         --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                         --arg k8sVersion "${KUBE_VERSION}" \
                         --arg datastore "${DATASTORE}" \
@@ -603,6 +846,11 @@ spec:
                       [ -n "${ASSESSMENT}" ] || echo "kubehz: assessment assembly failed; heartbeat continues without it" >&2
                     fi
                   fi
+                  # No assessment to send (a probe had no answer, or the
+                  # assembly failed): put back the marker that the gate wrote.
+                  [ -n "${ASSESSMENT}" ] || assess_write_back
+                  # The heartbeat and the calls after it run on the whole budget.
+                  BUDGET_END="${TICK_END}"
 
                   ASSESSMENT_FIELD=""
                   [ -z "${ASSESSMENT}" ] || ASSESSMENT_FIELD="\"assessment\": ${ASSESSMENT},"
@@ -628,8 +876,10 @@ spec:
                   # Guard an empty A (the Secret read failed this tick): a blank
                   # bearer is guaranteed to 401, so skip the POST and let the next
                   # tick retry once the Secret is readable (fail-soft, exit 0).
+                  # A skipped beat sends no assessment: put the marker back.
                   if [ -z "${AGENT_TOKEN}" ]; then
                     echo "kubehz: agent-token unavailable; skipping heartbeat (retrying next tick)" >&2
+                    assess_write_back
                     exit 0
                   fi
                   # A goes to curl in a config line (-K), never on argv: every process on
@@ -641,30 +891,34 @@ spec:
                   case "${AGENT_TOKEN}" in
                     *[!A-Za-z0-9_.~+/=-]*)
                       echo "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry" >&2
+                      assess_write_back
                       exit 0
                       ;;
                   esac
                   # The POST is GUARDED (|| rc): an unguarded RESPONSE=$(curl -f …)
-                  # under set -e aborts BEFORE the marker write — a rejected
-                  # assessment (e.g. an over-cap array 400ing the zod schema)
-                  # then resends deterministically every 5 minutes and the
-                  # heartbeat is PERMANENTLY lost. On ANY failure with an
-                  # assessment attached, retry ONCE without it so the plain
-                  # heartbeat always lands; only then handle the marker.
+                  # under set -e aborts the tick, so a rejected assessment
+                  # (e.g. an over-cap array 400ing the zod schema) takes the
+                  # heartbeat down with it. On ANY failure with an assessment
+                  # attached, retry ONCE without it so the plain heartbeat
+                  # always lands. The three outcomes for the marker that the
+                  # gate wrote before the send, each by what curl reported (a
+                  # POST whose answer was lost counts as failed, also when the
+                  # api stored the beat):
+                  #   delivered (the beat with the assessment landed): it stays;
+                  #   rejected (that beat failed, the plain retry landed): it
+                  #     stays, so the rejected assessment waits 24h;
+                  #   failed (both POSTs failed): assess_write_back puts it
+                  #     back, so the next tick sends the assessment again.
                   HB_RC=0
                   # The bearer reaches curl in a config on fd 3 (a here-document), the
                   # payload (it can carry the claim nonce) on stdin. Neither is on argv.
                   RESPONSE=$(printf '%s' "${PAYLOAD}" |
-                    curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                    bounded 15 curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
                     -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
                   header = "Authorization: Bearer ${AGENT_TOKEN}"
                   AUTH_EOF
                   ) || HB_RC=$?
-                  ASSESS_DELIVERED=""
-                  if [ "${HB_RC}" -eq 0 ] && [ -n "${ASSESSMENT}" ]; then
-                    ASSESS_DELIVERED=1
-                  fi
                   if [ "${HB_RC}" -ne 0 ] && [ -n "${ASSESSMENT}" ]; then
                     echo "kubehz: heartbeat with assessment failed (curl rc=${HB_RC}); retrying once without it" >&2
                     PLAIN_PAYLOAD=$(cat <<PLAIN_EOF
@@ -681,7 +935,7 @@ spec:
                   )
                     HB_RC=0
                     RESPONSE=$(printf '%s' "${PLAIN_PAYLOAD}" |
-                      curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                      bounded 15 curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                       -H "Content-Type: application/json" \
                       -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
                   header = "Authorization: Bearer ${AGENT_TOKEN}"
@@ -689,47 +943,37 @@ spec:
                     ) || HB_RC=$?
                     if [ "${HB_RC}" -eq 0 ]; then
                       # The plain beat landed → the assessment itself was the
-                      # poison. Move the marker anyway: resending a rejected
-                      # assessment every 5 minutes is exactly the loop this
-                      # guards against; the next attempt waits for the 24h
-                      # window or an explicit platform "assess" request.
+                      # poison. Keep the marker that the gate wrote: resending
+                      # a rejected assessment every 5 minutes is exactly the
+                      # loop this guards against; the next attempt waits for
+                      # the 24h window or an explicit platform "assess" request.
                       echo "kubehz: plain heartbeat landed; deferring the rejected assessment (next attempt after 24h or on request)" >&2
-                      ASSESS_DELIVERED=1
                       ASSESS_REJECTED=1
                     fi
                   fi
                   if [ "${HB_RC}" -ne 0 ]; then
                     echo "kubehz: heartbeat POST failed (curl rc=${HB_RC}); retrying next tick" >&2
+                    assess_write_back
                     exit 1
                   fi
                   printf '%s\n' "${RESPONSE}"
 
                   # Claim succeeded → the response carries the additive
                   # `claim: {verified: true}` key, the platform's cue to clear
-                  # the nonce from the config (it is consumed server-side and
+                  # the nonce from kubehz-agent-state (it is consumed server-side and
                   # can never succeed again). A beat whose nonce was wrong or
                   # expired carries NO cue and clears nothing — the expiry
                   # window above bounds how long such a nonce keeps echoing.
                   if [ -n "${CLAIM_NONCE}" ] && printf '%s' "${RESPONSE}" | \
-                      jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
-                    kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                      bounded 5 jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
+                    bounded 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 \
                       || echo "kubehz: claim verified but the nonce annotation could not be cleared; the next tick will expire it" >&2
                     echo "kubehz: cluster claim verified by the platform" >&2
                   fi
 
-                  # Assessment handled → move the 24h marker; clear a served
-                  # assess request. A failed annotate only risks a RE-send next
-                  # tick (idempotent server-side), never a lost heartbeat.
-                  if [ -n "${ASSESS_DELIVERED}" ]; then
-                    kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
-                      "kubehz.cloud/last-assessment=${NOW_EPOCH}" >/dev/null 2>&1 \
-                      || echo "kubehz: could not persist the assessment marker; the next tick may resend" >&2
-                    if [ "${ASSESS_REQ}" = "true" ]; then
-                      kubectl annotate configmap kubehz-agent-config -n kubehz-system \
-                        "kubehz.cloud/assess-requested-" >/dev/null 2>&1 || true
-                    fi
-                  fi
+                  # The 24h marker and the assess request were written before
+                  # the send (the send gate): nothing to write for them here.
                   # Desired actions stay PULL-based: an "assess" in the response
                   # arms the marker so the NEXT tick collects + sends a fresh
                   # assessment (handover contract §1 refresh path). NOT when this
@@ -737,9 +981,11 @@ spec:
                   # still carries the un-served ask (the server clears it only on
                   # assessment-bearing beats), and re-arming would bypass the 24h
                   # deferral into an every-other-tick resend of the same poison.
-                  if [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
-                      jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
-                    kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                  # NOT with an unreadable marker either: that tick writes
+                  # nothing (fail-closed, as for the assessment gate above).
+                  if [ -n "${MARKER_OK}" ] && [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
+                      bounded 5 jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
+                    bounded 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
                   fi
 
@@ -752,7 +998,7 @@ spec:
                   # execution flags, k8s-version skew — and acts on NOTHING:
                   # the acting pull loop is the P2 Go-agent capability
                   # (managed-platform-spec §8) and arrives with it. Markers
-                  # persist on the kubehz-agent-config ConfigMap (the same
+                  # persist on the kubehz-agent-state ConfigMap (the same
                   # annotation pattern + RBAC as the assessment gate):
                   #   kubehz.cloud/desired-etag      last-seen validator
                   #                                  (opaque — never parsed)
@@ -763,21 +1009,24 @@ spec:
                   DESIRED_ETAG=""
                   DESIRED_ERR=""
                   if [ -n "${MARKER_OK}" ]; then
-                    DESIRED_ETAG=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
-                    DESIRED_ERR=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
+                    DESIRED_ETAG=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
+                    DESIRED_ERR=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
                   fi
                   if [ -z "${MARKER_OK}" ]; then
                     # Fail closed like the assessment gate: without the marker
                     # ConfigMap the etag/error state cannot persist, so every
-                    # tick would re-poll and re-log — skip entirely.
-                    echo "kubehz: desired-state poll skipped (marker ConfigMap unreadable)" >&2
+                    # tick would re-poll and re-log — skip entirely. The line
+                    # names the assessment too: this tick sent none. A tick that
+                    # skipped the read for its budget logged its own line above.
+                    [ -n "${MARKER_BUDGET}" ] \
+                      || echo "kubehz: assessment and desired-state poll skipped: the agent cannot read configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'" >&2
                   else
                   set --
                   [ -z "${DESIRED_ETAG}" ] || set -- -H "If-None-Match: ${DESIRED_ETAG}"
                   DES_RC=0
                   # The bearer reaches curl in a config on stdin (-K -), never on argv.
                   DES_OUT=$(printf 'header = "Authorization: Bearer %s"\n' "${AGENT_TOKEN}" |
-                    curl -q -sS -D - -w '\n__code=%{http_code}' -K - "$@" \
+                    bounded 10 curl -q -sS -D - -w '\n__code=%{http_code}' -K - "$@" \
                     "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/desired" 2>/dev/null) || DES_RC=$?
                   if [ "${DES_RC}" -ne 0 ]; then
                     echo "kubehz: desired-state poll failed (curl rc=${DES_RC}); retrying next tick" >&2
@@ -788,7 +1037,7 @@ spec:
                         # Unchanged — silent. Clear a sticky refusal state so a
                         # later refusal logs again (e.g. after a re-enroll).
                         if [ -n "${DESIRED_ERR}" ]; then
-                          kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                          bounded 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
                         fi
                         ;;
@@ -800,27 +1049,27 @@ spec:
                         # header is stored verbatim (opaque validator).
                         DES_BODY=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -e '1,/^$/d' -e '/^__code=/d') || DES_BODY=""
                         DES_NEW_ETAG=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1)
-                        DES_REV=$(printf '%s' "${DES_BODY}" | jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
+                        DES_REV=$(printf '%s' "${DES_BODY}" | bounded 5 jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
                         # Missing ETag counts as unparseable too: persisting an
                         # empty validator would wipe If-None-Match and force a
                         # full 200 every tick.
                         if [ -z "${DES_REV}" ] || [ -z "${DES_NEW_ETAG}" ]; then
                           echo "kubehz: desired-state response was unparseable; retrying next tick" >&2
                         else
-                          DES_FLAGS=$(printf '%s' "${DES_BODY}" | jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
+                          DES_FLAGS=$(printf '%s' "${DES_BODY}" | bounded 5 jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
                           [ -n "${DES_FLAGS}" ] || DES_FLAGS="none"
-                          DES_K8S=$(printf '%s' "${DES_BODY}" | jq -r '.kubernetesVersion // empty' 2>/dev/null) || DES_K8S=""
+                          DES_K8S=$(printf '%s' "${DES_BODY}" | bounded 5 jq -r '.kubernetesVersion // empty' 2>/dev/null) || DES_K8S=""
                           DES_SKEW=""
                           if [ -n "${DES_K8S}" ] && [ "${DES_K8S}" != "${KUBE_VERSION}" ]; then
                             DES_SKEW=" — desired k8s ${DES_K8S}, local ${KUBE_VERSION}"
                           fi
                           echo "kubehz: desired state changed — revision ${DES_REV}, execution flags on: ${DES_FLAGS}${DES_SKEW} (report-only; acting arrives with the Go agent)"
-                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                          bounded 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-etag=${DES_NEW_ETAG}" \
                             "kubehz.cloud/desired-revision=${DES_REV}" >/dev/null 2>&1 \
                             || echo "kubehz: could not persist the desired-state marker; the next poll re-reports" >&2
                           if [ -n "${DESIRED_ERR}" ]; then
-                            kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                            bounded 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                               "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
                           fi
                         fi
@@ -828,7 +1077,7 @@ spec:
                       401|403|404)
                         if [ "${DESIRED_ERR}" != "${DES_CODE}" ]; then
                           echo "kubehz: desired-state poll refused (HTTP ${DES_CODE}) — check the cluster's enrollment/claim; identical refusals stay quiet" >&2
-                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                          bounded 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-error=${DES_CODE}" >/dev/null 2>&1 || true
                         fi
                         ;;
@@ -843,8 +1092,8 @@ spec:
                     name: kubehz-agent-config
               env:
                 # The one-time bind secret `lo kubehz deploy` stages in
-                # kubehz-agent-bind, before it applies this CronJob, when a
-                # register wrote one. Optional: the Secret is absent on any
+                # kubehz-agent-bind while this CronJob is suspended, when
+                # a register wrote one. Optional: the Secret is absent on any
                 # install with no bind secret in play. The bootstrap then
                 # registers without it and gets a separate pending row, which
                 # the user claims by its claim code.

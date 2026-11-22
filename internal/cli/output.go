@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -84,6 +85,42 @@ func writeOutput(w io.Writer, format string, v any) error {
 	return fmt.Errorf("writeOutput: no renderer for %q", format)
 }
 
+// yaml11Scalar matches the strings that a YAML 1.1 reader (PyYAML, or the
+// go-yaml v2 of sigs.k8s.io/yaml and kubectl) reads as a bool, a null, a
+// number or a time when they are plain, and the = that PyYAML cannot load.
+// yaml.v3 quotes only the strings that YAML 1.2 reads so. The alternatives,
+// in order:
+//   - y, n, yes, no, on, off, true, false and null in any case, ~ and =
+//   - binary 0b (also 0b-1 and 0b+1, which go-yaml v2 reads as numbers),
+//     octal 0o and hex 0x
+//   - decimal digits, also with a leading 0 (the YAML 1.1 octal 0777, and 08)
+//   - sexagesimal (base 60): 1:20, 190:20:30.15
+//   - a float with a fraction (1.5, 1., .5) or an exponent (1e3, 1.5E-3)
+//   - .inf with or without a sign, and .nan, in any case
+//   - a date (2026-11-20, 2026-1-2), also with a time after T, t, spaces or
+//     tabs, a fraction after . or , and a zone (Z, +01:00, -5)
+//   - the empty string
+//
+// A number can have _ at each place where go-yaml v2 or PyYAML accepts one.
+// go-yaml v2 removes each _ before it parses the number in a string that
+// starts with a digit or a sign, so -_1, 0_x1f, 0_b1, +_.5 and 1e_+3 are
+// numbers there. Thus _ can follow the sign, the 0 of a base, the base
+// letter, a digit, the dot, the e and the sign of the exponent. A base 60
+// number has no _ after its sign: neither reader accepts one there.
+//
+// The set is wider than YAML 1.1 in some places: YAML 1.1 has only three
+// case forms of each word (yes, Yes, YES; also .inf, .Inf, .INF), and a base
+// 60 int starts with a digit 1-9 (0:30 is a string, 0:30.5 is a float). The
+// pattern also quotes the other case forms (yEs, .iNf) and 0:30. That is
+// harmless: a reader keeps a quoted string a string.
+//
+// The bash twin holds the same pattern (KUBEHZ_AGENT_YAML11 in
+// .lok8s/libs/kubehz/agent). TestYAML11PatternIsTheBashPattern keeps the two
+// equal, and tests/fixtures/yaml11-quote/cases is the table of both twins.
+const yaml11Scalar = `^(?:(?i:y|n|yes|no|on|off|true|false|null)|~|=|(?:[-+]_*)?0_*[bB](?:_*[-+])?[01_]+|(?:[-+]_*)?0_*[oO][0-7_]+|(?:[-+]_*)?0_*[xX][0-9a-fA-F_]+|(?:[-+]_*)?[0-9][0-9_]*|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+(?:[.][0-9_]*)?|(?:[-+]_*)?(?:[0-9][0-9_]*[.][0-9_]*|[.]_*[0-9][0-9_]*)(?:[eE]_*(?:[-+]_*)?[0-9][0-9_]*)?|(?:[-+]_*)?[0-9][0-9_]*[eE]_*(?:[-+]_*)?[0-9][0-9_]*|[-+]?[.](?i:inf)|[.](?i:nan)|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{1,2}:[0-9]{1,2}(?:[.,][0-9]*)?(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?)?|)$`
+
+var yaml11ScalarRe = regexp.MustCompile(yaml11Scalar)
+
 // writeJSONAsYAML re-encodes a JSON document as block-style yaml with the
 // same keys in the same order.
 func writeJSONAsYAML(w io.Writer, raw []byte) error {
@@ -101,9 +138,14 @@ func writeJSONAsYAML(w io.Writer, raw []byte) error {
 }
 
 // blockStyle drops the flow and quote styles the JSON text carries into
-// the node tree, so the yaml prints in block style with plain scalars.
+// the node tree, so the yaml prints in block style with plain scalars. A
+// string of yaml11Scalar (a key too) gets double quotes, so a YAML 1.1
+// reader keeps it a string. A real bool, null or number stays plain.
 func blockStyle(n *yaml.Node) {
 	n.Style = 0
+	if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!str" && yaml11ScalarRe.MatchString(n.Value) {
+		n.Style = yaml.DoubleQuotedStyle
+	}
 	for _, c := range n.Content {
 		blockStyle(c)
 	}

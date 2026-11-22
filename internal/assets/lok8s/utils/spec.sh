@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# spec.sh — the ONE reader for spec.workers, shared by every driver, and for
-# the kind node version of a Lo cluster (spec::kind_node_version, at the end).
+# spec.sh — the ONE reader for spec.workers, shared by every driver, for the
+# kind node version of a Lo cluster (spec::kind_node_version), and the kubectl
+# range of the system-upgrade-controller addon (spec::suc_kubectl, at the end).
 #
 # Three drivers (kkp, kubeone, capi) turn `spec.workers` into machine
 # deployments. Each one used to carry its own copy of the same three facts, and
@@ -508,4 +509,132 @@ spec::kind_node_version() {
 spec::_is_image_tag() {
   local LC_ALL=C
   [[ "${1}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
+}
+
+# ── The kubectl range of system-upgrade-controller ──────────────────────────
+# Go twin: internal/addons/suc.go (the same rules and lines). For a Plan with
+# cordon or drain, the controller adds a cordon and a drain init container to
+# the Plan's Job. Both run the kubectl image that the addon pins (kubectl.image
+# in addons/system-upgrade-controller/values.yaml). rancher/kuberlr-kubectl
+# v8.1.1 bundles kubectl v1.34.8, v1.35.5 and v1.36.1, and its binary downloads
+# are off. kuberlr accepts one minor of skew, so the image serves Kubernetes
+# 1.33 to 1.37 only. `lo doctor` and `lo lint` compare spec.kubernetes.version
+# with the range. A Go test ties the range to the tag of the pin, and the
+# shared doctor cases (tests/fixtures/doctor-suc-kubectl) tie this twin to Go.
+_SPEC_SUC_KUBECTL_MIN=33
+_SPEC_SUC_KUBECTL_MAX=37
+# The default node image of the pinned kind release (Go: KindDefaultNodeVersion
+# and KindVersion in internal/toolchain/pins.go). A Lo cluster without
+# spec.kubernetes.version runs it when kind is the pinned release.
+_SPEC_KIND_DEFAULT_NODE=v1.36.1
+_SPEC_KIND_VERSION=v0.32.0
+
+# spec::suc_kubectl <version> — compares a set value of spec.kubernetes.version
+# with the range. Prints "in <major.minor>", "out <major.minor>" or
+# "notversion". A version is vX.Y or vX.Y.Z, the v optional, with an optional
+# @sha256 digest. Major and minor have no leading zero and at most three digits,
+# so the arithmetic below reads them as decimal numbers.
+spec::suc_kubectl() {
+  local LC_ALL=C
+  if [[ ! "${1}" =~ ^v?(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})(\.[0-9]+)?(@sha256:[0-9a-f]{64})?$ ]]; then
+    echo notversion
+    return 0
+  fi
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+  if (( major != 1 || minor < _SPEC_SUC_KUBECTL_MIN || minor > _SPEC_SUC_KUBECTL_MAX )); then
+    echo "out ${major}.${minor}"
+  else
+    echo "in ${major}.${minor}"
+  fi
+}
+
+# spec::is_addon <dir> <name> — returns 0 when the dir of a bare
+# spec.bootstrap entry names the addon <name>. It ignores a trailing "/" or
+# "/." of the dir (also a sequence of them, such as "/./" or "//"), so
+# `<name>/` and `<name>/.` name the addon. For these trailing forms the result
+# is the same as in Go: the Go parser cleans the path of a bare entry
+# (assets.Peek), and filepath.Base removes trailing separators. The bash
+# parser keeps the entry as written (bootstrap::_parse_entry), so
+# "${dir##*/}" alone gives an empty name or ".". The helper does not resolve
+# a ".." element, so there the result can differ from Go: Go cleans
+# `<name>/x/..` to <name>, and the helper reads "..".
+spec::is_addon() {
+  local d="${1}" want="${2}"
+  while :; do
+    case "${d}" in
+      */) d="${d%/}" ;;
+      */.) d="${d%/.}" ;;
+      *) break ;;
+    esac
+  done
+  [[ "${d##*/}" == "${want}" ]]
+}
+
+# spec::entry_base <key> <dir> — prints the last element of the dir of a
+# spec.bootstrap entry as the Go parser reads it (filepath.Base of the parsed
+# dir). <key> is the entry as written, <dir> is the dir that
+# bootstrap::_parse_entry gives for it. Go keeps the dir of a path entry (a
+# key that starts with "/", "./" or "../") as written, so the helper prints
+# its basename: `./x/.` gives ".". Go cleans the dir of a bare entry
+# (assets.Peek, path.Clean), so the helper ignores the empty and "." elements
+# and resolves "..": `x/`, `x/.`, `x/./`, `x//` and `a/x/.` give "x", and
+# `x/..` and `.` give "addons" (the dir is <lok8s>/addons/<key>). The bash
+# parser keeps every dir as written.
+#
+# The helper splits the dir with parameter expansion only, so a newline in the
+# dir is an ordinary character, as in Go, and it prints with printf, so a name
+# such as `-n` prints as itself. A caller that reads the result through
+# `$( … )` loses a trailing newline of the name.
+spec::entry_base() {
+  local key="${1}" dir="${2}"
+  if [[ "${key}" == /* || "${key}" == ./* || "${key}" == ../* ]]; then
+    # filepath.Base: drop the trailing slashes, then the last element.
+    local d="${dir%"${dir##*[!/]}"}"
+    if [[ -z "${dir}" ]]; then
+      printf '%s\n' "."
+    elif [[ -z "${d}" ]]; then
+      printf '%s\n' "/"
+    else
+      printf '%s\n' "${d##*/}"
+    fi
+    return 0
+  fi
+  local -a out=()
+  local rest="${dir}" p
+  while :; do
+    p="${rest%%/*}"
+    case "${p}" in
+      "" | .) ;;
+      ..)
+        if (( ${#out[@]} > 0 )) && [[ "${out[-1]}" != .. ]]; then
+          unset 'out[-1]'
+        elif [[ "${dir}" != /* ]]; then
+          out+=("..")
+        fi
+        ;;
+      *) out+=("${p}") ;;
+    esac
+    [[ "${rest}" == */* ]] || break
+    rest="${rest#*/}"
+  done
+  if (( ${#out[@]} > 0 )); then
+    printf '%s\n' "${out[-1]}"
+  elif [[ "${dir}" == /* ]]; then
+    printf '%s\n' "/"
+  else
+    printf '%s\n' "."
+  fi
+}
+
+# spec::suc_kubectl_range — the range as the lines name it: "1.33 to 1.37".
+spec::suc_kubectl_range() {
+  echo "1.${_SPEC_SUC_KUBECTL_MIN} to 1.${_SPEC_SUC_KUBECTL_MAX}"
+}
+
+# spec::suc_kubectl_out_of_range_line <major.minor> — the warning of `lo doctor`
+# and `lo lint` for a minor that the image does not serve.
+spec::suc_kubectl_out_of_range_line() {
+  local r
+  r="$(spec::suc_kubectl_range)"
+  echo "system-upgrade-controller: the kubectl image of the drain container serves Kubernetes ${r}, not ${1}, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from ${r}, or use a Plan without cordon or drain"
 }

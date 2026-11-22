@@ -43,14 +43,13 @@ teardown() {
 _make_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
-# function, so the kubectl stub below answers it and no real kubectl runs.
-timeout() {
-  shift
-  "$@"
-}
+# The timeout stub and stub_call come from tests/lib/agent_bound.sh.
 kubectl() {
+  stub_call kubectl "$@"
   case "$*" in
+    # The identity read: the Secret holds both keys with a value
+    # (resourceVersion 1, 2 entries).
+    "get secret kubehz-agent -n kubehz-system -o go-template="*) printf '1 2 AC' ;;
     *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*"claim-code"*)  printf 'khzc_test'   | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*) return 0 ;;
@@ -58,13 +57,14 @@ kubectl() {
     "get --raw /api/v1/nodes") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
-    "get configmap kubehz-agent-config"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
+    "get configmap kubehz-agent-state"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
     "annotate "*) return 0 ;;
     "get pods"*) printf ''; return 0 ;;
     *) printf '' ;;
   esac
 }
 curl() {
+  stub_call curl "$@"
   _url=""
   while [ "$#" -gt 0 ]; do
     case "$1" in http*://*) _url="$1" ;; esac
@@ -81,12 +81,18 @@ STUBS_EOF
     "${CRONJOB}" > "${heartbeat}"
 
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${stubs}" "${heartbeat}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/agent_bound.sh" "${stubs}" "${heartbeat}" > "${RUNNER}"
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
   : > "${STUB_CURL_LOG}"
+  export STUB_TIMEOUT_FORM_LOG="${BATS_TEST_TMPDIR}/timeout-form.log"
+  : > "${STUB_TIMEOUT_FORM_LOG}"
+  # Each kubectl and curl call, with its bound (tests/lib/agent_bound.sh).
+  export STUB_CALL_LOG="${BATS_TEST_TMPDIR}/calls.log"
+  : > "${STUB_CALL_LOG}"
+  source "${_PROJECT_ROOT}/tests/lib/agent_bound.bash"
 }
 
 # Source the deploy lib against the REAL manifests: PATH_LOK8S must point at the
@@ -112,6 +118,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   # The identity work still ran — the Go agent mints nothing and only ever
   # READS Secret kubehz-agent, so if the CronJob stopped enrolling, a cluster
@@ -132,6 +140,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   run grep -c '/heartbeat' "${STUB_CURL_LOG}"
   assert_output "1"
@@ -143,6 +153,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   # Fail-safe direction: an old ConfigMap without the key must keep beating,
   # never fall silent.
@@ -156,6 +168,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
   run grep -c '/heartbeat' "${STUB_CURL_LOG}"
   assert_output "1"
 }
@@ -428,14 +442,39 @@ _stub_yq() {
 
 # ══ 4. Apply order (no instant with two producers) ═════════════════════════
 
+# The argv of the three calls around the stage: the Job delete, the pod poll
+# and the patch that ends the suspend. Literal on purpose: a change of the
+# selector or of the patch in the lib fails here.
+AGENT_JOBS_DELETE='-n kubehz-system delete job -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --ignore-not-found=true'
+AGENT_JOBS_POLL='-n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name'
+AGENT_RESUME='-n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p {"spec":{"suspend":false}}'
+
+# The texts of the stop of the pod wait and of an interrupt while the
+# CronJob agent is suspended. Literal on purpose: a change in the lib fails
+# here.
+_AGENT_STAYS_SUSPENDED_TEXT="The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again."
+_AGENT_SUSPEND_SAFE_TEXT="That is the safe state: a suspended CronJob starts no Job."
+_AGENT_PODS_STUCK_TEXT="A pod ends within about 30 s (its grace period) after the Job delete, unless its node does not answer: then the pod stays Terminating. Check the node of each pod: kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent -o wide. If the node is gone, delete the pod: kubectl -n kubehz-system delete pod <name> --force --grace-period=0. Then run 'lo kubehz deploy' again."
+_AGENT_INTERRUPTED_TEXT="[error] kubehz: the deploy was interrupted. The CronJob agent can stay suspended, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again: it ends the suspend."
+
 _stub_kubectl_log() {
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  export AGENT_JOBS_POLL
   : > "${STUB_KUBECTL_LOG}"
   kubectl() {
     case "$*" in
+      # The poll for the pods of the CronJob agent's Jobs: logged, and no
+      # pods.
+      "${AGENT_JOBS_POLL}") echo "$*" >> "${STUB_KUBECTL_LOG}"; return 0 ;;
       # The drain probe: report an idle cluster so the order test is not a
       # timing test.
       *"get pods"*) printf ''; return 0 ;;
+      # The identity probe: the Secret holds an agent-token, so the deploy
+      # runs no bootstrap.
+      *"get secret kubehz-agent -o go-template="*)
+        echo "$*" >> "${STUB_KUBECTL_LOG}"
+        printf 'agent-token'
+        return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
@@ -454,22 +493,31 @@ _stub_kubectl_log() {
   assert_success
 
   # Line 1 applies the CronJob tree (which carries KUBEHZ_HEARTBEAT_OWNER=
-  # operator, stopping its beat); line 2 starts the live agent. Reversed, the
-  # live agent would beat while the CronJob still did.
+  # operator, stopping its beat), suspended; line 6 starts the live agent.
+  # Reversed, the live agent would beat while the CronJob still did.
   run head -1 "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
-  # Line 2 reads the identity Secret; present here, so no bootstrap
-  # job runs and line 3 starts the live agent.
+  # Lines 2 to 4: the Jobs of the CronJob are deleted, their pods are waited
+  # for, and only then the suspend ends.
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
-  assert_output --partial "get secret kubehz-agent"
+  assert_output -- "${AGENT_JOBS_DELETE}"
   run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_JOBS_POLL}"
+  run sed -n '4p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_RESUME}"
+  # Line 5 reads the identity Secret; it holds an agent-token here, so no
+  # bootstrap job runs and line 6 starts the live agent. The probe prints
+  # only whether the key is there, never a value.
+  run sed -n '5p' "${STUB_KUBECTL_LOG}"
+  assert_output -- '-n kubehz-system get secret kubehz-agent -o go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}'
+  run sed -n '6p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
   run grep -c "create job" "${STUB_KUBECTL_LOG}"
   assert_output "0"
-  # Line 4 waits for the Deployment to be Ready. Accepted is not running, and
+  # Line 7 waits for the Deployment to be Ready. Accepted is not running, and
   # between the marker and Ready NOTHING owns the beat — so the command may not
   # report a successful handover until this returns.
-  run sed -n '4p' "${STUB_KUBECTL_LOG}"
+  run sed -n '7p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "rollout status deployment/kubehz-live-agent"
 }
 
@@ -479,15 +527,15 @@ _stub_kubectl_log() {
   local work="${BATS_TEST_TMPDIR}/a1b"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  # The Secret is absent until the one-off bootstrap Job has completed.
-  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
+  # The apply created the Secret empty; the one-off bootstrap Job fills it.
+  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-filled"
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
       *"get secret kubehz-agent"*)
         echo "$*" >> "${STUB_KUBECTL_LOG}"
-        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
-        echo "Error from server (NotFound): secrets \"kubehz-agent\" not found" >&2; return 1 ;;
+        [[ ! -f "${STUB_SECRET_FLAG}" ]] || printf 'agent-token'
+        return 0 ;;
       *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
@@ -521,7 +569,7 @@ _stub_kubectl_log() {
   assert_output "1"
 }
 
-@test "apply order (to operator): an identity Secret that never appears FAILS the deploy before the live agent" {
+@test "apply order (to operator): an identity Secret that is never filled FAILS the deploy before the live agent" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1c"
@@ -530,7 +578,7 @@ _stub_kubectl_log() {
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
-      *"get secret kubehz-agent"*) echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
+      *"get secret kubehz-agent"*) return 0 ;;
       *"wait --for=condition=complete"*) echo "error: timed out waiting for the condition" >&2; return 1 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
@@ -543,9 +591,11 @@ _stub_kubectl_log() {
   assert_failure
   assert_output --partial "did not complete within 10s"
   assert_output --partial "describe job kubehz-heartbeat-bootstrap-"
+  assert_output --partial "A Job that failed stays until you delete it, or until the next 'lo kubehz deploy' deletes it."
+  assert_output --partial "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again."
   run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
   assert_output "0"
-  run grep -c "delete job" "${STUB_KUBECTL_LOG}"
+  run grep -c "delete job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }
 
@@ -592,28 +642,29 @@ _stub_kubectl_log() {
   assert_failure
   assert_output --partial "could not read Secret kubehz-agent"
   assert_output --partial "Forbidden"
-  assert_output --partial "reporting NOTHING"
+  assert_output --partial "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so heartbeats can stop until the deploy runs again. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
+  refute_output --partial "reporting NOTHING"
   run grep -c "create job" "${STUB_KUBECTL_LOG}"
   assert_output "0"
   run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }
 
-@test "apply order (to operator): a NotFound behind a warning line still runs the bootstrap" {
+# The apply just before created the Secret, and the agent cannot create it
+# (its Role has no create): an absent Secret stops the deploy, also behind
+# a warning line, and no bootstrap runs.
+@test "apply order (to operator): an absent identity Secret (NotFound behind a warning line) STOPS the deploy without a bootstrap" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1e"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
       *"get secret kubehz-agent"*)
-        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
         echo "Warning: the kubeconfig field exec.apiVersion v1alpha1 is deprecated" >&2
         echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
-      *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
@@ -621,9 +672,44 @@ _stub_kubectl_log() {
   export -f kubectl
 
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
-  assert_success
+  assert_failure
+  assert_output --partial "Secret kubehz-agent does not exist in kubehz-system, but the deploy applied it just before"
+  assert_output --partial "The agent cannot create it"
+  assert_output --partial "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again."
+  refute_output --partial "reporting NOTHING"
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+# A bootstrap Job that completes but leaves no agent-token stops the deploy
+# before the live agent; the Job stays for its log.
+@test "apply order (to operator): a bootstrap that leaves no agent-token FAILS the deploy before the live agent" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1g"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) printf 'Warning: a deprecated field\nclaim-code\n'; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_failure
+  assert_output --partial "completed but left no agent-token in Secret kubehz-agent"
   run grep -c "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
   assert_output "1"
+  run grep -c "delete job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
 }
 
 @test "apply order (to operator): a live agent that never becomes Ready FAILS the deploy" {
@@ -633,6 +719,8 @@ _stub_kubectl_log() {
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
+      # The identity Secret holds an agent-token: no bootstrap.
+      *"get secret kubehz-agent -o go-template="*) echo "$*" >> "${STUB_KUBECTL_LOG}"; printf 'agent-token'; return 0 ;;
       # ImagePullBackOff, as the apiserver reports it: the object was accepted,
       # the pod never came up.
       *"rollout status"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; return 1 ;;
@@ -648,10 +736,11 @@ _stub_kubectl_log() {
 
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_failure
-  # The message must name the state the operator is now in — nothing beating —
-  # not just report a failed command.
+  # The message must name the state the operator is now in — the beat can
+  # stop — not just report a failed command.
   assert_output --partial "never became Ready"
-  assert_output --partial "NOTHING owns the heartbeat"
+  assert_output --partial "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not Ready, so heartbeats can stop until the deploy runs again."
+  refute_output --partial "NOTHING"
 }
 
 # A rollout wait that times out, then the pod read and the events read that
@@ -676,6 +765,7 @@ _ready_timeout() {
         if [[ -n "${STUB_EVENTS_FILE}" ]]; then cat "${STUB_EVENTS_FILE}"; else printf '%s' "${STUB_EVENTS}"; fi
         return "${STUB_EVENTS_RC}" ;;
       *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent -o go-template="*) printf 'agent-token'; return 0 ;;
       *"rollout status"*) return 1 ;;
     esac
     return 0
@@ -910,9 +1000,17 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "delete deployment -l app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view"
   # Only once the pods are gone (the stub reports an empty namespace) may the
-  # CronJob's marker be rewritten.
+  # CronJob's marker be rewritten, suspended.
   run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
+  # Then the Jobs of the CronJob are deleted, their pods are waited for, and
+  # the suspend ends as the last step.
+  run sed -n '4,6p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_JOBS_DELETE}
+${AGENT_JOBS_POLL}
+${AGENT_RESUME}"
+  run wc -l < "${STUB_KUBECTL_LOG}"
+  assert_output "6"
 
   # And nothing re-applies the live agent in cronjob mode.
   refute [ "$(grep -c "apply -k ${work}/live-agent" "${STUB_KUBECTL_LOG}")" != "0" ]
@@ -1024,7 +1122,11 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   : > "${STUB_KUBECTL_LOG}"
   kubectl() {
     case "$*" in
-      *"get pods"*) echo 'Error from server (Forbidden): pods is forbidden' >&2; return 1 ;;
+      # Only the heartbeat probe fails; the poll for the pods of the CronJob
+      # agent's Jobs (fail-hard) finds none.
+      *"--field-selector=status.phase=Running"*) echo 'Error from server (Forbidden): pods is forbidden' >&2; return 1 ;;
+      *"get pods"*) return 0 ;;
+      *"get secret kubehz-agent -o go-template="*) echo "$*" >> "${STUB_KUBECTL_LOG}"; printf 'agent-token'; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
@@ -1038,8 +1140,11 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   assert_output --partial "could not check for an in-flight heartbeat pod"
-  # Line 2 reads the identity Secret; the live agent follows on line 3.
+  # Line 3 ends the suspend, line 4 reads the identity Secret, and the live
+  # agent follows on line 5.
   run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_RESUME}"
+  run sed -n '5p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
 }
 
@@ -1085,6 +1190,18 @@ _stub_kubectl_warns() {
   _stub_kubectl_warns 'Warning: metadata.finalizers: "foregroundDeletion": prefer a domain-qualified finalizer name'
 
   run kubehz::wait_live_agent_gone
+  assert_success
+  assert_output ""
+  [ ! -s "${STUB_SLEEP_LOG}" ] || fail "the probe waited on a warning: $(cat "${STUB_SLEEP_LOG}")"
+}
+
+@test "waits: an apiserver Warning is not a pod of the CronJob agent's Jobs" {
+  # Fail-hard too: a warning line read as a pod would stop the deploy with
+  # the CronJob suspended.
+  _source_deploy
+  _stub_kubectl_warns 'Warning: v1 ComponentStatus is deprecated in v1.19+'
+
+  run kubehz::wait_agent_jobs_gone
   assert_success
   assert_output ""
   [ ! -s "${STUB_SLEEP_LOG}" ] || fail "the probe waited on a warning: $(cat "${STUB_SLEEP_LOG}")"
@@ -1493,67 +1610,169 @@ _podspec() {
 # ── stage_bind_secret ────────────────────────────────────
 
 BIND_SECRET_VALUE="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
-BIND_MANIFEST='kind: Secret
-metadata:
-  name: kubehz-agent-bind
-  namespace: kubehz-system
-data:
-  bind-secret: OWYxYw=='
+# The khzb_ form: khzb_ and 64 lowercase hex characters, 69 bytes. The hex
+# holds digits and letters.
+BIND_SECRET_PREFIXED="khzb_$(printf '0123456789abcdef%.0s' 1 2 3 4)"
 
-# _stub_kubectl_bind [fail]: log every call. The dry-run create prints
-# BIND_MANIFEST; the server-side apply saves its stdin; a call whose argv
-# contains <fail> exits 1.
+# _bind_manifest <file>: what the stub dry-run create prints for the bytes of
+# <file>, so the value can be followed to the stdin of the apply.
+_bind_manifest() {
+  printf 'kind: Secret\nmetadata:\n  name: kubehz-agent-bind\n  namespace: kubehz-system\ndata:\n  bind-secret: %s\n' "$(base64 -w0 < "${1}")"
+}
+
+# _stub_kubectl_bind [fail]: log every call. The dry-run create saves the
+# bytes of its stdin (STUB_CREATE_STDIN, and each call appends them to
+# STUB_CREATE_STDINS) and prints _bind_manifest of them; the server-side
+# apply saves its stdin (STUB_SSA_STDIN, or STUB_DRY_STDIN for the server
+# dry run of the preflight). A call whose argv contains <fail> exits 1; with
+# STUB_FAIL_AFTER_CRON set, only after the CronJob agent apply (so the
+# preflight of the operator direction passes). With STUB_DRYRUN_FAIL set,
+# the server dry run exits 1. With STUB_SWAP set, the namespace apply writes
+# that value into the bind file: a change after the check. The calls around
+# the stage have their own switches: STUB_JOBS_DELETE_FAIL fails the Job
+# delete, STUB_POLL_FAIL fails each pod poll, STUB_PODS_STAY makes each pod
+# poll answer a pod that has not ended (STUB_PODS_LINES, when it is set, is
+# the answer), and STUB_RESUME_FAIL fails the patch that ends the suspend.
+# With STUB_TERM_ON_NAMESPACE set, the namespace apply saves what <workdir>
+# holds (STUB_TERM_SEEN) and sends TERM to the shell that runs it. With
+# STUB_SIGNAL_AT set to an argv, that call sends the signal STUB_SIGNAL to
+# the shell that runs it, from the CronJob agent apply on (so not in the
+# preflight), and runs nothing else.
 _stub_kubectl_bind() {
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   export STUB_KUBECTL_FAIL="${1:-}"
   export STUB_SSA_STDIN="${BATS_TEST_TMPDIR}/ssa.stdin"
-  export BIND_MANIFEST
+  export STUB_DRY_STDIN="${BATS_TEST_TMPDIR}/dry.stdin"
+  export STUB_CREATE_STDIN="${BATS_TEST_TMPDIR}/create.stdin"
+  export STUB_CREATE_STDINS="${BATS_TEST_TMPDIR}/create.stdins"
+  export STUB_TERM_SEEN="${BATS_TEST_TMPDIR}/term.seen"
+  export AGENT_JOBS_DELETE AGENT_JOBS_POLL AGENT_RESUME
   : > "${STUB_KUBECTL_LOG}"
+  rm -f "${STUB_CREATE_STDIN}" "${STUB_CREATE_STDINS}" "${STUB_SSA_STDIN}" "${STUB_DRY_STDIN}" "${STUB_TERM_SEEN}"
   kubectl() {
+    if [[ -n "${STUB_SIGNAL_AT:-}" && "$*" == "${STUB_SIGNAL_AT}" ]] \
+      && { [[ "$*" == "apply -k "*"/agent" ]] || grep -qE '^apply -k .*/agent$' "${STUB_KUBECTL_LOG}"; }; then
+      echo "$*" >> "${STUB_KUBECTL_LOG}"
+      kill -"${STUB_SIGNAL}" "${BASHPID}"
+      return 0
+    fi
     case "$*" in
+      "${AGENT_JOBS_POLL}")
+        echo "$*" >> "${STUB_KUBECTL_LOG}"
+        if [[ -n "${STUB_POLL_FAIL:-}" ]]; then
+          echo 'Error from server (Forbidden): pods is forbidden' >&2
+          return 1
+        fi
+        [[ -z "${STUB_PODS_STAY:-}" ]] || printf '%s\n' "${STUB_PODS_LINES:-pod/kubehz-heartbeat-29000000-x2k4q}"
+        return 0 ;;
       *"get pods"*) printf ''; return 0 ;;
+      "${AGENT_JOBS_DELETE}")
+        echo "$*" >> "${STUB_KUBECTL_LOG}"
+        [[ -z "${STUB_JOBS_DELETE_FAIL:-}" ]] || { echo 'Error from server (Forbidden): jobs.batch is forbidden' >&2; return 1; }
+        return 0 ;;
+      "${AGENT_RESUME}")
+        echo "$*" >> "${STUB_KUBECTL_LOG}"
+        [[ -z "${STUB_RESUME_FAIL:-}" ]] || { echo 'Error from server (Forbidden): cronjobs.batch is forbidden' >&2; return 1; }
+        return 0 ;;
+      "apply -f "*"/agent/namespace.yaml")
+        if [[ -n "${STUB_TERM_ON_NAMESPACE:-}" ]]; then
+          echo "$*" >> "${STUB_KUBECTL_LOG}"
+          ls -A -- "${3%/agent/namespace.yaml}" > "${STUB_TERM_SEEN}"
+          kill -TERM "${BASHPID}"
+          return 0
+        fi ;;
     esac
+    local cron_seen=1
+    [[ -z "${STUB_FAIL_AFTER_CRON:-}" ]] || grep -qE '^apply -k .*/agent$' "${STUB_KUBECTL_LOG}" || cron_seen=0
     echo "$*" >> "${STUB_KUBECTL_LOG}"
-    if [[ -n "${STUB_KUBECTL_FAIL}" && "$*" == *"${STUB_KUBECTL_FAIL}"* ]]; then
+    if [[ -n "${STUB_DRYRUN_FAIL:-}" && "$*" == *"--dry-run=server"* ]]; then
+      return 1
+    fi
+    if [[ -n "${STUB_KUBECTL_FAIL}" && "$*" == *"${STUB_KUBECTL_FAIL}"* ]] && (( cron_seen )); then
       return 1
     fi
     case "$*" in
-      *"create secret generic kubehz-agent-bind"*) printf '%s\n' "${BIND_MANIFEST}" ;;
+      "apply -f "*"/agent/namespace.yaml")
+        [[ -z "${STUB_SWAP:-}" ]] || printf %s "${STUB_SWAP}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind" ;;
+      *"create secret generic kubehz-agent-bind"*)
+        cat > "${STUB_CREATE_STDIN}"
+        cat "${STUB_CREATE_STDIN}" >> "${STUB_CREATE_STDINS}"
+        _bind_manifest "${STUB_CREATE_STDIN}" ;;
+      *"apply --server-side"*"--dry-run=server"*) cat > "${STUB_DRY_STDIN}" ;;
       *"apply --server-side"*) cat > "${STUB_SSA_STDIN}" ;;
+      # The identity Secret holds an agent-token: no bootstrap.
+      *"get secret kubehz-agent -o go-template="*) printf 'agent-token' ;;
     esac
     return 0
   }
-  export -f kubectl
+  export -f kubectl _bind_manifest
 }
 
+# _write_bind_secret [value]: the stored bind secret (default BIND_SECRET_VALUE).
 _write_bind_secret() {
   mkdir -p "${PATH_CLUSTERS}/acme.example.com"
-  printf %s "${BIND_SECRET_VALUE}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  printf %s "${1:-${BIND_SECRET_VALUE}}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
 }
 
-# _assert_bind_staged_first <work> <first change>: lines 1-3 stage the Secret
-# (namespace, dry-run create from the file, server-side apply of the dry-run
-# output on stdin), and line 4 is the first call that changes the agent.
-_assert_bind_staged_first() {
-  local work="${1}" first="${2}"
+# _assert_bind_staged_after <work> <n> <value>: line <n> applies the CronJob
+# agent (suspended), lines n+1 and n+2 delete its Jobs and poll for their
+# pods, lines n+3 to n+5 stage the Secret (namespace, dry-run create from
+# stdin, server-side apply of the dry-run output on stdin), and line n+6
+# ends the suspend. The create read <value> byte for byte. No copy of the
+# value is left in <work>.
+_assert_bind_staged_after() {
+  local work="${1}" n="${2}" value="${3}" expect="${BATS_TEST_TMPDIR}/bind.expect"
+  run sed -n "${n}p" "${STUB_KUBECTL_LOG}"
+  assert_output "apply -k ${work}/agent"
+  run sed -n "$(( n + 1 ))p" "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_JOBS_DELETE}"
+  run sed -n "$(( n + 2 ))p" "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_JOBS_POLL}"
+  run sed -n "$(( n + 3 ))p" "${STUB_KUBECTL_LOG}"
+  assert_output "apply -f ${work}/agent/namespace.yaml"
+  run sed -n "$(( n + 4 ))p" "${STUB_KUBECTL_LOG}"
+  assert_output -- "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml"
+  run sed -n "$(( n + 5 ))p" "${STUB_KUBECTL_LOG}"
+  assert_output "apply --server-side --force-conflicts -f -"
+  run sed -n "$(( n + 6 ))p" "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_RESUME}"
+  # The dry-run create read the value on stdin, byte for byte.
+  printf %s "${value}" > "${expect}"
+  run cmp "${expect}" "${STUB_CREATE_STDIN}"
+  assert_success
+  # The apply reads what the dry run printed, on stdin.
+  run cat "${STUB_SSA_STDIN}"
+  assert_output "$(_bind_manifest "${expect}")"
+  # The value never reaches the command line. An upsert in place: no delete
+  # leaves a running CronJob without the Secret.
+  run grep -c -e "from-literal" -e "${value}" -e "delete secret kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run ls -A "${work}"
+  assert_output "agent
+live-agent"
+}
+
+# _assert_bind_proved_first <work> <value>: lines 1 to 3 are the preflight of
+# the stage of the operator direction (namespace, dry-run create from stdin,
+# server-side apply with --dry-run=server of the dry-run output on stdin),
+# and line 4 applies the CronJob agent. The preflight read <value> byte for
+# byte.
+_assert_bind_proved_first() {
+  local work="${1}" value="${2}" expect="${BATS_TEST_TMPDIR}/proof.expect"
   run sed -n '1p' "${STUB_KUBECTL_LOG}"
   assert_output "apply -f ${work}/agent/namespace.yaml"
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
-  assert_output -- "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=${PATH_CLUSTERS}/acme.example.com/.kubehz-bind --dry-run=client -o yaml"
+  assert_output -- "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml"
   run sed -n '3p' "${STUB_KUBECTL_LOG}"
-  assert_output "apply --server-side --force-conflicts -f -"
+  assert_output "apply --server-side --force-conflicts --dry-run=server -f -"
   run sed -n '4p' "${STUB_KUBECTL_LOG}"
-  assert_output --partial "${first}"
-  # The apply reads what the dry run printed, on stdin.
-  run cat "${STUB_SSA_STDIN}"
-  assert_output "${BIND_MANIFEST}"
-  # The value comes from the file, never from the command line. An upsert
-  # in place: no delete leaves a running CronJob without the Secret.
-  run grep -c -e "from-literal" -e "${BIND_SECRET_VALUE}" -e "delete secret kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
-  assert_output "0"
+  assert_output "apply -k ${work}/agent"
+  printf %s "${value}" > "${expect}"
+  run cat "${STUB_DRY_STDIN}"
+  assert_output "$(_bind_manifest "${expect}")"
 }
 
-@test "apply order (to operator): the bind secret is staged BEFORE the CronJob agent and the identity bootstrap" {
+@test "apply order (to operator): the stage has a preflight (a server dry run) BEFORE the CronJob agent, then is staged while the CronJob is suspended and BEFORE the identity bootstrap" {
   _source_deploy
   _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind1"
@@ -1564,12 +1783,60 @@ _assert_bind_staged_first() {
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   refute_output --partial "no bind secret"
-  _assert_bind_staged_first "${work}" "apply -k ${work}/agent"
-  run sed -n '5p' "${STUB_KUBECTL_LOG}"
+  _assert_bind_proved_first "${work}" "${BIND_SECRET_VALUE}"
+  _assert_bind_staged_after "${work}" 4 "${BIND_SECRET_VALUE}"
+  # The preflight and the stage read the same bytes.
+  printf '%s%s' "${BIND_SECRET_VALUE}" "${BIND_SECRET_VALUE}" > "${BATS_TEST_TMPDIR}/twice.expect"
+  run cmp "${BATS_TEST_TMPDIR}/twice.expect" "${STUB_CREATE_STDINS}"
+  assert_success
+  run sed -n '11p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "get secret kubehz-agent "
 }
 
-@test "apply order (to cronjob): the bind secret is staged BEFORE the live agent goes and the CronJob agent returns" {
+@test "apply order (to operator): a failed preflight of the stage stops BEFORE the CronJob agent and stages nothing" {
+  _source_deploy
+  _write_bind_secret
+  local spec fail changed work n=0
+  for spec in "dryrun The deploy applied only the namespace kubehz-system." \
+              "--dry-run=client The deploy applied only the namespace kubehz-system." \
+              "namespace.yaml The namespace apply can have changed the namespace kubehz-system. The deploy applied no other object."; do
+    read -r fail changed <<< "${spec}"
+    n=$(( n + 1 ))
+    if [[ "${fail}" == dryrun ]]; then
+      export STUB_DRYRUN_FAIL=1
+      _stub_kubectl_bind
+    else
+      unset STUB_DRYRUN_FAIL
+      _stub_kubectl_bind "${fail}"
+    fi
+    work="${BATS_TEST_TMPDIR}/proof${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+    run kubehz::deploy_apply "${work}" acme.example.com operator managed
+    assert_failure
+    assert_output --partial "kubehz: the preflight of the bind secret stage failed (a server-side dry run of Secret kubehz-system/kubehz-agent-bind with the value from clusters/acme.example.com/.kubehz-bind), so the deploy stopped before the CronJob agent apply. ${changed} The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file and the Secret (kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found), then claim the new row with the code from 'lo kubehz claim-code'."
+    refute_output --partial "Nothing else was changed."
+    refute_output --partial "Only the namespace kubehz-system was applied."
+    refute_output --partial "proof"
+    refute_output --partial "${BIND_SECRET_VALUE}"
+    if [[ "${fail}" == namespace.yaml ]]; then
+      # The namespace apply failed: no dry-run create and no server dry run.
+      run grep -c -e "--dry-run" "${STUB_KUBECTL_LOG}"
+      assert_output "0"
+    fi
+    # No agent changed, and no Secret was staged.
+    run grep -c -e "apply -k " -e "apply --server-side --force-conflicts -f -" -e "get secret kubehz-agent " \
+      -e "create job" -e "rollout status" -e "delete job" -e "patch cronjob" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+    run ls -A "${work}"
+    assert_output "agent
+live-agent"
+  done
+  unset STUB_DRYRUN_FAIL
+}
+
+@test "apply order (to cronjob): the bind secret is staged right AFTER the live agent goes and the CronJob agent returns" {
   _source_deploy
   _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind2"
@@ -1579,15 +1846,76 @@ _assert_bind_staged_first() {
 
   run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
   assert_success
-  _assert_bind_staged_first "${work}" "delete -k ${work}/live-agent/managed"
-  run tail -1 "${STUB_KUBECTL_LOG}"
-  assert_output --partial "apply -k ${work}/agent"
+  run head -1 "${STUB_KUBECTL_LOG}"
+  assert_output "delete -k ${work}/live-agent/managed --ignore-not-found=true"
+  _assert_bind_staged_after "${work}" 3 "${BIND_SECRET_VALUE}"
+  # The patch that ends the suspend is the last call.
+  run wc -l < "${STUB_KUBECTL_LOG}"
+  assert_output "9"
 }
 
-@test "stage_bind_secret: a failed stage with a bind secret on disk stops before the CronJob agent, in both directions" {
+@test "apply order (both directions): a khzb_ bind secret is staged as it is, right AFTER the CronJob agent" {
+  _source_deploy
+  local mode owner access cron work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  # The operator direction runs the preflight of the stage in lines 1 to 3
+  # first.
+  for mode in "operator managed 4" "cronjob registered 3"; do
+    read -r owner access cron <<< "${mode}"
+    n=$(( n + 1 ))
+    _stub_kubectl_bind
+    work="${BATS_TEST_TMPDIR}/prefixed${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+    _write_bind_secret "${BIND_SECRET_PREFIXED}"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_success
+    refute_output --partial "no bind secret"
+    refute_output --partial "${BIND_SECRET_PREFIXED}"
+    _assert_bind_staged_after "${work}" "${cron}" "${BIND_SECRET_PREFIXED}"
+    # The file the Secret comes from keeps its 69 bytes.
+    run cat "${bind_file}"
+    assert_output "${BIND_SECRET_PREFIXED}"
+    run wc -c < "${bind_file}"
+    assert_output "69"
+  done
+}
+
+@test "stage_bind_secret: the deploy stages the bytes it checked, even when the file changes after the check" {
+  _source_deploy
+  local mode owner access cron value work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  export STUB_SWAP="khzb_$(printf '0f%.0s' $(seq 1 32))"
+  # The operator direction runs the preflight of the stage in lines 1 to 3
+  # first.
+  for mode in "operator managed 4" "cronjob registered 3"; do
+    read -r owner access cron <<< "${mode}"
+    for value in "${BIND_SECRET_VALUE}" "${BIND_SECRET_PREFIXED}"; do
+      n=$(( n + 1 ))
+      _stub_kubectl_bind
+      work="${BATS_TEST_TMPDIR}/swap${n}"
+      mkdir -p "${work}"
+      kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+      _write_bind_secret "${value}"
+
+      run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+      assert_success
+      # The stub changed the file between the check and the create.
+      run cat "${bind_file}"
+      assert_output "${STUB_SWAP}"
+      _assert_bind_staged_after "${work}" "${cron}" "${value}"
+    done
+  done
+  unset STUB_SWAP
+}
+
+@test "stage_bind_secret: a failed stage with a bind secret on disk stops with the CronJob suspended, in both directions" {
   _source_deploy
   _write_bind_secret
   local mode owner access step work n=0
+  local want="kubehz: could not stage the bind secret from clusters/acme.example.com/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The stage can have applied the namespace or the Secret. The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. If you deploy without the secret, the agent can register a separate pending row if it has no binding and no staged value yet. To deploy without the secret, remove the file and the Secret (kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found), then claim the new row with the code from 'lo kubehz claim-code'."
+  # The stub fails the step only after the CronJob agent apply, so the
+  # preflight of the operator direction passes and the real stage fails.
+  export STUB_FAIL_AFTER_CRON=1
   for mode in "operator managed" "cronjob registered"; do
     read -r owner access <<< "${mode}"
     for step in "namespace.yaml" "--dry-run=client" "apply --server-side"; do
@@ -1599,21 +1927,28 @@ _assert_bind_staged_first() {
 
       run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
       assert_failure
-      assert_output --partial "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind"
-      assert_output --partial "The deploy stopped before the CronJob agent."
-      assert_output --partial "registers a separate pending row, and the announced row gets no heartbeats."
-      assert_output --partial "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new."
-      assert_output --partial "To deploy without the secret, remove the file"
+      assert_output --partial "${want}"
+      refute_output --partial "reporting NOTHING"
+      refute_output --partial "The deploy applied the CronJob agent and then stopped."
       refute_output --partial "pending-pool"
-      # Nothing that changes an agent ran: no CronJob, no live-agent delete,
-      # no bootstrap Job.
-      run grep -c -e "apply -k" -e "delete -k" -e "create job" "${STUB_KUBECTL_LOG}"
+      # The CronJob agent apply is the last call that changes an agent: the
+      # Job delete and the pod poll follow it, then the failed stage. No
+      # resume, no live agent, no bootstrap Job, no identity read.
+      run grep -c -e "apply -k ${work}/agent\$" "${STUB_KUBECTL_LOG}"
+      assert_output "1"
+      run grep -c -F -x -e "${AGENT_JOBS_DELETE}" -e "${AGENT_JOBS_POLL}" "${STUB_KUBECTL_LOG}"
+      assert_output "2"
+      run grep -c -e "patch cronjob" -e "apply -k ${work}/live-agent" -e "create job" -e "get secret kubehz-agent " -e "rollout status" "${STUB_KUBECTL_LOG}"
       assert_output "0"
+      run ls -A "${work}"
+      assert_output "agent
+live-agent"
     done
   done
+  unset STUB_FAIL_AFTER_CRON
 }
 
-@test "stage_bind_secret: no bind secret on disk warns, touches no Secret and keeps the order" {
+@test "stage_bind_secret: no bind secret on disk warns, touches no Secret, and still deletes the Jobs, waits and ends the suspend" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/bind3"
@@ -1622,20 +1957,27 @@ _assert_bind_staged_first() {
 
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
-  assert_output --partial "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind."
-  assert_output --partial "the agent registers a separate pending row."
-  assert_output --partial "The announced row stays as it is and gets no heartbeats."
-  assert_output --partial "Claim the new row with the code from 'lo kubehz claim-code'."
+  assert_output --partial "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind. If 'lo kubehz register' ran in another checkout, the agent can register a separate pending row if it has no binding and no staged value yet. The announced row then stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'."
   run grep -c -e "kubehz-agent-bind" -e "namespace.yaml" "${STUB_KUBECTL_LOG}"
   assert_output "0"
   run head -1 "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
+  run sed -n '2,4p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "${AGENT_JOBS_DELETE}
+${AGENT_JOBS_POLL}
+${AGENT_RESUME}"
 }
 
-@test "stage_bind_secret: a file that is not a bind secret is never staged, and the deploy says so (F6)" {
+@test "stage_bind_secret: a file that is not a bind secret is never staged, and the deploy says so" {
   _source_deploy
   local fixture work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
-  for fixture in directory newline upper short unreadable; do
+  local v="${BIND_SECRET_VALUE}" p="${BIND_SECRET_PREFIXED}"
+  # nl69 is the trap of a check per line: 64 hex, a newline and 4 bytes make
+  # 69 bytes, and the first line matches. nul69 is the same trap with a NUL:
+  # a grep in binary mode can read the NUL as a line end.
+  for fixture in directory newline upper short unreadable cr crlf prefixed-newline prefixed-cr prefixed-crlf \
+    nl64 nl69 nl69-first prefixed-upper prefixed-upper-hex khza long65 prefixed-short68 prefixed-long70 \
+    nul69 nul69-first suffix hex69 nothex prefixed-nothex oversized; do
     [[ "${fixture}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
     n=$(( n + 1 ))
     _stub_kubectl_log
@@ -1643,10 +1985,33 @@ _assert_bind_staged_first() {
     mkdir -p "${PATH_CLUSTERS}/acme.example.com"
     case "${fixture}" in
       directory) mkdir -p "${bind_file}" ;;
-      newline) printf '%s\n' "${BIND_SECRET_VALUE}" > "${bind_file}" ;;
-      upper) printf %s "${BIND_SECRET_VALUE^^}" > "${bind_file}" ;;
-      short) printf %s "${BIND_SECRET_VALUE:1}" > "${bind_file}" ;;
-      unreadable) printf %s "${BIND_SECRET_VALUE}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+      newline) printf '%s\n' "${v}" > "${bind_file}" ;;
+      upper) printf %s "${v^^}" > "${bind_file}" ;;
+      short) printf %s "${v:1}" > "${bind_file}" ;;
+      unreadable) printf %s "${v}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+      cr) printf '%s\r' "${v}" > "${bind_file}" ;;
+      crlf) printf '%s\r\n' "${v}" > "${bind_file}" ;;
+      prefixed-newline) printf '%s\n' "${p}" > "${bind_file}" ;;
+      prefixed-cr) printf '%s\r' "${p}" > "${bind_file}" ;;
+      prefixed-crlf) printf '%s\r\n' "${p}" > "${bind_file}" ;;
+      nl64) printf '%s\n%s' "${v:0:32}" "${v:33}" > "${bind_file}" ;;
+      nl69) printf '%s\nabcd' "${v}" > "${bind_file}" ;;
+      nl69-first) printf 'abcd\n%s' "${v}" > "${bind_file}" ;;
+      prefixed-upper) printf %s "KHZB_${v}" > "${bind_file}" ;;
+      prefixed-upper-hex) printf %s "khzb_${v^^}" > "${bind_file}" ;;
+      khza) printf %s "khza_${v}" > "${bind_file}" ;;
+      long65) printf %s "${v}a" > "${bind_file}" ;;
+      prefixed-short68) printf %s "khzb_${v:1}" > "${bind_file}" ;;
+      prefixed-long70) printf %s "khzb_${v}a" > "${bind_file}" ;;
+      nul69) printf '%s\0abcd' "${v}" > "${bind_file}" ;;
+      nul69-first) printf 'abcd\0%s' "${v}" > "${bind_file}" ;;
+      suffix) printf %s "${v}khzb_" > "${bind_file}" ;;
+      hex69) printf %s "${v}${v:0:5}" > "${bind_file}" ;;
+      # 64 or 69 bytes with one letter that is not hex.
+      nothex) printf %s "${v:0:63}g" > "${bind_file}" ;;
+      prefixed-nothex) printf %s "khzb_${v:0:63}g" > "${bind_file}" ;;
+      # 64 kB that start with a valid value: the copy holds 70 bytes.
+      oversized) { printf %s "${v}"; head -c 65536 /dev/zero | tr '\0' a; } > "${bind_file}" ;;
     esac
     work="${BATS_TEST_TMPDIR}/malformed${n}"
     mkdir -p "${work}"
@@ -1654,28 +2019,40 @@ _assert_bind_staged_first() {
 
     run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
     assert_success
-    assert_output --partial "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters)."
-    assert_output --partial "The announced row stays as it is and gets no heartbeats."
+    assert_output --partial "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). The deploy does not stage it, and a Secret kubehz-agent-bind from an earlier deploy stays as it is. Then the agent can register a separate pending row if it has no binding and no staged value yet. The announced row then stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'."
+    assert_output --partial "If the file holds a newer form of bind secret, upgrade lok8s (the lo binary and, for a bash install, the synced tree), then run 'lo kubehz deploy' again."
     run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
     assert_output "0"
     run head -1 "${STUB_KUBECTL_LOG}"
     assert_output --partial "delete -k ${work}/live-agent/managed"
+    # The check left no copy of the file in the render directory.
+    run ls -A "${work}"
+    assert_output "agent
+live-agent"
   done
   chmod -R u+rwx "${PATH_CLUSTERS}" 2>/dev/null || true
 }
 
-@test "deploy_apply: a failure after the stage names what changed so far (F2)" {
+@test "deploy_apply: a failed agent step says what it can have changed, and stages nothing after it" {
   _source_deploy
-  local spec owner access fail prefix staged work n=0
-  for spec in "operator managed apply|-k could not apply the CronJob agent (identity bootstrap) —" \
-              "cronjob registered delete|-k could not remove the live agent —" \
-              "cronjob registered delete|deployment|-l could not sweep live-agent Deployments by label —"; do
-    read -r owner access fail prefix <<< "${spec}"
+  local spec owner access fail want on_disk work n=0
+  local cron="kubehz: could not apply the CronJob agent (identity bootstrap). The apply can have applied part of the agent objects; an applied CronJob is suspended, so heartbeats can stop until the deploy runs again. Fix the cause, then run 'lo kubehz deploy' again."
+  local remove="kubehz: could not remove the live agent. The delete can have removed part of the live agent objects. The deploy did not apply the CronJob agent, so heartbeats can stop until the deploy runs again."
+  local sweep="kubehz: could not sweep live-agent Deployments by label. The live agent delete before it passed, and the sweep can have removed some Deployments. The deploy did not apply the CronJob agent, so heartbeats can stop until the deploy runs again."
+  local back="kubehz: could not apply the CronJob agent. The live agent is gone. The apply can have applied part of the agent objects; an applied CronJob is suspended, so heartbeats can stop until the deploy runs again. Fix the cause, then run 'lo kubehz deploy' again."
+  local live="kubehz: could not apply the live agent. The apply can have applied part of the live agent objects. The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator), so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again, or set spec.kubehz.agent back to cronjob and run it again."
+  # The last word of each row names the variable with the expected error.
+  for spec in "operator managed apply|-k cron" \
+              "cronjob registered delete|-k remove" \
+              "cronjob registered delete|deployment|-l sweep" \
+              "cronjob registered apply|-k back" \
+              "operator managed live-agent/managed live"; do
+    read -r owner access fail want <<< "${spec}"
     fail="${fail//|/ }"
-    for staged in 1 0; do
+    for on_disk in 1 0; do
       n=$(( n + 1 ))
       rm -f "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
-      if (( staged )); then _write_bind_secret; fi
+      if (( on_disk )); then _write_bind_secret; fi
       _stub_kubectl_bind "${fail}"
       work="${BATS_TEST_TMPDIR}/changed${n}"
       mkdir -p "${work}"
@@ -1683,31 +2060,330 @@ _assert_bind_staged_first() {
 
       run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
       assert_failure
-      if (( staged )); then
-        assert_output --partial "${prefix} only the bind Secret changed"
+      assert_output --partial "${!want}"
+      refute_output --partial "othing else was changed"
+      refute_output --partial "Only the namespace kubehz-system was applied."
+      refute_output --partial "reporting NOTHING"
+      refute_output --partial "still one producer"
+      if [[ "${want}" == live ]]; then
+        # The live agent apply comes after the stage and the end of the
+        # suspend.
+        run grep -c -F -x -e "${AGENT_RESUME}" "${STUB_KUBECTL_LOG}"
+        assert_output "1"
+        run grep -c -e "apply --server-side --force-conflicts -f -" "${STUB_KUBECTL_LOG}"
+        assert_output "${on_disk}"
       else
-        assert_output --partial "${prefix} nothing else was changed"
+        # No stage, no Job delete and no end of the suspend.
+        run grep -c -e "apply --server-side --force-conflicts -f -" -e "delete job" -e "patch cronjob" "${STUB_KUBECTL_LOG}"
+        assert_output "0"
+      fi
+      if [[ "${owner}" == operator ]] && (( on_disk )); then
+        # The preflight of the stage ran before the CronJob agent apply.
+        run grep -c -e "--dry-run=server" "${STUB_KUBECTL_LOG}"
+        assert_output "1"
+      elif [[ "${want}" != live ]]; then
+        run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
+        assert_output "0"
       fi
     done
   done
 }
 
-@test "deploy_print: with a bind secret on disk the dry run says first that the Secret goes in first (F5)" {
+@test "deploy_print: the dry run names the suspend, the Job delete and the wait, the Secret, and the end of the suspend" {
   _source_deploy
-  local work="${BATS_TEST_TMPDIR}/print1"
-  mkdir -p "${work}"
-  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+  local mode owner access next work n=0
+  local jobs="# The CronJob agent is applied suspended. The deploy then deletes its Jobs (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent) and waits until their pods have ended."
+  local resume="# The deploy then sets spec.suspend to false on cronjob/kubehz-heartbeat."
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    work="${BATS_TEST_TMPDIR}/print${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+    _write_bind_secret
+    kubectl() { echo "kind: Rendered"; }
+    export -f kubectl
+    next="# The live agent is NOT deployed in cronjob mode; a previous install would be removed."
+    [[ "${owner}" != operator ]] || next="# --- Live agent (kubehz-live-agent) — managed tier RBAC ---"
+
+    run kubehz::deploy_print "${work}" acme.example.com "${owner}" "${access}"
+    assert_success
+    assert_line --index 0 "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: ${owner} ---"
+    assert_line --index 1 "kind: Rendered"
+    assert_line --index 2 -- "---"
+    assert_line --index 3 "${jobs}"
+    assert_line --index 4 -- "---"
+    assert_line --index 5 "# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied after the CronJob agent; the value is not printed ---"
+    assert_line --index 6 -- "---"
+    assert_line --index 7 "${resume}"
+    assert_line --index 8 -- "---"
+    assert_line --index 9 "${next}"
+    refute_output --partial "${BIND_SECRET_VALUE}"
+    run ls -A "${work}"
+    assert_output "agent
+live-agent"
+
+    rm -f "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+    run kubehz::deploy_print "${work}" acme.example.com "${owner}" "${access}"
+    assert_success
+    refute_output --partial "kubehz-agent-bind"
+    assert_line --index 3 "${jobs}"
+    assert_line --index 4 -- "---"
+    assert_line --index 5 "${resume}"
+  done
+}
+
+@test "cronjob: the CronJob agent ships suspended, and its jobTemplate labels the Jobs as the pods" {
+  run command yq -r '.spec.suspend' "${CRONJOB}"
+  assert_output "true"
+  run command yq -r '.spec.jobTemplate.metadata.labels.app' "${CRONJOB}"
+  assert_output "kubehz-heartbeat"
+  run command yq -r '.spec.jobTemplate.metadata.labels["app.kubernetes.io/name"]' "${CRONJOB}"
+  assert_output "kubehz-agent"
+  run command yq -r '.spec.jobTemplate.spec.template.metadata.labels.app' "${CRONJOB}"
+  assert_output "kubehz-heartbeat"
+  run command yq -r '.spec.jobTemplate.spec.template.metadata.labels["app.kubernetes.io/name"]' "${CRONJOB}"
+  assert_output "kubehz-agent"
+}
+
+@test "settle_cron_agent: Jobs that do not go stop the deploy before the stage, with the CronJob suspended, in both directions" {
+  _source_deploy
   _write_bind_secret
-  kubectl() { echo "kind: Rendered"; }
-  export -f kubectl
+  # After 100 sleeps the stub sends TERM: a wait without its bound ends with
+  # 143 and does not hang.
+  sleep() {
+    _sleeps=$(( ${_sleeps:-0} + 1 ))
+    (( _sleeps < 100 )) || kill -TERM "${BASHPID}"
+  }
+  export -f sleep
+  local mode owner access switch want work n=0
+  local suspended="${_AGENT_STAYS_SUSPENDED_TEXT}"
+  local delete="kubehz: could not delete the Jobs of the CronJob agent (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent). The delete can have removed some of them. ${suspended} The kubeconfig needs list and delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
+  local poll="kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for 1s: Error from server (Forbidden): pods is forbidden. ${suspended} ${_AGENT_SUSPEND_SAFE_TEXT} The kubeconfig needs list on Pods in kubehz-system. ${_AGENT_PODS_STUCK_TEXT}"
+  local stay="kubehz: pods of the CronJob agent's Jobs did not end within 1s after the deploy deleted the Jobs. The pods that have not ended: kubehz-heartbeat-29000000-x2k4q. ${suspended} ${_AGENT_SUSPEND_SAFE_TEXT} ${_AGENT_PODS_STUCK_TEXT}"
+  KUBEHZ_AGENT_JOBS_DRAIN_SECONDS=1
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    for switch in "STUB_JOBS_DELETE_FAIL delete" "STUB_POLL_FAIL poll" "STUB_PODS_STAY stay"; do
+      read -r switch want <<< "${switch}"
+      n=$(( n + 1 ))
+      unset STUB_JOBS_DELETE_FAIL STUB_POLL_FAIL STUB_PODS_STAY
+      export "${switch}=1"
+      _stub_kubectl_bind
+      work="${BATS_TEST_TMPDIR}/jobs${n}"
+      mkdir -p "${work}"
+      kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
 
-  run kubehz::deploy_print "${work}" acme.example.com cronjob registered
-  assert_success
-  assert_line --index 0 "# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied first; the value is not printed ---"
-  refute_output --partial "${BIND_SECRET_VALUE}"
+      run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+      assert_failure
+      assert_output --partial "${!want}"
+      # The pod wait names the force delete for a pod on a node that is
+      # gone; the Job delete has no pod to name.
+      if [[ "${want}" == delete ]]; then
+        refute_output --partial "delete pod"
+        refute_output --partial -- "--force"
+      else
+        assert_output --partial -- "--force --grace-period=0"
+      fi
+      # The Job delete ran; the poll ran once unless the delete failed. No
+      # stage, no end of the suspend, no live agent.
+      run grep -c -F -x -e "${AGENT_JOBS_DELETE}" "${STUB_KUBECTL_LOG}"
+      assert_output "1"
+      run grep -c -F -x -e "${AGENT_JOBS_POLL}" "${STUB_KUBECTL_LOG}"
+      if [[ "${want}" == delete ]]; then assert_output "0"; else assert_output "1"; fi
+      run grep -c -e "apply --server-side --force-conflicts -f -" -e "patch cronjob" -e "apply -k ${work}/live-agent" "${STUB_KUBECTL_LOG}"
+      assert_output "0"
+      run ls -A "${work}"
+      assert_output "agent
+live-agent"
+    done
+  done
+  unset STUB_JOBS_DELETE_FAIL STUB_POLL_FAIL STUB_PODS_STAY
+}
 
-  rm -f "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
-  run kubehz::deploy_print "${work}" acme.example.com cronjob registered
-  assert_success
-  refute_output --partial "kubehz-agent-bind"
+@test "wait_agent_jobs_gone: a pod that never ends stops the deploy at the end of the window, names the pods, and keeps the CronJob suspended, in both directions" {
+  # A pod on a node that does not answer stays Terminating, in the phase
+  # Running. KUBEHZ_AGENT_JOBS_DRAIN_SECONDS is the default 130: 26 polls,
+  # each followed by a sleep of 5 s. Only names of the DNS shape are printed.
+  _source_deploy
+  _write_bind_secret
+  export STUB_SLEEP_LOG="${BATS_TEST_TMPDIR}/sleep.log"
+  # The sleep is instant, so only the bound of the wait ends it. After 1000
+  # sleeps the stub sends TERM: a wait without its bound then ends with 143,
+  # not 1, and does not hang.
+  sleep() {
+    echo "slept $*" >> "${STUB_SLEEP_LOG}"
+    (( $(wc -l < "${STUB_SLEEP_LOG}") < 1000 )) || kill -TERM "${BASHPID}"
+  }
+  export -f sleep
+  export STUB_PODS_STAY=1
+  export STUB_PODS_LINES=$'pod/kubehz-heartbeat-29000000-x2k4q\npod/kubehz-heartbeat-29000005-b7m2p\npod/Bad\e[31mName'
+  local want="[error] kubehz: pods of the CronJob agent's Jobs did not end within 130s after the deploy deleted the Jobs. The pods that have not ended: kubehz-heartbeat-29000000-x2k4q, kubehz-heartbeat-29000005-b7m2p. ${_AGENT_STAYS_SUSPENDED_TEXT} ${_AGENT_SUSPEND_SAFE_TEXT} ${_AGENT_PODS_STUCK_TEXT}"
+  local mode owner access work n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    : > "${STUB_SLEEP_LOG}"
+    _stub_kubectl_bind
+    work="${BATS_TEST_TMPDIR}/never${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_equal "${status}" 1
+    assert_line "${want}"
+    refute_output --partial "Bad"
+    run grep -c -F -x -e "${AGENT_JOBS_POLL}" "${STUB_KUBECTL_LOG}"
+    assert_output "26"
+    run grep -c -F -x -e "slept 5" "${STUB_SLEEP_LOG}"
+    assert_output "26"
+    # spec.suspend stays true: no stage, no patch, no live agent.
+    run grep -c -e "apply --server-side --force-conflicts -f -" -e "patch cronjob" -e "apply -k ${work}/live-agent" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+  done
+  unset STUB_PODS_STAY STUB_PODS_LINES
+}
+
+@test "resume_cron_agent: a failed end of the suspend stops the deploy and says the CronJob can stay suspended" {
+  _source_deploy
+  _write_bind_secret
+  local mode owner access work n=0
+  local want="kubehz: could not set spec.suspend to false on cronjob/kubehz-heartbeat. The CronJob agent can stay suspended, so heartbeats can stop until the deploy runs again. The kubeconfig needs patch on CronJobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. The deploy sets it with: kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p '{\"spec\":{\"suspend\":false}}'."
+  export STUB_RESUME_FAIL=1
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    _stub_kubectl_bind
+    work="${BATS_TEST_TMPDIR}/resume${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_failure
+    assert_output --partial "${want}"
+    # The stage ran before the patch; nothing after it.
+    run grep -c -e "apply --server-side --force-conflicts -f -" "${STUB_KUBECTL_LOG}"
+    assert_output "1"
+    run tail -1 "${STUB_KUBECTL_LOG}"
+    assert_output -- "${AGENT_RESUME}"
+  done
+  unset STUB_RESUME_FAIL
+}
+
+@test "deploy_apply: a TERM during the stage removes the private copy, in both directions" {
+  _source_deploy
+  _write_bind_secret
+  local mode owner access work n=0
+  export STUB_TERM_ON_NAMESPACE=1
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    _stub_kubectl_bind
+    work="${BATS_TEST_TMPDIR}/term${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_equal "${status}" 143
+    # The copy was there when the TERM came, and it is gone after it.
+    run cat "${STUB_TERM_SEEN}"
+    assert_line "bind-secret"
+    run ls -A "${work}"
+    assert_output "agent
+live-agent"
+    # Nothing ran after the namespace apply that got the TERM.
+    run tail -1 "${STUB_KUBECTL_LOG}"
+    assert_output "apply -f ${work}/agent/namespace.yaml"
+  done
+  unset STUB_TERM_ON_NAMESPACE
+}
+
+@test "deploy_apply: an INT or a TERM from the CronJob agent apply to the end of the suspend says that the CronJob can stay suspended and ends with 130 or 143, in both directions" {
+  # At each step: the CronJob agent apply, the Job delete, the sleep of the
+  # pod wait, the namespace apply of the stage and the patch that ends the
+  # suspend. One line in place of the error of the step, and no step after
+  # it. A stub in the shell that runs deploy_apply sends the signal to that
+  # shell, not to the test.
+  _source_deploy
+  _write_bind_secret
+  export STUB_SLEEP_LOG="${BATS_TEST_TMPDIR}/sleep.log"
+  sleep() {
+    echo "slept $*" >> "${STUB_SLEEP_LOG}"
+    [[ "${STUB_SIGNAL_AT:-}" != sleep ]] || kill -"${STUB_SIGNAL}" "${BASHPID}"
+  }
+  export -f sleep
+  local mode owner access work at sig want_rc last n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    for at in cron delete sleep stage resume; do
+      for sig in INT TERM; do
+        n=$(( n + 1 ))
+        work="${BATS_TEST_TMPDIR}/signal${n}"
+        mkdir -p "${work}"
+        kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+        unset STUB_PODS_STAY
+        case "${at}" in
+          cron) STUB_SIGNAL_AT="apply -k ${work}/agent" ;;
+          delete) STUB_SIGNAL_AT="${AGENT_JOBS_DELETE}" ;;
+          sleep) STUB_SIGNAL_AT=sleep; export STUB_PODS_STAY=1 ;;
+          stage) STUB_SIGNAL_AT="apply -f ${work}/agent/namespace.yaml" ;;
+          resume) STUB_SIGNAL_AT="${AGENT_RESUME}" ;;
+        esac
+        export STUB_SIGNAL_AT STUB_SIGNAL="${sig}"
+        _stub_kubectl_bind
+        : > "${STUB_SLEEP_LOG}"
+
+        run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+        want_rc=130
+        [[ "${sig}" == INT ]] || want_rc=143
+        assert_equal "${status}" "${want_rc}"
+        # The line, once, and no error of the step.
+        assert_equal "$(grep -c -F -x -e "${_AGENT_INTERRUPTED_TEXT}" <<< "${output}")" 1
+        refute_output --partial "could not"
+        refute_output --partial "cannot list"
+        # No step after the signal.
+        last="${STUB_SIGNAL_AT}"
+        [[ "${at}" != sleep ]] || last="${AGENT_JOBS_POLL}"
+        run tail -1 "${STUB_KUBECTL_LOG}"
+        assert_output -- "${last}"
+        if [[ "${at}" != resume ]]; then
+          run grep -c -e "patch cronjob" "${STUB_KUBECTL_LOG}"
+          assert_output "0"
+        fi
+        run grep -c -e "apply -k ${work}/live-agent" -e "create job" "${STUB_KUBECTL_LOG}"
+        assert_output "0"
+        # The private copy is gone.
+        run ls -A "${work}"
+        assert_output "agent
+live-agent"
+      done
+    done
+  done
+  unset STUB_SIGNAL_AT STUB_SIGNAL STUB_PODS_STAY
+}
+
+@test "deploy_agent: an INT or a TERM while the CronJob agent is suspended ends the deploy with 130 or 143, not 1, and prints no summary" {
+  # The subshell of deploy_apply ends with the status of its trap, and
+  # deploy_agent passes it on, as the Go binary exits 128+n.
+  _source_deploy
+  export LOK8S_KUBEHZ_HOSTING="self" LOK8S_KUBEHZ_ACCESS="registered"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.cloud" LOK8S_KUBEHZ_AGENT="cronjob"
+  _write_bind_secret
+  sleep() { kill -"${STUB_SIGNAL}" "${BASHPID}"; }
+  export -f sleep
+  export STUB_PODS_STAY=1
+  local sig want_rc
+  for sig in INT TERM; do
+    export STUB_SIGNAL="${sig}"
+    _stub_kubectl_bind
+    run kubehz::deploy_agent acme.example.com
+    want_rc=130
+    [[ "${sig}" == INT ]] || want_rc=143
+    assert_equal "${status}" "${want_rc}"
+    assert_line "${_AGENT_INTERRUPTED_TEXT}"
+    refute_output --partial "heartbeat CronJob deployed"
+    run tail -1 "${STUB_KUBECTL_LOG}"
+    assert_output -- "${AGENT_JOBS_POLL}"
+  done
+  unset STUB_SIGNAL STUB_PODS_STAY
 }

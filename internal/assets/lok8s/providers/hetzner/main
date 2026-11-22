@@ -1083,16 +1083,37 @@ hetzner::_authorized_key() {
 }
 
 # hetzner::_check_key_pair <sshPublicKey> <sshPrivateKey>
-# Error when sshPublicKey is not the public key of sshPrivateKey (`ssh-keygen
-# -y` derives it), or when sshPrivateKey does not exist. Only a warning when
-# ssh-keygen cannot read the private key (it has a passphrase). Nothing to
-# check when one of the two is not set.
+# Error when the running user owns sshPrivateKey and group or other users
+# can access it (its mode has a bit of 077): ssh does not use such a key
+# ("bad permissions"), so the `ssh -i` of the readiness barrier goes on
+# without it. ssh checks the mode only of a key that the running user owns
+# (OpenSSH sshkey_perm_ok: st_uid == getuid()). It uses a key of another
+# owner, for example a root-owned 0440 Secret mount that a non-root runner
+# reads, so that key passes. Error when sshPublicKey is not the public key
+# of sshPrivateKey (`ssh-keygen -y` derives it), or when sshPrivateKey does
+# not exist. Only a warning when ssh-keygen cannot read the private key for
+# another reason (it has a passphrase). The mode check needs sshPrivateKey
+# only; the pair checks need the two.
 hetzner::_check_key_pair() {
-  local pub="${1}" priv="${2}" file want derived got
-  [[ -n "${pub}" && -n "${priv}" ]] || return 0
+  local pub="${1}" priv="${2}" file want derived got owner_mode mode
+  local stat_re='^([0-9]+) ([0-7]+)$'
+  [[ -n "${priv}" ]] || return 0
   file="${priv}"
   # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
   [[ "${file}" != "~/"* ]] || file="${HOME}/${file:2}"
+  # -L: the owner and the mode of the file that a link points to, which ssh
+  # checks. ${UID} is the real user id, the value of getuid(). When stat
+  # cannot tell the owner and the mode, there is no mode check (with
+  # sshPublicKey set, the ssh-keygen -y below then warns about a bad key).
+  if [[ -f "${file}" ]] && owner_mode="$(stat -L -c '%u %a' -- "${file}" 2>/dev/null)" &&
+     [[ "${owner_mode}" =~ ${stat_re} ]] && [[ "${BASH_REMATCH[1]}" == "${UID}" ]]; then
+    mode="${BASH_REMATCH[2]}"
+    if (( (8#${mode} & 8#077) != 0 )); then
+      error "rebuild: sshPrivateKey '${priv}' (${file}) has mode ${mode}: group or other users can access it. ssh does not use a private key with these permissions, so the readiness check cannot connect after the reimage, and nothing was reimaged. Make the key private: chmod 600 $(hetzner::_shell_word "${file}")"
+      return 1
+    fi
+  fi
+  [[ -n "${pub}" ]] || return 0
   if [[ ! -f "${file}" ]]; then
     error "rebuild: sshPrivateKey '${priv}' does not exist (${file}). The readiness check connects with it after the reimage, so nothing was reimaged. Correct sshPrivateKey in the descriptor."
     return 1

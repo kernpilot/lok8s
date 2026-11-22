@@ -96,7 +96,7 @@ of a refusal), and fail on a row they cannot build. The bats twin skips
 without helm v3.3+ locally (`bats --filter-tags real-helm tests/unit/` with
 a helm v3.3+ on `PATH` runs every test with that tag). The argsh container
 of `unit-tests` has no helm, so that job runs the tag a second time
-natively, with a pinned helm v3.21.2, where `CI=true` turns a missing helm
+natively, with a pinned helm v3.22.1, where `CI=true` turns a missing helm
 into a failure and the step fails when no test runs or one skips. The dry run prevents accidental side
 effects of legitimate addon code; it is not a security boundary against an
 addon that is made to do harm (see the trust model in
@@ -136,6 +136,11 @@ missing member, dry run, darwin, plain-http refusal), `b install` through the
 `execx.Runner` seam, doctor through a `Probe` seam over placeholder
 executables. Nothing reaches the network. The pin-drift test reads the
 repo's `go.mod` — mutation-check it by editing a version there.
+The khelm and helm pin tests also read the khelm of `.bin/b.lock` and
+`mise.toml`, the `HELM_VERSION` of `.github/workflows/ci.yml` and the helm
+that the bash chart gate names (`libs/addons`, both trees), and
+`TestPinSourcesFailWithoutThePin` proves that each reader fails on its file
+without the pin: `go test ./internal/toolchain/ -run 'Pin'`.
 
 Two Go modules ship alongside the root module and have their own tests:
 
@@ -287,6 +292,17 @@ reaches the container only through the `ARGSH_ENV_<X>` prefix (see
 [tests/README.md](tests/README.md)). CI pins `PATH_BIN` to the workspace
 `.bin` so `kustomize`-dependent render tests find the b-pinned binary.
 
+The argsh container has no `ssh-keygen`, so the tests that run the real
+sops (tagged `real-sops`) skip there. The `unit-tests` job runs that tag a
+second time on the runner, with the sops and ssh-to-age of `b install`. The
+step puts `.bin` first on `PATH`, and it fails before bats runs when `sops`
+or `ssh-to-age` resolves to a file other than the one in `.bin`. It also
+fails when a test fails, when the TAP plan is not `1..14` (the fourteen tagged
+tests: a change to the tags changes that number in
+`.github/workflows/ci.yml`), or when a test skips. Locally,
+`bats --filter-tags real-sops tests/unit/` runs them when `ssh-keygen`,
+`sops` and `ssh-to-age` are on `PATH`.
+
 The bats suites keep running against the frozen tree because a command
 routed to bash, the provider plugins and the `lo drivers` fallback still
 execute it. A behaviour change lands in Go first; touch the bash only when
@@ -318,6 +334,19 @@ and has been seen to print nothing and exit 0 on a file this script does
 report. The exit code alone is not the signal either — on a checkout whose
 `^`-prefixed imports the container cannot resolve, the run is already
 non-zero before your file is reached. Look for your file in the output.
+
+**One file before CI.** `./.bin/b install github.com/koalaman/shellcheck`
+installs the shellcheck release that the CI container bundles (the pin in
+`.bin/b.yaml`; no profile gives it to a consumer). Then
+`./.bin/shellcheck <file>` lints that file without docker, with the
+repository's `.shellcheckrc`: shellcheck reads it from the directory of
+the file and each parent, and the repository has only the one at the
+root. This runs shellcheck only, without argsh-lint, so
+`bash hack/lint-shell.sh` stays the full check. That script keeps the
+shellcheck of the container. `argsh lint` uses the container while
+argsh-lint is not local, and the script does not give `PATH_BIN` to
+argsh. With `PATH_BIN`, argsh mounts `.bin/` into the container in front
+of the container's shellcheck.
 
 ## E2E (`lo up --ci`)
 

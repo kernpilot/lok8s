@@ -1,0 +1,1 @@
+  ℹ sso-gate SecurityPolicy CRD check skipped: the cluster has no SecurityPolicy CRD (envoy-gateway is not installed)

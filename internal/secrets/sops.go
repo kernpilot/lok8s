@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -26,6 +28,8 @@ import (
 	"github.com/getsops/sops/v3/version"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // binaryStore is the store the sops CLI uses for --input-type/--output-type
@@ -99,11 +103,50 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(encPath, out, 0o600); err != nil {
+	// A temp file and a rename, not a write in place: an encrypt that stops
+	// half way leaves the old .enc whole (bash: secrets::_encrypt_file).
+	if err := writeReplacing(encPath, 0o600, func(w io.Writer) error {
+		_, err := w.Write(out)
+		return err
+	}); err != nil {
 		return err
 	}
-	nudgeNewer(encPath, plaintextPath)
+	// The time of the .enc is set by encryptFile (nudgeNewer).
 	return nil
+}
+
+// writeReplacing is storeguard.WriteReplacing: a temp file in the same
+// directory (dot-named, so the store reads never list it), mode perm, a
+// sync and a rename over path. A write that fails leaves the old file as
+// it was. The rename replaces a symlink or a hard link at path instead of
+// writing through it.
+func writeReplacing(path string, perm fs.FileMode, write func(io.Writer) error) error {
+	return storeguard.WriteReplacing(path, perm, write)
+}
+
+// removeTemp is storeguard.RemoveTemp: it removes name, the temp file of a
+// write that failed, and gives a *tempLeftError when that remove fails too.
+func removeTemp(err error, name string) error { return storeguard.RemoveTemp(err, name) }
+
+// tempLeftError is the error of a write through a temp file that failed,
+// and whose temp file stays because its remove failed too.
+type tempLeftError = storeguard.TempLeftError
+
+// reportTempLeft prints the error of a write whose temp file stays: the
+// write error and the remove error (in bash, the tools print them), then
+// "[error] cannot remove the temp file <path>: remove it by hand" (bash: the
+// same line after the rm in secrets::_encrypt_file, secrets::_replace and
+// secrets::_ensure_gitignore). For any other error it prints nothing and
+// reports false.
+func (c *Context) reportTempLeft(err error) bool {
+	var left *tempLeftError
+	if !errors.As(err, &left) {
+		return false
+	}
+	fmt.Fprintln(c.ErrOut, left.Err)
+	fmt.Fprintln(c.ErrOut, left.Rm)
+	ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", c.rel(left.Name))
+	return true
 }
 
 // DecryptYAMLFile decrypts a sops-encrypted YAML file (a

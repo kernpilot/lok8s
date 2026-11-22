@@ -5,12 +5,15 @@ package kubehz
 // The api is an httptest TLS server; hcloud calls go to the same server.
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -113,13 +116,28 @@ func TestDirectClaimNonClaimedFails(t *testing.T) {
 
 const bindSecretFixture = "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 
+// prefixedBindSecretFixture is a bind secret in the khzb_ form: khzb_ and
+// 64 lowercase hex characters, 69 bytes. The hex holds digits and letters, so
+// a check that takes only one of the two classes after the prefix fails.
+var prefixedBindSecretFixture = "khzb_" + strings.Repeat("0123456789abcdef", 4)
+
+// jsonStr is s as a JSON string literal, for a response body.
+func jsonStr(s string) string {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
 func bindSecretFile(h *harness, domain string) string {
 	return filepath.Join(h.ctx.Paths.Clusters, domain, ".kubehz-bind")
 }
 
 // persistBindSecret writes the announce's one-time secret at 0600 with no
 // trailing newline (the deploy reads it into a Secret whose value must be the
-// exact 64 hex), writes nothing for an empty secret, and rotates on a re-run.
+// exact value: 64 hex, or khzb_ and 64 hex), writes nothing for an empty
+// secret, and rotates on a re-run.
 func TestPersistBindSecret(t *testing.T) {
 	t.Run("writes the exact secret at 0600, no trailing newline", func(t *testing.T) {
 		h := newHarness(t)
@@ -137,6 +155,16 @@ func TestPersistBindSecret(t *testing.T) {
 		}
 		if fi.Mode().Perm() != 0o600 {
 			t.Fatalf("bind secret file mode = %v, want 0600", fi.Mode().Perm())
+		}
+	})
+	t.Run("a khzb_ secret is stored and read back byte for byte", func(t *testing.T) {
+		h := newHarness(t)
+		h.ctx.persistBindSecret("test.kubehz.dev", prefixedBindSecretFixture)
+		if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != prefixedBindSecretFixture {
+			t.Fatalf("bind secret file = %q, want %q with no trailing newline", got, prefixedBindSecretFixture)
+		}
+		if got := h.ctx.storedBindSecret("test.kubehz.dev"); got != prefixedBindSecretFixture {
+			t.Fatalf("storedBindSecret = %q, want %q", got, prefixedBindSecretFixture)
 		}
 	})
 	t.Run("an empty secret writes nothing", func(t *testing.T) {
@@ -279,7 +307,7 @@ func TestRegisterModesPersistBindSecret(t *testing.T) {
 }
 
 // registerMode runs one register mode against the harness api. The response
-// hands out next as the new bind secret.
+// hands out next, a JSON value (jsonStr for a string), as its bindSecret.
 type registerMode struct {
 	name string
 	run  func(t *testing.T, h *harness, next string)
@@ -291,7 +319,7 @@ var registerModes = []registerMode{
 		name: "the legacy fingerprint announce",
 		run: func(t *testing.T, h *harness, next string) {
 			delete(h.env, "KUBEHZ_TOKEN")
-			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","registered":true,"bindSecret":"`+next+`"}`)
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","registered":true,"bindSecret":`+next+`}`)
 			cfg := &Config{APIURL: h.apiURL(), Access: "registered"}
 			mustOK(t, h.ctx.RegisterCluster(t.Context(), cfg, "test.kubehz.dev", loSpec(h)), h.output())
 		},
@@ -300,7 +328,7 @@ var registerModes = []registerMode{
 	{
 		name: "the direct claim",
 		run: func(t *testing.T, h *harness, next string) {
-			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","claimed":true,"bindSecret":"`+next+`"}`)
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-001","claimed":true,"bindSecret":`+next+`}`)
 			mustOK(t, h.ctx.directClaim(t.Context(), &Config{}, "test.kubehz.dev", loSpec(h), h.apiURL()), h.output())
 		},
 		base: `{"domain":"test.kubehz.dev","fingerprint":"lo:test.kubehz.dev"`,
@@ -310,7 +338,7 @@ var registerModes = []registerMode{
 		run: func(t *testing.T, h *harness, next string) {
 			h.env["HCLOUD_TOKEN"] = "hc_test"
 			h.env["HCLOUD_API_BASE"] = h.apiURL()
-			h.handle("POST /api/clusters/register", 200, `{"id":"cl-5","bindSecret":"`+next+`","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}`)
+			h.handle("POST /api/clusters/register", 200, `{"id":"cl-5","bindSecret":`+next+`,"claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}`)
 			h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[]}`)
 			h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
 			mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
@@ -340,41 +368,76 @@ func TestStoredBindSecretIgnoresAFIFO(t *testing.T) {
 	}
 }
 
-// Every register mode sends the stored bind secret, so a re-run keeps
-// the same cluster record, and stores the one the response hands out.
+// Every register mode sends the stored bind secret, in either form and byte
+// for byte, so a re-run keeps the same cluster record, and stores the one the
+// response hands out.
 func TestRegisterModesSendTheStoredBindSecret(t *testing.T) {
-	next := "00" + bindSecretFixture[2:]
-	for _, m := range registerModes {
-		t.Run(m.name, func(t *testing.T) {
-			h := newHarness(t)
-			h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
-			m.run(t, h, next)
-			r := h.lastReq("POST", "/api/clusters/register")
-			if want := m.base + `,"bindSecret":"` + bindSecretFixture + `"}`; r == nil || r.Body != want {
-				t.Fatalf("register body = %+v, want %s", r, want)
-			}
-			if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != next {
-				t.Fatalf("the new bind secret was not stored: %q", got)
-			}
-			mustNotContain(t, h.output(), bindSecretFixture)
-			mustNotContain(t, h.output(), next)
-		})
+	for _, form := range []struct{ name, stored, next string }{
+		{"64 hex", bindSecretFixture, "00" + bindSecretFixture[2:]},
+		{"khzb_ and 64 hex", prefixedBindSecretFixture, "khzb_" + strings.Repeat("fedcba9876543210", 4)},
+	} {
+		for _, m := range registerModes {
+			t.Run(form.name+"/"+m.name, func(t *testing.T) {
+				h := newHarness(t)
+				h.ctx.persistBindSecret("test.kubehz.dev", form.stored)
+				m.run(t, h, jsonStr(form.next))
+				r := h.lastReq("POST", "/api/clusters/register")
+				if want := m.base + `,"bindSecret":"` + form.stored + `"}`; r == nil || r.Body != want {
+					t.Fatalf("register body = %+v, want %s", r, want)
+				}
+				if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != form.next {
+					t.Fatalf("the new bind secret was not stored: %q", got)
+				}
+				mustNotContain(t, h.output(), form.stored)
+				mustNotContain(t, h.output(), form.next)
+			})
+		}
+	}
+}
+
+// unusableBindSecrets are file contents that are no bind secret, in both
+// forms: line ends, a newline inside (64 hex, a newline and 4 bytes is 69
+// bytes with a line that matches), a NUL inside (69 bytes with no newline),
+// upper case, the wrong prefix, a prefix at the end, 69 hex, and the lengths
+// next to 64 and 69.
+func unusableBindSecrets() map[string]string {
+	hex, prefixed := bindSecretFixture, prefixedBindSecretFixture
+	return map[string]string{
+		"64 hex, a NUL and 4 bytes":      hex + "\x00abcd",
+		"4 bytes, a NUL and 64 hex":      "abcd\x00" + hex,
+		"64 hex and khzb_ (a suffix)":    hex + "khzb_",
+		"69 hex and no prefix":           hex + hex[:5],
+		"upper-case hex":                 strings.ToUpper(hex),
+		"63 hex":                         hex[1:],
+		"63 hex and a newline":           hex[1:] + "\n",
+		"64 hex and a newline":           hex + "\n",
+		"64 hex and a CR":                hex + "\r",
+		"64 hex and a CRLF":              hex + "\r\n",
+		"khzb_ and 64 hex and a newline": prefixed + "\n",
+		"khzb_ and 64 hex and a CR":      prefixed + "\r",
+		"khzb_ and 64 hex and a CRLF":    prefixed + "\r\n",
+		"a newline inside 64 bytes":      hex[:32] + "\n" + hex[33:],
+		"64 hex, a newline and 4 bytes":  hex + "\nabcd",
+		"4 bytes, a newline and 64 hex":  "abcd\n" + hex,
+		"upper-case KHZB_ prefix":        "KHZB_" + hex,
+		"khzb_ and upper-case hex":       "khzb_" + strings.ToUpper(hex),
+		"khza_ and 64 hex":               "khza_" + hex,
+		"65 hex":                         hex + "a",
+		"khzb_ and 63 hex (68 bytes)":    "khzb_" + hex[1:],
+		"khzb_ and 65 hex (70 bytes)":    "khzb_" + hex + "a",
+		"not hex":                        "g" + hex[1:],
+		"khzb_ and not hex":              "khzb_g" + hex[1:],
+		"oversized":                      hex + strings.Repeat("a", 200000),
 	}
 }
 
 // A missing, irregular or malformed stored value adds no bindSecret
 // (the api refuses a malformed one).
 func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
-	stored := map[string]string{
-		"upper-case hex":       strings.ToUpper(bindSecretFixture),
-		"63 hex":               bindSecretFixture[1:],
-		"63 hex and a newline": bindSecretFixture[1:] + "\n",
-		"64 hex and a newline": bindSecretFixture + "\n",
-		"not hex":              "g" + bindSecretFixture[1:],
-		"oversized":            bindSecretFixture + strings.Repeat("a", 200000),
-	}
+	stored := unusableBindSecrets()
+	names := append([]string{"missing", "a directory", "unreadable"}, slices.Sorted(maps.Keys(stored))...)
 	for _, m := range registerModes {
-		for _, name := range []string{"missing", "a directory", "unreadable", "upper-case hex", "63 hex", "63 hex and a newline", "64 hex and a newline", "not hex", "oversized"} {
+		for _, name := range names {
 			t.Run(m.name+"/"+name, func(t *testing.T) {
 				h := newHarness(t)
 				path := bindSecretFile(h, "test.kubehz.dev")
@@ -398,13 +461,91 @@ func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
 					}
 				}
 				// The response hands out no new secret: nothing to store.
-				m.run(t, h, "")
+				m.run(t, h, `""`)
 				r := h.lastReq("POST", "/api/clusters/register")
 				if want := m.base + `}`; r == nil || r.Body != want {
 					t.Fatalf("register body = %+v, want %s", r, want)
 				}
 			})
 		}
+	}
+}
+
+// A register answer whose bindSecret is not a bind secret (a final LF, a
+// NUL inside or at the end, upper case, a prefix with a final LF, or no
+// string at all) changes nothing on disk in every mode: the stored file
+// keeps its bytes. lo warns once, names the file and never prints the value.
+func TestRegisterModesRefuseAnUnusableResponseBindSecret(t *testing.T) {
+	next := "00" + bindSecretFixture[2:]
+	answers := map[string]string{
+		"64 hex and a LF":           jsonStr(next + "\n"),
+		"a NUL inside 64 hex":       jsonStr(next[:32] + "\x00" + next[32:]),
+		"64 hex and a NUL":          jsonStr(next + "\x00"),
+		"upper-case hex":            jsonStr(strings.ToUpper(next)),
+		"khzb_ and 64 hex and a LF": jsonStr("khzb_" + next + "\n"),
+		"a number of 64 digits":     strings.Repeat("1", 64),
+		"true":                      "true",
+		"a list with 64 hex":        "[" + jsonStr(next) + "]",
+	}
+	for _, m := range registerModes {
+		for _, name := range slices.Sorted(maps.Keys(answers)) {
+			t.Run(m.name+"/"+name, func(t *testing.T) {
+				h := newHarness(t)
+				h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+				m.run(t, h, answers[name])
+				if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != bindSecretFixture {
+					t.Fatalf("an unusable answer changed the stored bind secret: %q", got)
+				}
+				out := h.output()
+				want := "[warn] kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/test.kubehz.dev/.kubehz-bind."
+				if n := strings.Count(out, want); n != 1 {
+					t.Fatalf("want the warning once, got %d times:\n%s", n, out)
+				}
+				// The answer can have rotated the secret: the warning says so,
+				// and names the recovery.
+				mustContain(t, out, "The platform can have rotated the bind secret with this answer: then the value in the file no longer counts, and lo cannot get the new value again.")
+				mustContain(t, out, "An agent that has no binding yet can then register a separate pending row: claim that row with the code from 'lo kubehz claim-code'.")
+				mustNotContain(t, out, next)
+				mustNotContain(t, out, strings.ToUpper(next))
+				mustNotContain(t, out, bindSecretFixture)
+			})
+		}
+	}
+}
+
+// A register answer with no bind secret (null, false or "") keeps today's
+// path in every mode: no write, no change of the stored file, no warning.
+func TestRegisterModesKeepTheFileWhenTheAnswerHasNoBindSecret(t *testing.T) {
+	for _, m := range registerModes {
+		for _, answer := range []string{"null", "false", `""`} {
+			t.Run(m.name+"/"+answer, func(t *testing.T) {
+				h := newHarness(t)
+				h.ctx.persistBindSecret("test.kubehz.dev", prefixedBindSecretFixture)
+				m.run(t, h, answer)
+				if got := readFile(t, bindSecretFile(h, "test.kubehz.dev")); got != prefixedBindSecretFixture {
+					t.Fatalf("an answer with no bind secret changed the stored file: %q", got)
+				}
+				mustNotContain(t, h.output(), "cannot use")
+			})
+		}
+	}
+}
+
+// A read that fails after the open (an I/O error, not the end of the file)
+// gives no bind secret, even when the bytes read so far are a valid one.
+func TestStoredBindSecretRefusesAFailedRead(t *testing.T) {
+	h := newHarness(t)
+	h.ctx.persistBindSecret("test.kubehz.dev", bindSecretFixture)
+	if got := h.ctx.storedBindSecret("test.kubehz.dev"); got != bindSecretFixture {
+		t.Fatalf("the valid file gave %q", got)
+	}
+	readFull = func(r io.Reader, buf []byte) (int, error) {
+		n, _ := io.ReadFull(r, buf)
+		return n, errors.New("input/output error")
+	}
+	t.Cleanup(func() { readFull = io.ReadFull })
+	if got := h.ctx.storedBindSecret("test.kubehz.dev"); got != "" {
+		t.Fatalf("a failed read gave a bind secret: %q", got)
 	}
 }
 
@@ -483,7 +624,9 @@ func TestEnsureClaimKeyUploadsAndReplaces(t *testing.T) {
 	h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
 	mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
 	mustContain(t, h.output(), "Claim key 'kubehz-claim-test.kubehz.dev' uploaded")
-	mustContain(t, h.output(), "fingerprint: aa:bb")
+	// A buffer is not a terminal: the ticket stays off it.
+	mustContain(t, h.output(), "fingerprint: <hidden: one-time claim ticket>")
+	mustNotContain(t, h.output(), "aa:bb")
 	if !h.anyReq("DELETE", "/v1/ssh_keys/42") || !h.anyReq("POST", "/v1/ssh_keys") {
 		t.Fatalf("replace-by-name sequence missing: %+v", h.reqs())
 	}

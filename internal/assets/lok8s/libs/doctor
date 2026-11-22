@@ -3,13 +3,23 @@
 # vim: set syntax=bash:
 # doctor — environment + toolchain preflight diagnostics
 # Reports bash version (argsh needs >= 4.3), required/optional tool presence,
-# the PATH_* environment, whether the secrets plugin is built, and the active
-# domain. Exits non-zero when a REQUIRED prerequisite is missing.
+# the PATH_* environment, whether the secrets plugin is built, the active
+# domain, the RBAC migration leftovers of its cluster (doctor::_rbac_check),
+# and the rook-ceph-csi-kms objects that the current values do not render
+# (doctor::_kms_check). Exits non-zero when a REQUIRED prerequisite is missing.
 
 import ^utils/domain
+import ^utils/spec
 import ^utils/verbose
 import ^utils/provider
 import ^utils/template
+
+# The oldest kind release that the Lo driver can use. The kind config that
+# lo up renders sets networking.dnsSearch (drivers/lo/utils/render.sh), and
+# kind reads that field from v0.18.0. An older kind stops at `kind create`
+# with an unknown-field error. Go twin: doctorKindMin in
+# internal/cli/cmd_doctor.go.
+DOCTOR_KIND_MIN=v0.18.0
 
 main::doctor() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -50,7 +60,7 @@ main::doctor() {
   # jq is REQUIRED: template::envsubst's native path (any non-GNU envsubst,
   # e.g. b's renvsubst alias) substitutes via jq.
   doctor::_tool jq         1 "JSON processor (restricted substitution)"       || fail=1
-  doctor::_tool kind       0 "local clusters (Lo driver)"
+  doctor::_kind "${domain}" "local clusters (Lo driver)"               || fail=1
   doctor::_tool tilt       0 "dev loop (Lo driver)"
   doctor::_tool mkcert     0 "local TLS (Lo driver)"
   doctor::_tool sops       0 "secret encryption"
@@ -73,6 +83,7 @@ main::doctor() {
   else
     doctor::_warn "secrets.lok8s.dev plugin not built (run: lo kustomize build)"
   fi
+  doctor::_coreutils
 
   echo
   echo "--- dev TLS (cert: CA) ---"
@@ -103,6 +114,22 @@ main::doctor() {
   else
     doctor::_warn "no active domain (run: lo use <domain>)"
   fi
+  # The RBAC migration check of the domain's cluster (advisory; it sends only
+  # GET requests, and the credential plugin of the kubeconfig runs as kubectl
+  # runs it). Its lines come after the lines of the domain section; the two
+  # checks below follow them.
+  doctor::_rbac_check "${domain}"
+  # The rook-ceph-csi-kms objects that the current values do not render
+  # (advisory, with the same GET requests and plugin caveat).
+  doctor::_kms_check "${domain}"
+  # The SecurityPolicy CRD of envoy-gateway, when spec.bootstrap has sso-gate
+  # as an entry name (advisory; one kubectl read of the CRD, GET requests
+  # only, with the same plugin caveat).
+  doctor::_sso_check "${domain}"
+  # The Kubernetes minors that the kubectl image of system-upgrade-controller
+  # serves, when spec.bootstrap has the addon as an entry name (advisory; it
+  # reads the spec only).
+  doctor::_suc_check "${domain}"
 
   # Provider / infrastructure diagnosis — advisory, never affects the exit code.
   doctor::_provider_section "${domain}"
@@ -121,6 +148,1733 @@ doctor::_color() { [[ -t 1 && -z "${NO_COLOR:-}" ]]; }
 doctor::_ok()   { if doctor::_color; then printf '  \033[32m✓\033[0m %s\n' "${1}"; else printf '  ✓ %s\n' "${1}"; fi; }
 doctor::_warn() { if doctor::_color; then printf '  \033[33m!\033[0m %s\n' "${1}"; else printf '  ! %s\n' "${1}"; fi; }
 doctor::_bad()  { if doctor::_color; then printf '  \033[31m✗\033[0m %s\n' "${1}"; else printf '  ✗ %s\n' "${1}"; fi; }
+# A neutral fact, neither a pass nor a finding (the Go binary's ℹ line): the
+# whole line is dim on a terminal.
+doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1}"; else printf '  ℹ %s\n' "${1}"; fi; }
+
+# doctor::_coreutils — the coreutils line of the bash implementation. Go
+# twin: doctorCoreutils (internal/cli/cmd_doctor.go), with the same text.
+# The frozen bash libs (kubehz, bootstrap) use forms that GNU coreutils
+# and uutils coreutils have, BSD and BusyBox do not: stat -c, mv -T, ln -T,
+# realpath -e. On a BSD or BusyBox userland they fail mid-run. The line is
+# a warning, printed only when lok8s.yaml routes commands to bash
+# (doctor::_bash_selected) and the first line of `stat --version` contains
+# neither "GNU coreutils" nor "uutils coreutils" (doctor::_stat_gnu).
+# Otherwise it prints nothing.
+doctor::_coreutils() {
+  doctor::_bash_selected || return 0
+  if doctor::_stat_gnu; then
+    return 0
+  fi
+  doctor::_warn "bash implementation: no GNU coreutils stat on PATH; the bash lo kubehz and lo bootstrap commands use stat -c, mv -T, ln -T and realpath -e, and fail without GNU coreutils (fix: put GNU coreutils first on PATH, or select the Go implementation in lok8s.yaml)"
+}
+
+# doctor::_bash_selected — true when lok8s.yaml routes commands to bash. It
+# reads the file as the Go twin does (config.LoadImplementation): the first
+# document of ${PATH_BASE}/lok8s.yaml, only when it is a `kind: Project`
+# document. spec.implementation.default "bash" routes every command;
+# "" or "go" with a nonempty list spec.implementation.bash.commands routes
+# those commands. An other default, a file that yq cannot read, or no yq
+# selects nothing here. (The Go twin then prints its implementation
+# warning, and the tools section reports the missing yq.)
+doctor::_bash_selected() {
+  local file="${PATH_BASE:-.}/lok8s.yaml" sel=""
+  [[ -f "${file}" ]] || return 1
+  command -v yq >/dev/null 2>&1 || return 1
+  sel="$(yq -r 'select(documentIndex == 0 and .kind == "Project") | .spec.implementation | (.default // "") + " " + ((.bash.commands // []) | select(tag == "!!seq") | length | tostring)' "${file}" 2>/dev/null)" || return 1
+  case "${sel}" in
+    "bash "[0-9]*) return 0 ;;
+    " "[1-9]* | "go "[1-9]*) return 0 ;;
+  esac
+  return 1
+}
+
+# doctor::_stat_gnu — probes stat as template::envsubst_flavor probes
+# envsubst: true (the GNU forms work) when the first line of
+# `stat --version` (stdout) contains "GNU coreutils" (GNU: "stat (GNU
+# coreutils) 9.5") or "uutils coreutils" (uutils: "stat (uutils coreutils)
+# 0.2.2"). BSD and macOS stat answer "illegal option" on stderr, BusyBox
+# "unrecognized option" and its usage on stderr: both print nothing on
+# stdout, as a missing stat does. The exit code does not decide.
+doctor::_stat_gnu() {
+  local out="" line=""
+  out="$(stat --version 2>/dev/null)" || :
+  line="${out%%$'\n'*}"
+  [[ "${line}" == *"GNU coreutils"* || "${line}" == *"uutils coreutils"* ]]
+}
+
+# doctor::_rbac_check <domain>
+# The RBAC migration check (issues #311 and #315). Go twin:
+# internal/cli/cmd_doctor_rbac.go. The piped lines are the same in both.
+#
+# The system-upgrade-controller and redis-operator addons no longer bind the
+# broad RBAC of their charts. The bootstrap applies without prune, so a
+# cluster that ran an earlier version of an addon keeps the old objects until
+# a person deletes them. This check reads the ClusterRoleBindings and
+# ClusterRoles of the domain's cluster and reports each old object with its
+# delete command. It deletes nothing: lo doctor sends only GET requests; a
+# kubeconfig exec credential plugin runs as kubectl runs it, and lo does not
+# limit what it does.
+#
+# It runs only when spec.bootstrap has one of the two addons (read with the
+# entry parser of `lo addons --detail`) and the domain has a kubeconfig (the
+# file that the entrypoint exports as KUBECONFIG). It makes two reads, each
+# with --request-timeout=10s and a bound of 30 s (doctor::_rbac_bound). A
+# read runs the credential plugin of that kubeconfig, which can ask for a
+# login. Each read runs as its own process group: the bound and a Ctrl-C
+# stop the whole group (TERM, then KILL after 2 s), so the children of a
+# credential plugin stop too, and the check waits for them. A failed read
+# is a warning with a fixed reason per class. kubectl's stderr can name the
+# server and the user, so the check never prints it. A
+# binding counts when it gives the role to the account in any form: the
+# ServiceAccount, the User name of its token, or a group of the token. A
+# delete command is printed only for a binding of the account alone: a
+# binding that the account shares gets a line that names it, with no
+# command. A binding name goes into a printed delete command only when it is
+# a DNS-1123 subdomain (doctor::_rbac_delete checks it again). Each delete
+# command names the kubeconfig of the reads (shell-quoted) and is the rest
+# of its line, so a copy of it deletes in the cluster that the check read and
+# nothing else. The old ClusterRole gets a delete command only when no
+# ClusterRoleBinding gives it to another subject, and the line says to check
+# the RoleBindings first (the check does not read them). Of the labels of
+# that role, the check prints only the three aggregation keys of the
+# built-in roles. Every line is advisory: it always returns 0.
+doctor::_rbac_check() {
+  local domain="${1}"
+  local skipped="RBAC migration check skipped: "
+  local not_checked="RBAC migration leftovers not checked: "
+  local invalid="kubectl failed or did not return a valid list"
+  # The domain section above says it (no active domain).
+  [[ -n "${domain}" ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && ! -f "${spec}" && -f "${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml" ]]; then
+    doctor::_info "${skipped}${domain} is a deploy domain (run the check on its cluster domain: lo doctor --domain <cluster domain>)"
+    return 0
+  fi
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ || ! -f "${spec}" ]]; then
+    doctor::_info "${skipped}${domain} has no cluster.lok8s.yaml"
+    return 0
+  fi
+  # The bash twin reads the spec with yq and the lists with jq (the Go twin
+  # needs neither). Without one of them the lines below would be wrong.
+  local tool
+  for tool in yq jq; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      doctor::_warn "${not_checked}${tool} not found"
+      return 0
+    fi
+  done
+  local kind
+  if ! kind=$(domain::spec_driver "${spec}" lo 2>/dev/null); then
+    doctor::_info "${skipped}the cluster spec of ${domain} cannot be read (run: lo lint)"
+    return 0
+  fi
+  # The entry parser of libs/bootstrap (the entrypoint loads it). An addon
+  # counts only as a bare entry name, never as a path entry (Go: the
+  # Builtin flag of the parsed entry), also with a trailing "/" or "/."
+  # (spec::is_addon), as in Go.
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    doctor::_info "${skipped}the bootstrap entry parser is not loaded"
+    return 0
+  fi
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp ex key suc=0 suc_admin=0 redis=0 chart_rbac=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
+    ! spec::is_addon "${dr}" system-upgrade-controller || suc=1
+    ! spec::is_addon "${dr}" system-upgrade-controller-cluster-admin || suc_admin=1
+    ! spec::is_addon "${dr}" redis-operator || redis=1
+    ! spec::is_addon "${dr}" redis-operator-chart-rbac || chart_rbac=1
+  done
+  if (( ! suc && ! redis )); then
+    doctor::_info "${skipped}spec.bootstrap has no system-upgrade-controller and no redis-operator"
+    return 0
+  fi
+  if (( suc && suc_admin )); then
+    doctor::_info "RBAC migration check of system-upgrade-controller skipped: spec.bootstrap has system-upgrade-controller-cluster-admin, which owns the cluster-admin binding"
+    suc=0
+  fi
+  (( suc || redis )) || return 0
+
+  local kubeconfig
+  kubeconfig="$(doctor::_rbac_kubeconfig "${spec}")"
+  if doctor::_rbac_has_control "${kubeconfig}"; then
+    doctor::_info "${skipped}the kubeconfig path has a control character (the delete commands of the check name that path)"
+    return 0
+  fi
+  if [[ ! -f "${kubeconfig}" ]]; then
+    doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
+    return 0
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}kubectl not found"
+    return 0
+  fi
+
+  local result=""
+  result=$(doctor::_rbac_fetch "${kubeconfig}" "${chart_rbac}") || result=""
+  case "${result}" in
+    ok|ok$'\n'*) doctor::_rbac_report "${result#ok}" "${suc}" "${redis}" "${kubeconfig}" ;;
+    fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}" ;;
+    *)           doctor::_warn "${not_checked}${invalid}" ;;
+  esac
+  return 0
+}
+
+# doctor::_rbac_kubeconfig <spec> — the kubeconfig that the entrypoint
+# exports for the domain: the spec's metadata.name, else LOK8S_CLUSTER_NAME,
+# else local (Go: build.AmbientKubeconfig). The path ends with .yaml, so a
+# command substitution keeps all of it.
+doctor::_rbac_kubeconfig() {
+  local cluster="${LOK8S_CLUSTER_NAME:-local}" spec_name=""
+  spec_name=$(yq -r '.metadata.name // ""' "${1}" 2>/dev/null) || spec_name=""
+  [[ -z "${spec_name}" ]] || cluster="${spec_name}"
+  printf '%s' "${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+}
+
+# doctor::_rbac_bound — the bound of one read, in seconds (Go: rbacReadBound).
+# A test makes it short.
+doctor::_rbac_bound() { echo 30; }
+
+# doctor::_rbac_fetch <kubeconfig> <chart_rbac 0|1>
+# The two reads and the records. Prints "ok" and then the records of
+# doctor::_rbac_records, or one line "fail<TAB><reason>". It runs in a
+# subshell, so its temp dir, its variables and its traps never reach the
+# caller. On an exit or a Ctrl-C, the traps stop a read that still runs and
+# remove the temp dir. A Ctrl-C then ends the subshell with SIGINT, so that
+# the caller acts on it. The subshell only calls doctor::_rbac_fetch_in:
+# the _rbac_* variables are set and read in plain function scope (no
+# assignment in the subshell group itself, ShellCheck SC2030/SC2031).
+doctor::_rbac_fetch() ( doctor::_rbac_fetch_in "$@" )
+
+# doctor::_rbac_fetch_in <kubeconfig> <chart_rbac 0|1> — the body of
+# doctor::_rbac_fetch, always in its subshell. The _rbac_* variables are
+# globals of that subshell, not locals: the EXIT trap reads them after this
+# function has returned.
+doctor::_rbac_fetch_in() {
+  _rbac_tmp="" _rbac_pid="" _rbac_hold="" _rbac_shell="" _rbac_now=0 _rbac_rc=0 _rbac_stopped=0 _rbac_reason=""
+  trap 'doctor::_rbac_cleanup' EXIT
+  trap 'doctor::_rbac_cleanup; trap - EXIT INT; kill -INT "${BASHPID}"' INT
+  local invalid="kubectl failed or did not return a valid list" records=""
+  if ! _rbac_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-doctor-rbac.XXXXXX"); then
+    _rbac_tmp=""
+    printf 'fail\t%s\n' "${invalid}"
+    exit 0
+  fi
+  doctor::_rbac_read "${1}" clusterrolebindings "${_rbac_tmp}/crb.json" "${_rbac_tmp}/err"
+  [[ -n "${_rbac_reason}" ]] || doctor::_rbac_read "${1}" clusterroles "${_rbac_tmp}/cr.json" "${_rbac_tmp}/err"
+  if [[ -n "${_rbac_reason}" ]]; then
+    printf 'fail\t%s\n' "${_rbac_reason}"
+  elif records=$(doctor::_rbac_records "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${2}"); then
+    printf 'ok\n%s\n' "${records}"
+  else
+    printf 'fail\t%s\n' "${invalid}"
+  fi
+}
+
+# doctor::_rbac_cleanup — the EXIT and INT action of doctor::_rbac_fetch:
+# stop the process group of a read that still runs (doctor::_rbac_stop), end
+# its leader (doctor::_rbac_release), and then remove the temp dir. The
+# stderr of the stop goes to /dev/null: bash reports a job that a KILL ended
+# on stderr, with the text of the command.
+doctor::_rbac_cleanup() {
+  if [[ -n "${_rbac_pid}" ]]; then
+    { doctor::_rbac_stop "${_rbac_pid}"; doctor::_rbac_release; } 2>/dev/null
+  fi
+  if [[ -n "${_rbac_tmp}" ]]; then
+    rm -f -- "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${_rbac_tmp}/crd.json" "${_rbac_tmp}/err" \
+      "${_rbac_tmp}"/kms-{clusterroles,clusterrolebindings,roles,rolebindings}.{json,rec} \
+      "${_rbac_tmp}"/refs-{clusterrolebindings,rolebindings,clusterroles}.{json,rec}
+    rmdir -- "${_rbac_tmp}" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# doctor::_rbac_read <kubeconfig> <resource> <out file> <err file> [<shape> [<arg>...]]
+# One bounded `kubectl get <resource> [<arg>...] -o json` (in
+# doctor::_rbac_fetch and doctor::_kms_fetch). The args are fixed arguments
+# of the caller (the label selector of the csi-kms check). Sets _rbac_reason
+# to "" when the output is a list of the shape that the check reads
+# (doctor::_rbac_shape; <shape> defaults to <resource>), else to the fixed
+# reason of the failure's class. The stderr goes to <err file> for the class
+# and is never printed. A read that the bound stopped gives the reason of the
+# bound, also when kubectl handled the TERM and exited 0 (Go: rbacGet checks
+# the context first).
+doctor::_rbac_read() {
+  local kubeconfig="${1}" resource="${2}" out="${3}" err="${4}" shape="${5:-${2}}"
+  shift 4
+  (( $# == 0 )) || shift
+  doctor::_rbac_get "${out}" "${err}" --kubeconfig "${kubeconfig}" get "${resource}" "$@"
+  if [[ -z "${_rbac_reason}" ]] && ! doctor::_rbac_shape "${shape}" "${out}"; then
+    _rbac_reason="kubectl failed or did not return a valid list"
+  fi
+  return 0
+}
+
+# doctor::_rbac_get <out file> <err file> <kubectl arg...>
+# One bounded `kubectl <kubectl arg...> -o json --request-timeout=10s`
+# (doctor::_rbac_run: the bound, the process group and the stop). Sets
+# _rbac_reason to "" when kubectl exited 0 within the bound, else to the
+# fixed reason of the failure's class (doctor::_rbac_reason). The stderr goes
+# to <err file> for the class and is never printed. doctor::_rbac_read and
+# the sso-gate check (doctor::_sso_fetch) use it (Go: rbacGet).
+doctor::_rbac_get() {
+  local out="${1}" err="${2}"
+  shift 2
+  _rbac_reason=""
+  doctor::_rbac_run "${out}" "${err}" kubectl "$@" -o json --request-timeout=10s
+  if (( _rbac_stopped )); then
+    _rbac_reason="kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
+  elif (( _rbac_rc != 0 )); then
+    _rbac_reason=$(doctor::_rbac_reason "$(cat "${err}" 2>/dev/null)")
+  fi
+  return 0
+}
+
+# doctor::_rbac_shape <shape> <file> — 0 when <file> is one JSON object
+# whose items is a list of objects of the shape that both twins read (Go:
+# rbacRead with rbacParseBinding, rbacParseRole, kmsParseFor or
+# kmsParseRefFor, kmsParseAgg). <shape> is clusterroles (a role),
+# labelled-cluster or labelled-ns (the name, the namespace and the labels:
+# the labelled reads of the csi-kms check), ref-cluster or ref-ns (the name,
+# the namespace and the roleRef: its reference reads), agg (the name and the
+# aggregationRule: its aggregation read; a matchLabels key and an expression
+# key are not empty) or another resource (a binding). A field may
+# be absent or null: it is then empty. A field that is there has the type
+# that the check reads, and so has each element of a list (no null). Any
+# other value makes the whole list invalid, also in an item that the check
+# does not report. The csi-kms shapes also need a name that is not empty
+# (and, for the -ns shapes, a namespace), and the ref shapes a roleRef.kind
+# and a roleRef.name that are not empty: the check cannot compare an object
+# without them. A list with a continue token (a metadata.continue that is
+# not empty) is a part of the list, so it is invalid too: kubectl follows the
+# token itself and prints the whole list. --slurp: a second JSON value in the
+# file makes it invalid too. The stderr of jq is never printed. jq accepts
+# some text that the JSON decoder of Go refuses: of that, a leading
+# byte-order mark, NaN, and a number out of the range of a float64
+# (Infinity, 1e1000) make the list invalid here too.
+doctor::_rbac_shape() {
+  local bom=""
+  # The first 3 bytes (C locale: a character is a byte).
+  bom="$(LC_ALL=C; IFS= read -r -N 3 b < "${2}" && printf '%s' "${b}")" || bom=""
+  [[ "${bom}" != $'\xef\xbb\xbf' ]] || return 1
+  # shellcheck disable=SC2016 # jq program text
+  jq -e -s --arg res "${1}" '
+    def str: . == null or type == "string";
+    def obj: . == null or type == "object";
+    def strs: . == null or (type == "array" and all(.[]; type == "string"));
+    def objs(f): . == null or (type == "array" and all(.[]; type == "object" and f));
+    def binding: (.metadata | obj) and (.metadata.name | str)
+      and (.roleRef | obj) and (.roleRef.kind | str) and (.roleRef.name | str)
+      and (.subjects | objs((.kind | str) and (.name | str) and (.namespace | str)));
+    def role: (.metadata | obj) and (.metadata.name | str)
+      and (.metadata.labels | . == null or (type == "object" and all(.[]; type == "string")))
+      and (.rules | objs((.apiGroups | strs) and (.resources | strs) and (.verbs | strs) and (.resourceNames | strs)));
+    def nonempty: type == "string" and length > 0;
+    def labelled: (.metadata | obj) and (.metadata.name | nonempty) and (.metadata.namespace | str)
+      and (.metadata.labels | . == null or (type == "object" and all(.[]; type == "string")));
+    def ref: (.metadata | obj) and (.metadata.name | nonempty) and (.metadata.namespace | str)
+      and (.roleRef | obj) and (.roleRef.kind | nonempty) and (.roleRef.name | nonempty);
+    def sel: (.matchLabels | . == null or (type == "object" and all(keys[]; length > 0) and all(.[]; type == "string")))
+      and (.matchExpressions | objs((.key | nonempty) and (.operator | str) and (.values | strs)));
+    def agg: (.metadata | obj) and (.metadata.name | nonempty)
+      and (.aggregationRule | . == null or (type == "object" and (.clusterRoleSelectors | objs(sel))));
+    length == 1 and all(.. | numbers; (isnan or isinfinite) | not)
+      and (.[0] | type == "object" and (.items | type == "array")
+      and (.metadata | obj) and (.metadata.continue | str) and ((.metadata.continue // "") == "")
+      and all(.items[]; type == "object"
+        and (if $res == "clusterroles" then role
+          elif $res == "labelled-cluster" then labelled
+          elif $res == "labelled-ns" then labelled and (.metadata.namespace | nonempty)
+          elif $res == "ref-cluster" then ref
+          elif $res == "ref-ns" then ref and (.metadata.namespace | nonempty)
+          elif $res == "agg" then agg
+          else binding end)))
+  ' "${2}" > /dev/null 2>&1
+}
+
+# doctor::_rbac_run <out file> <err file> <command...>
+# Runs the command with stdin /dev/null, stdout to <out file> and stderr to
+# <err file>, and stops it after doctor::_rbac_bound seconds (Go: the
+# context of rbacRead). The command runs under a small leader
+# (doctor::_rbac_leader), a coprocess of this shell. With set -m the leader
+# starts a process group of its own (its pid is the id of the group), and
+# the command and its children are in that group, so that a stop also
+# reaches the children of a credential plugin. The leader holds the group
+# until the stop is done: it ends only when doctor::_rbac_release closes its
+# stdin, or by the KILL of a stop, which is the last signal. While the
+# leader is there, no other process can get its pid, so no other group can
+# get the id of this group (Go: the runner reaps the child only after the
+# stop). The shell waits for the line of the leader with read -t: that is
+# the bound, and a Ctrl-C (the INT trap of doctor::_rbac_fetch) interrupts
+# the read at once. The group is not the foreground group of the terminal:
+# a Ctrl-C reaches this shell only. When the command ends first, the members
+# of the group that are left get the stop too (doctor::_rbac_others, Go:
+# stopMembers), also after an exit with 0: for example a browser that a
+# credential plugin opened for a login. The check does not use timeout(1):
+# macOS has no timeout(1), and a BusyBox timeout can signal the command
+# only, not its children (not tested here; GNU timeout signals the group).
+# Sets _rbac_rc to the exit code and _rbac_stopped to 1 when the bound
+# stopped the command. A leader that ends without its line (a signal from
+# outside) gives the exit code 1, and its group gets no signal.
+doctor::_rbac_run() {
+  local out="${1}" err="${2}" bound from line="" rc=0
+  shift 2
+  bound="$(doctor::_rbac_bound)"
+  _rbac_rc=0 _rbac_stopped=0 _rbac_shell="${BASHPID}"
+  set -m
+  coproc _rbac_co { doctor::_rbac_leader "${out}" "${err}" "$@"; }
+  _rbac_pid=$!
+  set +m
+  # Copies: bash unsets _rbac_co when it reaps the leader.
+  _rbac_hold="${_rbac_co[1]:-}" from="${_rbac_co[0]:-}"
+  # 2>/dev/null first: a leader that bash reaped has no fd.
+  read -r -t "${bound}" line 2>/dev/null <&"${from}" || rc=$?
+  if (( rc > 128 )); then
+    _rbac_stopped=1
+    { doctor::_rbac_stop "${_rbac_pid}"; doctor::_rbac_release; } 2>/dev/null
+    return 0
+  fi
+  [[ "${rc}" == 0 && "${line}" =~ ^[0-9]+$ ]] || line=1
+  _rbac_rc="${line}"
+  {
+    if (( rc == 0 )) && doctor::_rbac_others "${_rbac_pid}"; then
+      doctor::_rbac_stop "${_rbac_pid}"
+    fi
+    doctor::_rbac_release
+  } 2>/dev/null
+  return 0
+}
+
+# doctor::_rbac_leader <out file> <err file> <command...>
+# The leader of the process group of a read (doctor::_rbac_run). It runs the
+# command in its group with stdin /dev/null, stdout to <out file> and
+# stderr to <err file>, prints the exit code of the command, and then reads
+# its stdin until the end: doctor::_rbac_release closes it after the stop.
+# The TERM of a stop does not end the leader: it has a trap for TERM (a
+# trap, not an ignore, so that the command gets the default action of
+# TERM). A TERM can end a read with a status above 128: the leader then
+# reads again. The KILL of a stop ends it. The stderr of the leader goes to
+# /dev/null: bash reports a command that a signal ended on stderr, with the
+# text of the command.
+doctor::_rbac_leader() {
+  local out="${1}" err="${2}" rc=0 s=0
+  shift 2
+  exec 2>/dev/null
+  trap ':' TERM
+  "$@" < /dev/null > "${out}" 2> "${err}" || rc=$?
+  printf '%s\n' "${rc}"
+  while :; do
+    s=0
+    read -r _ || s=$?
+    (( s > 128 )) || break
+  done
+}
+
+# doctor::_rbac_release — end the leader of a read: close its stdin, wait
+# for it (bash reaps it), and forget its group.
+doctor::_rbac_release() {
+  if [[ -n "${_rbac_hold}" ]]; then
+    exec {_rbac_hold}>&-
+    _rbac_hold=""
+  fi
+  [[ -z "${_rbac_pid}" ]] || wait "${_rbac_pid}" || true
+  _rbac_pid=""
+}
+
+# doctor::_rbac_stop <pgid> — stop the process group <pgid> of a read: TERM
+# (and CONT, so that a stopped member gets the TERM), then up to 2 s (the
+# grace; Go: rbacReadGrace) for the members other than the leader to end
+# (doctor::_rbac_others), then KILL, and then up to 1 s more for them to
+# go. Each signal goes to the group, never to one pid
+# (doctor::_rbac_signal). After the KILL the leader is gone: the wait for
+# the members reads the list of processes only (doctor::_rbac_scan).
+doctor::_rbac_stop() {
+  local end
+  doctor::_rbac_signal TERM "${1}" || return 0
+  doctor::_rbac_signal CONT "${1}" || true
+  doctor::_rbac_clock
+  end=$(( _rbac_now + 2000000 ))
+  while doctor::_rbac_others "${1}"; do
+    doctor::_rbac_clock
+    if (( _rbac_now >= end )); then
+      doctor::_rbac_signal KILL "${1}" || true
+      end=$(( _rbac_now + 1000000 ))
+      while doctor::_rbac_scan "${1}"; do
+        doctor::_rbac_clock
+        (( _rbac_now < end )) || break
+        sleep 0.05
+      done
+      return 0
+    fi
+    sleep 0.1
+  done
+}
+
+# doctor::_rbac_signal <signal> <pgid> — send the signal to the process group
+# <pgid>, only while its leader holds it (doctor::_rbac_owned). Never to one
+# pid. Fails when the group did not get the signal.
+doctor::_rbac_signal() {
+  doctor::_rbac_owned "${2}" || return 1
+  kill "-${1}" -- "-${2}" 2>/dev/null
+}
+
+# doctor::_rbac_owned <pgid> — 0 when the leader of the group of the read is
+# still there (Go: group.owned). Where /proc exists: /proc/<pgid>/stat is
+# there, its parent is this shell, and its process group is <pgid>. A
+# leader that has ended and that bash has not reaped (a zombie) counts: it
+# keeps its pid. A process that got the pid after the reap is not a child
+# of this shell that leads a group: this shell starts no other group while
+# a read runs. Without /proc there is no check: 0.
+doctor::_rbac_owned() {
+  local stat=""
+  [[ -r /proc/self/stat ]] || return 0
+  { IFS= read -r stat < "/proc/${1}/stat"; } 2>/dev/null || return 1
+  # After the command name: the state, the parent and the process group.
+  [[ "${stat##*) }" =~ ^[^\ ]+\ ([0-9]+)\ ([0-9]+)\  ]] || return 1
+  [[ "${BASH_REMATCH[1]}" == "${_rbac_shell}" && "${BASH_REMATCH[2]}" == "${1}" ]]
+}
+
+# doctor::_rbac_others <pgid> — 0 when a process other than the leader is in
+# the group <pgid> (Go: othersInGroup): the leader holds the group
+# (doctor::_rbac_owned), and a listing of the processes shows such a member
+# (doctor::_rbac_scan). One listing can miss a member: a member can start a
+# child after the listing began and end before the listing reads it. So it
+# reports 1 only after two listings in a row found no member.
+doctor::_rbac_others() {
+  doctor::_rbac_owned "${1}" || return 1
+  doctor::_rbac_scan "${1}" || doctor::_rbac_scan "${1}"
+}
+
+# doctor::_rbac_scan <pgid> — 0 when one listing of the processes shows a
+# process other than <pgid> (the leader) in the process group <pgid>; a
+# zombie counts. The listing is /proc/<pid>/stat where /proc exists (Go:
+# scanGroup), else ps -A. When there is no listing, it reports 0: the stop
+# then sends the KILL after the grace. A process can end between the glob
+# and its read: cat then fails, and the lines of the others are still
+# there. A member whose name has a newline splits its line, and the scan
+# does not see it.
+doctor::_rbac_scan() {
+  local form=ps n=""
+  if [[ -r /proc/self/stat ]]; then
+    form=stat
+    n="$(cat /proc/[0-9]*/stat 2>/dev/null | doctor::_rbac_members "${form}" "${1}")" || true
+  else
+    n="$(ps -A -o pid= -o pgid= 2>/dev/null | doctor::_rbac_members "${form}" "${1}")" || true
+  fi
+  # "<lines> <members>": no line is no listing.
+  [[ "${n}" =~ ^[1-9][0-9]*\ ([0-9]+)$ ]] || return 0
+  (( BASH_REMATCH[1] > 0 ))
+}
+
+# doctor::_rbac_members <stat|ps> <pgid> — reads a listing of the processes
+# on stdin: lines of /proc/<pid>/stat, or "<pid> <pgid>" lines of ps. Prints
+# "<lines> <members>": the count of the lines, and of the processes other
+# than <pgid> in the group <pgid>. In a stat line, the fields after the
+# command name come after its last ") " (the name itself can hold ") ").
+doctor::_rbac_members() {
+  # shellcheck disable=SC2016 # jq program text
+  jq -R -n -r --arg form "${1}" --arg g "${2}" '
+    (if $form == "stat" then "^(?<p>[0-9]+) .*\\) [^ ]+ [^ ]+ (?<g>[0-9]+) "
+     else "^ *(?<p>[0-9]+) +(?<g>[0-9]+) *$" end) as $re
+    | reduce (inputs | (capture($re) // {p: "", g: ""})) as $x ([0, 0];
+        [.[0] + 1, .[1] + (if $x.g == $g and $x.p != $g then 1 else 0 end)])
+    | "\(.[0]) \(.[1])"
+  ' 2>/dev/null
+}
+
+# doctor::_rbac_clock — sets _rbac_now to the time in microseconds: the
+# EPOCHREALTIME of bash 5 without its decimal point (some locales write a
+# comma), else SECONDS (whole seconds).
+doctor::_rbac_clock() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    _rbac_now="${EPOCHREALTIME//[!0-9]/}"
+  else
+    _rbac_now=$(( SECONDS * 1000000 ))
+  fi
+}
+
+# doctor::_rbac_reason <stderr> — the fixed reason of a failed read (Go:
+# rbacReadReason, the same words in the same order). "was refused" is
+# kubectl's own text for a refused connection.
+doctor::_rbac_reason() {
+  local s="${1,,}"
+  case "${s}" in
+    *forbidden*|*unauthorized*|*"must be logged in"*)
+      echo "the kubeconfig user cannot list ClusterRoles and ClusterRoleBindings (forbidden or unauthorized)" ;;
+    *"unable to connect"*|*"connection refused"*|*"was refused"*|*"no such host"*|*timeout*|*"deadline exceeded"*|*"network is unreachable"*|*"no route to host"*)
+      echo "the cluster API did not answer (unreachable or timed out)" ;;
+    *)
+      echo "kubectl failed or did not return a valid list" ;;
+  esac
+}
+
+# doctor::_rbac_records <bindings file> <roles file> <chart_rbac 0|1>
+# The facts the report needs, one TAB-separated record per line, from one jq
+# run (a failed run is a failed check, never an empty pass):
+#   suc-left <role> <form> <arg> [<binding>]
+#                                  a binding that gives the SUC ServiceAccount
+#                                  cluster-admin
+#   suc-new 0|1                    a binding that gives it lok8s-system-upgrade-controller
+#   redis-left <role> <form> <arg> [<binding>]
+#                                  a binding that gives the redis-operator
+#                                  ServiceAccount cluster-admin, redis-operator or
+#                                  (without the opt-in addon)
+#                                  lok8s-redis-operator-chart-rbac
+#   redis-new 0|1                  a binding that gives it lok8s-redis-operator
+#   redis-oldrole 0|1              the chart's ClusterRole redis-operator
+#   redis-ref [<binding>]          a binding that gives that role to a subject
+#                                  that is not the account (Go: rbacOtherRefs)
+#   redis-agg <labels>             of the aggregation keys of the built-in
+#                                  roles (admin, edit, view), the ones that
+#                                  role has with the value "true"
+#   redis-exec 0|1                 a ClusterRole that a binding gives it has create
+#                                  on pods/exec
+# <form> <arg> is "group <group>" when a subject is a group of the account's
+# token (the first one), else "sa <n>": the account is a subject (as the
+# ServiceAccount or as the User name of its token) and <n> subjects are not
+# the account (Go: rbacGrantOf). A binding matches by its subjects and
+# roleRef, never by its name. jq puts the binding name in a record only
+# when it is a DNS-1123 subdomain (at most 253 characters), else it leaves
+# the field out. The other fields are fixed words, numbers, and role and
+# group names that jq matched against fixed names, so no text of the
+# response reaches a record but such a name. Each record goes through rec,
+# which fails the run when a field has a control character (a TAB or a
+# newline would split the record). The stderr of jq goes to /dev/null: an
+# error on a malformed field quotes the value of the field.
+doctor::_rbac_records() {
+  # shellcheck disable=SC2016 # jq program text
+  jq -r --slurpfile cr "${2}" --arg chart "${3}" '
+    def rec: map(tostring) | if any(.[]; test("[[:cntrl:]]")) then error("a record field has a control character") else join("\t") end;
+    def acct($n; $ns): (.kind == "ServiceAccount" and .name == $n and .namespace == $ns)
+      or (.kind == "User" and .name == "system:serviceaccount:\($ns):\($n)");
+    def grp($ns): .kind == "Group" and (.name as $g
+      | any("system:serviceaccounts:\($ns)", "system:serviceaccounts", "system:authenticated"; . == $g));
+    def holds($n; $ns): any(.subjects[]?; acct($n; $ns) or grp($ns));
+    def bound($n; $ns; $roles):
+      .items[] | select(.roleRef.kind == "ClusterRole" and (.roleRef.name as $r | any($roles[]; . == $r)) and holds($n; $ns));
+    def anyof($want): . as $list | any($want[]; . as $w | any(($list // [])[]; . == $w));
+    def shown: (type == "string") and length <= 253
+      and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\z");
+    def others($n; $ns): [.subjects[]? | select(acct($n; $ns) | not)] | length;
+    def named: if (.metadata.name | shown) then [.metadata.name] else [] end;
+    def left($tag; $n; $ns):
+      ([.subjects[]? | select(grp($ns)) | .name] | .[0]) as $g
+      | [$tag, .roleRef.name] + (if $g != null then ["group", $g] else ["sa", others($n; $ns)] end) + named | rec;
+    ($cr[0].items) as $roles
+    | ([$roles[] | select(.metadata.name == "redis-operator")] | .[0]) as $old
+    | ([.items[] | select(.roleRef.kind == "ClusterRole" and holds("redis-operator"; "redis-operator")) | .roleRef.name]) as $refs
+    | (bound("system-upgrade-controller"; "cattle-system"; ["cluster-admin"])
+        | left("suc-left"; "system-upgrade-controller"; "cattle-system")),
+      (["suc-new", ([bound("system-upgrade-controller"; "cattle-system"; ["lok8s-system-upgrade-controller"])] | if length > 0 then 1 else 0 end)] | rec),
+      (bound("redis-operator"; "redis-operator";
+          ["cluster-admin", "redis-operator"] + (if $chart == "1" then [] else ["lok8s-redis-operator-chart-rbac"] end))
+        | left("redis-left"; "redis-operator"; "redis-operator")),
+      (["redis-new", ([bound("redis-operator"; "redis-operator"; ["lok8s-redis-operator"])] | if length > 0 then 1 else 0 end)] | rec),
+      (["redis-oldrole", (if $old == null then 0 else 1 end)] | rec),
+      (if $old == null then empty else
+        (.items[] | select(.roleRef.kind == "ClusterRole" and .roleRef.name == "redis-operator"
+          and others("redis-operator"; "redis-operator") > 0) | ["redis-ref"] + named | rec),
+        ((($old.metadata.labels // {}) as $l
+          | [("admin", "edit", "view") | "rbac.authorization.k8s.io/aggregate-to-\(.)" | select($l[.] == "true")]
+          | join(", ")) as $agg
+          | if $agg == "" then empty else ["redis-agg", $agg] | rec end)
+      end),
+      (["redis-exec", (if any($roles[];
+          (.metadata.name as $m | any($refs[]; . == $m))
+          and any(.rules[]?; ((.resourceNames // []) | length) == 0
+            and (.apiGroups | anyof(["", "*"]))
+            and (.resources | anyof(["pods/exec", "*", "*/exec"]))
+            and (.verbs | anyof(["create", "*"])))) then 1 else 0 end)] | rec)
+  ' "${1}" 2>/dev/null
+}
+
+# doctor::_rbac_report <records> <suc 0|1> <redis 0|1> <kubeconfig> — the
+# lines, in the order of the Go twin.
+doctor::_rbac_report() {
+  local records="${1}" suc="${2}" redis="${3}" kubeconfig="${4}" rec tag a b c d
+  local -a suc_left=() redis_left=() refs=()
+  local suc_new=0 redis_new=0 old_role=0 agg="" has_exec=0 odd=0 line
+  while IFS=$'\t' read -r tag a b c d; do
+    case "${tag}" in
+      suc-left)      suc_left+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}") ;;
+      suc-new)       suc_new="${a}" ;;
+      redis-left)    redis_left+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}") ;;
+      redis-new)     redis_new="${a}" ;;
+      redis-oldrole) old_role="${a}" ;;
+      redis-ref)     if [[ -n "${a}" ]]; then refs+=("${a}"); else odd=$(( odd + 1 )); fi ;;
+      redis-agg)     agg="${a}" ;;
+      redis-exec)    has_exec="${a}" ;;
+    esac
+  done <<< "${records}"
+
+  if (( suc )); then
+    if (( ${#suc_left[@]} == 0 )); then
+      doctor::_ok "system-upgrade-controller: no RBAC migration leftovers"
+    else
+      (( suc_new )) || doctor::_rbac_new_missing system-upgrade-controller lok8s-system-upgrade-controller
+      for rec in "${suc_left[@]}"; do
+        doctor::_rbac_binding_line "${rec}" system-upgrade-controller "${kubeconfig}"
+      done
+    fi
+  fi
+  if (( redis )); then
+    if (( ${#redis_left[@]} == 0 && ! old_role )); then
+      doctor::_ok "redis-operator: no RBAC migration leftovers"
+    else
+      (( redis_new )) || doctor::_rbac_new_missing redis-operator lok8s-redis-operator
+      for rec in "${redis_left[@]+"${redis_left[@]}"}"; do
+        doctor::_rbac_binding_line "${rec}" redis-operator "${kubeconfig}"
+      done
+      if (( old_role )); then
+        # Go: rbacOldRoleLine. The role gets its delete command only when
+        # no binding gives it to another subject (a redis-ref record).
+        local cmd="" n=$(( ${#refs[@]} + odd )) names those="those bindings"
+        line="ClusterRole redis-operator, the old role of the chart, is still in the cluster"
+        if (( n == 0 )) && cmd="$(doctor::_rbac_delete "${kubeconfig}" clusterrole redis-operator)"; then
+          line+=". Doctor does not read RoleBindings: check that none refers to it, and then delete it: ${cmd}"
+        elif (( n == 0 )); then
+          cmd=""
+          line+=". Doctor prints no delete command for the role: check that no RoleBinding refers to it (doctor does not read RoleBindings), and then delete it"
+        else
+          (( odd == 0 )) || refs+=("${odd} with an unusual name")
+          names="$(IFS=,; printf '%s' "${refs[*]}")"
+          if (( n == 1 )); then
+            line+=", and 1 ClusterRoleBinding gives it to subjects other than the redis-operator ServiceAccount"
+            those="that binding"
+          else
+            line+=", and ${n} ClusterRoleBindings give it to subjects other than the redis-operator ServiceAccount"
+          fi
+          line+=" (${names//,/, }). Doctor prints no delete command for the role: give the subjects of ${those} another role first, check that no RoleBinding refers to it (doctor does not read RoleBindings), and then delete it"
+        fi
+        doctor::_warn "migration incomplete: ${line}"
+        if [[ -n "${agg}" ]]; then
+          line="migration incomplete: ClusterRole redis-operator copies its rules into built-in roles (${agg}). The aggregation controller removes the copies when the role is deleted"
+          [[ -z "${cmd}" ]] || line+=" (the command above)"
+          doctor::_warn "${line}"
+        fi
+      fi
+    fi
+    (( has_exec )) || doctor::_info "redis-operator: no ClusterRoleBinding gives the redis-operator ServiceAccount create on pods/exec. A RedisCluster cannot form or scale without it (restore ClusterRoleBinding lok8s-redis-operator-exec before you add one)"
+  fi
+  return 0
+}
+
+# doctor::_rbac_new_missing <account> <new role> — a delete of the old
+# binding before the new one exists leaves the workload without access.
+doctor::_rbac_new_missing() {
+  doctor::_warn "migration incomplete: no ClusterRoleBinding binds the ${1} ServiceAccount to ${2} yet (apply the bootstrap before the deletes below: lo bootstrap)"
+}
+
+# doctor::_rbac_binding_line <role TAB form TAB arg TAB binding> <account> <kubeconfig>
+# One old grant (Go: rbacGrantLine). Only a binding of the account alone
+# ("sa 0") gets a delete command, as the rest of its line. A grant through a
+# group (it also gives the role to other accounts) and a binding with other
+# subjects get no command: a delete would also remove the grant of the
+# others. An empty binding field is a name that is not a DNS-1123 subdomain:
+# the line then has no name and no command. For a role that an opt-in addon
+# binds the account to, each advice to remove the grant says to keep it
+# only on purpose: the check finds an opt-in addon only as a bare entry
+# name (Go: rbacOptInRole).
+doctor::_rbac_binding_line() {
+  local role="" form="" arg="" name="" what account="the ${2} ServiceAccount" keep="" cmd="" line
+  local unusual="Doctor does not print that name or a delete command: "
+  IFS=$'\t' read -r role form arg name <<< "${1}"
+  what="ClusterRoleBinding ${name}"
+  [[ -n "${name}" ]] || what="a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain)"
+  case "${2}:${role}" in
+    system-upgrade-controller:cluster-admin|redis-operator:lok8s-redis-operator-chart-rbac)
+      keep="keep it only on purpose, else " ;;
+  esac
+  if [[ "${form}" == group ]]; then
+    line="${what} gives ${role} to the group ${arg}, which includes ${account}. "
+    if [[ -n "${name}" ]]; then
+      line+="Doctor prints no delete command for a shared grant: review the binding"
+    else
+      line+="${unusual}find the binding and review it"
+    fi
+  elif [[ "${arg}" != 0 ]]; then
+    local others="${arg} other subjects"
+    [[ "${arg}" != 1 ]] || others="1 other subject"
+    line="${what} binds ${account} and ${others} to ${role}. "
+    if [[ -n "${name}" ]]; then
+      line+="Doctor prints no delete command for a binding with other subjects: ${keep}remove ${account} from its subjects (for example with kubectl edit)"
+    else
+      line+="${unusual}${keep}find the binding and remove ${account} from its subjects"
+    fi
+  else
+    line="${what} binds ${account} to ${role}. "
+    # doctor::_rbac_delete checks the name again: a name that fails gets
+    # the line without the command.
+    if [[ -n "${name}" ]] && cmd="$(doctor::_rbac_delete "${3}" clusterrolebinding "${name}")"; then
+      if [[ -n "${keep}" ]]; then line+="Keep it only on purpose, else delete it: "; else line+="Delete it: "; fi
+      line+="${cmd}"
+    else
+      line+="${unusual}${keep}find the binding and delete it"
+    fi
+  fi
+  doctor::_warn "migration incomplete: ${line}"
+}
+
+# doctor::_rbac_delete <kubeconfig> <resource> <name> [<namespace>] — the
+# delete command of one object in the cluster of the kubeconfig that the
+# reads used (Go: rbacDeleteCommand, and rbacDeleteCommandIn with a
+# namespace). It checks the name again where it builds the command: for a
+# name that is not a DNS-1123 subdomain of at most 253 characters, it prints
+# nothing and returns 1. With a namespace (not empty), the command ends with
+# --namespace <namespace>, and a namespace that is not a DNS-1123 label of at
+# most 63 characters is refused the same way. The kubeconfig path is
+# shell-quoted.
+doctor::_rbac_delete() {
+  # The letters one by one: a range like a-z can match other letters in the
+  # regex of some locales.
+  local c='abcdefghijklmnopqrstuvwxyz0123456789'
+  local re="^[${c}]([-${c}]*[${c}])?(\\.[${c}]([-${c}]*[${c}])?)*\$"
+  local label="^[${c}]([-${c}]*[${c}])?\$"
+  (( ${#3} <= 253 )) && [[ "${3}" =~ ${re} ]] || return 1
+  if [[ -n "${4:-}" ]]; then
+    (( ${#4} <= 63 )) && [[ "${4}" =~ ${label} ]] || return 1
+    printf 'kubectl --kubeconfig %s delete %s %s --namespace %s' "$(doctor::_rbac_quote "${1}")" "${2}" "${3}" "${4}"
+    return 0
+  fi
+  printf 'kubectl --kubeconfig %s delete %s %s' "$(doctor::_rbac_quote "${1}")" "${2}" "${3}"
+}
+
+# doctor::_rbac_quote <s> — s for a POSIX shell: in single quotes, with each
+# single quote as '\'' (Go: rbacShQuote).
+doctor::_rbac_quote() {
+  local q="'\\''"
+  printf "'%s'" "${1//\'/${q}}"
+}
+
+# doctor::_rbac_has_control <s> — 0 when s has an ASCII control character
+# (a byte below 0x20, or DEL; Go: rbacHasControl). The check prints the
+# kubeconfig path in its commands, and such a character can end the line
+# or drive the terminal.
+doctor::_rbac_has_control() {
+  local ctl=$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177'
+  [[ "${1}" == *["${ctl}"]* ]]
+}
+
+# doctor::_kms_check <domain>
+# The rook-ceph-csi-kms check. Go twin: internal/cli/cmd_doctor_csikms.go.
+# The piped lines are the same in both.
+#
+# The rook-ceph-csi-kms addon renders the roles and bindings of the options
+# in values.kms, and each object carries the label
+# lok8s.dev/name=rook-ceph-csi-kms. The bootstrap applies without prune, so
+# after a change of the options (or of tenantNamespaces) the objects of the
+# earlier apply stay in the cluster, and their grants with them.
+#
+# When spec.bootstrap has the addon as a bare entry name, the check renders
+# each such entry as the bootstrap renders it (addons::render, with the
+# directory, the values and the env of the entry, the driver kind and the
+# provider of the spec; an env name that the bootstrap refuses is a failed
+# render). The chart of the addon is local, so the render downloads nothing,
+# and a render never reaches the cluster. The check then reads the
+# ClusterRoles, ClusterRoleBindings, Roles and RoleBindings with the label in
+# all namespaces (doctor::_kms_fetch). Each object that no render holds (the
+# same kind, namespace and name) is a candidate leftover: a label is not proof
+# that the addon made the object, so a line says "if no other tool manages
+# it" before a delete command. When spec.bootstrap has rook-ceph but not the
+# addon, the check reads too (no render): each object with the label is a
+# candidate. Without either addon the check does nothing, so it does not run
+# the credential plugin of the kubeconfig for a cluster that cannot have such
+# objects.
+#
+# A candidate Role or ClusterRole gets a delete command only when no binding
+# outside the candidates refers to it and, for a ClusterRole, when it has no
+# aggregate-to label and no other ClusterRole aggregates it. For that, the
+# check reads all RoleBindings and (with a ClusterRole candidate) all
+# ClusterRoleBindings without the label selector, and then all ClusterRoles.
+# An aggregation selector can select any label, not only an aggregate-to
+# label: the check evaluates the selectors of each ClusterRole with an
+# aggregationRule on the labels of each candidate ClusterRole
+# (doctor::_kms_aggs). A selector that the check cannot evaluate, or a failed
+# read, gives no delete command. A candidate binding always gets its
+# command: a delete removes its grant and cannot break an object of the
+# render.
+#
+# The check does not render a path entry of spec.bootstrap: its kustomize
+# plugins can read the secret store. A path entry can render the objects of
+# the addon too, so with a path entry the check prints no candidate: when it
+# finds one, it says that it did not check. An entry that does not resolve or
+# parse stops the check before the reads. The line names the position of the
+# entry, not its text: an entry holds values, and values can hold secrets.
+#
+# The check uses the machinery of the RBAC migration check: the domain's
+# kubeconfig (doctor::_rbac_kubeconfig), doctor::_rbac_read (the bound of each
+# read, its process group, the fixed reasons, and a list that must be
+# complete: kubectl's output is never printed), the temp dir and the traps of
+# the reads, and doctor::_rbac_delete. jq compares each listed object with
+# the render, and gives a name, a namespace or an option label to the shell
+# only in the DNS-1123 form: an object with another name or namespace is
+# counted (doctor::_kms_records). A failed render or read is one warning, and
+# the check stops. An equal set prints nothing. Without yq or jq the check
+# does nothing: the RBAC migration check above says that it did not check.
+# Every line is advisory: it always returns 0. lo doctor sends only GET
+# requests; a kubeconfig exec credential plugin runs as kubectl runs it, and
+# lo does not limit what it does.
+doctor::_kms_check() {
+  local domain="${1}" addon=rook-ceph-csi-kms
+  local skipped="${addon} RBAC check skipped: " not_checked="${addon} RBAC leftovers not checked: "
+  local render_failed="the addon does not render with the values of its spec.bootstrap entry (see: lo bootstrap --only ${addon} --dry-run)"
+  local malformed="the render of the addon is malformed (a document that is not an object, an object without a kind, or an RBAC object without a name or, for a Role or RoleBinding, a namespace)"
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] || return 0
+  if ! command -v yq >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  local kind
+  kind=$(domain::spec_driver "${spec}" lo 2>/dev/null) || return 0
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    return 0
+  fi
+  # bootstrap::_resolve_entries does not return the status of its yq (it
+  # reads the yq through mapfile): the first yq here does (Go: the error of
+  # bootstrap.ResolveEntries).
+  local listed=""
+  if ! yq -o=json -I=0 '.spec.bootstrap[]?' "${spec}" >/dev/null 2>&1 \
+      || ! listed="$(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)"; then
+    doctor::_warn "${not_checked}spec.bootstrap: doctor cannot read the list of entries (see: lo bootstrap --dry-run)"
+    return 0
+  fi
+  # An addon counts only as a bare entry name, as in the RBAC migration
+  # check (Go: the Builtin flag of the parsed entry), also with a trailing
+  # "/" or "/." (spec::is_addon). The check does not render a path entry.
+  local -a entries=() dirs=() inls=() envs=() path_keys=()
+  [[ -z "${listed}" ]] || mapfile -t entries <<< "${listed}"
+  local e nm dr inl ev wt dp ex key parent=0 enabled=0 i
+  for (( i = 0; i < ${#entries[@]}; i++ )); do
+    e="${entries[i]}"
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    if ! bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null; then
+      doctor::_warn "${not_checked}spec.bootstrap entry $(( i + 1 )): it does not parse (see: lo bootstrap --dry-run)"
+      return 0
+    fi
+    if [[ "${key}" == /* || "${key}" == ./* || "${key}" == ../* ]]; then
+      path_keys+=("${key}")
+      continue
+    fi
+    if spec::is_addon "${dr}" "${addon}"; then
+      dirs+=("${dr}"); inls+=("${inl}"); envs+=("${ev}")
+    elif spec::is_addon "${dr}" rook-ceph; then
+      parent=1
+    fi
+  done
+  (( ${#dirs[@]} == 0 )) || enabled=1
+  (( enabled || parent )) || return 0
+  # The skip lines are for a spec with the addon only: the leftover check of
+  # a spec without it says nothing unless it finds an object.
+  local kubeconfig
+  kubeconfig="$(doctor::_rbac_kubeconfig "${spec}")"
+  if doctor::_rbac_has_control "${kubeconfig}"; then
+    (( ! enabled )) || doctor::_info "${skipped}the kubeconfig path has a control character (the delete commands of the check name that path)"
+    return 0
+  fi
+  if [[ ! -f "${kubeconfig}" ]]; then
+    (( ! enabled )) || doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
+    return 0
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    (( ! enabled )) || doctor::_warn "${not_checked}kubectl not found"
+    return 0
+  fi
+  # The render's messages are not printed: the line of the failure names the
+  # command that shows them.
+  local ids="[]" provider="" stream=""
+  if (( enabled )); then
+    provider=$(yq -r '.spec.provider.name // ""' "${spec}" 2>/dev/null) || provider=""
+    for (( i = 0; i < ${#dirs[@]}; i++ )); do
+      if ! declare -F addons::render >/dev/null \
+          || bootstrap::_reserved_env_name "${envs[i]}" >/dev/null \
+          || ! stream="$(addons::render "${dirs[i]}" "${kind}" "${provider}" "${inls[i]}" "${envs[i]}" 2>/dev/null)"; then
+        doctor::_warn "${not_checked}${render_failed}"
+        return 0
+      fi
+      if ! ids="$(printf '%s\n' "${stream}" | doctor::_kms_ids "${ids}")"; then
+        doctor::_warn "${not_checked}${malformed}"
+        return 0
+      fi
+    done
+  fi
+  local result="" with_refs=1
+  (( ${#path_keys[@]} == 0 )) || with_refs=0
+  result=$(doctor::_kms_fetch "${kubeconfig}" "${ids}" "${with_refs}") || result=""
+  # "ok" alone: no candidate (doctor::_kms_fetch gives a record only for a
+  # candidate). A path entry can only add objects to the render: no candidate
+  # without it is no candidate with it too.
+  case "${result}" in
+    ok)          return 0 ;;
+    ok$'\n'*)    ;;
+    fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}"; return 0 ;;
+    *)           doctor::_warn "${not_checked}kubectl failed or did not return a valid list"; return 0 ;;
+  esac
+  if (( ${#path_keys[@]} > 0 )); then
+    doctor::_warn "${not_checked}spec.bootstrap has path entries ($(doctor::_kms_path_list "${path_keys[@]}")), which can render these objects too"
+    return 0
+  fi
+  doctor::_kms_report "${result#ok$'\n'}" "${enabled}" "${kubeconfig}"
+  return 0
+}
+
+# doctor::_kms_ids <ids> — <ids> (a JSON array of {kind, namespace, name}),
+# with the ClusterRoles, ClusterRoleBindings, Roles and RoleBindings of the
+# rendered stream on stdin added (Go: kmsRenderedIDs). A cluster-scoped kind
+# has no namespace. It fails for a stream that yq or jq cannot read, a
+# document that is not an object (an empty document is null here: it is
+# skipped), an object without a string kind, and an RBAC object without a
+# string metadata.name or, for a Role or a RoleBinding, a string
+# metadata.namespace: the check cannot know what such a render applies. The
+# stderr of yq and jq goes to /dev/null: a parse error can quote the text of
+# the render.
+doctor::_kms_ids() {
+  local docs
+  docs="$(yq -o=json -I=0 '.' - 2>/dev/null)" || return 1
+  # shellcheck disable=SC2016 # jq program text
+  printf '%s\n' "${docs}" | jq -e -c -s --argjson ids "${1}" '
+    def nonempty: type == "string" and length > 0;
+    def rbac: . as $k | any("ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"; . == $k);
+    def nsd: . == "Role" or . == "RoleBinding";
+    def meta(f): .metadata | type == "object" and f;
+    if all(.[]; . == null or (type == "object" and (.kind | nonempty)
+        and (if .kind | rbac then meta(.name | nonempty)
+          and ((.kind | nsd | not) or meta(.namespace | nonempty)) else true end)))
+    then $ids + [.[] | select(type == "object" and (.kind | rbac))
+      | {kind: .kind, namespace: (if .kind | nsd then .metadata.namespace else "" end), name: .metadata.name}]
+    else error("malformed") end
+  ' 2>/dev/null
+}
+
+# doctor::_kms_fetch <kubeconfig> <ids> <refs 0|1>
+# The four labelled reads, the reference reads (only with <refs> 1) and the
+# records. Prints "ok" and then the records of doctor::_kms_records and
+# doctor::_kms_bound, or one line "fail<TAB><reason>". It runs in a subshell,
+# with the temp dir, the traps and the cleanup of doctor::_rbac_fetch.
+doctor::_kms_fetch() ( doctor::_kms_fetch_in "$@" )
+
+# doctor::_kms_fetch_in <kubeconfig> <ids> <refs 0|1> — the body of
+# doctor::_kms_fetch, always in its subshell (see doctor::_rbac_fetch_in). A
+# failed labelled read stops the reads: no record of an earlier read is
+# printed. The forbidden reason names the four kinds of this check. Right
+# after each read, doctor::_kms_project keeps only the fields of the records
+# in a .rec file, and the raw list is removed at once: the raw list lives in
+# the temp dir (mode 0700) only for the time of its read and check. The .rec
+# files live until the cleanup of the subshell.
+#
+# The reference reads run when a Role or a ClusterRole is among the extra
+# records: all ClusterRoleBindings (only with a ClusterRole) and all
+# RoleBindings, without the selector. A failed reference read stops these
+# reads and gives one record "refs-fail<TAB><reason>": then no role gets a
+# delete command. After them, when they did not fail and a ClusterRole is
+# among the extra records, the aggregation read lists all ClusterRoles
+# (doctor::_kms_aggs). A failed aggregation read gives one record
+# "agg-fail<TAB><reason>": then no ClusterRole gets a delete command.
+doctor::_kms_fetch_in() {
+  _rbac_tmp="" _rbac_pid="" _rbac_hold="" _rbac_shell="" _rbac_now=0 _rbac_rc=0 _rbac_stopped=0 _rbac_reason=""
+  trap 'doctor::_rbac_cleanup' EXIT
+  trap 'doctor::_rbac_cleanup; trap - EXIT INT; kill -INT "${BASHPID}"' INT
+  local invalid="kubectl failed or did not return a valid list" records="" bound="" aggs="" res shape forbidden
+  forbidden="$(doctor::_rbac_reason forbidden)"
+  local what
+  local -a files=()
+  if ! _rbac_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-doctor-rbac.XXXXXX"); then
+    _rbac_tmp=""
+    printf 'fail\t%s\n' "${invalid}"
+    exit 0
+  fi
+  for res in clusterroles clusterrolebindings roles rolebindings; do
+    shape=labelled-cluster
+    [[ "${res}" != role* ]] || shape=labelled-ns
+    doctor::_rbac_read "${1}" "${res}" "${_rbac_tmp}/kms-${res}.json" "${_rbac_tmp}/err" "${shape}" \
+      --all-namespaces --selector lok8s.dev/name=rook-ceph-csi-kms
+    # The labels of a ClusterRole stay for the aggregation selectors.
+    what=labelled
+    [[ "${res}" != clusterroles ]] || what=labelled-labels
+    if [[ -z "${_rbac_reason}" ]] \
+        && ! doctor::_kms_project "${what}" "${_rbac_tmp}/kms-${res}.json" "${_rbac_tmp}/kms-${res}.rec"; then
+      _rbac_reason="${invalid}"
+    fi
+    rm -f -- "${_rbac_tmp}/kms-${res}.json"
+    if [[ -n "${_rbac_reason}" ]]; then
+      [[ "${_rbac_reason}" != "${forbidden}" ]] \
+        || _rbac_reason="the kubeconfig user cannot list ClusterRoles, ClusterRoleBindings, Roles and RoleBindings in all namespaces (forbidden or unauthorized)"
+      printf 'fail\t%s\n' "${_rbac_reason}"
+      exit 0
+    fi
+    files+=("${_rbac_tmp}/kms-${res}.rec")
+  done
+  if ! records=$(doctor::_kms_records "${2}" "${files[@]}"); then
+    printf 'fail\t%s\n' "${invalid}"
+    exit 0
+  fi
+  local cluster_role=0 role=0
+  [[ $'\n'"${records}" != *$'\n'extra$'\t'ClusterRole$'\t'* ]] || cluster_role=1 role=1
+  [[ $'\n'"${records}" != *$'\n'extra$'\t'Role$'\t'* ]] || role=1
+  if (( ${3} && role )); then
+    printf '[]\n' > "${_rbac_tmp}/refs-clusterrolebindings.rec"
+    printf '[]\n' > "${_rbac_tmp}/refs-rolebindings.rec"
+    for res in clusterrolebindings rolebindings; do
+      [[ "${res}" != clusterrolebindings ]] || (( cluster_role )) || continue
+      shape=ref-cluster
+      [[ "${res}" != rolebindings ]] || shape=ref-ns
+      doctor::_rbac_read "${1}" "${res}" "${_rbac_tmp}/refs-${res}.json" "${_rbac_tmp}/err" "${shape}" --all-namespaces
+      if [[ -z "${_rbac_reason}" ]] \
+          && ! doctor::_kms_project ref "${_rbac_tmp}/refs-${res}.json" "${_rbac_tmp}/refs-${res}.rec"; then
+        _rbac_reason="${invalid}"
+      fi
+      rm -f -- "${_rbac_tmp}/refs-${res}.json"
+      [[ -z "${_rbac_reason}" ]] || break
+    done
+    if [[ -n "${_rbac_reason}" ]]; then
+      [[ "${_rbac_reason}" != "${forbidden}" ]] \
+        || _rbac_reason="the kubeconfig user cannot list RoleBindings and ClusterRoleBindings in all namespaces (forbidden or unauthorized)"
+      bound="refs-fail"$'\t'"${_rbac_reason}"
+    elif ! bound=$(doctor::_kms_bound "${2}" "${files[@]}" "${_rbac_tmp}/refs-clusterrolebindings.rec" "${_rbac_tmp}/refs-rolebindings.rec"); then
+      bound="refs-fail"$'\t'"${invalid}"
+    fi
+  fi
+  if (( ${3} && cluster_role )) && [[ "${bound}" != refs-fail$'\t'* ]]; then
+    doctor::_rbac_read "${1}" clusterroles "${_rbac_tmp}/refs-clusterroles.json" "${_rbac_tmp}/err" agg --all-namespaces
+    if [[ -z "${_rbac_reason}" ]] \
+        && ! doctor::_kms_project agg "${_rbac_tmp}/refs-clusterroles.json" "${_rbac_tmp}/refs-clusterroles.rec"; then
+      _rbac_reason="${invalid}"
+    fi
+    rm -f -- "${_rbac_tmp}/refs-clusterroles.json"
+    if [[ -n "${_rbac_reason}" ]]; then
+      [[ "${_rbac_reason}" != "${forbidden}" ]] \
+        || _rbac_reason="the kubeconfig user cannot list ClusterRoles (forbidden or unauthorized)"
+      aggs="agg-fail"$'\t'"${_rbac_reason}"
+    elif ! aggs=$(doctor::_kms_aggs "${2}" "${files[0]}" "${_rbac_tmp}/refs-clusterroles.rec"); then
+      aggs="agg-fail"$'\t'"${invalid}"
+    fi
+  fi
+  printf 'ok\n%s\n' "${records}${bound:+$'\n'${bound}}${aggs:+$'\n'${aggs}}"
+}
+
+# doctor::_kms_project <labelled|labelled-labels|ref|agg> <list file> <out file>
+# Writes the fields of the records of a list that doctor::_rbac_shape
+# accepted, as one JSON array (Go: kmsParseFor, kmsParseRefFor and
+# kmsParseAgg keep the same fields):
+#   labelled  of each object with the label lok8s.dev/name=rook-ceph-csi-kms:
+#             n (the name), ns (the namespace), o (the option label) and g
+#             (true when a label starts with
+#             rbac.authorization.k8s.io/aggregate-to-; not the label)
+#   labelled-labels
+#             the same, and l (all labels: the ClusterRoles, for the
+#             aggregation selectors; no line prints a label value)
+#   ref       of each binding: n, ns, rk and rn (the kind and the name of its
+#             role); not the subjects, the labels or the annotations
+#   agg       of each ClusterRole with an aggregationRule: n, and s (its
+#             selectors: l the matchLabels, e the matchExpressions as k, o
+#             and v, the key, the operator and the values); not the rules
+doctor::_kms_project() {
+  # shellcheck disable=SC2016 # jq program text
+  jq -c --arg what "${1}" '
+    if $what == "labelled" or $what == "labelled-labels" then
+      [.items[] | (.metadata.labels // {}) as $l | select($l["lok8s.dev/name"] == "rook-ceph-csi-kms")
+        | {n: .metadata.name, ns: (.metadata.namespace // ""), o: ($l["csi-kms.lok8s.dev/option"] // ""),
+           g: ($l | keys | any(startswith("rbac.authorization.k8s.io/aggregate-to-")))}
+        + (if $what == "labelled-labels" then {l: $l} else {} end)]
+    elif $what == "agg" then
+      [.items[] | select(.aggregationRule != null)
+        | {n: .metadata.name, s: [.aggregationRule.clusterRoleSelectors // [] | .[]
+            | {l: (.matchLabels // {}), e: [.matchExpressions // [] | .[] | {k: .key, o: (.operator // ""), v: (.values // [])}]}]}]
+    else
+      [.items[] | {n: .metadata.name, ns: (.metadata.namespace // ""), rk: .roleRef.kind, rn: .roleRef.name}]
+    end
+  ' "${2}" > "${3}" 2>/dev/null
+}
+
+# doctor::_kms_records <ids> <rec file>...
+# One TAB-separated record per object with the label of the addon that no
+# render holds, in the order of the files and of their items (Go: the loop of
+# doctorKMSLeftovers), from one jq run (a failed run is a failed check):
+#   extra <kind> <namespace> <name> <option> <aggregated 0|1>
+#                 a name that is a DNS-1123 subdomain (at most 253
+#                 characters), and of a Role or RoleBinding a namespace that
+#                 is a DNS-1123 label (at most 63); <option> is the option
+#                 label when it is a DNS-1123 label. An empty field is "-"
+#                 (a TAB in IFS joins empty fields), and "-" is never such a
+#                 name.
+#   odd           an object with another name or namespace: counted, never
+#                 printed
+# <ids> is the JSON array of doctor::_kms_ids. The files are the .rec files
+# of doctor::_kms_project for clusterroles, clusterrolebindings, roles and
+# rolebindings, in that order: they hold only the objects with the label
+# lok8s.dev/name of the addon. Each record goes through rec, which fails the
+# run when a field has a control character. The stderr of jq goes to
+# /dev/null: an error on a malformed field quotes the value.
+doctor::_kms_records() {
+  local ids="${1}"
+  shift
+  # shellcheck disable=SC2016 # jq program text
+  jq -r -n --argjson ids "${ids}" '
+    def rec: map(tostring) | if any(.[]; test("[[:cntrl:]]")) then error("a record field has a control character") else join("\t") end;
+    def subdomain: (type == "string") and length <= 253
+      and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\z");
+    def dnslabel: (type == "string") and length <= 63 and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?\\z");
+    def dash: if . == "" then "-" else . end;
+    ["ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"] as $kinds
+    | [inputs] as $lists
+    | range(0; 4) as $i
+    | $kinds[$i] as $k
+    | ($k == "Role" or $k == "RoleBinding") as $nsd
+    | $lists[$i][]
+    | {kind: $k, namespace: (if $nsd then .ns else "" end), name: .n} as $id
+    | select(any($ids[]; . == $id) | not)
+    | if ($id.name | subdomain) and (($nsd | not) or ($id.namespace | dnslabel)) then
+        ["extra", $k, ($id.namespace | dash), $id.name, (if .o | dnslabel then .o else "-" end), (if .g then 1 else 0 end)] | rec
+      else
+        ["odd"] | rec
+      end
+  ' "$@" 2>/dev/null
+}
+
+# doctor::_kms_bound <ids> <rec file>... — the records of the bindings that
+# refer to a Role or a ClusterRole of the extra records (Go: kmsRefs), from
+# one jq run. The files are the four .rec files of doctor::_kms_records, then
+# the .rec files of the reference reads of clusterrolebindings and
+# rolebindings ([] when not read). A binding that is a candidate itself does
+# not count. A RoleBinding refers to a ClusterRole by its name, and to a Role
+# by its name in the namespace of the binding. In the order of the files and
+# of their items:
+#   ref <role kind> <role namespace> <role name> <binding kind> <binding namespace> <binding name>
+#                 a binding name that is a DNS-1123 subdomain and a
+#                 namespace that is a DNS-1123 label; an empty field is "-"
+#   refodd <role kind> <role namespace> <role name>
+#                 a binding with another name or namespace: counted
+doctor::_kms_bound() {
+  local ids="${1}"
+  shift
+  # shellcheck disable=SC2016 # jq program text
+  jq -r -n --argjson ids "${ids}" '
+    def rec: map(tostring) | if any(.[]; test("[[:cntrl:]]")) then error("a record field has a control character") else join("\t") end;
+    def subdomain: (type == "string") and length <= 253
+      and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\z");
+    def dnslabel: (type == "string") and length <= 63 and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?\\z");
+    def dash: if . == "" then "-" else . end;
+    ["ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"] as $kinds
+    | [inputs] as $lists
+    | [range(0; 4) as $i | $kinds[$i] as $k | ($k == "Role" or $k == "RoleBinding") as $nsd
+        | $lists[$i][] | {kind: $k, namespace: (if $nsd then .ns else "" end), name: .n}
+        | select(. as $id | any($ids[]; . == $id) | not)] as $cand
+    | [$cand[] | select((.kind == "ClusterRole" or .kind == "Role") and (.name | subdomain)
+        and (.kind == "ClusterRole" or (.namespace | dnslabel)))] as $roles
+    | (($lists[4][] | {kind: "ClusterRoleBinding", namespace: "", name: .n, rk, rn}),
+       ($lists[5][] | {kind: "RoleBinding", namespace: .ns, name: .n, rk, rn}))
+    | select(. as $b | any($cand[]; . == {kind: $b.kind, namespace: $b.namespace, name: $b.name}) | not)
+    | . as $b
+    | (if .rk == "ClusterRole" then {kind: "ClusterRole", namespace: "", name: .rn}
+       elif .rk == "Role" and .kind == "RoleBinding" then {kind: "Role", namespace: .namespace, name: .rn}
+       else empty end) as $t
+    | select(any($roles[]; . == $t))
+    | if ($b.name | subdomain) and ($b.namespace == "" or ($b.namespace | dnslabel)) then
+        ["ref", $t.kind, ($t.namespace | dash), $t.name, $b.kind, ($b.namespace | dash), $b.name] | rec
+      else
+        ["refodd", $t.kind, ($t.namespace | dash), $t.name] | rec
+      end
+  ' "$@" 2>/dev/null
+}
+
+# doctor::_kms_aggs <ids> <clusterroles rec file> <aggregation rec file> —
+# the records of the ClusterRoles that aggregate a ClusterRole of the extra
+# records (Go: kmsAggs and kmsMatch), from one jq run. The first file is the
+# .rec file of the labelled read of clusterroles (with the labels), the
+# second one the .rec file of the aggregation read. A ClusterRole
+# aggregates a candidate when one of its selectors selects the candidate:
+# each matchLabels pair is a label of the candidate, and each expression
+# holds. In: the candidate has the label, with one of the values. NotIn: it
+# does not have the label, or its value is none of the values. Exists: it
+# has the label. DoesNotExist: it does not have the label. A selector
+# without pairs and expressions selects each ClusterRole. The check cannot
+# evaluate a form that the API refuses: another operator, In or NotIn
+# without values, or Exists or DoesNotExist with values. A ClusterRole does
+# not aggregate itself. In the order of the candidates and of the
+# aggregation list:
+#   agg ClusterRole - <name> <aggregating name>
+#                 an aggregating ClusterRole with a name that is a DNS-1123
+#                 subdomain
+#   aggodd ClusterRole - <name>
+#                 an aggregating ClusterRole with another name: counted
+#   aggunk ClusterRole - <name>
+#                 no ClusterRole aggregates the candidate, and a selector
+#                 that the check cannot evaluate can select it
+# No record holds a label value.
+doctor::_kms_aggs() {
+  local ids="${1}"
+  shift
+  # shellcheck disable=SC2016 # jq program text
+  jq -r -n --argjson ids "${ids}" '
+    def rec: map(tostring) | if any(.[]; test("[[:cntrl:]]")) then error("a record field has a control character") else join("\t") end;
+    def subdomain: (type == "string") and length <= 253
+      and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\z");
+    # An expression on the labels $l: true, false, or null (a form that the
+    # check cannot evaluate).
+    def holds($l): .k as $k | .v as $v | ($l | has($k)) as $has | $l[$k] as $got
+      | if .o == "In" then (if ($v | length) == 0 then null else ($has and any($v[]; . == $got)) end)
+        elif .o == "NotIn" then (if ($v | length) == 0 then null else (($has and any($v[]; . == $got)) | not) end)
+        elif .o == "Exists" then (if ($v | length) > 0 then null else $has end)
+        elif .o == "DoesNotExist" then (if ($v | length) > 0 then null else ($has | not) end)
+        else null end;
+    # A selector on the labels $l: true, false, or null.
+    def selects($l): [(.l | to_entries[] | .key as $k | .value as $v | ($l | has($k)) and $l[$k] == $v),
+        (.e[] | holds($l))]
+      | if any(.[]; . == null) then null else all(.[]; .) end;
+    [inputs] as [$crs, $aggs]
+    | $crs[] | {kind: "ClusterRole", namespace: "", name: .n} as $id
+    | select((any($ids[]; . == $id) | not) and ($id.name | subdomain))
+    | (.l // {}) as $l
+    | [$aggs[] | select(.n != $id.name)
+        | {n: .n, m: ([.s[] | selects($l)] | if any(.[]; . == true) then true elif any(.[]; . == null) then null else false end)}] as $r
+    | if any($r[]; .m == true) then
+        $r[] | select(.m == true)
+        | if .n | subdomain then ["agg", "ClusterRole", "-", $id.name, .n] else ["aggodd", "ClusterRole", "-", $id.name] end | rec
+      elif any($r[]; .m == null) then ["aggunk", "ClusterRole", "-", $id.name] | rec
+      else empty end
+  ' "$@" 2>/dev/null
+}
+
+# doctor::_kms_list <one> <many> <more> <odd> [<shown>...] — the shown names,
+# the count of the other names, and the count of the names that the check
+# does not print, joined with ", " (Go: kmsList).
+doctor::_kms_list() {
+  local one="${1}" many="${2}" more="${3}" odd="${4}" out="" s w
+  shift 4
+  for s in "$@"; do out+="${out:+, }${s}"; done
+  if (( more > 0 )); then
+    w="${many}"
+    (( more != 1 )) || w="${one}"
+    out+="${out:+, }${more} more ${w}"
+  fi
+  if (( odd > 0 )); then
+    w="${many}"
+    (( odd != 1 )) || w="${one}"
+    out+="${out:+, }${odd} ${w} with an unusual name"
+  fi
+  printf '%s' "${out}"
+}
+
+# doctor::_kms_path_list <key>... — the path entries of spec.bootstrap as the
+# spec writes them, only in the form ^[A-Za-z0-9._/-]{1,253}$ (C locale: a
+# character is a byte), at most 3 (Go: kmsPathList). The others are counted.
+doctor::_kms_path_list() {
+  local LC_ALL=C k more=0 odd=0
+  local -a keys_shown=()
+  for k in "$@"; do
+    if [[ ! "${k}" =~ ^[A-Za-z0-9._/-]{1,253}$ ]]; then
+      odd=$(( odd + 1 ))
+    elif (( ${#keys_shown[@]} == 3 )); then
+      more=$(( more + 1 ))
+    else
+      keys_shown+=("${k}")
+    fi
+  done
+  doctor::_kms_list entry entries "${more}" "${odd}" "${keys_shown[@]+"${keys_shown[@]}"}"
+}
+
+# doctor::_kms_report <records> <enabled 0|1> <kubeconfig> — the lines, in the
+# order of the Go twin: one line per extra object (kmsExtraLine), with its
+# delete command as the rest of the line when the check prints one, then the
+# count of the other objects (kmsUnusualLine). doctor::_rbac_delete checks
+# the name and the namespace again: an object that fails is counted instead.
+# A role gets a delete command only when no binding outside the candidates
+# refers to it (the ref and refodd records, at most 3 named) and, for a
+# ClusterRole, when it has no aggregate-to label and no other ClusterRole
+# aggregates it (the agg and aggodd records, at most 3 named; aggunk and
+# agg-fail: not checked). A candidate binding keeps its command, also when
+# its role is in the render: the delete removes a grant, and the render
+# does not hold the binding.
+doctor::_kms_report() {
+  local records="${1}" enabled="${2}" kubeconfig="${3}"
+  local addon=rook-ceph-csi-kms selector=lok8s.dev/name=rook-ceph-csi-kms
+  local tag kind ns name opt agg bname cmd what line rkey refs_reason="" agg_reason="" unusual=0 no_command
+  # The bindings of each role (the key: <kind>/<namespace>/<name>): the
+  # first 3 names, one per line, and the counts of the others. The same for
+  # the ClusterRoles that aggregate a ClusterRole (agg_*).
+  local -A shown=() nshown=() more=() odd=() agg_shown=() agg_n=() agg_more=() agg_odd=() agg_unk=()
+  while IFS=$'\t' read -r tag kind ns name opt agg bname; do
+    rkey="${kind}/${ns}/${name}"
+    case "${tag}" in
+      refs-fail) refs_reason="${kind}" ;;
+      agg-fail) agg_reason="${kind}" ;;
+      agg)
+        if (( ${agg_n[${rkey}]:-0} == 3 )); then
+          agg_more[${rkey}]=$(( ${agg_more[${rkey}]:-0} + 1 ))
+        else
+          agg_shown[${rkey}]+="ClusterRole/${opt}"$'\n'
+          agg_n[${rkey}]=$(( ${agg_n[${rkey}]:-0} + 1 ))
+        fi
+        ;;
+      aggodd) agg_odd[${rkey}]=$(( ${agg_odd[${rkey}]:-0} + 1 )) ;;
+      aggunk) agg_unk[${rkey}]=1 ;;
+      ref)
+        if (( ${nshown[${rkey}]:-0} == 3 )); then
+          more[${rkey}]=$(( ${more[${rkey}]:-0} + 1 ))
+        elif [[ "${agg}" == - ]]; then
+          shown[${rkey}]+="${opt}/${bname}"$'\n'
+          nshown[${rkey}]=$(( ${nshown[${rkey}]:-0} + 1 ))
+        else
+          shown[${rkey}]+="${opt}/${agg}/${bname}"$'\n'
+          nshown[${rkey}]=$(( ${nshown[${rkey}]:-0} + 1 ))
+        fi
+        ;;
+      refodd) odd[${rkey}]=$(( ${odd[${rkey}]:-0} + 1 )) ;;
+    esac
+  done <<< "${records}"
+  local -a names=()
+  while IFS=$'\t' read -r tag kind ns name opt agg; do
+    case "${tag}" in
+      odd) unusual=$(( unusual + 1 )); continue ;;
+      extra) ;;
+      *) continue ;;
+    esac
+    rkey="${kind}/${ns}/${name}"
+    [[ "${ns}" != - ]] || ns=""
+    [[ "${opt}" != - ]] || opt=""
+    if ! cmd="$(doctor::_rbac_delete "${kubeconfig}" "${kind,,}" "${name}" "${ns}")"; then
+      unusual=$(( unusual + 1 ))
+      continue
+    fi
+    what="${kind} ${name}"
+    [[ -z "${ns}" ]] || what+=" in namespace ${ns}"
+    [[ -z "${opt}" ]] || what+=" (option ${opt})"
+    line="${addon}: ${what} is a candidate leftover: it has the label ${selector}, and "
+    if (( enabled )); then
+      line+="the current values do not render it"
+    else
+      line+="spec.bootstrap does not have the addon"
+    fi
+    line+=". It keeps its grant."
+    if [[ "${kind}" == *Binding ]]; then
+      doctor::_warn "${line} If no other tool manages it, delete it: ${cmd}"
+      continue
+    fi
+    no_command=0
+    if [[ -n "${refs_reason}" ]]; then
+      line+=" References not checked: ${refs_reason}."
+      no_command=1
+    elif [[ -n "${shown[${rkey}]:-}" || -n "${odd[${rkey}]:-}" ]]; then
+      names=()
+      [[ -z "${shown[${rkey}]:-}" ]] || mapfile -t names <<< "${shown[${rkey}]%$'\n'}"
+      line+=" It is still bound by $(doctor::_kms_list binding bindings "${more[${rkey}]:-0}" "${odd[${rkey}]:-0}" "${names[@]+"${names[@]}"}")."
+      no_command=1
+    fi
+    if [[ "${kind}" == ClusterRole ]]; then
+      if [[ -n "${agg_reason}" ]]; then
+        line+=" Aggregation not checked: ${agg_reason}."
+        no_command=1
+      elif [[ -n "${agg_shown[${rkey}]:-}" || -n "${agg_odd[${rkey}]:-}" ]]; then
+        names=()
+        [[ -z "${agg_shown[${rkey}]:-}" ]] || mapfile -t names <<< "${agg_shown[${rkey}]%$'\n'}"
+        line+=" It is aggregated into $(doctor::_kms_list ClusterRole ClusterRoles "${agg_more[${rkey}]:-0}" "${agg_odd[${rkey}]:-0}" "${names[@]+"${names[@]}"}")."
+        no_command=1
+      elif [[ -n "${agg_unk[${rkey}]:-}" ]]; then
+        line+=" Aggregation not checked: a ClusterRole has an aggregation selector that doctor cannot evaluate."
+        no_command=1
+      fi
+    fi
+    if [[ "${kind}" == ClusterRole && "${agg}" == 1 ]]; then
+      line+=" It has an aggregate-to label: an aggregated ClusterRole takes its rules."
+      no_command=1
+    fi
+    if (( no_command )); then
+      doctor::_warn "${line} Doctor prints no delete command for it."
+    else
+      doctor::_warn "${line} No binding outside the candidates refers to it. If no other tool manages it, delete it: ${cmd}"
+    fi
+  done <<< "${records}"
+  (( unusual > 0 )) || return 0
+  local n="1 object" verb=" is a candidate leftover: " it="it"
+  if (( unusual > 1 )); then
+    n="${unusual} objects" verb=" are candidate leftovers: " it="them"
+  fi
+  line="${addon}: ${n} with the label ${selector} and an unusual name or namespace (not DNS-1123)${verb}"
+  if (( enabled )); then
+    line+="the current values do not render ${it}"
+  else
+    line+="spec.bootstrap does not have the addon"
+  fi
+  doctor::_warn "${line}. Doctor does not print those names. List the objects of the addon: kubectl --kubeconfig $(doctor::_rbac_quote "${kubeconfig}") get clusterroles,clusterrolebindings,roles,rolebindings --all-namespaces --selector ${selector}"
+  return 0
+}
+
+# doctor::_sso_check <domain>
+# The SecurityPolicy CRD check for the sso-gate addon (issue #141). Go twin:
+# internal/cli/cmd_doctor_ssogate.go. The piped lines are the same in both.
+#
+# The SecurityPolicy of sso-gate sets spec.mergeType, so that the policy adds
+# to the guards of the Gateway's own policy and does not replace them.
+# envoy-gateway declares that field in its SecurityPolicy CRD from v1.8.0. On
+# an older CRD, a client-side apply drops the field without an error, and the
+# route then has the SSO policy only: the Gateway's guards (an IP allowlist,
+# a deny-by-default authorization) no longer apply to it.
+#
+# The check runs only when spec.bootstrap has sso-gate as a bare entry name
+# (read with the entry parser of `lo addons --detail`, as the RBAC migration
+# check reads its addons) and the domain has a kubeconfig (the file that the
+# entrypoint exports as KUBECONFIG). It runs one kubectl command: `kubectl get
+# customresourcedefinitions.apiextensions.k8s.io
+# securitypolicies.gateway.envoyproxy.io --ignore-not-found -o json`, with the
+# bound, the process group, the temp dir, the traps and the fixed reasons of
+# the RBAC migration check (doctor::_sso_fetch). The full resource name needs
+# no short name (`crd`) from the API discovery of the cluster. kubectl sends
+# GET requests only: the CRD, and the API discovery when its cache has no
+# answer. kubectl's stderr is never printed.
+#
+# The check selects the version v1alpha1 by its name, never by its position
+# in spec.versions (the order of that list is not a contract), and looks for
+# schema.openAPIV3Schema.properties.spec.properties.mergeType in it
+# (doctor::_sso_state). Two flags of the versions also count: a v1alpha1 that
+# is not served gets the line of a CRD without v1alpha1 (an apply of sso-gate
+# then fails with an error, and drops nothing in silence), and a storage
+# version other than v1alpha1 that does not declare the field is a ✗ (the
+# apiserver prunes each object with the schema of the storage version before
+# it stores it). The Go twin's header has the details.
+#
+# The lines: ✓ when v1alpha1 and the storage version declare the field; ✗
+# when v1alpha1 does not (upgrade envoy-gateway first) or the storage version
+# does not (reinstall the CRDs of envoy-gateway first); ℹ (skipped) without a
+# kubeconfig or a CRD; ! (not checked) when jq or kubectl is not there, the
+# read fails, or the CRD has no served v1alpha1, with the fixed reason.
+# Without a domain, with a deploy domain, without a cluster spec, with a spec
+# that cannot be read, or without yq, it prints nothing: the RBAC migration
+# check above says it. Every line is advisory: it always returns 0.
+doctor::_sso_check() {
+  local domain="${1}"
+  local skipped="sso-gate SecurityPolicy CRD check skipped: " not_checked="sso-gate SecurityPolicy CRD not checked: "
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  local kind
+  kind=$(domain::spec_driver "${spec}" lo 2>/dev/null) || return 0
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    return 0
+  fi
+  # The addon counts only as a bare entry name, never as a path entry, as in
+  # the RBAC migration check (Go: the Builtin flag of the parsed entry), also
+  # with a trailing "/" or "/." (spec::is_addon).
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp ex key enabled=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
+    ! spec::is_addon "${dr}" sso-gate || enabled=1
+  done
+  (( enabled )) || return 0
+  # The bash twin reads the CRD with jq (the Go twin needs no jq).
+  if ! command -v jq >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}jq not found"
+    return 0
+  fi
+  local kubeconfig
+  kubeconfig="$(doctor::_rbac_kubeconfig "${spec}")"
+  if doctor::_rbac_has_control "${kubeconfig}"; then
+    doctor::_info "${skipped}the kubeconfig path has a control character"
+    return 0
+  fi
+  if [[ ! -f "${kubeconfig}" ]]; then
+    doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
+    return 0
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}kubectl not found"
+    return 0
+  fi
+  local result=""
+  result=$(doctor::_sso_fetch "${kubeconfig}") || result=""
+  case "${result}" in
+    present)     doctor::_ok "sso-gate: the SecurityPolicy CRD declares spec.mergeType" ;;
+    absent)      doctor::_bad "sso-gate: the SecurityPolicy CRD has no spec.mergeType, so envoy-gateway is older than v1.8.0: upgrade it first, then reconcile sso-gate" ;;
+    dropped)     doctor::_bad "sso-gate: the storage version of the SecurityPolicy CRD has no spec.mergeType, so the apiserver drops the field when it stores the policy: reinstall the CRDs of envoy-gateway first, then reconcile sso-gate" ;;
+    none)        doctor::_info "${skipped}the cluster has no SecurityPolicy CRD (envoy-gateway is not installed)" ;;
+    noversion)   doctor::_warn "${not_checked}the SecurityPolicy CRD has no version v1alpha1" ;;
+    notserved)   doctor::_warn "${not_checked}the SecurityPolicy CRD does not serve the version v1alpha1" ;;
+    fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}" ;;
+    *)           doctor::_warn "${not_checked}kubectl failed or did not return a valid CRD" ;;
+  esac
+  return 0
+}
+
+# doctor::_sso_fetch <kubeconfig>
+# The CRD read and its state. Prints one line: the state of
+# doctor::_sso_state, or "fail<TAB><reason>". It runs in a subshell, with the
+# temp dir, the traps and the cleanup of doctor::_rbac_fetch.
+doctor::_sso_fetch() ( doctor::_sso_fetch_in "$@" )
+
+# doctor::_sso_fetch_in <kubeconfig> — the body of doctor::_sso_fetch, always
+# in its subshell (see doctor::_rbac_fetch_in). The forbidden reason and the
+# reason of another failure name the CRD (Go: the same mapping of the
+# reasons of rbacGet).
+doctor::_sso_fetch_in() {
+  _rbac_tmp="" _rbac_pid="" _rbac_hold="" _rbac_shell="" _rbac_now=0 _rbac_rc=0 _rbac_stopped=0 _rbac_reason=""
+  trap 'doctor::_rbac_cleanup' EXIT
+  trap 'doctor::_rbac_cleanup; trap - EXIT INT; kill -INT "${BASHPID}"' INT
+  local invalid="kubectl failed or did not return a valid CRD" state="" forbidden other
+  forbidden="$(doctor::_rbac_reason forbidden)"
+  other="$(doctor::_rbac_reason "")"
+  if ! _rbac_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-doctor-rbac.XXXXXX"); then
+    _rbac_tmp=""
+    printf 'fail\t%s\n' "${invalid}"
+    exit 0
+  fi
+  doctor::_rbac_get "${_rbac_tmp}/crd.json" "${_rbac_tmp}/err" \
+    --kubeconfig "${1}" get customresourcedefinitions.apiextensions.k8s.io \
+    securitypolicies.gateway.envoyproxy.io --ignore-not-found
+  if [[ "${_rbac_reason}" == "${forbidden}" ]]; then
+    _rbac_reason="the kubeconfig user cannot read the SecurityPolicy CRD (forbidden or unauthorized)"
+  elif [[ "${_rbac_reason}" == "${other}" ]]; then
+    _rbac_reason="${invalid}"
+  fi
+  if [[ -n "${_rbac_reason}" ]]; then
+    printf 'fail\t%s\n' "${_rbac_reason}"
+  elif state=$(doctor::_sso_state "${_rbac_tmp}/crd.json"); then
+    printf '%s\n' "${state}"
+  else
+    printf 'fail\t%s\n' "${invalid}"
+  fi
+}
+
+# doctor::_sso_state <file> — prints the state of the CRD read in <file> (Go:
+# ssoParse, the same rules): none (JSON white space only, or a List with no
+# items: --ignore-not-found prints nothing for a CRD that is not there),
+# noversion (no version v1alpha1), notserved (v1alpha1 is not served),
+# absent (v1alpha1 does not declare the field), dropped (v1alpha1 declares
+# it, and the storage version, another one, does not), present (both
+# declare it), or invalid. Else the file must be one JSON object with a
+# spec.versions list of objects, each with a string name (absent or null:
+# empty) and the booleans served and storage, exactly one storage version,
+# and exactly one element with the name v1alpha1. In a version, each step of
+# the path to the field that is there must be an object: a step that is
+# absent or null makes the field absent, any other value makes the CRD
+# invalid. As in doctor::_rbac_shape, a leading byte-order mark,
+# a second JSON value, NaN and a number out of the range of a float64 make it
+# invalid (the JSON decoder of Go refuses them). The stderr of jq is never
+# printed.
+doctor::_sso_state() {
+  local bom="" state=""
+  # The first 3 bytes (C locale: a character is a byte).
+  bom="$(LC_ALL=C; IFS= read -r -N 3 b < "${1}" && printf '%s' "${b}")" || bom=""
+  if [[ "${bom}" == $'\xef\xbb\xbf' ]]; then
+    echo invalid
+    return 0
+  fi
+  # shellcheck disable=SC2016 # jq program text
+  state=$(jq -r -s '
+    def look($keys): reduce $keys[] as $k ({v: ., s: ""};
+        if .s != "" then .
+        elif .v == null then .s = "absent"
+        elif (.v | type) != "object" then .s = "invalid"
+        else .v = .v[$k] end)
+      | if .s != "" then .s
+        elif .v == null then "absent"
+        elif (.v | type) == "object" then "present"
+        else "invalid" end;
+    def field: look(["schema", "openAPIV3Schema", "properties", "spec", "properties", "mergeType"]);
+    if length == 0 then "none"
+    elif length != 1 or any(.. | numbers; isnan or isinfinite) then "invalid"
+    else .[0]
+      | if type != "object" then "invalid"
+        elif .kind == "List" then
+          (if (.items | type) == "array" and (.items | length) == 0 then "none" else "invalid" end)
+        elif (.spec | type) != "object" or (.spec.versions | type) != "array" then "invalid"
+        elif any(.spec.versions[]; type != "object" or ((.name | . == null or type == "string") | not)
+            or (.served | type) != "boolean" or (.storage | type) != "boolean") then "invalid"
+        elif ([.spec.versions[] | select(.storage)] | length) != 1 then "invalid"
+        else ([.spec.versions[] | select(.storage)][0]) as $stored
+          | [.spec.versions[] | select(.name == "v1alpha1")]
+          | if length == 0 then "noversion"
+            elif length > 1 then "invalid"
+            elif (.[0].served | not) then "notserved"
+            else .[0]
+              | (field) as $s
+              | if $s != "present" or .storage then $s
+                else ($stored | field) | if . == "absent" then "dropped" else . end
+                end
+            end
+        end
+    end
+  ' "${1}" 2>/dev/null) || state=invalid
+  case "${state}" in
+    none|noversion|notserved|absent|dropped|present) ;;
+    *) state=invalid ;;
+  esac
+  printf '%s\n' "${state}"
+}
+
+# doctor::_suc_check <domain>
+# The kubectl range check for the system-upgrade-controller addon. Go twin:
+# internal/cli/cmd_doctor_suc.go. The piped lines are the same in both.
+#
+# The drain container of a Plan with cordon or drain runs the kubectl image
+# that the addon pins, and that image serves only the Kubernetes minors of
+# spec::suc_kubectl_range (utils/spec.sh has the details). The check reads the
+# spec only: no kubectl, no cluster.
+#
+# It runs when spec.bootstrap has system-upgrade-controller as a bare entry
+# name (read with the entry parser of `lo addons --detail`, as the RBAC
+# migration check reads its addons). spec.kubernetes.version comes from the one
+# reader (spec::kubernetes_version). The lines: ✓ when the minor is in the
+# range; ! with the range and the fixes when it is not; ℹ for a Lo cluster
+# without a version (kind runs its default node image); ! (not checked) when
+# the version cannot be read or is not vX.Y or vX.Y.Z. A cluster of another
+# kind without a version gets no line: lo knows no default version for its
+# driver, and no lint rule or schema requires the field there. The addon also
+# counts with a trailing "/" or "/." (spec::is_addon), as in Go. Without a
+# domain, with a deploy domain, without a cluster spec, with a spec whose kind
+# cannot be read, or without yq, it prints nothing: the RBAC migration check
+# above says it. Every line is advisory: it always returns 0.
+doctor::_suc_check() {
+  local domain="${1}" not_checked="system-upgrade-controller kubectl range not checked: "
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  local kind
+  kind=$(domain::spec_driver "${spec}" lo 2>/dev/null) || return 0
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    return 0
+  fi
+  # The addon counts only as a bare entry name, never as a path entry, as in
+  # the RBAC migration check (Go: the Builtin flag of the parsed entry).
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp ex key enabled=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
+    ! spec::is_addon "${dr}" system-upgrade-controller || enabled=1
+  done
+  (( enabled )) || return 0
+  local version verdict
+  if ! version=$(spec::kubernetes_version "${spec}" 2>/dev/null); then
+    doctor::_warn "${not_checked}spec.kubernetes.version cannot be read"
+    return 0
+  fi
+  if [[ -z "${version}" ]]; then
+    [[ "${kind}" != lo ]] || doctor::_info "system-upgrade-controller: spec.kubernetes.version is not set, so kind runs its default node image (${_SPEC_KIND_DEFAULT_NODE} with kind ${_SPEC_KIND_VERSION}, the pinned release); the kubectl image of the drain container serves Kubernetes $(spec::suc_kubectl_range)"
+    return 0
+  fi
+  verdict="$(spec::suc_kubectl "${version}")"
+  case "${verdict}" in
+    in\ *)  doctor::_ok "system-upgrade-controller: the kubectl image of the drain container serves Kubernetes ${verdict#in } (it serves $(spec::suc_kubectl_range))" ;;
+    out\ *) doctor::_warn "$(spec::suc_kubectl_out_of_range_line "${verdict#out }")" ;;
+    *)      doctor::_warn "${not_checked}spec.kubernetes.version is not a version of the form vX.Y or vX.Y.Z" ;;
+  esac
+  return 0
+}
 
 # doctor::_provider_section <domain>
 # If the active domain is a provider-backed cluster whose provider implements
@@ -179,6 +1933,91 @@ doctor::_tool() {
   fi
   doctor::_warn "${name} not found (optional) — ${purpose}"
   return 0
+}
+
+# doctor::_kind_fails <domain> — status 0 when an older kind is a failure
+# for the active domain (Go: kindFails). It is when the domain uses the Lo
+# driver (lo up runs kind for it), and when there is no active domain: the
+# name is empty, or domain::driver cannot read the driver of the domain (no
+# cluster.lok8s.yaml and no deploy.lok8s.yaml, or a spec without a kind or
+# with a malformed one). For a domain of another driver, a deploy domain
+# included, an older kind is a warning. domain::driver reads a
+# cluster.lok8s.yaml with yq (the Go twin needs no yq). As the other yq
+# readers of doctor do, the check looks for yq first: when the domain has a
+# cluster.lok8s.yaml and there is no yq, the driver is not read (status 2,
+# doctor::_kind prints a warning and says why). There the twins can differ:
+# Go reads the driver and fails an older kind for a domain of the Lo driver.
+# The doctor exit code is 1 in both, because yq is required.
+doctor::_kind_fails() {
+  local drv clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+  [[ -n "${1}" ]] || return 0
+  if [[ -f "${clusters}/${1}/cluster.lok8s.yaml" ]] && ! command -v yq >/dev/null 2>&1; then
+    return 2
+  fi
+  drv=$(domain::driver "${1}" 2>/dev/null) || return 0
+  [[ "${drv}" == lo ]]
+}
+
+# doctor::_kind <domain> <purpose> — the kind line of the tools section (Go:
+# doctorKind). kind is optional: when it is absent, the line is a warning.
+# When it is present, it must be DOCTOR_KIND_MIN or later. An older kind is
+# a failure (returns 1) for the domain of doctor::_kind_fails, else a
+# warning with the same text. When doctor::_kind_fails cannot read the
+# driver because yq is not there, a second warning line says so. Only
+# major.minor.patch counts, so a
+# pre-release of a later release passes. A failed `kind version`, or an
+# output without the version field, is a warning. `kind version` prints
+# "kind v0.32.0 go1.25.5 linux/amd64": the fields of the first line are
+# split at spaces and tabs, the first field must be "kind", and the second
+# starts with vX.Y.Z, then a "-", a "+" or the end. A number has 9 digits at
+# most, so shell arithmetic compares it as Go does. The line names only the
+# matched numbers, no other byte of the output.
+doctor::_kind() {
+  local domain="${1}" purpose="${2}" kind=""
+  # The first kind on PATH that can run. For plain files (a file of this
+  # user, on a mount that allows exec), this is the kind that the Go twin
+  # finds (toolchain.LookPath). When no kind on PATH can run, command -v
+  # prints a file without the exec bit: that kind is not found here either.
+  # The twins differ for other files: -x asks access(2), and Go reads only
+  # the mode bits. For a file that only another user can run, or a file on
+  # a noexec mount, bash prints "not found", and Go finds the file, cannot
+  # run it and prints "version unknown". Both lines are warnings.
+  kind=$(command -v kind 2>/dev/null) || kind=""
+  if [[ -z "${kind}" || -d "${kind}" || ! -x "${kind}" ]]; then
+    doctor::_warn "kind not found (optional) — ${purpose}"
+    return 0
+  fi
+  local need="lo up needs kind ${DOCTOR_KIND_MIN} or later for networking.dnsSearch"
+  local re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+]|$)'
+  local out="" known=1
+  out="$("${kind}" version 2>/dev/null </dev/null)" || known=0
+  local -a f=()
+  IFS=$' \t' read -r -a f <<< "${out%%$'\n'*}"
+  if (( ! known )) || [[ "${f[0]:-}" != kind ]] || ! [[ "${f[1]:-}" =~ ${re} ]]; then
+    doctor::_warn "kind — ${purpose}; version unknown, ${need}"
+    return 0
+  fi
+  local -a got=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  [[ "${DOCTOR_KIND_MIN}" =~ ${re} ]]
+  local -a want=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  local i
+  for i in 0 1 2; do
+    if (( 10#${got[i]} > 10#${want[i]} )); then
+      break
+    fi
+    if (( 10#${got[i]} < 10#${want[i]} )); then
+      local msg="kind v${got[0]}.${got[1]}.${got[2]} — ${purpose}; ${need} (fix: b update kind)" rc=0
+      doctor::_kind_fails "${domain}" || rc=$?
+      if (( rc )); then
+        doctor::_warn "${msg}"
+        (( rc != 2 )) || doctor::_warn "kind: the driver of ${domain} not checked: yq not found"
+        return 0
+      fi
+      doctor::_bad "${msg}"
+      return 1
+    fi
+  done
+  doctor::_ok "kind — ${purpose}"
 }
 
 doctor::_dir() {

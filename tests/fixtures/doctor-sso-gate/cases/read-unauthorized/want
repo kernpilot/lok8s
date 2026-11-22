@@ -1,0 +1,1 @@
+  ! sso-gate SecurityPolicy CRD not checked: the kubeconfig user cannot read the SecurityPolicy CRD (forbidden or unauthorized)

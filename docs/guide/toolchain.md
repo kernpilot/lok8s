@@ -80,7 +80,7 @@ binaries:
     version: v5.8.1
     groups: [core]
   github.com/mgoltzsche/khelm:
-    version: v2.8.0
+    version: v2.9.0
     file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
     groups: [core]
   github.com/kernpilot/lok8s:
@@ -107,7 +107,7 @@ binaries:
 
 - **The pins are drift-tested.** `kustomize v5.8.1` is the CLI release built
   from the kustomize API the `lo-full` build links (`v0.21.1`);
-  `khelm v2.8.0` is the library `lo-full` links and the `ChartRenderer`
+  `khelm v2.9.0` is the library `lo-full` links and the `ChartRenderer`
   binary `lo` core execs; the `secrets.lok8s.dev` Secret plugin is the
   `kustomize-secret-<os>-<arch>` asset of **this `lo`'s own release**. All
   three live in `internal/toolchain/pins.go` and `go test` fails when
@@ -146,6 +146,8 @@ binaries:
   `github.com/arg-sh/argsh: {asset: argsh, onPost: "${B_BIN} builtin ${B_EVENT}"}`,
   `yq: {}`, `jq: {}`, `renvsubst: {alias: envsubst}`, `sops: {}`,
   `ssh-to-age: {}` and run `.bin/b install`.
+- **GNU coreutils for the bash side:** the frozen bash `lo kubehz` and `lo bootstrap` commands use `stat -c`, `mv -T`, `ln -T` and `realpath -e`, which GNU coreutils and uutils coreutils have (BSD, macOS and BusyBox do not), so `lo doctor` warns when `lok8s.yaml` routes commands to bash and the first line of `stat --version` names neither of them (on macOS: `brew install coreutils` and put its `gnubin` directory first on `PATH`, or select the Go implementation).
+  The bash side also uses GNU sed (`sed -i` with no suffix) and GNU find (`find -printf`); the doctor check probes only `stat`.
 - **`b` itself** is installed into `.bin/b` from its pinned release tarball
   (`b-<os>-<arch>.tar.gz`, the asset b's own installer resolves), verified
   against the SHA-256 recorded from that release's `checksums.txt` before
@@ -165,7 +167,7 @@ side.
 |---|---|---|---|
 | `kubectl` (`core`) | yes | yes | `lo` execs it for apply/wait |
 | `kustomize` **v5.8.1** (`core`) | yes, pinned | yes | `lo` core: every render. `lo-full`: only `LO_RENDER=exec`; the bash side always |
-| `khelm` `ChartRenderer` **v2.8.0** (`core`) | yes, pinned, under `.kustomize/` | yes | the addons' Helm charts (core execs it; lo-full links the same release) |
+| `khelm` `ChartRenderer` **v2.9.0** (`core`) | yes, pinned, under `.kustomize/` | yes | the addons' Helm charts (core execs it; lo-full links the same release) |
 | `secrets.lok8s.dev` `Secret` plugin at **lo's version** (`core`) | yes, pinned, under `.kustomize/` | built from source (`lo kustomize build`) | every render on core and the bash side; lo-full serves it itself |
 | `kind` **v0.32.0** (pinned), `tilt`, `mkcert` (`local`) | yes (default on) | yes | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
 | `kubeone`, `hcloud` (`cloud`) | opt-in (`--groups …,cloud`) | `kubeone`/`capi` profiles (+ `clusterctl`) | the provisioning drivers exec them |

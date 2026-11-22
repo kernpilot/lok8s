@@ -4,6 +4,7 @@ package kubehz
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -39,6 +40,14 @@ func fileOwner(info fs.FileInfo) (int, bool) {
 		return 0, false
 	}
 	return int(st.Uid), true
+}
+
+// singleLink reports whether the entry has exactly one name (no hard
+// link). It is false when the platform does not say, so a check that
+// needs one name fails closed there.
+func singleLink(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink == 1
 }
 
 // overflowUID is the uid that an owner without a mapping shows in a user
@@ -87,4 +96,151 @@ func readPrivateFile(file string) ([]byte, error) {
 		return nil, errNotPrivate
 	}
 	return io.ReadAll(io.LimitReader(f, 1<<20))
+}
+
+// privateEUID gives privateDirRefusal and privateWalk the effective uid
+// of this process (bash: id -u), and privateLstat reads each name of the
+// walk in privateWalk and a directory that os.Stat does not find in
+// privateDirRefusal (bash: kubehz::_lstat_line). A test replaces them.
+var (
+	privateEUID  = os.Geteuid
+	privateLstat = os.Lstat
+)
+
+// privateNotThere reports a lookup error that proves that no entry is at
+// the path: ENOENT, or ENOTDIR (a part of the path before the last name is
+// not a directory). Any other error (EIO, ESTALE, EACCES) cannot tell
+// (bash: status 1 and 2 of kubehz::_lstat_line).
+func privateNotThere(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// privateWalk ports kubehz::_private_link_hops: the one walk of the last
+// name of dest. It gives the path at the end of the walk, the Lstat of
+// that path (nil when nothing is there), and "", else the error line of
+// bash. It reads each name once (privateLstat: the type and the owner come
+// from the same lookup), and it follows a link only after these checks:
+// the link belongs to this user or root, and no other user can replace a
+// file in the directory of the link (privateDirRefusal), so the link
+// cannot change before os.Readlink reads it. The end of the walk is the
+// path that the write replaces: the caller never resolves it again. In a
+// directory with the sticky bit, another user can put a link at a name
+// that is not there: os.Rename replaces that link, and does not follow it.
+// A link of another user (it can point at a file of this user), a link
+// whose owner cannot be read, a name that Lstat cannot read for a cause
+// other than "not there" (EIO, EACCES: the walk cannot tell that it is no
+// link), a link to nothing and a chain of more than maxLinkHops links are
+// refused. A relative link names a path from the directory of the link
+// (the text before the last "/", not cleaned, as in bash). A link to a
+// directory on the way (not the last name) is not checked here. This is
+// not linkTarget of the agent kubeconfig: that walk also checks each
+// parent directory, wants a regular file of this user at the end, and
+// gives the texts of the agent command.
+func privateWalk(dest string) (string, fs.FileInfo, string) {
+	p := dest
+	for hops := 0; ; hops++ {
+		info, err := privateLstat(p)
+		if privateNotThere(err) {
+			if hops > 0 {
+				return "", nil, "Cannot resolve the symlink " + dest
+			}
+			return p, nil, ""
+		}
+		if err != nil {
+			return "", nil, "Cannot read the path " + p + ": nothing is written"
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			return p, info, ""
+		}
+		if hops == maxLinkHops {
+			return "", nil, "Cannot resolve the symlink " + dest
+		}
+		uid, ok := fileOwner(info)
+		if !ok {
+			return "", nil, "Cannot read the owner of the link " + p + ": nothing is written"
+		}
+		if uid != 0 && uid != privateEUID() {
+			return "", nil, fmt.Sprintf("The link %s belongs to uid %d, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.", p, uid)
+		}
+		if refused := privateDirRefusal(privateDir(p)); refused != "" {
+			return "", nil, refused
+		}
+		next, err := os.Readlink(p)
+		if err != nil || next == "" {
+			return "", nil, "Cannot resolve the symlink " + dest
+		}
+		if !strings.HasPrefix(next, "/") {
+			if i := strings.LastIndex(p, "/"); i >= 0 {
+				next = p[:i+1] + next
+			} else {
+				next = "./" + next
+			}
+		}
+		p = next
+	}
+}
+
+// privateDirRefusal ports kubehz::_private_dir_ok: "" when no other user
+// can replace a file in dir, else the error line of bash. It refuses:
+//   - a dir that os.Stat cannot read for a cause other than "not there"
+//     (a parent that this user cannot search, a parent that is a file), a
+//     dir that os.Stat does not find and that Lstat cannot read for a
+//     cause other than "not there", and a dir that is not there when its
+//     parent is not a directory;
+//   - a path that is there but is not a directory (also a link to
+//     nothing);
+//   - a directory that belongs to a user other than this user or root
+//     (that user can change its mode);
+//   - without the sticky bit: a world-writable directory, and a
+//     group-writable one whatever its group (a group can have other
+//     members).
+//
+// A directory with the sticky bit passes: there, only the owner of a file
+// can rename or remove it, and os.Rename goes onto the exact path (bash
+// also wants mv -T there when other users can write into it). A directory
+// that is not there passes when its parent is a directory: the write makes
+// it with mode 0700, and the second check reads it. The check reads the
+// mode bits only, not an ACL, and the directory only, not its parents
+// (see writePrivateFile). os.Stat follows a link, as the create does.
+func privateDirRefusal(dir string) string {
+	unread := "Cannot read the owner and the mode of the directory " + dir + ": nothing is written"
+	notDir := "The path " + dir + " is not a directory: nothing is written"
+	info, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		_, lerr := privateLstat(dir)
+		if lerr == nil {
+			return notDir
+		}
+		if !privateNotThere(lerr) {
+			return unread
+		}
+		if parent, perr := os.Stat(privateDir(dir)); perr != nil || !parent.IsDir() {
+			return unread
+		}
+		return ""
+	}
+	if err != nil {
+		return unread
+	}
+	if !info.IsDir() {
+		return notDir
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return unread
+	}
+	if uid := int(st.Uid); uid != 0 && uid != privateEUID() {
+		return fmt.Sprintf("The directory %s belongs to uid %d, not to this user or to root, so another user can replace a file in it: nothing is written. Use a directory of your own.", dir, uid)
+	}
+	mode := info.Mode()
+	if mode&os.ModeSticky != 0 {
+		return ""
+	}
+	if mode.Perm()&0o002 != 0 {
+		return fmt.Sprintf("The directory %s is world-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.", dir, dir)
+	}
+	if mode.Perm()&0o020 != 0 {
+		return fmt.Sprintf("The directory %s is group-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.", dir, dir)
+	}
+	return ""
 }

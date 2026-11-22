@@ -90,13 +90,13 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
         CLUSTERCTL_SHA256=a6b94e0da68df254191480b11c0b50019a7a5df87560d6f70a76d3453116f21e \
         FLUX_SHA256=6e984c92aa02250ea3f907367dc7829411e31d667b100ce2005cb87d5509e5b3 \
         KIND_SHA256=50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54 \
-        KHELM_SHA256=f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c ;; \
+        KHELM_SHA256=ab507f6ac1dd4e5c2d68b570a0722c8129d06a12919c912b3a26bf9cb7cf0593 ;; \
       arm64) \
         KUBECTL_SHA256=c957eb8c4bea27a3bb35b269edd9082e27f027f7b76b20b5bf4afebc726c6d3e \
         CLUSTERCTL_SHA256=a9b32e0179cdbb66ba67ebdb45be818c983dedcc827f6d31bca72277250df52c \
         FLUX_SHA256=16409df2fbd40b23458d81c22dd57abd39e82450831bdf522716d9d1030976c6 \
         KIND_SHA256=b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d \
-        KHELM_SHA256=40da3b53961b5a1b91a5713c536533899f3fc580d8ae31803d9c31aacda8f2e0 ;; \
+        KHELM_SHA256=166dc045819c224f64db235f189bd70337be61dd49ed95d8ea90da99722124d7 ;; \
       *) echo "operator image: no download checksums for ${ARCH}" >&2; exit 1 ;; \
     esac \
     && mkdir -p /tmp/dl \
@@ -119,7 +119,7 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
     && echo "${KIND_SHA256}  /tmp/dl/kind" | sha256sum -c - \
     && install -m 0755 /tmp/dl/kind /usr/local/bin/kind \
     && wget -qO /tmp/dl/khelm \
-      "https://github.com/mgoltzsche/khelm/releases/download/v2.8.0/khelm-linux-${ARCH}" \
+      "https://github.com/mgoltzsche/khelm/releases/download/v2.9.0/khelm-linux-${ARCH}" \
     && echo "${KHELM_SHA256}  /tmp/dl/khelm" | sha256sum -c - \
     && mkdir -p /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer \
     && install -m 0755 /tmp/dl/khelm /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer \

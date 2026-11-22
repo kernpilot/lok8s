@@ -1,0 +1,1 @@
+  ! system-upgrade-controller kubectl range not checked: spec.kubernetes.version cannot be read

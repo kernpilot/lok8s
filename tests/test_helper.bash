@@ -431,6 +431,26 @@ _children() {
   fi
 }
 
+# _stat_field <pid> <n> — field <n> of /proc/<pid>/stat after the command
+# name (1: the state, 2: the parent, 3: the process group) where /proc
+# exists, else from ps (macOS) for 2 and 3. Empty when the process is gone.
+# The file is one record: the fields start after its last ") ", so a
+# command name with a space, a ")" or a newline does not move them. A
+# stand-in script does not load this file: write the function into it with
+# declare -f.
+_stat_field() {
+  if [[ -d /proc/self ]]; then
+    local stat
+    local -a fields
+    { stat="$(< "/proc/${1}/stat")"; } 2>/dev/null || return 1
+    stat="${stat##*) }"
+    read -r -a fields <<< "${stat}"
+    echo "${fields[$(( ${2} - 1 ))]}"
+  else
+    case "${2}" in 2) ps -o ppid= -p "${1}" ;; 3) ps -o pgid= -p "${1}" ;; esac 2>/dev/null | tr -d ' '
+  fi
+}
+
 # _pgrep_f <ERE> — the pids whose command line (its arguments joined by
 # spaces) matches <ERE>, as pgrep's full-command mode gives them, leaving
 # out the shell that scans. From /proc where it exists (the CI bats

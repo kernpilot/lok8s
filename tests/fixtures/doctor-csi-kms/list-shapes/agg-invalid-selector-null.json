@@ -1,0 +1,19 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "metadata": {
+        "name": "a"
+      },
+      "aggregationRule": {
+        "clusterRoleSelectors": [
+          null
+        ]
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

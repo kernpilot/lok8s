@@ -140,6 +140,60 @@ teardown() {
   assert_output --partial "no readable cluster/deploy spec"
 }
 
+# Issue #272: a spec with two YAML documents gets the layout line (the line
+# `lo provision` prints), not "no readable spec". The other refusals keep
+# the old message. Go twin: TestRequireDriverNamesTheSpecLayout.
+@test "require_driver names the layout of a spec with two YAML documents" {
+  mkdir -p "${PATH_CLUSTERS}/two-dom"
+  printf 'kind: Lo\n---\nkind: KubeOne\n' > "${PATH_CLUSTERS}/two-dom/cluster.lok8s.yaml"
+  run --separate-stderr domain::require_driver lo "two-dom" "registry management"
+  assert_failure
+  assert_output ""
+  assert_equal "${stderr}" "[error] ${PATH_CLUSTERS}/two-dom/cluster.lok8s.yaml holds more than one YAML document. Remove lines 2 to 3 (the '---' at line 2 and everything after it)."
+}
+
+@test "require_driver keeps the no-readable-spec message for a missing or malformed spec" {
+  mkdir -p "${PATH_CLUSTERS}/bad-dom"
+  printf 'kind: ../lo\n' > "${PATH_CLUSTERS}/bad-dom/cluster.lok8s.yaml"
+  local d
+  for d in missing-dom bad-dom; do
+    run --separate-stderr domain::require_driver lo "${d}" "registry management"
+    assert_failure
+    assert_equal "${stderr}" "error: domain '${d}' has no readable cluster/deploy spec under clusters/ — cannot run registry management"
+  done
+}
+
+# _plain <cmd...> runs the command as it is. _set_u <cmd...> runs it in a
+# subshell with `set -u`, as lo runs (set -euo pipefail).
+_plain() { "$@"; }
+_set_u() { ( set -u; "$@" ); }
+
+# A directory in place of cluster.lok8s.yaml is no cluster spec, and the
+# layout check does not read it (the read failed, and under `set -u` the
+# check ended with an unbound variable and a bare "[error] <file>" line).
+# Without a deploy.lok8s.yaml, the gate gives the no-readable-spec refusal.
+# With one beside it, the domain is a deploy domain. Go twin:
+# TestRequireDriverSpecIsADirectory.
+@test "require_driver: a directory in place of the cluster spec is no spec" {
+  mkdir -p "${PATH_CLUSTERS}/dir-dom/cluster.lok8s.yaml" "${PATH_CLUSTERS}/dirdeploy-dom/cluster.lok8s.yaml"
+  : > "${PATH_CLUSTERS}/dirdeploy-dom/deploy.lok8s.yaml"
+  local mode
+  for mode in _plain _set_u; do
+    run --separate-stderr "${mode}" domain::spec_layout "${PATH_CLUSTERS}/dir-dom/cluster.lok8s.yaml"
+    assert_success
+    assert_output ""
+    assert_equal "${stderr}" ""
+    run --separate-stderr "${mode}" domain::require_driver lo "dir-dom" "registry management"
+    assert_failure
+    assert_output ""
+    assert_equal "${stderr}" "error: domain 'dir-dom' has no readable cluster/deploy spec under clusters/ — cannot run registry management"
+    run --separate-stderr "${mode}" domain::require_driver lo "dirdeploy-dom" "registry management"
+    assert_failure
+    assert_output ""
+    assert_equal "${stderr}" "error: domain 'dirdeploy-dom' uses the 'deploy' driver — registry management is a 'lo'-driver (local cluster) feature."$'\n'"       Pass --domain <a-lo-domain> or switch with 'lo use <domain>'."
+  done
+}
+
 @test "driver read failure (unreadable spec kind) fails instead of empty-succeeding" {
   # yq|tr used to mask a yq failure into rc=0 + empty driver (Copilot round 2).
   mkdir -p "${PATH_CLUSTERS}/broken-dom"

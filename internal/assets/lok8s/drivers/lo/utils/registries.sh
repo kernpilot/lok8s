@@ -717,7 +717,7 @@ data:
   localRegistryHosting.v1: |
     host: "${build_ip}"
     hostFromClusterNetwork: "${build_host}"
-    help: "https://kernpilot.github.io/lok8s/guide/services#how-the-image-swap-actually-works"
+    help: "https://lok8s.io/guide/services#how-the-image-swap-actually-works"
 EOF
 }
 

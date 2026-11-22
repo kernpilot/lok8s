@@ -1,0 +1,214 @@
+# The table of the -o yaml quoting, for both twins: internal/cli/output_yaml11_test.go
+# and tests/unit/kubehz_agent_yaml11_test.bats. Each line is a JSON value, the yaml
+# scalar that the value prints as (in `v: <scalar>`; a string value prints the same
+# as a key, `<scalar>: 1`), and why, separated by tabs:
+#   set      a string of the YAML 1.1 set: the pattern of each twin matches it
+#   encoder  a string that the encoders quote themselves (the pattern does not match)
+#   plain    a string that stays plain (the pattern does not match)
+#   value    a real bool, null or number, which stays plain
+#
+# The strings that a YAML 1.1 reader reads as a bool, a null, a number or a
+# time print in double quotes, and so does =, which PyYAML cannot load. The set
+# is wider than YAML 1.1 in some places, and that is harmless (a reader keeps a
+# quoted string a string): YAML 1.1 has only three case forms of each word
+# (yes, Yes, YES), and a base 60 int starts with a digit 1-9, so yEs and 0:30
+# are strings there.
+# the bool words in any case
+"y"	"y"	set
+"Y"	"Y"	set
+"n"	"n"	set
+"N"	"N"	set
+"yes"	"yes"	set
+"Yes"	"Yes"	set
+"YES"	"YES"	set
+"yEs"	"yEs"	set
+"no"	"no"	set
+"No"	"No"	set
+"NO"	"NO"	set
+"nO"	"nO"	set
+"on"	"on"	set
+"On"	"On"	set
+"ON"	"ON"	set
+"oN"	"oN"	set
+"off"	"off"	set
+"Off"	"Off"	set
+"OFF"	"OFF"	set
+"oFf"	"oFf"	set
+"true"	"true"	set
+"True"	"True"	set
+"TRUE"	"TRUE"	set
+"tRUE"	"tRUE"	set
+"false"	"false"	set
+"False"	"False"	set
+"FALSE"	"FALSE"	set
+"fAlSe"	"fAlSe"	set
+# the null words in any case, and ~
+"null"	"null"	set
+"Null"	"Null"	set
+"NULL"	"NULL"	set
+"nUll"	"nUll"	set
+"~"	"~"	set
+# =, which PyYAML cannot load
+"="	"="	set
+# binary (go-yaml v2 also reads a sign after 0b)
+"0b1"	"0b1"	set
+"0B1"	"0B1"	set
+"-0b1_0"	"-0b1_0"	set
+"+0b11"	"+0b11"	set
+"0_b1"	"0_b1"	set
+"0b_1"	"0b_1"	set
+"-_0b1"	"-_0b1"	set
+"0b-1"	"0b-1"	set
+"0b+1"	"0b+1"	set
+"0b_-1"	"0b_-1"	set
+# octal 0o
+"0o17"	"0o17"	set
+"0O17"	"0O17"	set
+"-0o7"	"-0o7"	set
+"+0o1_7"	"+0o1_7"	set
+"0_o17"	"0_o17"	set
+"+_0o7"	"+_0o7"	set
+# decimal, also with a leading 0 (the YAML 1.1 octal 0777, and 08)
+"0"	"0"	set
+"7"	"7"	set
+"-7"	"-7"	set
+"+7"	"+7"	set
+"1_000"	"1_000"	set
+"1_"	"1_"	set
+"0777"	"0777"	set
+"0_7"	"0_7"	set
+"-017"	"-017"	set
+"08"	"08"	set
+"019"	"019"	set
+"00"	"00"	set
+"-_1"	"-_1"	set
+"+_7"	"+_7"	set
+"-_0_7"	"-_0_7"	set
+# hex
+"0x1F"	"0x1F"	set
+"0X1f"	"0X1f"	set
+"-0x1_f"	"-0x1_f"	set
+"0xdead_beef"	"0xdead_beef"	set
+"0_x1f"	"0_x1f"	set
+"0x_1f"	"0x_1f"	set
+"-_0x1f"	"-_0x1f"	set
+# sexagesimal
+"1:20"	"1:20"	set
+"-1:20"	"-1:20"	set
+"+1:20"	"+1:20"	set
+"190:20:30.15"	"190:20:30.15"	set
+"12:30:45"	"12:30:45"	set
+"0:30"	"0:30"	set
+"1:2:3"	"1:2:3"	set
+# floats with a fraction or an exponent
+"1.5"	"1.5"	set
+"-1.5"	"-1.5"	set
+"+1."	"+1."	set
+"1."	"1."	set
+".5"	".5"	set
+"-.5"	"-.5"	set
+"1.5e3"	"1.5e3"	set
+"1.5E-3"	"1.5E-3"	set
+"1e3"	"1e3"	set
+"1E+3"	"1E+3"	set
+"-2e-2"	"-2e-2"	set
+"6.8523015e+5"	"6.8523015e+5"	set
+"685.230_15e+03"	"685.230_15e+03"	set
+"1_0.5"	"1_0.5"	set
+".5e3"	".5e3"	set
+"1e1_0"	"1e1_0"	set
+"+_.5"	"+_.5"	set
+"-._5"	"-._5"	set
+"1_.5"	"1_.5"	set
+"1._5"	"1._5"	set
+".5_"	".5_"	set
+"1_e3"	"1_e3"	set
+"1e_3"	"1e_3"	set
+"1e_+3"	"1e_+3"	set
+"1e+_3"	"1e+_3"	set
+"1.5_e-_3"	"1.5_e-_3"	set
+# .inf and .nan in any case
+".inf"	".inf"	set
+".Inf"	".Inf"	set
+".INF"	".INF"	set
+".iNf"	".iNf"	set
+"+.inf"	"+.inf"	set
+"-.inf"	"-.inf"	set
+"-.InF"	"-.InF"	set
+".nan"	".nan"	set
+".NaN"	".NaN"	set
+".NAN"	".NAN"	set
+".nAn"	".nAn"	set
+# the empty string
+""	""	set
+# dates and times: the YAML 1.1 timestamps (PyYAML cannot load 2026-13-01),
+# and the short forms and the , fraction of go-yaml v2
+"2026-11-20"	"2026-11-20"	set
+"2026-1-2"	"2026-1-2"	set
+"2026-13-01"	"2026-13-01"	set
+"2026-11-20T10:00:00Z"	"2026-11-20T10:00:00Z"	set
+"2026-11-20t10:00:00Z"	"2026-11-20t10:00:00Z"	set
+"2026-11-20T10:00:00.5Z"	"2026-11-20T10:00:00.5Z"	set
+"2026-11-20T10:00:00+01:00"	"2026-11-20T10:00:00+01:00"	set
+"2026-11-20T1:2:3Z"	"2026-11-20T1:2:3Z"	set
+"2026-11-20T10:00:00"	"2026-11-20T10:00:00"	set
+"2026-11-20T10:00:00."	"2026-11-20T10:00:00."	set
+"2026-11-20 10:00:00"	"2026-11-20 10:00:00"	set
+"2026-11-20  10:00:00"	"2026-11-20  10:00:00"	set
+"2026-11-20 10:00:00.123456"	"2026-11-20 10:00:00.123456"	set
+"2026-11-20 10:00:00,5"	"2026-11-20 10:00:00,5"	set
+"2026-11-20 10:00:00Z"	"2026-11-20 10:00:00Z"	set
+"2026-11-20 10:00:00 Z"	"2026-11-20 10:00:00 Z"	set
+"2026-11-20 10:00:00 -5"	"2026-11-20 10:00:00 -5"	set
+"2026-11-20 10:00:00 +01:00"	"2026-11-20 10:00:00 +01:00"	set
+"2026-11-20\t10:00:00"	"2026-11-20\t10:00:00"	set
+# The encoders quote a string that cannot be plain themselves.
+"- x"	'- x'	encoder
+"@x"	'@x'	encoder
+# Other strings stay plain.
+"word"	word	plain
+"yess"	yess	plain
+"nope"	nope	plain
+"onoff"	onoff	plain
+"Nono"	Nono	plain
+"true1"	true1	plain
+"nullx"	nullx	plain
+"yes!"	yes!	plain
+"y-es"	y-es	plain
+"1.35.5"	1.35.5	plain
+"1.2.3.4"	1.2.3.4	plain
+"10.0.0.1"	10.0.0.1	plain
+"v1.2"	v1.2	plain
+"1:60"	1:60	plain
+"1:2:3a"	1:2:3a	plain
+"0x"	0x	plain
+"0b2"	0b2	plain
+"0o8"	0o8	plain
+"0x1G"	0x1G	plain
+".infinity"	.infinity	plain
+"nan"	nan	plain
+"inf"	inf	plain
+"1e"	1e	plain
+"e3"	e3	plain
+"_1"	_1	plain
+"."	.	plain
+"~~"	~~	plain
+"y es"	y es	plain
+"=="	==	plain
+"-_"	-_	plain
+"0_x"	0_x	plain
+"1e_"	1e_	plain
+"1:2_0"	1:2_0	plain
+"2026-11"	2026-11	plain
+"2026-11-20x"	2026-11-20x	plain
+"20261-11-20"	20261-11-20	plain
+"2026-11-20T"	2026-11-20T	plain
+"2026-11-20T10:00"	2026-11-20T10:00	plain
+"2026-11-20T10:00:00+0100"	2026-11-20T10:00:00+0100	plain
+# A real bool, null or number stays plain.
+true	true	value
+false	false	value
+null	null	value
+7	7	value
+-1.5	-1.5	value
+0	0	value

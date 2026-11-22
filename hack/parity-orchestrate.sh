@@ -209,12 +209,12 @@ check - status --domain shared.dev                 # lo: NotFound
 check - status --domain beta.cloud                 # kubeone driver status, no Tilt section
 check - status --domain gamma.app                  # deploy → follows clusterRef
 check - status --domain delta.app                  # deploy without clusterRef (error merged into stdout)
-# NOT checked: `status --domain nope.dev` — see the ../evil note below (the
-# same unbound-variable crash: any domain without a spec).
-# NOT checked: `status --domain ../evil` — the bash dispatch_status ignores
-# resolve_spec's return and dies on an unbound LOK8S_SPEC_KIND (`set -u`);
-# the Go port prints the raw invalid-domain error and carries on with the
-# cluster-free sections. A bash defect, not a parity target.
+# NOT checked: `status --domain nope.dev` (no spec) and `status --domain
+# ../evil` (a traversal-shaped domain). Since #269 the bash dispatch_status
+# returns 1 when resolve_spec fails, so both twins print the lookup error in
+# the Cluster section and carry on with the cluster-free sections. Before,
+# the bash died on an unbound LOK8S_SPEC_KIND (`set -u`). No case diffs the
+# two domains yet.
 check_parse status extra
 mkdir -p "${PROJ}/clusters/alpha.dev/targets/zitadel" "${PROJ}/clusters/alpha.dev/targets/api"
 : > "${PROJ}/clusters/alpha.dev/artifacts.yaml"
@@ -223,16 +223,19 @@ check - status --domain alpha.dev                  # targets listed, built, stal
 : > "${PROJ}/.tilt.pid"
 check - status --domain alpha.dev                  # empty pidfile
 rm -f "${PROJ}/.tilt.pid"
-# A gone cluster with its kubeconfig left behind, as after `lo down`
-# (issue #194): the driver says NotFound and both kubectl reads still run.
-# This stub prints its arguments, so the diff also compares the
-# --request-timeout=5s of the node read in the two twins. Then it fails,
-# as an API server that does not answer.
+# A kubeconfig left behind, as after `lo down` (issue #194): the driver
+# says NotFound, and the /readyz probe still runs. This stub passes the
+# probe, then prints its arguments and fails each read, so both twins run
+# the two reads. The Nodes section shows the arguments of the node read
+# (the harness compares the read arguments of both twins), then the same
+# `(not reachable)` line. The failed inventory read prints nothing.
 mkdir -p "${PROJ}/.kubeconfig"
 printf 'apiVersion: v1\n' > "${PROJ}/.kubeconfig/sharedc.yaml"
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
-# Parity stub: print the arguments, then fail (no live cluster is reached).
+# Parity stub: pass the /readyz probe; print the arguments of any other
+# call, then fail (no live cluster is reached).
+case "$*" in 'get --raw /readyz '*) echo ok; exit 0 ;; esac
 echo "stub: kubectl $*"
 exit 1
 SH
@@ -496,6 +499,17 @@ layoutempty.dev|holds an empty YAML document before the spec\. Remove line 2 \(a
 layouttwo.dev|holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.
 LAYOUT
 unset PARITY_KIND_LOG PARITY_DOCKER_LOG
+# The other Lo-driver gates read the same layout: `registry status` and
+# `image list` refuse layouttwo.dev with the same [error] line.
+layout_two="/clusters/layouttwo\.dev/cluster\.lok8s\.yaml holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.$"
+check - registry status --domain layouttwo.dev
+for side in bash go; do
+  node_pin "${side}: registry status refuses layouttwo.dev with the layout" "${WORK}/${side}.err" 1 "${layout_two}"
+done
+check - image list --domain layouttwo.dev
+for side in bash go; do
+  node_pin "${side}: image list refuses layouttwo.dev with the layout" "${WORK}/${side}.err" 1 "${layout_two}"
+done
 
 # ── lo up — spec.network.dnsSearch ───────────────────────────────────────────
 # dns.dev sets a search list, dnsalias.dev an anchored list with aliased
@@ -1706,6 +1720,9 @@ parity::stub "${PROJ}" docker <<'SH'
 #!/usr/bin/env bash
 # Parity stub (gateway priority): the argv log, the version, the endpoint
 # gateways, the members of the registry network and the in-node `ip` reads.
+# PARITY_GW_PRIO and PARITY_ALIASES are the priority and the aliases of the
+# registry endpoint; PARITY_PAUSED=1 pauses the worker. A network connect or
+# disconnect succeeds (the default below).
 echo "docker $*" >> "${PARITY_DOCKER_LOG}"
 case "${1:-} ${2:-}" in
   "version --format") echo "${PARITY_DOCKER_VERSION}"; exit 0 ;;
@@ -1743,8 +1760,10 @@ case "${1:-} ${2:-}" in
         esac
         gw=10.99.16.1
         if [[ "${PARITY_NO_GATEWAY:-0}" == 1 ]]; then gw=""; fi
-        out="${role}|true|${gw}"
-        if [[ "$*" == *GwPriority* ]]; then out+="|${PARITY_GW_PRIO:-0}"; fi
+        paused=false
+        if [[ "${PARITY_PAUSED:-0}" == 1 && "${2}" == *-worker ]]; then paused=true; fi
+        out="${role}|true|${paused}|${gw}"
+        if [[ "$*" == *GwPriority* ]]; then out+="|${PARITY_GW_PRIO:-0}|${PARITY_ALIASES:-}"; fi
         echo "${out}"
         exit 0 ;;
     esac
@@ -1804,17 +1823,29 @@ for side in bash go; do
   gw_pin "${side}: no gateway: one warning per node"             "${WORK}/${side}.err" 2 'zz-gwprio-(control-plane|worker): found no IPv4 gateway for network zz-gwnet \(docker inspect: ""\)\. lo did not examine the default route\.'
 done
 unset PARITY_NO_GATEWAY
-export PARITY_DOCKER_VERSION="29.6.2 29.6.2" PARITY_ATTACHED=1
-gw_check "attached without a priority"
+export PARITY_DOCKER_VERSION="29.6.2 29.6.2" PARITY_ATTACHED=1 PARITY_ALIASES="node-a "
+gw_check "attached at priority 0"
 for side in bash go; do
-  gw_pin "${side}: attached: no connect"                         "${WORK}/docker.${side}.log" 0 '^docker network connect '
-  gw_pin "${side}: attached: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+  gw_pin "${side}: attached: one disconnect per node"            "${WORK}/docker.${side}.log" 2 '^docker network disconnect lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: attached: both nodes connect again at -1, with the alias" "${WORK}/docker.${side}.log" 2 '^docker network connect --gw-priority -1 --alias node-a lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: attached: no plain connect"                   "${WORK}/docker.${side}.log" 0 '^docker network connect (--alias [^ ]+ )*lok8s-registries '
+  gw_pin "${side}: attached: the route is not touched"           "${WORK}/docker.${side}.log" 0 '^docker exec .* ip '
+  gw_pin "${side}: attached: the reconnect is reported"          "${WORK}/${side}.err" 2 'zz-gwprio-(control-plane|worker): the endpoint on lok8s-registries had gateway priority 0\. lo connected the node to lok8s-registries again with gateway priority -1, so the default route stays on zz-gwnet after a node restart\.'
 done
 gw_check "shared off, attached under the old shared default" gwprio-off.dev
 for side in bash go; do
-  gw_pin "${side}: shared off, attached: no connect"             "${WORK}/docker.${side}.log" 0 '^docker network connect '
-  gw_pin "${side}: shared off, attached: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+  gw_pin "${side}: shared off, attached: one disconnect per node" "${WORK}/docker.${side}.log" 2 '^docker network disconnect lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: shared off, attached: both nodes connect again at -1" "${WORK}/docker.${side}.log" 2 '^docker network connect --gw-priority -1 --alias node-a lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: shared off, attached: the route is not touched" "${WORK}/docker.${side}.log" 0 '^docker exec .* ip '
 done
+export PARITY_PAUSED=1
+gw_check "attached at priority 0, the worker paused"
+for side in bash go; do
+  gw_pin "${side}: paused: the worker is not changed or read"    "${WORK}/docker.${side}.log" 0 '^docker (network (dis)?connect .* zz-gwprio-worker|exec zz-gwprio-worker )'
+  gw_pin "${side}: paused: the control plane connects again at -1" "${WORK}/docker.${side}.log" 1 '^docker network connect --gw-priority -1 --alias node-a lok8s-registries zz-gwprio-control-plane$'
+  gw_pin "${side}: paused: one warning"                          "${WORK}/${side}.err" 1 'lo: zz-gwprio-worker: the node is paused \(State\.Paused: "true"\)\. lo did not examine the default route\. Unpause the node \(docker unpause zz-gwprio-worker\)\. Then run lo up again\.'
+done
+unset PARITY_PAUSED PARITY_ALIASES
 export PARITY_ATTACHED=0
 gw_check "shared off, not attached" gwprio-off.dev
 for side in bash go; do

@@ -1,8 +1,9 @@
 package cache
 
 import (
-	"fmt"
 	"strings"
+
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // FormatName builds the cache filename for a given (secret, namespace,
@@ -14,12 +15,19 @@ import (
 // "secret/ns/key") use the same string convention.
 //
 // Empty namespace is normalized to the literal "default", matching the
-// bash plugin's behavior.
+// bash plugin's behavior. The name comes from storeguard.EntryName, the
+// builder of storeguard.CheckName too: Put writes the entry that a reader
+// of this name reads.
 func FormatName(secret, namespace, key string) string {
+	return storeguard.EntryName(secret, defaultNamespace(namespace), key)
+}
+
+// defaultNamespace is namespace, or "default" when it is empty.
+func defaultNamespace(namespace string) string {
 	if namespace == "" {
-		namespace = "default"
+		return "default"
 	}
-	return fmt.Sprintf("Secret.%s.%s.%s", secret, namespace, key)
+	return namespace
 }
 
 // ParseRef parses a cross-secret reference into (secret, namespace, key).

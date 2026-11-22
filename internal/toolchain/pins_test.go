@@ -10,6 +10,8 @@ package toolchain
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -104,10 +106,14 @@ func TestTemplateCarriesThePins(t *testing.T) {
 // TestContributorBYamlCarriesThePins: the contributor .bin/b.yaml installs
 // the pinned kustomize and khelm releases. A floating entry let CI install
 // khelm v3.0.0 next to the linked v2.8.0 (2026-10-21), and the chart
-// byte-parity test failed on every PR.
+// byte-parity test failed on every PR. The test also reads the version of
+// the one khelm entry of .bin/b.lock and the khelm release of mise.toml,
+// and checks that both name KhelmVersion (b.lock writes it after a "v").
+// It does not check the sha256 of the b.lock entry.
 func TestContributorBYamlCarriesThePins(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), ".bin", "b.yaml"))
+	root := testutil.RepoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, ".bin", "b.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +138,257 @@ func TestContributorBYamlCarriesThePins(t *testing.T) {
 		}},
 		Sync: "bump .bin/b.yaml with internal/toolchain/pins.go, then run b install to refresh .bin/b.lock",
 	}.Check(t)
+
+	testutil.Drift{
+		Want: testutil.Tree{Name: "pins.go", Files: map[string]string{
+			lockKhelm.file: KhelmVersion,
+			miseKhelm.file: KhelmVersion,
+		}},
+		Got: testutil.Tree{Name: "the khelm of the contributor toolchain", Files: map[string]string{
+			lockKhelm.file: releaseOf(t, root, lockKhelm),
+			miseKhelm.file: releaseOf(t, root, miseKhelm),
+		}},
+		Sync: "bump mise.toml and .bin/b.yaml with internal/toolchain/pins.go, then run b install to refresh .bin/b.lock",
+	}.Check(t)
+}
+
+// A pinSource is one file that names the release of one tool. Its read
+// returns the version as the file writes it. parsePin, which all sources
+// share, checks the form of that version and returns the release.
+type pinSource struct {
+	// file is the path relative to the repo root.
+	file string
+	// prefix is what the file writes before MAJOR.MINOR.PATCH.
+	prefix string
+	// read returns the version that raw, the bytes of file, names.
+	read func(raw []byte) (string, error)
+}
+
+// The patterns of the line-based sources: group 1 is the version.
+const (
+	miseKhelmPattern = `(?m)^"github:mgoltzsche/khelm"\s*=\s*"([^"]+)"`
+	ciHelmPattern    = `(?m)^\s*HELM_VERSION=([^\s"]+)\s*$`
+	gateHelmPattern  = `Use helm v([0-9][^,\s]*), or use the Go implementation`
+)
+
+// The khelm and helm sources of the pin tests.
+var (
+	lockKhelm = pinSource{file: ".bin/b.lock", prefix: "v", read: lockVersion("github.com/mgoltzsche/khelm")}
+	miseKhelm = pinSource{file: "mise.toml", read: matchPin(miseKhelmPattern)}
+	ciHelm    = pinSource{file: ".github/workflows/ci.yml", read: matchPin(ciHelmPattern)}
+	// The refusal of the bash chart gate, in the frozen tree and in the
+	// embedded mirror.
+	gateHelm       = gateRefusal(".lok8s/libs/addons")
+	gateHelmMirror = gateRefusal("internal/assets/lok8s/libs/addons")
+)
+
+// gateRefusal is the source of the helm that the refusal of the bash chart
+// gate names in file.
+func gateRefusal(file string) pinSource {
+	return pinSource{file: file, read: matchPin(gateHelmPattern)}
+}
+
+// release returns the release that s.file under root names.
+func (s pinSource) release(root string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(s.file)))
+	if err != nil {
+		return "", err
+	}
+	return s.parse(raw)
+}
+
+// parse returns the release that raw, the bytes of s.file, names. The
+// error starts with s.file.
+func (s pinSource) parse(raw []byte) (string, error) {
+	v, err := s.read(raw)
+	if err == nil {
+		v, err = parsePin(v, s.prefix)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", s.file, err)
+	}
+	return v, nil
+}
+
+// releaseOf is s.release in a test: it reports the error and returns "".
+func releaseOf(t *testing.T, root string, s pinSource) string {
+	t.Helper()
+	v, err := s.release(root)
+	if err != nil {
+		t.Error(err)
+	}
+	return v
+}
+
+// releaseRE is the form of a pinned release.
+var releaseRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// parsePin returns the release in v, a version as a file writes it: prefix,
+// then MAJOR.MINOR.PATCH. Another prefix is an error, and so is a floating
+// version such as "2".
+func parsePin(v, prefix string) (string, error) {
+	rel, ok := strings.CutPrefix(v, prefix)
+	if !ok || !releaseRE.MatchString(rel) {
+		return "", fmt.Errorf("the version %q is not %sMAJOR.MINOR.PATCH", v, prefix)
+	}
+	return rel, nil
+}
+
+// lockVersion returns a reader of a .bin/b.lock: the version of its one
+// entry whose source is source.
+func lockVersion(source string) func(raw []byte) (string, error) {
+	return func(raw []byte) (string, error) {
+		var lock struct {
+			Binaries []struct {
+				Version string `json:"version"`
+				Source  string `json:"source"`
+			} `json:"binaries"`
+		}
+		if err := json.Unmarshal(raw, &lock); err != nil {
+			return "", err
+		}
+		var found []string
+		for _, b := range lock.Binaries {
+			if b.Source == source {
+				found = append(found, b.Version)
+			}
+		}
+		if len(found) != 1 {
+			return "", fmt.Errorf("%d entries with source %s, want one", len(found), source)
+		}
+		return found[0], nil
+	}
+}
+
+// matchPin returns a reader of the first group of the one match of
+// pattern. A second match could name another release.
+func matchPin(pattern string) func(raw []byte) (string, error) {
+	re := regexp.MustCompile(pattern)
+	return func(raw []byte) (string, error) {
+		m := re.FindAllSubmatch(raw, -1)
+		if len(m) != 1 {
+			return "", fmt.Errorf("%d matches of %s, want one", len(m), pattern)
+		}
+		return string(m[0][1]), nil
+	}
+}
+
+// TestParsePin: the shared parse of a pinned version.
+func TestParsePin(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ v, prefix, want, err string }{
+		{"2.9.0", "", "2.9.0", ""},
+		{"v2.9.0", "v", "2.9.0", ""},
+		{"3.22.10", "", "3.22.10", ""},
+		// mise.toml had khelm at "2", a floating version.
+		{"2", "", "", `the version "2" is not MAJOR.MINOR.PATCH`},
+		{"2.9", "", "", `the version "2.9" is not MAJOR.MINOR.PATCH`},
+		{"latest", "", "", `the version "latest" is not MAJOR.MINOR.PATCH`},
+		{"2.9.0-rc.1", "", "", `the version "2.9.0-rc.1" is not MAJOR.MINOR.PATCH`},
+		{"", "", "", `the version "" is not MAJOR.MINOR.PATCH`},
+		// A v where the file writes none: CI builds helm-v${HELM_VERSION}.
+		{"v3.22.1", "", "", `the version "v3.22.1" is not MAJOR.MINOR.PATCH`},
+		// No v where the file writes one (.bin/b.lock).
+		{"2.9.0", "v", "", `the version "2.9.0" is not vMAJOR.MINOR.PATCH`},
+	} {
+		got, err := parsePin(tc.v, tc.prefix)
+		var msg string
+		if err != nil {
+			msg = err.Error()
+		}
+		if got != tc.want || msg != tc.err {
+			t.Errorf("parsePin(%q, %q) = %q, %q; want %q, %q", tc.v, tc.prefix, got, msg, tc.want, tc.err)
+		}
+	}
+}
+
+// TestPinSourcesFailWithoutThePin is the control of the khelm and helm pin
+// tests. Each source gives its pin from the real file. On the same file
+// without the pin, its reader fails with the message that the pin test
+// prints. Thus a pin test that passes has read each pin.
+func TestPinSourcesFailWithoutThePin(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	for _, tc := range []struct {
+		src  pinSource
+		pin  string
+		drop func(t *testing.T, raw []byte) ([]byte, int)
+		want string
+	}{
+		{lockKhelm, KhelmVersion, dropLockSource("github.com/mgoltzsche/khelm"),
+			".bin/b.lock: 0 entries with source github.com/mgoltzsche/khelm, want one"},
+		{miseKhelm, KhelmVersion, dropLines(`"github:mgoltzsche/khelm"`),
+			"mise.toml: 0 matches of " + miseKhelmPattern + ", want one"},
+		{ciHelm, HelmVersion, dropLines("HELM_VERSION="),
+			".github/workflows/ci.yml: 0 matches of " + ciHelmPattern + ", want one"},
+		{gateHelm, HelmVersion, dropLines("Use helm v"),
+			".lok8s/libs/addons: 0 matches of " + gateHelmPattern + ", want one"},
+		{gateHelmMirror, HelmVersion, dropLines("Use helm v"),
+			"internal/assets/lok8s/libs/addons: 0 matches of " + gateHelmPattern + ", want one"},
+	} {
+		t.Run(tc.src.file, func(t *testing.T) {
+			t.Parallel()
+			raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(tc.src.file)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := tc.src.parse(raw); err != nil || got != tc.pin {
+				t.Fatalf("the real %s gives %q (%v), want the pin %s", tc.src.file, got, err, tc.pin)
+			}
+			cut, n := tc.drop(t, raw)
+			if n == 0 {
+				t.Fatalf("the control removed nothing from %s", tc.src.file)
+			}
+			if _, err := tc.src.parse(cut); err == nil || err.Error() != tc.want {
+				t.Errorf("%s without the pin: error %v, want %q", tc.src.file, err, tc.want)
+			}
+		})
+	}
+}
+
+// dropLines returns a drop of every line that contains substr, and the
+// number of lines it removed.
+func dropLines(substr string) func(*testing.T, []byte) ([]byte, int) {
+	return func(_ *testing.T, raw []byte) ([]byte, int) {
+		var kept [][]byte
+		n := 0
+		for line := range bytes.SplitSeq(raw, []byte("\n")) {
+			if bytes.Contains(line, []byte(substr)) {
+				n++
+				continue
+			}
+			kept = append(kept, line)
+		}
+		return bytes.Join(kept, []byte("\n")), n
+	}
+}
+
+// dropLockSource returns a drop of the .bin/b.lock entries whose source is
+// source, and the number of entries it removed.
+func dropLockSource(source string) func(*testing.T, []byte) ([]byte, int) {
+	return func(t *testing.T, raw []byte) ([]byte, int) {
+		t.Helper()
+		var lock map[string]any
+		if err := json.Unmarshal(raw, &lock); err != nil {
+			t.Fatal(err)
+		}
+		bins, ok := lock["binaries"].([]any)
+		if !ok {
+			t.Fatal(".bin/b.lock has no binaries list")
+		}
+		kept := []any{}
+		for _, b := range bins {
+			if e, _ := b.(map[string]any); e["source"] != source {
+				kept = append(kept, b)
+			}
+		}
+		lock["binaries"] = kept
+		out, err := json.Marshal(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out, len(bins) - len(kept)
+	}
 }
 
 // TestYQFallbacksInstallThePin: the other places that install yq install
@@ -143,19 +400,41 @@ func TestYQFallbacksInstallThePin(t *testing.T) {
 		{"internal/assets/lok8s/providers/hetzner/cloud-init/cloud.d/ci/write_files/bootstrap/install-tools.sh", `(?m)^YQ_VERSION="([^"]+)"$`, ""},
 		{"mise.toml", `(?m)^yq\s*=\s*"([^"]+)"`, "v"},
 	} {
-		raw, err := os.ReadFile(filepath.Join(root, tc.file))
+		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(tc.file)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		m := regexp.MustCompile(tc.pattern).FindAllSubmatch(raw, -1)
-		if len(m) != 1 {
-			t.Errorf("%s: %d yq versions, want one", tc.file, len(m))
+		v, err := matchPin(tc.pattern)(raw)
+		if err != nil {
+			t.Errorf("%s: %v", tc.file, err)
 			continue
 		}
-		if got := tc.prefix + string(m[0][1]); got != YQVersion {
+		if got := tc.prefix + v; got != YQVersion {
 			t.Errorf("%s installs yq %s, want the pin %s (internal/toolchain YQVersion)", tc.file, got, YQVersion)
 		}
 	}
+}
+
+// TestHelmMentionsCarryThePin: the helm that CI installs for the
+// real-helm bats tests (.github/workflows/ci.yml) and the helm that the
+// refusal of the bash chart gate names (libs/addons, in both trees) are
+// the helm that lo links (HelmVersion). So a helm bump in go.mod and
+// pins.go must bump them too.
+func TestHelmMentionsCarryThePin(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	want, got := map[string]string{}, map[string]string{}
+	for _, s := range []pinSource{ciHelm, gateHelm, gateHelmMirror} {
+		want[s.file] = HelmVersion
+		got[s.file] = releaseOf(t, root, s)
+	}
+	testutil.Drift{
+		Want: testutil.Tree{Name: "pins.go", Files: want},
+		Got:  testutil.Tree{Name: "the helm that CI installs and the bash chart gate names", Files: got},
+		Sync: "bump HELM_VERSION and the sha256 of its tarball in .github/workflows/ci.yml, and the refusal in " +
+			"internal/assets/lok8s/libs/addons (then hack/sync-legacy-assets.sh; tests/unit/bootstrap_test.bats checks the refusal text), " +
+			"with internal/toolchain/pins.go",
+	}.Check(t)
 }
 
 // yqMinimumRE finds a statement of the yq minimum: "v4.x.y or later" or
@@ -322,4 +601,24 @@ func floatProblems(tpl string, floating map[string]string) []string {
 		}
 	}
 	return problems
+}
+
+// kindDefaultNodes is the default node image of each kind release, from the
+// release notes of kind. Add the row of a new KindVersion before the bump.
+var kindDefaultNodes = map[string]string{
+	"v0.32.0": "v1.36.1",
+}
+
+// The default node image moves with the kind release: a KindVersion without
+// a row, or a KindDefaultNodeVersion that is not the row of KindVersion,
+// fails.
+func TestKindDefaultNodeVersionFollowsKindVersion(t *testing.T) {
+	t.Parallel()
+	want, ok := kindDefaultNodes[KindVersion]
+	if !ok {
+		t.Fatalf("kindDefaultNodes has no row for kind %s: add its default node image", KindVersion)
+	}
+	if KindDefaultNodeVersion != want {
+		t.Errorf("KindDefaultNodeVersion = %s, but kind %s defaults to kindest/node %s", KindDefaultNodeVersion, KindVersion, want)
+	}
 }

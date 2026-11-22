@@ -14,13 +14,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // ── Init ─────────────────────────────────────────────────
@@ -51,7 +50,21 @@ func (c *Context) Init(sshKey string) error {
 
 	sopsConfig := c.sopsConfigPath()
 
+	// Before the first write (the config), and on a rerun with a config
+	// too: the .gitignore of the store that init writes (gitignoreOK).
+	if !c.gitignoreOK(c.initStorePath(), stepFirstWrite) {
+		return ErrHandled
+	}
+
 	if fsutil.IsRegular(sopsConfig) {
+		// A rerun writes no config, but it checks the .gitignore of the
+		// store and writes it when it needs a change, as the first run
+		// does. A store that does not exist holds no plaintext.
+		if store := c.initStorePath(); fsutil.DirExists(store) {
+			if err := c.ensureGitignore(store, stepFirstWrite); err != nil {
+				return err
+			}
+		}
 		raw, _ := os.ReadFile(sopsConfig)
 		// Check if this key is already present
 		if grepQF(string(raw), agePubkey) {
@@ -95,10 +108,10 @@ creation_rules:
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := c.makeStore(dir); err != nil {
 		return err
 	}
-	return ensureGitignore(dir)
+	return c.ensureGitignore(dir, stepGitignoreWrite)
 }
 
 // grepQF mirrors `grep -qF pattern file` on in-memory content: an empty
@@ -129,40 +142,44 @@ func grepQF(content, pattern string) bool {
 // new recipient would appear to be added while some secrets stayed unreadable
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
-// the ordering is part of the observable contract.)
+// the ordering is part of the observable contract. A .gitignore of the
+// store that is not a regular file, a store of the context that does not
+// resolve or that it cannot list, and an .enc of the store that the
+// encrypt refuses (a symlink, a directory, a FIFO, a socket or a device),
+// are refused BEFORE the write, and the .gitignore of the store is written
+// before it, so the run cannot stop half way at them.) The first run
+// re-keys every plaintext of the sweep from its cache file: a plaintext
+// that is older than its .enc (after a pull) replaces the value of that
+// .enc.
+//
+// A rerun finishes the work of a run that stopped after its write, as far
+// as it can detect that work. When .sops.yaml lists the recipient already,
+// the run reads the sops envelope of each .enc of the sweep
+// (unfinishedEncs, at most 16 MiB each): an .enc that is missing, or that
+// does not pass the recipient envelope check (encAdded: an entry of the
+// recipient with an armored age block, a mac and a lastmodified), is not
+// finished. That check is structural: it does not show that sops wrote the
+// entry or that the key can decrypt the file. Before it decides, the run
+// refuses what the first run refuses (a store that does not resolve or
+// list, an .enc that is not a regular file, a .sops.yaml that is also a
+// file that the run writes, an orphan that does not pass the check without
+// skipOrphans) and writes the .gitignore. Then it re-keys the files that
+// are not finished, and only those, and leaves .sops.yaml as it is. After
+// the encrypt it reads the sweep again, and a file that still does not
+// pass the check (its creation rule does not list the key) fails the run.
+// With nothing left, the run changes nothing.
+//
+// The writes replace each file with a rename, so a run that stops or is
+// killed leaves each file whole, old or new, and a rerun finishes the work
+// that it can detect. They are not synced to the disk (no fsync): a power
+// loss can lose a write or change their order.
+//
+// The argument check and the re-key steps are the helpers in rekey.go, which
+// RemoveKey shares; rekey_test.go pins this command's output and effects.
 func (c *Context) AddKey(key string, all, skipOrphans bool) error {
-	// Accept an age key directly, or derive one from an SSH public key.
-	agePubkey := ""
-	if strings.HasPrefix(key, "age1") {
-		agePubkey = key
-	} else {
-		if !fsutil.IsRegular(key) {
-			ui.ErrorTo(c.ErrOut, "not an age key and not a readable file: %s", key)
-			ui.ErrorTo(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
-			return ErrHandled
-		}
-		// Contained (bash: 2>/dev/null): the ssh-to-age binary echoes its
-		// ENTIRE input on failure, which for a mistakenly-passed PRIVATE key
-		// would print the key material (see
-		// tests/unit/secret_material_containment_test.bats). The library
-		// error is likewise never surfaced.
-		derived, _, err := deriveAgePublicKey(key)
-		if err != nil && !errors.Is(err, errUnsupportedKey) {
-			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", key)
-			ui.ErrorTo(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
-			return ErrHandled
-		}
-		// A parseable non-ed25519 key derives to "" (the binary's rc-0 skip)
-		// and is caught by the shape check below, matching bash.
-		agePubkey = derived
-	}
-
-	// bech32 age public key. Validated because a typo here is silent: sops
-	// accepts the config and every later encrypt writes a recipient nobody
-	// holds.
-	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.ErrorTo(c.ErrOut, "not a valid age public key: %s", agePubkey)
-		return ErrHandled
+	agePubkey, err := c.recipientArg(key)
+	if err != nil {
+		return err
 	}
 
 	sopsConfig := c.sopsConfigPath()
@@ -170,22 +187,91 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
-
-	raw, err := os.ReadFile(sopsConfig)
+	// Before the first write (the lock file): the .gitignore of the store
+	// that the encrypt below writes (gitignoreOK). A store that does not
+	// resolve is refused below (encryptTargets), and StorePath names
+	// another store then.
+	if !c.gitignoreOK(c.StorePath(), stepFirstWrite) {
+		return ErrHandled
+	}
+	// The file that the lock, the read and the write use, resolved once
+	// (lock.go).
+	dest, err := c.sopsConfigDest()
 	if err != nil {
 		return err
 	}
-	if strings.Contains(string(raw), agePubkey) {
-		fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
-		fmt.Fprintf(c.Out, "  %s\n", agePubkey)
-		return nil
+	// One run at a time, from this read to the last encrypt (lock.go).
+	unlock, err := c.lockSopsConfig(dest)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	raw, err := os.ReadFile(dest)
+	if err != nil {
+		return err
+	}
+
+	// Before the first write, on both paths: the store of the context must
+	// resolve and list, with --all too, because the encrypt below re-keys
+	// that store (encryptTargets). Found after the write, a store that does
+	// not resolve stopped the run with the recipient in .sops.yaml, and a
+	// rerun found nothing to re-key. The list is the one of the sweep, and
+	// the encrypt below reads this same list (encryptChecked).
+	checked, err := c.encryptTargets()
+	if err != nil {
+		return err
+	}
+	// Each .enc that the encrypt below writes must be a regular file or
+	// absent (encryptFile refuses any other entry, and that refusal comes
+	// after the write). A rerun refuses it too, before it decides that
+	// nothing is left to do.
+	if c.refuseEncPaths(checked.encs()) {
+		return ErrHandled
+	}
+	// The .gitignore and the .enc files that the run writes must not be the
+	// file of .sops.yaml: their write would replace it (refuseConfigAlias).
+	// A rerun with nothing to do writes the .gitignore too.
+	if c.refuseConfigAlias(dest, checked) {
+		return ErrHandled
+	}
+	// A recipient that .sops.yaml lists already is done when the re-key of
+	// the sweep is finished. An .enc that is missing or does not pass the
+	// recipient envelope check is the work of an earlier run that stopped
+	// after its write of .sops.yaml (at the orphan check, or in the
+	// encrypt), and this run finishes that work (rerunLeft, finishReKey).
+	present := strings.Contains(string(raw), agePubkey)
+	var left []string
+	if present {
+		if left, err = c.rerunLeft(checked, agePubkey, all, skipOrphans); err != nil {
+			return err
+		}
+	}
+	// The .gitignore of the store keeps the plaintext cache files out of
+	// git. The encrypt writes it too, but after the write of .sops.yaml: a
+	// .gitignore that it cannot write stopped the run there, with the
+	// recipient in .sops.yaml and no .enc re-keyed. A rerun with nothing to
+	// do writes it too. A store directory that does not exist holds no
+	// plaintext, and the encrypt skips it.
+	if fsutil.DirExists(checked.dir) {
+		if err := c.ensureGitignore(checked.dir, stepSopsConfig); err != nil {
+			ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again")
+			return err
+		}
+	}
+	if present {
+		return c.finishReKey(checked, left, agePubkey)
 	}
 
 	// Append to every creation rule's age list (comma-separated, sops' own
-	// format).
+	// format). replaceFile writes dest, the file that a symlinked .sops.yaml
+	// names, and the link stays a link.
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
-	if err := os.WriteFile(sopsConfig, []byte(edited), 0o644); err != nil { // #nosec G306 -- .sops.yaml holds public age recipients only
+	if err := replaceFile(dest, []byte(edited)); err != nil {
+		if c.reportTempLeft(err) {
+			return ErrHandled
+		}
 		return err
 	}
 	if after < 1 {
@@ -197,83 +283,119 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 
 	// Re-key the stores. Without this the recipient is listed but holds
 	// nothing.
-	var stores []string
-	if all {
-		matches, _ := filepath.Glob(c.Paths.Clusters + "/*/secrets")
-		sort.Strings(matches)
-		for _, d := range matches {
-			// bash's * glob skips dot-directories; Go's does not.
-			if strings.HasPrefix(filepath.Base(filepath.Dir(d)), ".") {
-				continue
-			}
-			if fsutil.DirExists(d) {
-				stores = append(stores, d)
-			}
-		}
-	} else {
-		dir, err := c.ResolveStore()
-		if err != nil {
-			return err
-		}
-		stores = append(stores, dir)
+	stores, _, err := c.rekeyStores(all)
+	if err != nil {
+		return err
 	}
-	if len(stores) == 0 {
+	if len(stores) == 0 { // every domain store is a path it cannot read
 		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
 		return ErrHandled
 	}
-
-	orphans := 0
-	for _, store := range stores {
-		for _, base := range storeEntries(store, "Secret.") {
-			if !strings.HasSuffix(base[len("Secret."):], ".enc") {
-				continue
-			}
-			enc := store + "/" + base
-			if !fsutil.Exists(enc) {
-				continue
-			}
-			if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
-				ui.WarnTo(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", strings.TrimPrefix(enc, c.Paths.Base+"/"))
-				orphans++
-			}
-		}
+	// One listing of each store, whose error is checked: the store of the
+	// sweep was listed before the write (storeListing).
+	names, err := c.storeListing(stores, checked, true)
+	if err != nil {
+		return err
 	}
-	if orphans > 0 && !skipOrphans {
-		ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
-		ui.ErrorTo(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
-		ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
+	orphans, err := c.addKeyOrphans(stores, names, "")
+	if err != nil {
+		return err
+	}
+	if len(orphans) > 0 && !skipOrphans {
+		c.refuseOrphans(len(orphans))
 		return ErrHandled
 	}
 
-	rekeyed := 0
-	now := time.Now()
-	for _, store := range stores {
-		for _, base := range storeEntries(store, "Secret.") {
-			plain := store + "/" + base
-			// bash tests [[ -e && != *.enc ]] — any existing entry counts,
-			// not just regular files.
-			if !fsutil.Exists(plain) || strings.HasSuffix(base, ".enc") {
-				continue
-			}
-			// The freshness skip in Encrypt is keyed on mtime, and a
-			// recipient change does not touch the plaintext — so nudge it,
-			// which is exactly the manual step this command exists to remove.
-			if err := os.Chtimes(plain, now, now); err != nil {
-				return err
-			}
-			rekeyed++
-		}
+	rekeyed, err := touchPlaintexts(stores, names)
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(c.Out, "re-keying %d cache file(s) across %d store(s)…\n", rekeyed, len(stores))
 	// No name filter on purpose: a re-key rewrote every cache file in every
 	// store, so the whole store is exactly what must be re-encrypted here.
 	// (Faithful to bash: the sweep covers the CURRENT context's store; other
 	// stores' touched plaintexts stay newer than their .enc twins, so a later
-	// per-domain encrypt still picks them up.)
-	if err := c.Encrypt(""); err != nil {
+	// per-domain encrypt still picks them up.) The sweep is the list checked
+	// before the write.
+	if err := c.encryptChecked(checked); err != nil {
 		return err
 	}
-	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
+	fmt.Fprintln(c.Out, "done. Commit .sops.yaml and the updated .enc files together")
+	return nil
+}
+
+// rerunLeft is the check of a rerun of AddKey, when .sops.yaml lists the
+// recipient already (bash: the same steps in secrets::add-key), and returns
+// the .enc files of the sweep whose re-key is not finished
+// (unfinishedEncs). It runs before the decision that nothing is left to
+// do. The orphans of the stores of the run (rekeyStores, storeListing) that
+// do not pass the recipient envelope check (addKeyOrphans) are refused
+// without skipOrphans, with the lines of the first run: an earlier run that
+// stopped at the orphan check is not reported as done.
+func (c *Context) rerunLeft(checked sweepList, recipient string, all, skipOrphans bool) ([]string, error) {
+	left, err := c.unfinishedEncs(checked, recipient)
+	if err != nil {
+		return nil, err
+	}
+	stores, _, err := c.rekeyStores(all)
+	if err != nil {
+		return nil, err
+	}
+	if len(stores) == 0 { // every domain store is a path it cannot read
+		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
+		return nil, ErrHandled
+	}
+	names, err := c.storeListing(stores, checked, false)
+	if err != nil {
+		return nil, err
+	}
+	orphans, err := c.addKeyOrphans(stores, names, recipient)
+	if err != nil {
+		return nil, err
+	}
+	if len(orphans) > 0 && !skipOrphans {
+		c.refuseOrphans(len(orphans))
+		return nil, ErrHandled
+	}
+	return left, nil
+}
+
+// finishReKey ends a rerun of AddKey (bash: the same steps in
+// secrets::add-key). With nothing left, it changes nothing. Else it
+// re-keys the files of left only: an .enc whose re-key is finished keeps
+// its bytes, so a plaintext that is older than a pulled .enc does not
+// replace it. Then it reads the sweep again (unfinishedEncs). An .enc that
+// still does not pass the recipient envelope check can mean that its
+// creation rule does not list the key (for example, the key is in a
+// comment of .sops.yaml only): the run names each such file and fails,
+// with no "done" line.
+func (c *Context) finishReKey(checked sweepList, left []string, recipient string) error {
+	if len(left) == 0 {
+		fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
+		fmt.Fprintf(c.Out, "  %s\n", recipient)
+		return nil
+	}
+	fmt.Fprintf(c.Out, "recipient already present in .sops.yaml, but %d .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n", len(left))
+	fmt.Fprintf(c.Out, "  %s\n", recipient)
+	plains := make([]string, 0, len(left))
+	for _, enc := range left {
+		plains = append(plains, strings.TrimSuffix(enc, ".enc"))
+	}
+	if err := c.encryptSweep(checked.dir, "", true, func() []string { return plains }); err != nil {
+		return err
+	}
+	still, err := c.unfinishedEncs(checked, recipient)
+	if err != nil {
+		return err
+	}
+	if len(still) > 0 {
+		for _, enc := range still {
+			ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not pass the recipient envelope check after the re-key", c.rel(enc))
+		}
+		ui.ErrorTo(c.ErrOut, "  the key is in .sops.yaml, but the creation rule of these files may not list it (for example, the key is only in a comment): fix .sops.yaml, then run this command again")
+		return ErrHandled
+	}
+	fmt.Fprintln(c.Out, "done. Commit .sops.yaml and the updated .enc files together")
 	return nil
 }
 
@@ -317,6 +439,17 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 		ui.ErrorTo(c.ErrOut, "Key argument is required")
 		return ErrHandled
 	}
+	// Before the prompt and any write (storeguard.CheckName): each part of
+	// the name of the plaintext file is one part of a path, the file is an
+	// entry of the store itself, and its name does not end in .enc (the rule
+	// !Secret.*.enc of the .gitignore re-includes it, and git would commit
+	// the plaintext). The store of this check is StorePath: the write below
+	// checks the resolved store again. Each refusal names the field and its
+	// text, never the value.
+	base, err := storeguard.CheckName(c.StorePath(), name, namespace, key)
+	if err != nil {
+		return c.printStop(err)
+	}
 
 	if value == "-" {
 		// argsh's :~stdin type: an explicit `-` reads stdin during parsing.
@@ -357,18 +490,23 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+	if err := c.makeStore(secretsDir); err != nil {
 		return err
 	}
-
-	cacheFile := secretsDir + "/Secret." + name + "." + namespace + "." + key
-	if err := os.WriteFile(cacheFile, []byte(value), 0o600); err != nil {
+	// The one plaintext write of a store (storeguard: Guard.WritePlaintext),
+	// also of decrypt and the Secret generator. It refuses a file that is
+	// not an entry of the resolved store, a name that ends in .enc, and a
+	// file that is not a regular file and not absent (a symlink, a
+	// directory, a FIFO, a socket or a device). Then it checks the
+	// .gitignore that keeps the plaintext out of git, and writes a new
+	// private temp file in the store (mode 0600, an exclusive create) and a
+	// rename onto the file: a symlink or a hard link there is replaced as a
+	// name, and the file that it names keeps its old content.
+	cacheFile := secretsDir + "/" + base
+	if err := c.writePlaintext(storeguard.Plaintext{Dir: secretsDir, Base: base, Step: stepPlaintext, Who: "set"}, []byte(value)); err != nil {
 		return err
 	}
-	if err := os.Chmod(cacheFile, 0o600); err != nil {
-		return err
-	}
-	ui.Debug("Wrote %s", cacheFile)
+	ui.Debug("Wrote %s", printable(cacheFile))
 
 	if doEncrypt {
 		// Encrypt ONLY this one file — never a whole-store sweep (a sweep
@@ -411,21 +549,81 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 // walking up from the FILE's path, so a different .sops.yaml higher up (e.g.
 // the repo root, or under Docker) could silently supply other
 // creation_rules/recipients than the one we validated.
+//
+// The .enc path must be a regular file or absent (encDestinationOK) before
+// sops runs: a symlink (to a file or to a directory), a directory, a FIFO, a
+// socket, a device or a path whose lstat fails with another error than "does
+// not exist" is refused with the same line as the bash twin, and nothing is
+// written. The rename would replace a symlink and refuse a directory. The
+// bash twin renames with GNU mv -T (or gmv -T) for the same reason, and
+// refuses to encrypt without one: a mv without -T moves the file INTO a
+// directory, or into the directory that a symlink names.
 func (c *Context) encryptFile(plaintext string) error {
 	sopsConfig := c.sopsConfigPath()
 	if !fsutil.IsRegular(sopsConfig) {
-		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
+		ui.ErrorTo(c.ErrOut, "No .sops.yaml found. Run: lo secrets init")
+		return ErrHandled
+	}
+	encPath := plaintext + ".enc"
+	if !encDestinationOK(encPath) {
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written. Remove it, then encrypt again", c.rel(encPath))
 		return ErrHandled
 	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))
-	if err := sopsEncryptFile(sopsConfig, plaintext, plaintext+".enc"); err != nil {
+	if err := sopsEncryptFile(sopsConfig, plaintext, encPath); err != nil {
 		// The bash path surfaces the sops CLI's own stderr before the [error]
 		// line; the library error stands in for it here.
-		fmt.Fprintln(c.ErrOut, err)
+		if !c.reportTempLeft(err) {
+			fmt.Fprintln(c.ErrOut, err)
+		}
 		ui.ErrorTo(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
 		return ErrHandled
 	}
+	// An .enc with the same time as its plaintext gets a time of the kernel
+	// after it (nudgeNewer). A plaintext dated after now stays the newer
+	// file, with a warning (bash: the test after the rename in
+	// secrets::_encrypt_file): each encrypt writes its .enc again, and an
+	// edit of it is not lost. A plaintext that is newer than its .enc but
+	// not after now gets no warning: the clock of the kernel, which stamps
+	// the .enc, can be behind time.Now().
+	if !nudgeNewer(encPath, plaintext) {
+		ui.WarnTo(c.ErrOut, "%s has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again. Set the time of the plaintext to now (touch it)", c.rel(plaintext))
+	}
 	return nil
+}
+
+// encDestinationOK is storeguard.DestinationOK: path, read with lstat (a
+// symlink is not followed), is a regular file or does not exist (bash:
+// secrets::_enc_path_ok; the bash twin tells "does not exist" from the
+// other lstat errors with secrets::_absent). It checks the last part of the
+// path only: the store directory and its parents are trusted.
+func encDestinationOK(path string) bool { return storeguard.DestinationOK(path) }
+
+// sweepPlaintexts returns the plaintext cache files of dir that the encrypt
+// sweep reads (plaintextsOf over the names of storeEntries, bash:
+// secrets::_sweep_files). Encrypt lists the store with it after the
+// .gitignore write.
+func sweepPlaintexts(dir, prefix string) []string {
+	return plaintextsOf(dir, storeEntries(dir, prefix))
+}
+
+// plaintextsOf returns the plaintext cache files among names, entries of
+// dir: each regular file whose name does not end in .enc. AddKey lists the
+// store once, before its first write (encryptTargets), and gets its sweep
+// from those names: it checks the .enc of each file, and its encrypt reads
+// that same list (encryptChecked), so a file that the run itself changes is
+// not added. Another process that writes to the store during the run is
+// outside the threat model.
+func plaintextsOf(dir string, names []string) []string {
+	var plains []string
+	for _, base := range names {
+		plaintext := dir + "/" + base
+		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") {
+			continue
+		}
+		plains = append(plains, plaintext)
+	}
+	return plains
 }
 
 // Encrypt sweeps plaintext cache files into .enc twins (bash:
@@ -452,42 +650,47 @@ func (c *Context) Encrypt(name string) error {
 	if err != nil {
 		return err
 	}
-	if !fsutil.DirExists(secretsDir) {
-		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
-		return nil
-	}
-
-	// Ensure .gitignore blocks plaintext before we create .enc files
-	if err := ensureGitignore(secretsDir); err != nil {
-		return err
-	}
-
-	if !fsutil.IsRegular(c.sopsConfigPath()) {
-		ui.ErrorTo(c.ErrOut, "No .sops.yaml found — run: lo secrets init")
-		return ErrHandled
-	}
-
 	// Cache files are Secret.<name>.<namespace>.<key>, so name anchors on the
 	// second field.
 	prefix := "Secret."
 	if name != "" {
 		prefix = "Secret." + name + "."
 	}
+	return c.encryptSweep(secretsDir, name, false, func() []string { return sweepPlaintexts(secretsDir, prefix) })
+}
+
+// encryptSweep is the sweep of Encrypt over the store secretsDir (bash:
+// secrets::_encrypt_store): the .gitignore of the store, the .sops.yaml
+// check, then each plaintext of list() whose .enc is not newer. list runs
+// after the .gitignore write: Encrypt lists the store there, and AddKey
+// gives the list that it checked before its first write (encryptChecked).
+// name is for the message when nothing matched.
+//
+// With force it encrypts every file of the list, also one whose .enc is
+// newer: the re-key of AddKey, where a new .enc must list the new recipient
+// whatever the times say (an .enc dated in the future stays newer than the
+// plaintexts that the run set to now).
+func (c *Context) encryptSweep(secretsDir, name string, force bool, list func() []string) error {
+	if !fsutil.DirExists(secretsDir) {
+		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
+		return nil
+	}
+
+	// Ensure .gitignore blocks plaintext before we create .enc files
+	if err := c.ensureGitignore(secretsDir, stepEncWrites); err != nil {
+		return err
+	}
+
+	if !fsutil.IsRegular(c.sopsConfigPath()) {
+		ui.ErrorTo(c.ErrOut, "No .sops.yaml found. Run: lo secrets init")
+		return ErrHandled
+	}
 
 	count, skipped := 0, 0
-	for _, base := range storeEntries(secretsDir, prefix) {
-		plaintext := secretsDir + "/" + base
-		if !fsutil.IsRegular(plaintext) {
-			continue
-		}
-		// Skip .enc files
-		if strings.HasSuffix(base, ".enc") {
-			continue
-		}
-
+	for _, plaintext := range list() {
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
-		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
+		if !force && fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
 			skipped++
 			continue
 		}
@@ -535,6 +738,16 @@ func (c *Context) Decrypt(sshKey string) error {
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
+	}
+	// Before any write: a ciphertext whose plaintext name ends in .enc
+	// (refuseReservedDestinations), and a plaintext name that is not a
+	// regular file and not absent (refuseLinkedDestinations). Then, before
+	// the first plaintext, the .gitignore that keeps it out of git.
+	if c.refuseReservedDestinations(secretsDir) || c.refuseLinkedDestinations(secretsDir) {
+		return ErrHandled
+	}
+	if err := c.ensureGitignore(secretsDir, stepDecrypt); err != nil {
+		return err
 	}
 
 	// Resolve the age private key. Checked in order:
@@ -586,7 +799,7 @@ func (c *Context) Decrypt(sshKey string) error {
 		if fsutil.IsRegular(plaintext) && newerThan(plaintext, encFile) {
 			cur, err := os.ReadFile(plaintext)
 			if err != nil {
-				ui.ErrorTo(c.ErrOut, "Failed to read %s", filepath.Base(plaintext))
+				ui.ErrorTo(c.ErrOut, "Failed to read %s", printable(filepath.Base(plaintext)))
 				return ErrHandled
 			}
 			dec, err := decryptEncFile(encFile, ageKey)
@@ -594,37 +807,44 @@ func (c *Context) Decrypt(sshKey string) error {
 				// No library error on this path: a sops error can carry
 				// digests of the plaintext (bash discards the CLI's stderr
 				// here for the same reason).
-				ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
+				ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", printable(base))
 				return ErrHandled
 			}
 			if bytes.Equal(dec, cur) {
 				skippedEqual++
 			} else {
-				ui.WarnTo(c.ErrOut, "%s: the plaintext is newer than %s and differs from it. Decrypt kept the plaintext.", filepath.Base(plaintext), base)
+				ui.WarnTo(c.ErrOut, "%s: the plaintext is newer than %s and differs from it. Decrypt kept the plaintext.", printable(filepath.Base(plaintext)), printable(base))
 				skippedDiffer++
 			}
 			continue
 		}
 
-		ui.Debug("Decrypting %s", base)
+		ui.Debug("Decrypting %s", printable(base))
 		raw, err := os.ReadFile(encFile)
+		var dec []byte
 		if err == nil {
-			var dec []byte
-			if dec, err = sopsDecryptData(raw, ageKey); err == nil {
-				err = os.WriteFile(plaintext, dec, 0o600)
-			}
+			dec, err = sopsDecryptData(raw, ageKey)
 		}
 		if err != nil {
 			// The [error] line names the file only. The bash path discards
 			// the sops CLI's stderr: a MAC mismatch prints two unkeyed
 			// SHA-512 digests of the plaintext. Both print this one line.
-			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
+			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", printable(base))
 			return ErrHandled
 		}
-		if err := os.Chmod(plaintext, 0o600); err != nil {
+		// The one plaintext write of a store (Guard.WritePlaintext): the
+		// checks above ran for each entry before the first write, and the
+		// write checks this entry and the .gitignore again. A new private
+		// temp file in the store (mode 0600) and a rename onto the plaintext
+		// file: a hard link there is replaced as a name, and its other name
+		// keeps its old content.
+		if err := c.writePlaintext(storeguard.Plaintext{Dir: secretsDir, Base: filepath.Base(plaintext), Step: stepPlaintext, Who: "decrypt"}, dec); err != nil {
 			return err
 		}
-		nudgeNewer(plaintext, encFile)
+		// An .enc dated in the future keeps the plaintext the older file,
+		// as in the bash twin, which sets no time. On an equal time the
+		// plaintext gets a time of the kernel after the .enc.
+		_ = nudgeNewer(plaintext, encFile)
 		count++
 	}
 
@@ -648,6 +868,54 @@ func (c *Context) Decrypt(sshKey string) error {
 		fmt.Fprintf(c.Out, "No encrypted secrets found in %s\n", secretsDir)
 	}
 	return nil
+}
+
+// refuseReservedDestinations prints a refusal and returns true when a
+// ciphertext of the store dir would decrypt to a plaintext whose name ends
+// in .enc (reservedPlaintextName; bash: secrets::_decrypt_reserved), for
+// example Secret.app.default.enc.enc. The rule !Secret.*.enc of the
+// .gitignore re-includes that plaintext. Decrypt runs it before its first
+// write. It reads the same entries as the decrypt loop.
+func (c *Context) refuseReservedDestinations(dir string) bool {
+	refused := false
+	for _, base := range storeEntries(dir, "Secret.") {
+		if !strings.HasSuffix(base[len("Secret."):], ".enc") || !fsutil.IsRegular(dir+"/"+base) {
+			continue
+		}
+		if dest := strings.TrimSuffix(base, ".enc"); reservedPlaintextName(dest) {
+			ui.ErrorTo(c.ErrOut, "%s: decrypt would write the plaintext file %s, which ends in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it", printable(c.rel(dir+"/"+base)), printable(dest))
+			refused = true
+		}
+	}
+	if refused {
+		ui.ErrorTo(c.ErrOut, "decrypt wrote no plaintext file: move these .enc files out of the store, then run this command again")
+	}
+	return refused
+}
+
+// refuseLinkedDestinations prints a refusal and returns true when the
+// plaintext file of a ciphertext of the store dir is not a regular file
+// and not absent (encDestinationOK; bash: secrets::_decrypt_links): a
+// symlink, a directory, a FIFO, a socket or a device, or its lookup fails.
+// A symlink there can name a file that git commits (Secret.x.enc, the
+// .gitignore). Decrypt runs it before its first write, also for a
+// plaintext that it would keep. It reads the same entries as the decrypt
+// loop.
+func (c *Context) refuseLinkedDestinations(dir string) bool {
+	refused := false
+	for _, base := range storeEntries(dir, "Secret.") {
+		if !strings.HasSuffix(base[len("Secret."):], ".enc") || !fsutil.IsRegular(dir+"/"+base) {
+			continue
+		}
+		if dest := dir + "/" + strings.TrimSuffix(base, ".enc"); !encDestinationOK(dest) {
+			ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: decrypt would write the plaintext of %s there", printable(c.rel(dest)), printable(base))
+			refused = true
+		}
+	}
+	if refused {
+		ui.ErrorTo(c.ErrOut, "decrypt wrote no plaintext file: remove these entries, then run this command again")
+	}
+	return refused
 }
 
 // decryptEncFile decrypts encFile in memory. Nothing is written: the

@@ -19,7 +19,7 @@ kustomize  = "5.8.1"
 sops       = "3.9"
 mkcert     = "1.4"
 "github:arg-sh/argsh"        = "0.10.0"
-"github:mgoltzsche/khelm"    = "2"
+"github:mgoltzsche/khelm"    = "2.9.0"
 "github:Mic92/ssh-to-age"    = "latest"
 "github:containeroo/renvsubst" = { version = "latest", bin = "envsubst" }
 

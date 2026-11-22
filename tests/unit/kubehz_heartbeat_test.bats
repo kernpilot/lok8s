@@ -56,24 +56,142 @@ setup() {
   # call, and STUB_KUBECTL_DELAY makes each call sleep (a slow apiserver).
   # curl captures the POSTed heartbeat body (-d) to STUB_PAYLOAD_OUT so the
   # test can assert the wire payload.
+  # STUB_STATE_FILE (a JSON object) is the annotation store of
+  # kubehz-agent-state: the marker read prints it, and an annotate that is
+  # not denied changes it as kubectl does (key=value sets, key- removes, all
+  # or nothing). It persists from one run of the script to the next, so a
+  # case can run several ticks. Without it, the read prints STUB_MARKER and
+  # an annotate changes nothing. The denials: STUB_GATE_DENIED refuses the
+  # first annotate of a run that writes kubehz.cloud/last-assessment (the
+  # send gate), STUB_WRITEBACK_DENIED refuses any later one (the write-back),
+  # and STUB_ANNOTATE_DENIED refuses every annotate. STUB_EVENTS_LOG gets
+  # each annotate and each heartbeat POST in their order.
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
-# same form). It logs the bound and the command, and runs the command as a
-# shell function, so the kubectl stub below answers it. A command that
-# contains STUB_TIMEOUT_MATCH times out instead: busybox kills it with
-# SIGTERM (rc 143), and it prints nothing.
+# timeout: the pod's `timeout -k KILL SECS CMD ARGS` (the BusyBox applet and
+# GNU coreutils take the same form). It logs its whole argv, so a case sees
+# the bound of each call, and runs the command as a shell function, so the
+# kubectl and curl stubs below answer it. A kubectl or curl call that does
+# not run under it goes to STUB_UNBOUND_LOG. A command that contains
+# STUB_TIMEOUT_MATCH times out instead: TERM kills it (rc 143), and it
+# prints nothing. A command that contains STUB_TIMEOUT_COMMIT_MATCH runs
+# (the apiserver stores the write), and then times out at the client
+# (rc 143): the answer came after the bound. The log has one line per
+# call: a line break in an argument (a jq program) becomes a space.
+# With the fake clock (below), a command whose work moved the clock more
+# than SECS + 2 s stops there, as the real timeout stops it: TERM after
+# SECS, KILL 2 s later (rc 143).
 timeout() {
-  local secs=$1
-  shift
-  printf '%s %s\n' "${secs}" "$*" >> "${STUB_TIMEOUT_LOG}"
+  local _stub_nl='
+'
+  local _stub_args="$*"
+  printf '%s\n' "${_stub_args//${_stub_nl}/ }" >> "${STUB_TIMEOUT_LOG}"
   case "$*" in
     *"${STUB_TIMEOUT_MATCH:-<none>}"*) return 143 ;;
   esac
-  "$@"
+  local _stub_secs _stub_rc=0 _stub_t0=""
+  [ "$1" != "-k" ] || shift 2
+  _stub_secs="$1"
+  shift
+  [ -z "${STUB_CLOCK_FILE:-}" ] || _stub_t0=$(cat "${STUB_CLOCK_FILE}")
+  local STUB_BOUND=1
+  "$@" || _stub_rc=$?
+  if [ -n "${_stub_t0}" ] && [ "$(cat "${STUB_CLOCK_FILE}")" -gt $(( _stub_t0 + _stub_secs + 2 )) ]; then
+    _stub_clock_set $(( _stub_t0 + _stub_secs + 2 ))
+    return 143
+  fi
+  _stub_clock_tick "${_stub_secs}" "$1" "${_stub_args}"
+  case "${_stub_args}" in
+    *"${STUB_TIMEOUT_COMMIT_MATCH:-<none>}"*) return 143 ;;
+  esac
+  return "${_stub_rc}"
+}
+# The fake clock, for the tick budget (_fake_clock START in the cases):
+# STUB_CLOCK_FILE holds the seconds since boot, and STUB_UPTIME the same
+# number in the form of /proc/uptime, which the runner reads instead of
+# /proc/uptime. `date -u +%s` prints that number plus the step of the
+# wall clock in STUB_CLOCK_FILE.wall (none at first). The clock moves:
+#   STUB_CLOCK_SLOW=1: each kubectl and curl call runs to its bound
+#     (SECS + 2 s: TERM, then KILL); STUB_CLOCK_SLOW_FROM=<text>: each
+#     call from the first one whose argv holds the text on;
+#   STUB_CLOCK_LOCAL=<secs>: each jq and awk step takes that long;
+#   STUB_LOCAL_HANG=<text>: a jq or awk step whose argv holds the text
+#     hangs for 1000 s and prints nothing.
+# STUB_WALL_STEP=<secs> steps the wall clock by that many seconds (a
+# negative number sets it back) after the first call whose argv holds
+# STUB_WALL_STEP_FROM. The clock of the budget does not move with it.
+# STUB_CLOCK_SLOW and STUB_CLOCK_LOCAL do not go together: in the pipe of
+# the node list, both sides would move the clock at the same time.
+_stub_clock_set() {
+  printf '%s\n' "$1" > "${STUB_CLOCK_FILE}"
+  printf '%s.37 %s.12\n' "$1" "$(( $1 * 3 ))" > "${STUB_UPTIME}"
+}
+# _stub_clock_tick SECS COMMAND ARGS: after a call under timeout.
+_stub_clock_tick() {
+  [ -n "${STUB_CLOCK_FILE:-}" ] || return 0
+  case "$3" in
+    *"${STUB_CLOCK_SLOW_FROM:-<none>}"*) : > "${STUB_CLOCK_FILE}.slow" ;;
+  esac
+  case "$3" in
+    *"${STUB_WALL_STEP_FROM:-<none>}"*)
+      [ -f "${STUB_CLOCK_FILE}.wall" ] || printf '%s\n' "${STUB_WALL_STEP}" > "${STUB_CLOCK_FILE}.wall" ;;
+  esac
+  case "$2" in kubectl|curl) ;; *) return 0 ;; esac
+  [ -n "${STUB_CLOCK_SLOW:-}" ] || [ -f "${STUB_CLOCK_FILE}.slow" ] || return 0
+  _stub_clock_set "$(( $(cat "${STUB_CLOCK_FILE}") + $1 + 2 ))"
+}
+date() {
+  if [ -n "${STUB_CLOCK_FILE:-}" ] && [ "$*" = "-u +%s" ]; then
+    echo "$(( $(cat "${STUB_CLOCK_FILE}") + $(cat "${STUB_CLOCK_FILE}.wall" 2>/dev/null || echo 0) ))"
+    return 0
+  fi
+  command date "$@"
+}
+# jq and awk: the real tools, after their local work on the fake clock.
+# A step that hangs takes its input and prints nothing.
+_stub_local_work() {
+  [ -n "${STUB_CLOCK_FILE:-}" ] || return 0
+  case "$*" in
+    *"${STUB_LOCAL_HANG:-<none>}"*)
+      _stub_clock_set "$(( $(cat "${STUB_CLOCK_FILE}") + 1000 ))"
+      return 1 ;;
+  esac
+  [ -z "${STUB_CLOCK_LOCAL:-}" ] || _stub_clock_set "$(( $(cat "${STUB_CLOCK_FILE}") + STUB_CLOCK_LOCAL ))"
+}
+jq() {
+  if ! _stub_local_work "$@"; then cat > /dev/null; return 0; fi
+  command jq "$@"
+}
+awk() {
+  if ! _stub_local_work "$@"; then cat > /dev/null; return 0; fi
+  command awk "$@"
+}
+# _stub_store_annotate ARGS: apply the annotate ARGS to STUB_STATE_FILE.
+# Without --overwrite, a key that holds another value fails the call, as in
+# kubectl. Nothing changes on a failure.
+_stub_store_annotate() {
+  local overwrite="" arg cur
+  cur=$(cat "${STUB_STATE_FILE}")
+  for arg in "$@"; do
+    case "${arg}" in
+      --overwrite) overwrite=1 ;;
+      annotate|configmap|kubehz-agent-state|-n|kubehz-system) ;;
+      *=*)
+        if [ -z "${overwrite}" ] && printf '%s' "${cur}" | command jq -e --arg k "${arg%%=*}" --arg v "${arg#*=}" \
+            'has($k) and .[$k] != $v' >/dev/null; then
+          echo "error: --overwrite is false but found the following declared annotation(s): '${arg%%=*}' already has a value" >&2
+          return 1
+        fi
+        cur=$(printf '%s' "${cur}" | command jq -c --arg k "${arg%%=*}" --arg v "${arg#*=}" '.[$k] = $v') ;;
+      *-) cur=$(printf '%s' "${cur}" | command jq -c --arg k "${arg%-}" 'del(.[$k])') ;;
+      *) echo "stub: unknown annotate argument ${arg}" >&2; return 1 ;;
+    esac
+  done
+  printf '%s\n' "${cur}" > "${STUB_STATE_FILE}"
 }
 kubectl() {
   argv_log kubectl "$@"
+  [ -n "${STUB_BOUND:-}" ] || printf '%s\n' "$*" >> "${STUB_UNBOUND_LOG}"
   [ -z "${STUB_KUBECTL_LOG:-}" ] || printf '%s\n' "$*" >> "${STUB_KUBECTL_LOG}"
   [ -z "${STUB_KUBECTL_DELAY:-}" ] || sleep "${STUB_KUBECTL_DELAY}"
   # In the pod, kubectl reads the in-cluster config. A client-config flag
@@ -93,6 +211,21 @@ kubectl() {
     esac
   done
   case "$*" in
+    # The identity read: resourceVersion 7, then the number of entries and
+    # the keys of the identity with a value: "2 AC" by default (an enrolled
+    # agent). STUB_ID_KEYS='' is the empty Secret of a first tick (the
+    # bootstrap patches it), and STUB_SECRET_ABSENT=1 no Secret at all.
+    # tests/unit/kubehz_agent_secret_test.bats answers this read from
+    # Secret fixtures, as kubectl does.
+    "get secret kubehz-agent -n kubehz-system -o go-template="*)
+      if [ -n "${STUB_SECRET_ABSENT:-}" ]; then
+        echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2
+        return 1
+      fi
+      printf '7 %s' "${STUB_ID_KEYS-2 AC}" ;;
+    # The fill of the empty Secret (the values on stdin are dropped here).
+    "patch secret kubehz-agent -n kubehz-system --type=merge --patch-file=/dev/stdin")
+      cat > /dev/null ;;
     # An enrolled agent identity exists: the heartbeat reads its agent-token
     # back and authenticates with it. The empty-token guard skips the POST when
     # no token is readable, so the fixture must supply one for the heartbeat to
@@ -102,7 +235,6 @@ kubectl() {
     # The claim code: empty unless STUB_CLAIM_CODE sets one. With one, the
     # bootstrap sends its self-register.
     *"get secret kubehz-agent"*"claim-code"*) printf '%s' "${STUB_CLAIM_CODE:-}" | base64 | tr -d '\n' ;;
-
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (a single "gitVersion" → unambiguous). `version -o json`
     # below is the regression guard: it carries BOTH a client (v1.31.4) and a
@@ -138,16 +270,53 @@ kubectl() {
     "get node "*) printf '' ;;
 
     "get csr -o json") printf '{}\n' ;;
-    *"/readyz"*) printf 'ok\n'; return 0 ;;
+    # STUB_READYZ_FAIL: /readyz answers with an error and no check lines, so
+    # the script asks /version for the apiserver status.
+    *"/readyz"*)
+      if [ -n "${STUB_READYZ_FAIL:-}" ]; then echo 'Error from server (ServiceUnavailable)' >&2; return 1; fi
+      printf 'ok\n'; return 0 ;;
 
     # ── Assessment fixtures (handover contract §1) ──
-    # Gate marker: the annotations map on the kubehz-agent-config ConfigMap.
-    # STUB_MARKER holds the JSON annotations; STUB_MARKER_FORBIDDEN simulates
-    # an old install without the marker RBAC (read fails -> fail-closed).
-    "get configmap kubehz-agent-config"*)
+    # The agent's RBAC grants nothing on kubehz-agent-config (the pod gets
+    # it through envFrom): any call on it is refused, as the apiserver does.
+    *"configmap kubehz-agent-config"*)
+      echo 'Error from server (Forbidden): configmaps "kubehz-agent-config" is forbidden' >&2
+      return 1 ;;
+    # Gate marker: the annotations map on the kubehz-agent-state ConfigMap.
+    # STUB_STATE_FILE (the store) or STUB_MARKER holds the JSON annotations;
+    # STUB_MARKER_FORBIDDEN simulates an install without that ConfigMap or
+    # its RBAC (read fails -> fail-closed).
+    "get configmap kubehz-agent-state"*)
       [ -z "${STUB_MARKER_FORBIDDEN:-}" ] || return 1
+      if [ -n "${STUB_STATE_FILE:-}" ]; then cat "${STUB_STATE_FILE}"; return 0; fi
       printf '%s' "${STUB_MARKER:-}" ;;
-    "annotate "*) printf '%s\n' "$*" >> "${STUB_ANNOTATE_LOG}"; return 0 ;;
+    # A dry run stores nothing: it goes to its own log (STUB_DRYRUN_LOG) and
+    # changes no store. The agent sends none.
+    "annotate --dry-run"*)
+      printf '%s\n' "$*" >> "${STUB_DRYRUN_LOG}"
+      return 0 ;;
+    # A marker write. The first one of a run that writes
+    # kubehz.cloud/last-assessment is the send gate (STUB_GATE_DENIED), a
+    # later one the write-back (STUB_WRITEBACK_DENIED). STUB_ANNOTATE_DENIED
+    # refuses every annotate, as RBAC without the patch or an admission
+    # webhook does.
+    "annotate "*)
+      printf '%s\n' "$*" >> "${STUB_ANNOTATE_LOG}"
+      printf '%s\n' "$*" >> "${STUB_EVENTS_LOG}"
+      local _which=""
+      case " $* " in
+        *" kubehz.cloud/last-assessment="*|*" kubehz.cloud/last-assessment- "*)
+          if [ -z "${_stub_gate_seen:-}" ]; then _which=gate; else _which=writeback; fi
+          _stub_gate_seen=1 ;;
+      esac
+      if [ -n "${STUB_ANNOTATE_DENIED:-}" ] \
+        || { [ "${_which}" = gate ] && [ -n "${STUB_GATE_DENIED:-}" ]; } \
+        || { [ "${_which}" = writeback ] && [ -n "${STUB_WRITEBACK_DENIED:-}" ]; }; then
+        echo 'Error from server (Forbidden): configmaps "kubehz-agent-state" is forbidden' >&2
+        return 1
+      fi
+      [ -z "${STUB_STATE_FILE:-}" ] || _stub_store_annotate "$@"
+      return $? ;;
     # etcd static pods: default one Ready pod (datastore=etcd, reachable).
     # STUB_ETCD_READY="" = no etcd pods visible (kine/managed-CP edges).
     *"-l component=etcd"*) printf '%s' "${STUB_ETCD_READY-True }" ;;
@@ -166,7 +335,7 @@ kubectl() {
       if [ -n "${STUB_DAEMONSETS+x}" ]; then printf '%s' "${STUB_DAEMONSETS}"; else printf 'cilium\nkube-proxy\n'; fi ;;
     "get configmap kubeadm-config"*)
       printf '  networking:\n    dnsDomain: cluster.local\n    podSubnet: 10.244.0.0/16\n    serviceSubnet: 10.96.0.0/12\n' ;;
-    # The assessment probes run under `timeout 5` (a stalled apiserver
+    # The assessment probes run under `timeout -k 2 5` (a stalled apiserver
     # degrades ONE probe, never the whole beat; the timeout stub above).
     # STUB_SC_JSON overrides the StorageClass dump (the >50-cap fixture).
     "get storageclasses -o json"*)
@@ -179,7 +348,10 @@ kubectl() {
       printf '%s\n' '{"items":[{"spec":{"type":"LoadBalancer"}},{"spec":{"type":"ClusterIP"}},{"spec":{"type":"LoadBalancer"}}]}' ;;
     "get validatingwebhookconfigurations -o json"*) printf '%s\n' '{"items":[{},{},{}]}' ;;
     "get mutatingwebhookconfigurations -o json"*) printf '%s\n' '{"items":[{}]}' ;;
-    "get nodes -l node-role.kubernetes.io/control-plane -o name"*) printf 'node/cp-1\n' ;;
+    # STUB_CP_NODES="" = no node with the control-plane label: the script
+    # counts the legacy master label instead.
+    "get nodes -l node-role.kubernetes.io/control-plane -o name"*)
+      if [ -n "${STUB_CP_NODES+x}" ]; then printf '%s' "${STUB_CP_NODES}"; else printf 'node/cp-1\n'; fi ;;
     "get nodes -l node-role.kubernetes.io/master -o name"*) printf '' ;;
 
     "get pods"*) printf ''; return 0 ;;
@@ -198,6 +370,7 @@ curl() {
   # STUB_DESIRED_INM_OUT.
   # curl_capture (tests/lib/curl_capture.sh) reads the call the way curl
   # does: the bearer from the config (-K), the body from stdin.
+  [ -n "${STUB_BOUND:-}" ] || printf 'curl %s\n' "$*" >> "${STUB_UNBOUND_LOG}"
   curl_capture "$@"
   printf '%s' "${CURL_HEADERS}" | grep '^Authorization: ' >> "${STUB_AUTH_LOG}" || :
   _body="${CURL_BODY}"
@@ -222,6 +395,15 @@ curl() {
       ;;
   esac
   [ -z "${_body}" ] || printf '%s' "${_body}" > "${STUB_PAYLOAD_OUT}"
+  # Each heartbeat POST: "assessment" or "plain" in STUB_BEATS_LOG, and the
+  # POST in STUB_EVENTS_LOG. STUB_CURL_FAIL=1 fails every heartbeat POST
+  # (the delivery fails: no beat lands).
+  case "${_url}" in
+    */heartbeat)
+      case "${_body}" in *'"assessment"'*) echo assessment ;; *) echo plain ;; esac >> "${STUB_BEATS_LOG}"
+      echo "POST ${_url}" >> "${STUB_EVENTS_LOG}"
+      [ -z "${STUB_CURL_FAIL:-}" ] || return 22 ;;
+  esac
   if [ -n "${STUB_CURL_FAIL_ASSESS:-}" ]; then
     case "${_body}" in *'"assessment"'*) return 22 ;; esac
   fi
@@ -234,14 +416,28 @@ STUBS_EOF
   # Prepend the stubs to the real script → a self-contained, runnable heartbeat.
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
   cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
+  # The tick budget reads /proc/uptime in one redirection. The runner reads
+  # STUB_UPTIME there when a case sets it (the fake clock), else the real
+  # file.
+  [ "$(grep -c '< /proc/uptime' "${RUNNER}")" = 1 ]
+  sed -i 's#< /proc/uptime#< "${STUB_UPTIME:-/proc/uptime}"#' "${RUNNER}"
+  [ "$(grep -c '< "${STUB_UPTIME:-/proc/uptime}"' "${RUNNER}")" = 1 ]
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
+  # Dry-run annotate calls, apart from the marker writes. The agent sends none.
+  export STUB_DRYRUN_LOG="${BATS_TEST_TMPDIR}/dryrun.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
-  # Every `timeout SECS CMD …` call: the bound, then the command.
+  # Every `timeout …` call: its whole argv (`-k 2 5 kubectl get …`).
   export STUB_TIMEOUT_LOG="${BATS_TEST_TMPDIR}/timeout.log"
+  # Every kubectl and curl call that does not run under timeout.
+  export STUB_UNBOUND_LOG="${BATS_TEST_TMPDIR}/unbound.log"
+  # Each annotate and each heartbeat POST, in order; and per heartbeat POST
+  # whether it carried an assessment.
+  export STUB_EVENTS_LOG="${BATS_TEST_TMPDIR}/events.log"
+  export STUB_BEATS_LOG="${BATS_TEST_TMPDIR}/beats.log"
   # The Authorization headers that curl got (from its config).
   export STUB_AUTH_LOG="${BATS_TEST_TMPDIR}/auth.log"
   # Desired-state poll fixtures: default 304 (unchanged → silent) so the
@@ -258,6 +454,14 @@ _argv_spies() {
   export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
   source "${_PROJECT_ROOT}/tests/lib/argv_sentinels.bash"
   argv_spy "${ARGV_SPY_TOOLS[@]}"
+}
+
+# _fake_clock START: the fake clock of the tick budget (the stubs above), at
+# START seconds since boot. The wall clock starts at the same number.
+_fake_clock() {
+  export STUB_CLOCK_FILE="${BATS_TEST_TMPDIR}/clock" STUB_UPTIME="${BATS_TEST_TMPDIR}/uptime"
+  printf '%s\n' "$1" > "${STUB_CLOCK_FILE}"
+  printf '%s.37 %s.12\n' "$1" "$(( $1 * 3 ))" > "${STUB_UPTIME}"
 }
 
 # _node_list N: generate a node list of N nodes and serve it as the answer
@@ -639,9 +843,13 @@ teardown() {
   run command jq -rc '.assessment.storageClasses[0]' "${STUB_PAYLOAD_OUT}"
   assert_output '{"name":"hcloud-volumes","provisioner":"csi.hetzner.cloud","isDefault":true}'
 
-  # Delivered → the 24h marker moved (epoch annotation on the ConfigMap).
-  run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
-  assert_success
+  # Delivered → the 24h marker moved (epoch annotation on the ConfigMap):
+  # the send gate wrote it once, and no dry run was sent.
+  run grep -cE '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -c 'kubehz.cloud/last-assessment' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
 }
 
 # ── Assessment: pvSummary grouping + unit conversion ─────
@@ -714,8 +922,11 @@ teardown() {
 
   # The marker moved anyway — a known-rejected assessment must NOT resend
   # every 5 minutes; the next attempt waits for 24h or a platform request.
+  # The send gate wrote it before the send, and nothing put it back.
   run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
   assert_success
+  run grep -c 'kubehz.cloud/last-assessment' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
 }
 
 # ── Assessment gating: at most once per 24h ──────────────
@@ -750,7 +961,7 @@ teardown() {
 
 # ── Assessment gating: platform-requested (actions[] assess) ──
 
-@test "assessment: assess-requested=true overrides a fresh marker and is cleared after the send" {
+@test "assessment: assess-requested=true overrides a fresh marker and is cleared with the new time" {
   local now
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/assess-requested":"true"}'
@@ -820,20 +1031,438 @@ teardown() {
 }
 
 # ── Assessment: fail-closed when the marker is unreadable ──
-# An old install without the kubehz-agent-marker RBAC must NOT spam a full
-# assessment every 5-minute tick — an unreadable marker sends nothing.
+# An install without the kubehz-agent-state ConfigMap (the script of a new lo
+# on an agent that an older lo deployed, until `lo kubehz deploy` runs again)
+# or without the kubehz-agent-marker RBAC must NOT spam a full assessment
+# every 5-minute tick: an unreadable marker sends nothing.
 
-@test "assessment: an unreadable marker (missing RBAC) sends NO assessment" {
+@test "assessment: an unreadable marker (no kubehz-agent-state, or no RBAC for it) sends NO assessment" {
   export STUB_MARKER_FORBIDDEN=1
 
   run bash --posix "${RUNNER}"
   assert_success
+  # One line names what was skipped, the ConfigMap and the fix.
+  assert_line "kubehz: assessment and desired-state poll skipped: the agent cannot read configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'"
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
   assert_failure
   # The heartbeat itself still went out intact.
   run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
   assert_output "test.example.com"
+  # Nothing was written: there is no ConfigMap to write to.
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
+}
+
+# The re-arm on an "assess" in the response writes to the marker. With an
+# unreadable marker the tick writes nothing, the re-arm included.
+@test "assessment: an unreadable marker arms nothing, even when the response asks for an assessment" {
+  export STUB_MARKER_FORBIDDEN=1
+  export STUB_RESPONSE='{"status":"ok","actions":["assess"]}'
+
+  run bash --posix "${RUNNER}"
+  assert_success
+
+  run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+  assert_output "test.example.com"
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
+}
+
+# ── Assessment: the send gate (a readable marker that cannot be written) ──
+# RBAC without the patch, or an admission webhook, can deny every write to
+# kubehz-agent-state while the read works. The 24h marker then never moves,
+# so without the gate the full assessment went out on every 5-minute tick.
+# The gate writes the marker before the send: on a denial the tick sends
+# the plain heartbeat, no assessment, and consumes no assess request.
+
+@test "assessment: a denied marker write sends no assessment; the heartbeat goes out and one line names the fix" {
+  export STUB_ANNOTATE_DENIED=1
+  # Readable and due: an assess request is waiting, and the response asks
+  # again.
+  export STUB_MARKER='{"kubehz.cloud/assess-requested":"true"}'
+  export STUB_RESPONSE='{"status":"ok","actions":["assess"]}'
+  local line="kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'"
+
+  run bash --posix "${RUNNER}"
+  assert_success
+  # The fixed line, once.
+  [ "$(printf '%s\n' "${output}" | grep -cxF -- "${line}")" = "1" ]
+
+  # No assessment went out: one heartbeat POST, the plain beat, intact.
+  run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
+  assert_output "1"
+  run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+  assert_output "test.example.com"
+  run command jq -rc '[.nodes[].name]' "${STUB_PAYLOAD_OUT}"
+  assert_output '["cp-1","worker-1"]'
+
+  # The gate tried once, on the state ConfigMap: the time and the request
+  # removal in one call.
+  run grep -cE '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+ kubehz\.cloud/assess-requested-$' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
+  # No probe ran, and nothing else tried to move the marker or clear the
+  # request (no write-back: the gate wrote nothing).
+  run grep -F 'get storageclasses' "${STUB_TIMEOUT_LOG}"
+  assert_failure
+  run grep -c 'kubehz.cloud/last-assessment' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -c 'kubehz.cloud/assess-requested-' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+}
+
+# ── The send gate over several ticks ─────────────────────
+# The gate writes the marker before the send, in one annotate call that
+# also removes a pending assess request. The three outcomes of the send:
+#   delivered: the beat with the assessment lands; the gate write stays;
+#   rejected:  that beat fails and the plain retry lands; the gate write
+#              stays (the heartbeat case of the rejected POST above);
+#   failed:    both POSTs fail; the write-back puts back the old time and
+#              the request, so the next tick sends again.
+# A write-back that fails too costs the assessment of this window, and the
+# agent does not loop. Each case runs the real script several times against
+# the stub's annotation store (STUB_STATE_FILE), which persists between the
+# runs.
+
+# _tick: one run of the script with fresh per-run logs. The store stays.
+_tick() {
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_BEATS_LOG}"
+  : > "${STUB_EVENTS_LOG}"
+  : > "${STUB_DRYRUN_LOG}"
+  : > "${STUB_TIMEOUT_LOG}"
+  rm -f -- "${STUB_PAYLOAD_OUT:?}"
+  run bash --posix "${RUNNER}"
+}
+
+# _store: the annotation store, keys sorted.
+_store() {
+  command jq -S -c . "${STUB_STATE_FILE}"
+}
+
+# The send gate's line in STUB_ANNOTATE_LOG: the new time, and the request
+# removal when a request was pending.
+GATE_RE='^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+'
+
+@test "send gate: a delivered assessment: the gate writes the marker before the send, and nothing writes it after" {
+  local now stamp
+  now=$(date -u +%s)
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/last-assessment":"%s"}\n' "$(( now - 90000 ))" > "${STUB_STATE_FILE}"
+
+  # Tick 1: due. The gate write, then the one POST, which carries the
+  # assessment. No dry run, no write after the send.
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "assessment"
+  run cat "${STUB_EVENTS_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE}\$"
+  assert_line --index 1 "POST https://api.example.com/api/clusters/test.example.com/heartbeat"
+  [ "${#lines[@]}" -eq 2 ]
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  [ "${stamp}" -ge "${now}" ]
+
+  # Tick 2: the marker is fresh. The plain beat, and nothing is written.
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+}
+
+# (a) RBAC without the patch, or an admission webhook, refuses the gate
+# write on every tick.
+@test "send gate: a gate write denied on every tick sends no assessment, keeps the request and logs one line per tick" {
+  local tick line="kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'"
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/assess-requested":"true"}\n' > "${STUB_STATE_FILE}"
+  export STUB_GATE_DENIED=1
+  for tick in 1 2 3; do
+    _tick
+    assert_success
+    [ "$(printf '%s\n' "${output}" | grep -cxF -- "${line}")" = "1" ] || fail "tick ${tick}: the fixed line is not there once"
+    run cat "${STUB_BEATS_LOG}"
+    assert_output "plain"
+    # One annotate: the refused gate (the time and the request removal).
+    run cat "${STUB_ANNOTATE_LOG}"
+    assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+    [ "${#lines[@]}" -eq 1 ]
+    # The request stays, and no probe ran.
+    run _store
+    assert_output '{"kubehz.cloud/assess-requested":"true"}'
+    run grep -F 'get storageclasses' "${STUB_TIMEOUT_LOG}"
+    assert_failure
+  done
+}
+
+# (b) The gate write lands, and the delivery fails: both POSTs.
+@test "send gate: a failed delivery puts back the time and the request; the next tick sends the assessment once" {
+  local now old before stamp
+  now=$(date -u +%s)
+  old=$(( now - 100 ))
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/last-assessment":"%s","kubehz.cloud/assess-requested":"true"}\n' "${old}" > "${STUB_STATE_FILE}"
+  before=$(_store)
+
+  # Tick 1: the gate, two failed POSTs, the write-back in one call.
+  export STUB_CURL_FAIL=1
+  _tick
+  assert_failure
+  assert_output --partial "kubehz: heartbeat POST failed (curl rc=22); retrying next tick"
+  run cat "${STUB_BEATS_LOG}"
+  assert_line --index 0 "assessment"
+  assert_line --index 1 "plain"
+  [ "${#lines[@]}" -eq 2 ]
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment=${old} kubehz.cloud/assess-requested=true"
+  [ "${#lines[@]}" -eq 2 ]
+  run _store
+  assert_output "${before}"
+
+  # Tick 2: the delivery works. The assessment goes out once, the gate
+  # write stays.
+  unset STUB_CURL_FAIL
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "assessment"
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  [ "${#lines[@]}" -eq 1 ]
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  [ "${stamp}" -ge "${now}" ]
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+
+  # Tick 3: the marker is fresh. No assessment.
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+}
+
+# (c) The gate write lands, the delivery fails, and the write-back fails
+# too. (A gate write that fails sends nothing, so it has no write-back.)
+@test "send gate: a write-back that fails too loses this assessment and never loops: the next ticks send none" {
+  local tick stamp line="kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request"
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/assess-requested":"true"}\n' > "${STUB_STATE_FILE}"
+
+  # Tick 1: the gate, two failed POSTs, the refused write-back, one line.
+  export STUB_CURL_FAIL=1 STUB_WRITEBACK_DENIED=1
+  _tick
+  assert_failure
+  [ "$(printf '%s\n' "${output}" | grep -cxF -- "${line}")" = "1" ]
+  run cat "${STUB_BEATS_LOG}"
+  assert_line --index 0 "assessment"
+  assert_line --index 1 "plain"
+  [ "${#lines[@]}" -eq 2 ]
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment- kubehz.cloud/assess-requested=true"
+  [ "${#lines[@]}" -eq 2 ]
+  # The gate write stays: the new time, no request.
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+
+  # Ticks 2 and 3: everything works, and the marker is fresh: the plain
+  # beat, no write, no line.
+  unset STUB_CURL_FAIL STUB_WRITEBACK_DENIED
+  for tick in 2 3; do
+    _tick
+    assert_success
+    refute_output --partial "${line}"
+    run cat "${STUB_BEATS_LOG}"
+    assert_output "plain"
+    [ ! -s "${STUB_ANNOTATE_LOG}" ] || fail "tick ${tick}: an annotate ran"
+    run _store
+    assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+  done
+}
+
+# (d) The request goes only with the new time: one annotate call (one
+# PATCH) writes the time and removes the request, and no call removes the
+# request alone.
+@test "send gate: a pending request is used up only in the call that writes the new time" {
+  local now stamp
+  now=$(date -u +%s)
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/last-assessment":"%s","kubehz.cloud/assess-requested":"true"}\n' "$(( now - 100 ))" > "${STUB_STATE_FILE}"
+  local before
+  before=$(_store)
+
+  # Tick 1: the gate write is refused: the request stays.
+  export STUB_GATE_DENIED=1
+  _tick
+  assert_success
+  run grep -c 'kubehz.cloud/assess-requested-' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -E "${GATE_RE} kubehz\.cloud/assess-requested-\$" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run _store
+  assert_output "${before}"
+
+  # Tick 2: the gate write lands: one call, the time and the removal.
+  unset STUB_GATE_DENIED
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "assessment"
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  [ "${#lines[@]}" -eq 1 ]
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  [ "${stamp}" -ge "${now}" ]
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+}
+
+# ── The markers live on kubehz-agent-state ───────────────
+# The agent's RBAC grants get and patch on that one ConfigMap and nothing on
+# kubehz-agent-config. The kubectl stub refuses every call on
+# kubehz-agent-config, as the apiserver does.
+
+# _state_only: every annotate call of the last run names the state ConfigMap,
+# and no kubectl call names kubehz-agent-config. $1 is the number of annotate
+# calls that the run must make.
+_state_only() {
+  local want=$1 all state
+  all=$(grep -c '' "${STUB_ANNOTATE_LOG}") || all=0
+  state=$(grep -cE '^annotate (--overwrite )?configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/' "${STUB_ANNOTATE_LOG}") || state=0
+  [ "${all}" = "${want}" ] || { echo "annotate calls: ${all}, want ${want}" >&2; return 1; }
+  [ "${state}" = "${want}" ] || { echo "annotate calls on kubehz-agent-state: ${state}, want ${want}" >&2; return 1; }
+  if grep -F 'kubehz-agent-config' "${STUB_KUBECTL_LOG}" >&2; then
+    echo "a kubectl call names kubehz-agent-config" >&2
+    return 1
+  fi
+}
+
+@test "state ConfigMap: each of the nine marker writers and the marker read name kubehz-agent-state only" {
+  local now
+  now=$(date -u +%s)
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+
+  # Tick 1: no last-assessment, a served assess request, an expired nonce, a
+  # stored refusal, a changed desired state and an "assess" in the response:
+  # the nonce clear, the send gate (the 24h marker and the request clear in
+  # one call), the re-arm, the desired-state validator and the refusal clear.
+  export STUB_MARKER='{"kubehz.cloud/assess-requested":"true","kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'","kubehz.cloud/desired-error":"401"}'
+  export STUB_DESIRED_CODE=200
+  export STUB_DESIRED_ETAG='"9-120"'
+  export STUB_RESPONSE='{"status":"ok","actions":["assess"]}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  run _state_only 5
+  assert_success
+  run grep -F 'kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -E 'kubehz\.cloud/last-assessment=[0-9]+ kubehz\.cloud/assess-requested-$' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/assess-requested=true" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F 'kubehz.cloud/desired-etag="9-120" kubehz.cloud/desired-revision=7' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/desired-error-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  # The marker read: one call, on the state ConfigMap.
+  run grep -c '^get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}$' "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+
+  # Tick 2: a live nonce that the platform verifies, and a stored refusal
+  # with an unchanged desired state: the nonce clear and the refusal clear.
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'","kubehz.cloud/desired-error":"401"}'
+  export STUB_DESIRED_CODE=304
+  export STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "claim verified"
+  run _state_only 2
+  assert_success
+  run grep -F 'kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/desired-error-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+
+  # Tick 3: a new refusal of the desired-state poll is stored.
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+  export STUB_DESIRED_CODE=403
+  export STUB_RESPONSE='{"status":"ok"}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  run _state_only 1
+  assert_success
+  run grep -F "kubehz.cloud/desired-error=403" "${STUB_ANNOTATE_LOG}"
+  assert_success
+
+  # Tick 4: a due assessment whose delivery fails: the send gate and the
+  # write-back, which removes the time again (the marker read saw none).
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_MARKER='{}'
+  export STUB_CURL_FAIL=1
+  run bash --posix "${RUNNER}"
+  assert_failure
+  run _state_only 2
+  assert_success
+  run grep -cxE 'annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -cxF 'annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+}
+
+# ── Upgrade: an agent that an older lo deployed ──────────
+# That agent kept its markers on kubehz-agent-config. After `lo kubehz deploy`
+# the agent reads only kubehz-agent-state, which starts empty. The cost is one
+# extra assessment, then the 24h gate holds again. A claim nonce placed on
+# the old ConfigMap is not echoed.
+
+@test "upgrade: the first tick on a new, empty kubehz-agent-state sends one assessment, the next tick sends none" {
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  # The new ConfigMap has no annotations: the read prints nothing.
+  export STUB_MARKER=''
+
+  run bash --posix "${RUNNER}"
+  assert_success
+  run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run grep -c '' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -E '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  local stamp
+  stamp=$(sed -n 's/.*kubehz\.cloud\/last-assessment=//p' "${STUB_ANNOTATE_LOG}")
+  run grep -F 'kubehz-agent-config' "${STUB_KUBECTL_LOG}"
+  assert_failure
+
+  # The next tick reads the marker that the first tick wrote.
+  : > "${STUB_ANNOTATE_LOG}"
+  rm -f -- "${STUB_PAYLOAD_OUT:?}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'"${stamp}"'"}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+  assert_output "test.example.com"
+  run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
 }
 
 # ── in-cluster kubectl takes no client-config flag ──
@@ -842,7 +1471,7 @@ teardown() {
 # kubectl stub refuses such a call the same way. The marker read carried
 # --request-timeout=5s: it failed on every tick, so the 24h gate, the claim
 # nonce and the desired-state poll were off, and every assessment probe read
-# empty. `timeout 5` bounds the calls now.
+# empty. `timeout -k 2 5` bounds the calls now.
 
 @test "in-cluster kubectl: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
   run bash --posix "${RUNNER}"
@@ -856,42 +1485,304 @@ teardown() {
   assert_output "etcd cilium 10.244.0.0/16 2 3 2 3 1"
 }
 
-@test "in-cluster kubectl: the marker read and every assessment probe run under timeout 5; the node list under timeout 30" {
+@test "in-cluster kubectl: the marker read, the send gate and every assessment probe run under timeout -k 2 5; the node list under timeout -k 2 30" {
   run bash --posix "${RUNNER}"
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
-  assert_line "5 kubectl get configmap kubehz-agent-config -n kubehz-system -o jsonpath={.metadata.annotations}"
-  assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
-  assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
-  assert_line "5 kubectl get crd clusters.cluster.x-k8s.io -o name"
-  assert_line --partial "5 kubectl get daemonsets -n kube-system -o jsonpath="
-  assert_line "5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
-  assert_line "5 kubectl get storageclasses -o json"
-  assert_line "5 kubectl get pv -o json"
-  assert_line "5 kubectl get services -A -o json"
-  assert_line "5 kubectl get validatingwebhookconfigurations -o json"
-  assert_line "5 kubectl get mutatingwebhookconfigurations -o json"
-  assert_line "5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
-  # The node list has its own bound.
-  assert_line "30 kubectl get --raw /api/v1/nodes"
-  # Twelve bounded calls, each in the plain-seconds form that busybox and
-  # coreutils both take.
-  run grep -c '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
-  assert_output "12"
-  run grep -vcE '^(5 kubectl get |30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
+  assert_line "-k 2 5 kubectl get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}"
+  assert_line --regexp '^-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
+  assert_line "-k 2 5 kubectl get crd clusters.cluster.x-k8s.io -o name"
+  assert_line --partial "-k 2 5 kubectl get daemonsets -n kube-system -o jsonpath="
+  assert_line "-k 2 5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
+  assert_line "-k 2 5 kubectl get storageclasses -o json"
+  assert_line "-k 2 5 kubectl get pv -o json"
+  assert_line "-k 2 5 kubectl get services -A -o json"
+  assert_line "-k 2 5 kubectl get validatingwebhookconfigurations -o json"
+  assert_line "-k 2 5 kubectl get mutatingwebhookconfigurations -o json"
+  assert_line "-k 2 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
+  # The node list has its own bound, and each curl call too: 15 s for a
+  # heartbeat POST, 10 s for the desired-state poll.
+  assert_line "-k 2 30 kubectl get --raw /api/v1/nodes"
+  assert_line --partial "-k 2 15 curl -q -fsSL -X POST https://api.example.com/api/clusters/test.example.com/heartbeat "
+  assert_line --partial "-k 2 10 curl -q -sS -D - -w "
+  # Each call in the form that the BusyBox applet and GNU coreutils both
+  # take: TERM after the seconds, KILL 2 s later. No call is unbounded.
+  # The jq and awk steps run under `timeout -k 2 5` too, the jq of the
+  # node list under the bound of its call.
+  run grep -cE '^-k 2 5 (jq|awk) ' "${STUB_TIMEOUT_LOG}"
+  [ "${output}" -ge 15 ]
+  run cat "${STUB_TIMEOUT_LOG}"
+  assert_line --partial "-k 2 5 awk -F"
+  assert_line --regexp '^-k 2 30 jq -ce \[\.items\[\] \|'
+  run grep -vcE '^(-k 2 5 kubectl |-k 2 30 kubectl get --raw /api/v1/nodes$|-k 2 10 curl -q |-k 2 15 curl -q |-k 2 5 (jq|awk) |-k 2 30 jq -ce )' "${STUB_TIMEOUT_LOG}"
   assert_output "0"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# Every kubectl call of the script runs under `timeout -k 2 5` (the node
+# list under `timeout -k 2 30`): the identity Secret calls, the health
+# reads, the marker writes and the nonce clears too. Each curl call runs
+# under `timeout -k 2 10` (the register, the desired-state poll) or
+# `timeout -k 2 15` (a heartbeat POST). A call without the bound can hold
+# the tick until the Job's deadline kills it. Four ticks reach every call:
+# a first run (the empty Secret is filled, a register, /readyz fails, no
+# control-plane label, an expired nonce, a changed desired state, a stored
+# refusal and an "assess" in the response), a verified claim with an
+# unchanged desired state, a new refusal, and a failed delivery (the
+# write-back).
+@test "in-cluster kubectl: every kubectl call of the script runs under timeout -k 2" {
+  local now
+  now=$(date -u +%s)
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+
+  STUB_ID_KEYS='' STUB_CLAIM_CODE=khzc_test STUB_READYZ_FAIL=1 STUB_CP_NODES='' STUB_DESIRED_CODE=200 STUB_DESIRED_ETAG='"9-120"' \
+    STUB_MARKER='{"kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'","kubehz.cloud/desired-error":"401"}' \
+    STUB_RESPONSE='{"status":"ok","actions":["assess"]}' run bash --posix "${RUNNER}"
+  assert_success
+  STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'","kubehz.cloud/desired-error":"401"}' \
+    STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}' run bash --posix "${RUNNER}"
+  assert_success
+  STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}' STUB_DESIRED_CODE=401 run bash --posix "${RUNNER}"
+  assert_success
+  STUB_MARKER='{}' STUB_CURL_FAIL=1 run bash --posix "${RUNNER}"
+  assert_failure
+
+  # No kubectl or curl call ran outside timeout, and each one ran under the
+  # -k form.
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+  run grep -vcE '^(-k 2 5 kubectl |-k 2 30 kubectl get --raw /api/v1/nodes$|-k 2 10 curl -q |-k 2 15 curl -q |-k 2 5 (jq|awk) |-k 2 30 jq -ce )' "${STUB_TIMEOUT_LOG}"
+  assert_output "0"
+  [ "$(grep -c '' "${STUB_KUBECTL_LOG}")" = "$(grep -c ' kubectl ' "${STUB_TIMEOUT_LOG}")" ]
+  # The calls that ran without a bound before, each seen under it.
+  run cat "${STUB_TIMEOUT_LOG}"
+  assert_line '-k 2 5 kubectl get secret kubehz-agent -n kubehz-system -o go-template={{.metadata.resourceVersion}} {{with .data}}{{len .}} {{if index . "agent-token"}}A{{end}}{{if index . "claim-code"}}C{{end}}{{end}}'
+  assert_line "-k 2 5 kubectl patch secret kubehz-agent -n kubehz-system --type=merge --patch-file=/dev/stdin"
+  run grep -cE ' kubectl (create|apply|replace|delete) ' "${STUB_TIMEOUT_LOG}"
+  assert_output "0"
+  run cat "${STUB_TIMEOUT_LOG}"
+  assert_line --partial "-k 2 10 curl -q -fsSL -X POST https://api.example.com/api/clusters/agent-register "
+  assert_line "-k 2 5 kubectl get secret kubehz-agent -n kubehz-system -o jsonpath={.data.agent-token}"
+  assert_line "-k 2 5 kubectl get secret kubehz-agent -n kubehz-system -o jsonpath={.data.claim-code}"
+  assert_line "-k 2 5 kubectl get --raw /version"
+  assert_line "-k 2 5 kubectl get csr -o json"
+  assert_line "-k 2 5 kubectl get --raw /readyz?verbose"
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=kube-scheduler -o jsonpath="
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=kube-controller-manager -o jsonpath="
+  assert_line "-k 2 5 kubectl get nodes -l node-role.kubernetes.io/master -o name"
+  assert_line "-k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/assess-requested=true"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/desired-etag=\"9-120\" kubehz.cloud/desired-revision=7"
+  assert_line "-k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system kubehz.cloud/desired-error-"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/desired-error=401"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-"
+  # The nonce clear runs on two paths: the expiry (tick 1) and the verified
+  # claim (tick 2).
+  [ "$(grep -cxF -- "-k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-" "${STUB_TIMEOUT_LOG}")" = 2 ]
+  # /version runs twice in tick 1: the server version and the apiserver
+  # status after the failed /readyz.
+  [ "$(grep -cxF -- "-k 2 5 kubectl get --raw /version" "${STUB_TIMEOUT_LOG}")" -ge 5 ]
+}
+
+# A send gate write that the apiserver stores, but whose answer comes after
+# the bound: the timeout kills kubectl (rc 143) after the commit. The agent
+# cannot tell it from a refusal: it sends no assessment this tick, and it
+# puts nothing back. The stored time holds and the request is used up, so
+# the next tick sends no assessment either: one lost window, until the 24h
+# window ends or the platform asks again.
+@test "send gate: a gate write that is stored but times out at the client: no assessment, no write-back, one lost window" {
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '%s\n' '{"kubehz.cloud/assess-requested":"true"}' > "${STUB_STATE_FILE}"
+  STUB_TIMEOUT_COMMIT_MATCH="kubehz.cloud/last-assessment=" run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "assessment not sent: the agent cannot write configmap/kubehz-agent-state"
+  # The store holds the gate's time, and the request is gone.
+  run command jq -r '."kubehz.cloud/last-assessment" // "none"' "${STUB_STATE_FILE}"
+  assert_output --regexp '^[0-9]+$'
+  run command jq -r 'has("kubehz.cloud/assess-requested")' "${STUB_STATE_FILE}"
+  assert_output "false"
+  # One annotate (the gate), no write-back, and a plain beat.
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_output --regexp '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+ kubehz\.cloud/assess-requested-$'
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  # The next tick: the stored time is fresh and no request is left, so it
+  # sends no assessment and writes nothing.
+  run bash --posix "${RUNNER}"
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output $'plain\nplain'
+  [ "$(grep -c '' "${STUB_ANNOTATE_LOG}")" = 1 ]
+}
+
+# Every call runs to its bound (the fake clock). The bounds sum to far more
+# than activeDeadlineSeconds (120 s), and a Job that its deadline kills
+# leaves the send gate's write in place. With the tick budget, a call
+# starts only when it ends before the budget: the reads stop 17 s before
+# its end, so the heartbeat POST still fits, and the calls and the steps
+# of the tick end 97 s after its start at the latest (the 90 s budget
+# and the one write-back of 7 s). The fake clock counts the calls and the
+# jq and awk steps; it does not count the pod start or the shell work
+# between them, and neither does that bound.
+@test "tick budget: with every call at its bound, the tick ends within 97 s and still sends the heartbeat" {
+  _fake_clock 1000000
+  export STUB_CLOCK_SLOW=1
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{}\n' > "${STUB_STATE_FILE}"
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: tick budget: kubectl get not started: it can take 7s, and the budget ends in "
+  assert_output --partial "assessment and desired-state poll skipped: the tick budget is spent"
+  [ "$(cat "${STUB_CLOCK_FILE}")" -le 1000097 ]
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  # No gate write: the store is as it was.
+  run cat "${STUB_STATE_FILE}"
+  assert_output "{}"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# From the send gate on, every call runs to its bound. The gate and the
+# probes run on the shorter budget (34 s before its end): the probes that
+# no longer fit do not start, the tick defers the assessment, the
+# write-back puts the marker back, and the heartbeat goes out on the rest
+# of the budget.
+@test "tick budget: probes that run out of the budget defer the assessment, the marker is put back, the heartbeat goes out" {
+  _fake_clock 1000000
+  export STUB_CLOCK_SLOW_FROM="kubehz.cloud/last-assessment="
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{}\n' > "${STUB_STATE_FILE}"
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "assessment deferred: the tick budget ran out during the probes; the next tick probes again"
+  refute_output --partial "assessment deferred: no answer for"
+  [ "$(cat "${STUB_CLOCK_FILE}")" -le 1000097 ]
+  # The gate, then the write-back: the store is as it was.
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment=1000000"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-"
+  run cat "${STUB_STATE_FILE}"
+  assert_output "{}"
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# The local work counts against the budget: each jq and awk step takes 6 s
+# here (within its bound of 7 s), and the kubectl and curl calls none. The
+# send gate still fits, the probes run out of the budget, and the steps
+# that no longer fit do not start. Without the budget check of each step,
+# the probes end after 84 s and the heartbeat POST no longer fits.
+@test "tick budget: the jq and awk steps count: slow local work defers the assessment, the tick ends within 97 s, the heartbeat goes out" {
+  _fake_clock 1000000
+  export STUB_CLOCK_LOCAL=6
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{}\n' > "${STUB_STATE_FILE}"
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: tick budget: jq -er not started: it can take 7s, and the budget ends in "
+  assert_output --partial "assessment deferred: the tick budget ran out during the probes; the next tick probes again"
+  [ "$(cat "${STUB_CLOCK_FILE}")" -le 1000097 ]
+  # The gate (its time is the wall clock after three steps of 6 s), then the
+  # write-back: the store is as it was.
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment=1000018"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-"
+  run cat "${STUB_STATE_FILE}"
+  assert_output "{}"
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# A local step that hangs (the awk of the PV summary) stops at its bound
+# (TERM after 5 s, KILL 2 s later): the summary is unknown, never zero PVs,
+# the tick defers the assessment and puts the marker back, and the tick
+# ends in time. Without the bound, the hang holds the tick until the
+# Job's deadline kills it, after the send gate wrote its time.
+@test "tick budget: a jq or awk step that hangs stops at its bound; the PV summary is unknown, the assessment deferred" {
+  _fake_clock 1000000
+  export STUB_LOCAL_HANG="byProvisioner"
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{}\n' > "${STUB_STATE_FILE}"
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: assessment deferred: no answer for pvSummary; the next tick probes again"
+  [ "$(cat "${STUB_CLOCK_FILE}")" -le 1000097 ]
+  run grep -c -- '^-k 2 5 awk -F' "${STUB_TIMEOUT_LOG}"
+  assert_output "1"
+  run cat "${STUB_STATE_FILE}"
+  assert_output "{}"
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# The wall clock is set back by an hour right after the send gate (an NTP
+# step), and from the gate on every call runs to its bound. The budget
+# reads the seconds since boot, which the step does not move: the probes
+# run out of the budget as without the step, and the tick ends in time.
+# On the wall clock the budget would get an hour longer: every probe would
+# run, and the tick would pass the Job's deadline after the gate.
+@test "tick budget: a wall clock set back during the tick does not make the budget longer" {
+  _fake_clock 1000000
+  export STUB_CLOCK_SLOW_FROM="kubehz.cloud/last-assessment="
+  export STUB_WALL_STEP=-3600 STUB_WALL_STEP_FROM="kubehz.cloud/last-assessment="
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{}\n' > "${STUB_STATE_FILE}"
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "assessment deferred: the tick budget ran out during the probes; the next tick probes again"
+  [ "$(cat "${STUB_CLOCK_FILE}")" -le 1000097 ]
+  # The wall clock was set back.
+  [ "$(cat "${STUB_CLOCK_FILE}.wall")" = "-3600" ]
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment=1000000"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-"
+  run cat "${STUB_STATE_FILE}"
+  assert_output "{}"
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# Without a number in /proc/uptime (no file, or a first field that is not
+# a number), the budget reads the wall clock, the tick logs one line, and
+# it beats as before.
+@test "tick budget: without a number in /proc/uptime the budget uses the wall clock and logs one line" {
+  local uptime
+  for uptime in "" "unknown 12.5"; do
+    rm -f "${STUB_BEATS_LOG}"
+    export STUB_UPTIME="${BATS_TEST_TMPDIR}/uptime-${#uptime}"
+    [ -z "${uptime}" ] || printf '%s\n' "${uptime}" > "${STUB_UPTIME}"
+    run bash --posix "${RUNNER}"
+    assert_success
+    assert_output --partial "kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move"
+    refute_output --partial "tick budget: "
+    run cat "${STUB_BEATS_LOG}"
+    assert_output "assessment"
+  done
+  # With the real /proc/uptime of the host, no line.
+  unset STUB_UPTIME
+  run bash --posix "${RUNNER}"
+  assert_success
+  refute_output --partial "/proc/uptime"
 }
 
 # A probe for a field the contract has no "unknown" value for (a count, a
 # list, capiManaged) that times out is unknown, never 0 or []: the tick sends
 # no assessment, the heartbeat still goes out, and the 24h marker does not
-# move, so the next tick probes again.
+# move: the write-back puts back what the send gate wrote, so the next tick
+# probes again.
 @test "assessment: a timed-out probe defers the assessment, never a 0" {
   local match
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
   for match in "get services -A" "get validatingwebhookconfigurations" "get mutatingwebhookconfigurations" \
       "node-role.kubernetes.io/control-plane" "get storageclasses" "get pv " "get crd clusters.cluster.x-k8s.io"; do
     export STUB_TIMEOUT_MATCH="${match}"
     rm -f "${STUB_PAYLOAD_OUT}" "${STUB_ANNOTATE_LOG}"
+    printf '{}\n' > "${STUB_STATE_FILE}"
     run bash --posix "${RUNNER}"
     assert_success
     assert_output --partial "kubehz: assessment deferred: no answer for "
@@ -899,8 +1790,13 @@ teardown() {
     assert_success
     run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
     assert_output "test.example.com"
-    run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
-    assert_failure
+    # The send gate, then the write-back: the marker is as before the tick.
+    run cat "${STUB_ANNOTATE_LOG}"
+    assert_line --index 0 --regexp '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
+    assert_line --index 1 'annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-'
+    [ "${#lines[@]}" -eq 2 ]
+    run command jq -c . "${STUB_STATE_FILE}"
+    assert_output '{}'
   done
 }
 

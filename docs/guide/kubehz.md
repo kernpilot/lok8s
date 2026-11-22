@@ -576,9 +576,10 @@ two 256-bit secrets locally and announces only their SHA-256 hashes to
 
 The platform stores only `sha256(A)` and `sha256(C)`: it can never push a
 credential into your cluster, and a database leak yields no usable secret. The
-agent generates the secrets **once** and never rotates them, so re-applying it
-is a no-op. Registration is **provider-agnostic**: no SSH key, no hcloud token,
-nothing Hetzner-specific.
+deploy creates the Secret empty, and the agent generates the secrets **once**
+and never rotates them. Re-applying the manifests is a no-op: the manifest of
+the Secret has no data, so `kubectl apply` keeps the values. Registration is
+**provider-agnostic**: no SSH key, no hcloud token, nothing Hetzner-specific.
 
 ::: details Legacy: `lo kubehz register`
 A pre-agent announce still exists and runs automatically at the end of
@@ -634,8 +635,11 @@ domain exactly as you give it, so another spelling of the domain (letter
 case, for example) gives another value. lo then refuses the key; it never
 deletes the wrong one.
 
-- The next `lo kubehz register` replaces the key, because the platform mints
-  a new one each time. `lo kubehz deregister` deletes it.
+- The next `lo kubehz register` replaces the key in Hetzner, because the
+  platform mints a new one each time. The ticket of the earlier key stops
+  working only when that register sends the current bind secret of the
+  earlier registration while it is still pending (see the next section).
+  `lo kubehz deregister` deletes the key.
 - Both commands act only on a key with this label and this value. A Hetzner
   project can be shared, so a key of the same name that a person or another
   cluster made stays. lo prints a warning that names the key. The register
@@ -643,9 +647,67 @@ deletes the wrong one.
 - An older lo uploaded the key without the label. lo cannot tell that key
   from a key that a person made, so it does not replace or delete it. If an
   older lo made the key for this cluster, delete it in the Hetzner Console
-  (**Security → SSH keys**), then run `lo kubehz register` again. The old
-  key has no use: the platform does not accept its fingerprint after the
-  next register.
+  (**Security → SSH keys**), then run `lo kubehz register` again. That
+  register uploads a new key. The fingerprint of the old key stops working
+  only when that register sends the current bind secret of the old
+  registration while it is still pending (see the next section).
+:::
+
+::: details The claim ticket on a terminal and on a pipe
+The fingerprint of the claim key is the one-time claim ticket. lo prints it
+only with `--print-token`, or when stdout is a terminal and the run is not a
+CI run. A CI run is a nonempty `LOK8S_NONINTERACTIVE` (any value, `false`
+too), or a nonempty `CI` that is not exactly `false` (so `CI=0` and
+`CI=FALSE` make a CI run too). This applies to `lo kubehz register` and
+to the register step of `lo provision` and `lo up`. `lo recover` passes no
+`--print-token` to its register step, so the same rule applies there. When
+lo prints the ticket, the last lines of the claim key mode are:
+
+```text
+  curl -X POST <api>/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \
+       -H 'Content-Type: application/json' -d '{"fingerprint":"<ticket>"}'
+  fingerprint: <ticket>   (also visible in Hetzner Console -> Security -> SSH keys)
+```
+
+In all other cases (a pipe, a file, the log of a CI job, or a terminal in
+a CI run), lo prints a placeholder in place of the ticket:
+
+```text
+  curl -X POST <api>/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \
+       -H 'Content-Type: application/json' -d '{"fingerprint":"<hidden: one-time claim ticket>"}'
+  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key 'kubehz-claim-<domain>'; 'lo kubehz register --domain <domain> --print-token' registers again and shows a new ticket)
+```
+
+- Read the ticket in the Hetzner Console (**Security → SSH keys**, the key
+  `kubehz-claim-<domain>`).
+- Or run `lo kubehz register --domain <domain> --print-token`. Then lo
+  prints the ticket on any stdout, also in a CI run. Use the flag only where
+  the output stays private: not in a CI job and not in a shared log. The
+  re-run registers again, so it replaces the claim key and prints a new
+  ticket. The ticket of the earlier key stops working only when that
+  register sends the current bind secret of the earlier registration while
+  it is still pending (see the next section).
+- A terminal is not a private place: a terminal recording, the scrollback
+  and a program that reads the pty keep what lo prints.
+- In the bash implementation, these functions stop a shell trace
+  (`set -x`), `set -a` and a DEBUG, RETURN or ERR trap of the caller until
+  they return: `kubehz::register_cluster`, `kubehz::deregister_cluster`,
+  `kubehz::ensure_claim_key`, `kubehz::direct_claim`,
+  `kubehz::claim_key_own` and `kubehz::re-enroll`. So the trace does not
+  show the ticket, the tokens or the answers of the platform in them. A
+  trace of other code, before or after these functions, is not covered.
+- These functions and their helpers `kubehz::register_post` and
+  `kubehz::persist_bind_secret` declare the locals that hold the ticket,
+  a token, the bind secret or an answer of the platform with `local +x`.
+  So a child process (`curl`, `jq`, `mkdir`, `rm`) does not get these
+  values in its environment, also when the caller exported a name with
+  the same spelling. Other names and other functions are not covered.
+- `lo kubehz re-enroll` prints the code and the message of a refusal as
+  the platform sends them. lo does not sanitize this text.
+- The Go `lo mcp` does not offer `--print-token` to an agent. The bash
+  `lo mcp` (argsh) offers it, because argsh cannot remove one flag from
+  its MCP tools. So an MCP client of the bash server can get the live
+  ticket in its tool result.
 :::
 
 ::: details Claim before you deploy: the bind secret
@@ -659,31 +721,137 @@ the agent binds there instead of making a second row, so a cluster you
 claim before the agent deploys still shows its own heartbeats.
 
 The secret proves only that the operator who deploys is the operator who
-announced. It rotates on every re-announce and is spent on the first
-adoption. It is a credential: keep `.kubehz-bind` out of version control.
+announced. It rotates on each re-announce that sends the current secret, and
+is spent on the first adoption. It is a credential: keep `.kubehz-bind` out
+of version control.
 
-A re-run of `lo kubehz register` sends the stored secret, so the re-run
-keeps the same cluster record and stores the new secret it gets back. lo
-uses the file only when it is readable and holds exactly 64 lowercase hex
-characters, and it never puts the value on a command line.
+A re-run of `lo kubehz register` sends the stored secret. It counts only when
+it is the current secret of the record: an older secret counts as no secret.
+With the fingerprint announce and the current secret, the platform keeps the
+same cluster record and sends a new secret, which lo stores. With a claim key,
+the current secret keeps the same record only when that record can still
+rotate: it is a pending claim-key record that is not deleted and not claimed,
+that the heartbeat agent has not taken over, and that still shows the cluster
+as being created. Then the re-run rotates the claim ticket: the record gets
+the fingerprint of the new key and a new secret, and the earlier ticket stops
+working. Otherwise the re-run counts as a re-run without the current secret
+(see below). The file holds the bind secret as lo received it: 64 lowercase
+hex characters, or `khzb_` and 64 lowercase hex characters. lo accepts both
+forms, and only from a readable file with nothing else in it. It never puts
+the value on a command line. lo checks the value in a register answer by the
+same rule. It does not store a value of another form: it warns, and the file
+stays as it is.
+
+A re-run without the current secret (on another machine, in CI, where the
+runner does not keep the file, or with an older file) does not change the
+earlier record. With a claim key, a re-run that registers with success adds
+a new pending record with its own ticket and bind secret. At registration,
+the platform refuses a new pending record when the domain already has five;
+that is a check at registration time, not a hard limit. The earlier ticket
+keeps working until someone claims it, or until the cleanup removes its
+record: by default when the record is older than about 14 days and has had
+no heartbeat for that time (the kubehz deployment can change this). The
+cleanup can run late; it is not a promised time at which the ticket stops
+working. With the fingerprint announce, the platform returns the same record
+and no new secret.
 
 The platform does not adopt the announced row by its domain alone. An agent
-that registers without the secret gets a separate pending row, and the
-announced row gets no heartbeats. So `lo kubehz deploy` stages the secret
-before it applies the agent:
+that has no binding yet and registers without the secret gets a separate
+pending row, and the announced row gets no heartbeats. So no agent pod may
+run between the CronJob apply and the Secret apply. `lo kubehz deploy` does
+these steps in this order, in both modes:
 
-- The deploy applies the namespace `kubehz-system`, then the Secret
-  `kubehz-agent-bind` with a server-side apply. The kubeconfig needs `patch`
-  on Secrets in `kubehz-system`, and `create` when the Secret is new. It does
-  not need `delete`.
-- If the deploy cannot stage the secret, it stops before it changes an agent.
+1. In the operator mode only, the preflight: the deploy applies the
+   namespace `kubehz-system` and does a server-side dry run of the Secret
+   apply. If the preflight fails, the deploy stops before the CronJob apply.
+2. The deploy applies the agent CronJob with `spec.suspend: true`. A
+   suspended CronJob starts no new Jobs.
+3. The deploy deletes the Jobs of the CronJob
+   (`-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent`).
+4. The deploy waits until the pods with these labels have ended
+   (`KUBEHZ_AGENT_JOBS_DRAIN_SECONDS`, default 130 s). After the Job delete,
+   a pod ends within about 30 s (its grace period), unless its node does not
+   answer.
+5. The deploy stages the secret: it applies the namespace, then the Secret
+   `kubehz-agent-bind` with a server-side apply. It reads `.kubehz-bind` once
+   and stages the bytes that it checked.
+6. The deploy sets `spec.suspend` to `false`. If a schedule time went by
+   while the CronJob was suspended, the CronJob starts a Job at once (it has
+   no `startingDeadlineSeconds`), in the operator mode at the same time as
+   the identity bootstrap Job of step 7.
+7. In the operator mode, the deploy then runs the identity bootstrap Job and
+   applies the live agent.
+
+The kubeconfig needs `list` and `delete` on Jobs (a delete by label lists the
+Jobs first), `list` on Pods and `patch` on CronJobs in `kubehz-system`. For
+the Secret it needs `patch` on Secrets in `kubehz-system`, and `create` when
+the Secret is new. It does not need `delete` on Secrets.
+
+- If a step from 2 to 6 fails, the deploy stops. The CronJob can stay
+  suspended, so heartbeats can stop until the deploy runs again. The error
+  says what the step can have changed.
+- An interrupt (Ctrl-C, or a TERM signal) from step 2 to 6 stops the deploy
+  with exit code 130 (143 for a TERM). The deploy prints one line: the
+  CronJob can stay suspended. Run `lo kubehz deploy` again to end the
+  suspend.
+- If the pods do not end in time, the deploy stops with exit code 1 and does
+  not delete them. The error names the pods. The CronJob stays suspended,
+  which is the safe state: a suspended CronJob starts no Job. A pod on a node
+  that does not answer stays `Terminating`. Find the node of each pod with
+  `kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent -o wide`.
+  If the node is gone, delete the pod with
+  `kubectl -n kubehz-system delete pod <name> --force --grace-period=0`.
+  Then run `lo kubehz deploy` again.
 - If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on
   another machine) or holds no valid secret, the deploy warns and continues
-  without the secret.
+  without the secret: it skips step 5 only. A Secret `kubehz-agent-bind` from
+  an earlier deploy stays as it is. The agent can then register a separate
+  pending row if it has no binding and no staged value yet.
+- The deploy owns `spec.suspend`. If you suspended the CronJob by hand, the
+  next deploy sets it back to `false`.
+- An apply of the agent manifests without `lo kubehz deploy` leaves the
+  CronJob suspended.
 
-To deploy without the secret on purpose, remove `.kubehz-bind`. The agent
-then registers a separate pending row. Claim that row with the code from
-`lo kubehz claim-code`. The announced row gets no heartbeats.
+To deploy without the secret on purpose, remove `.kubehz-bind` and the
+Secret:
+
+```bash
+kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found
+```
+
+A pod that runs at that time keeps the value in its environment until it
+ends. An agent that has no binding yet then registers a separate pending
+row. Claim that row with the code from `lo kubehz claim-code`. The announced
+row gets no heartbeats.
+
+**Upgrade order for the `khzb_` form.** The platform can hand out the bind
+secret as `khzb_` and 64 lowercase hex characters. An older lo and an older
+agent CronJob accept only 64 lowercase hex characters, so they do not send a
+value of the new form. An older `lo kubehz register` does not send it, an
+older `lo kubehz deploy` warns and does not stage it, and an older CronJob
+leaves it out of its register. An agent that is not bound yet then registers
+a separate pending row. Claim that row with the code from
+`lo kubehz claim-code`. So, before the platform hands out the new form:
+
+1. Upgrade lok8s: the `lo` binary and, for a bash install, the synced tree.
+2. Run `lo kubehz deploy` again on each cluster. The deploy applies the new
+   agent CronJob, which accepts both forms.
+
+A deploy that does not stage the secret keeps an existing Secret
+`kubehz-agent-bind` as it is.
+
+If the deploy stopped with the CronJob suspended, fix the cause that the
+error names, then run `lo kubehz deploy` again. The next deploy deletes the
+Jobs, waits for their pods, stages the secret and ends the suspend. To see
+the state:
+
+```bash
+kubectl -n kubehz-system get cronjob kubehz-heartbeat   # SUSPEND
+```
+
+An agent that registered a separate pending row before the upgrade stays on
+that row: lo has no command that moves it to the announced row. Claim that
+row with the code from `lo kubehz claim-code`.
 :::
 
 ## Claiming
@@ -713,10 +881,24 @@ paste it into the dashboard while signed in.
 3. **Paste it** into the dashboard **Claim** page while signed in. The platform
    attributes the cluster to your account and consumes the code (single-use).
 
-The claim code is the *only* secret that transits your browser, and only once.
-The **agent-token** (the credential that authenticates heartbeats) never
-leaves the cluster, and no command prints it, `lo kubehz claim-code`
-included.
+In this flow, the claim code is the *only* secret that transits your browser,
+and only once. The **agent-token** (the credential that authenticates
+heartbeats) never leaves the cluster, and no command prints it, `lo kubehz
+claim-code` included.
+
+The dashboard can also start the claim. Then it mints a claim nonce
+(`khzn_…`), and the nonce is the secret that transits your browser. The
+agent-token stays in the cluster in this flow too. `lo kubehz claim` places
+the nonce for the agent, and the next heartbeat (within 5 minutes) echoes it
+to the platform. Give the nonce on stdin, so that it is not on the command
+line or in the shell history:
+
+```bash
+lo kubehz claim --nonce - < nonce.txt
+```
+
+`--nonce -` reads one line. `lo` removes the white space at its start and at
+its end (also the CR of a file with CRLF line ends), then checks its shape.
 
 ## Choosing an agent
 
@@ -852,7 +1034,7 @@ The default agent is a CronJob `kubehz-heartbeat` in the `kubehz-system`
 namespace that runs **every five minutes** and POSTs a status snapshot to
 `/api/clusters/<domain>/heartbeat`. It also owns the cluster's identity, which
 is why it stays deployed even when the live agent takes over the heartbeat: it
-creates the identity Secret and enrolls it, and the live agent only reads that
+fills the identity Secret and enrolls it, and the live agent only reads that
 Secret. Both agents tolerate the control-plane taint, so a cluster with no
 worker yet, or one that is control-plane-only by design, runs them on the
 control plane. A first `lo kubehz deploy` with `agent: operator` runs the
@@ -860,26 +1042,45 @@ CronJob's bootstrap once as a one-off Job and waits for it. The live agent
 then finds its identity Secret at once, not at the CronJob's next tick.
 Properties worth knowing:
 
-- **Self-bootstrapping identity.** On each run the agent ensures one Secret,
-  `kubehz-agent` in `kubehz-system`, holding a self-generated agent-token `A`
-  (`khz_agt_…`) and claim-code `C` (`khzc_…`). The agent creates it once and
-  **never rotates** it; the platform only ever receives `sha256(A)`/`sha256(C)`.
+- **Self-bootstrapping identity.** The deploy creates one Secret,
+  `kubehz-agent` in `kubehz-system`, empty. On its first run the agent fills
+  it with a self-generated agent-token `A` (`khz_agt_…`) and claim-code `C`
+  (`khzc_…`), in one patch. A tick writes the Secret only when it has no
+  entry at all, whatever the values, so the agent **never rotates** them and
+  never writes over a key that is there. When two ticks fill it at the same
+  time, the apiserver refuses the second patch (it carries the
+  `resourceVersion` of its read), and both ticks use the values of the first.
+  A Secret with entries, but not both keys with a value (one of the keys, an
+  empty value, or another key), stays as it is. The tick logs
+  `kubehz: Secret kubehz-agent in kubehz-system has data, but not both an agent-token and a claim-code with a value; the agent does not write it`
+  and uses the values that are there: a heartbeat needs `A`, the register
+  `A` and `C`. To give the agent a new identity, delete the Secret and run
+  `lo kubehz deploy` (see the reset of the Secret below).
+  The platform only ever receives `sha256(A)`/`sha256(C)`.
 - **Authenticated.** Every heartbeat carries `Authorization: Bearer A`. Once a
   cluster has enrolled a token, the platform rejects anonymous heartbeats for
   it: the identity is proven from the first beat.
 - **Outbound-only.** The agent pushes; the platform never connects into your
   cluster and holds no credentials for it (only verifier hashes).
 - **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
-  state: `get`/`list` on nodes, namespaces, componentstatuses and CSRs, `list`
-  pods in `kube-system` only (control-plane health), and `get` on the `/readyz`
-  + `/version` API paths. On top of that it holds `get`+`create` (never
-  `update`/`patch`/`delete`) on Secrets in its own `kubehz-system` namespace,
-  to bootstrap its identity Secret once. It reads no Secrets elsewhere and can rotate nothing. The
+  state: `list` on nodes and CSRs, `list` pods in `kube-system` only
+  (control-plane health), and `get` on the `/readyz` + `/version` API paths.
+  On top of that it holds `get` and `patch` on its identity Secret, by name,
+  in its own `kubehz-system` namespace, and no other grant on Secrets: no
+  `create` (RBAC cannot limit a `create` to one name, so the grant would let
+  a holder of the agent's token create any Secret in that namespace), no
+  `update`, no `delete`. It reads no other Secret. The `patch` grant could
+  change the values; the agent's script never does that. The
   [assessment](#assessment-and-handover) adds read-only probe grants
-  (storageclasses, persistentvolumes, services `list`, webhook configuration
-  `list`, `get` on the one CAPI CRD, kube-system daemonset `list` + the
-  `kubeadm-config` ConfigMap) and `get`/`patch` scoped to the single
-  `kubehz-agent-config` ConfigMap for its send-gate marker.
+  (`list` on storageclasses, persistentvolumes, services and webhook
+  configurations, `get` on the one CAPI CRD, kube-system daemonset `list` +
+  the `kubeadm-config` ConfigMap). The agent keeps its markers (the
+  assessment send gate, the claim nonce and the desired-state validator) as
+  annotations on one ConfigMap, `kubehz-agent-state`. `patch` on that
+  ConfigMap and on the identity Secret are its only write grants: it can
+  create no object. It has no access to
+  `kubehz-agent-config`, its configuration: the pod gets it through
+  `envFrom`, so the agent cannot change its own API URL.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain, the same
   identity it registers under.
 - **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only
@@ -931,15 +1132,93 @@ lo use my-cluster.example.com
 lo kubehz deploy
 ```
 
-On its first run the agent creates its identity Secret, self-registers, and
-starts beating. Then read the claim code with `lo kubehz claim-code` and paste
-it into the dashboard to [claim](#claiming) the cluster.
+On its first run the agent fills its identity Secret (the deploy created it
+empty), self-registers, and starts beating. Then read the claim code with
+`lo kubehz claim-code` and paste it into the dashboard to [claim](#claiming)
+the cluster.
 
 The manifests ship with lok8s as kustomize directories:
 `.lok8s/libs/kubehz/manifests/agent/` (CronJob) and
 `.lok8s/libs/kubehz/manifests/live-agent/` (live agent, base and managed). So
 you can read exactly what `deploy` applies, or render it first with
 `lo kubehz deploy --dry-run`.
+
+### An agent that an older lo deployed
+
+An older lo kept the agent's markers as annotations on `kubehz-agent-config`,
+and the agent could patch that ConfigMap. lo now keeps them on
+`kubehz-agent-state`. After you update lo, run `lo kubehz deploy` again. It
+adds `kubehz-agent-state` and the new RBAC, and the CronJob reads its markers
+there from the next tick.
+
+- Until you deploy again, the agent in the cluster keeps the old script and
+  beats as before. `lo kubehz claim` stops with
+  `configmap/kubehz-agent-state not found`.
+- The first tick after the deploy finds no markers. It sends one assessment,
+  and the desired-state poll gets one full answer. Then the 24-hour gate holds
+  again.
+- The agent does not echo a claim nonce that you placed before the deploy.
+  Place a new one with `lo kubehz claim`.
+- The old annotations stay on `kubehz-agent-config`. Nothing reads them.
+- Deploy and claim with one lo version. `lo kubehz claim` only checks that
+  `kubehz-agent-state` exists, and that does not prove that the agent in the
+  cluster reads it. A `lo kubehz deploy` with an older lo puts back the old
+  agent, which reads its markers from `kubehz-agent-config`, and leaves
+  `kubehz-agent-state` behind with nothing reading it. An older lo's
+  `lo kubehz claim` places the nonce on `kubehz-agent-config`, which the
+  current agent does not read. In both cases the claim never verifies: run
+  `lo kubehz deploy` with the current lo, then place a new nonce with
+  `lo kubehz claim`.
+
+Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
+`kubectl apply` removes only what an earlier apply set.
+
+An older lo also gave the agent `create` on Secrets, and the agent created
+its identity Secret itself. lo now creates the Secret in the deploy, and the
+agent's Role holds only `get` and `patch` on it. A `lo kubehz deploy` after
+you update lo keeps the Secret that the old agent created, with its values:
+the manifest has no data, and `kubectl apply` adds only the labels. The
+agent keeps its identity, and you do not re-enroll. A heartbeat pod that
+started before the deploy runs the old script against the new Role. It
+cannot create the Secret, but it does not have to: the deploy created it.
+If that Secret is still empty, the pod has no identity and skips its beat,
+and the next tick fills the Secret.
+
+Do not deploy with an older lo after this one. A `lo kubehz deploy` with an
+older lo has two effects:
+
+- It puts back the older Role, which gives the agent `create` on every
+  Secret in `kubehz-system`. Each deploy replaces the Role, so the next
+  deploy with the current lo removes that grant again.
+- If it comes before the first fill, the Secret stays empty. The older agent
+  creates its Secret only when there is none, and it does not fill one that
+  is there. The agent has no identity: it does not register, and it skips
+  each beat.
+
+To recover, run `lo kubehz deploy` with the current lo: the next tick fills
+the empty Secret. You can also delete the empty Secret first, and then run
+`lo kubehz deploy` with the current lo.
+
+If a GitOps controller applies the agent manifests, make sure that it does
+not reset `kubehz-agent-state` or the Secret `kubehz-agent`: let it create
+them only. For Flux, add the annotation
+`kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` to both in your overlay.
+
+A reset of the Secret deletes `A` and `C`. The next tick fills the Secret
+with new values, and the platform refuses the beats of the new token until
+you run `lo kubehz re-enroll`. Read the new claim code with
+`lo kubehz claim-code` if the cluster is not claimed yet.
+
+The shipped manifest of the ConfigMap has no annotations. A reset deletes
+all the markers:
+
+- The time of the last assessment and a pending platform request go. The
+  next tick sends an assessment and writes the time again. A controller that
+  resets the ConfigMap again and again thus causes at most one assessment
+  per reset, and at most one per 5-minute tick.
+- A pending claim nonce goes. That claim never verifies: place a new one
+  with `lo kubehz claim`.
+- The desired-state validator goes. The next poll gets one full answer.
 
 ## Status and deregistration
 
@@ -1102,12 +1381,12 @@ sent, and the platform applies its default.
 
 Every command takes `-o text|json|yaml`. `text` prints a table for a list and
 one line per field for one record. `json` and `yaml` print fixed fields (see
-[Output formats](../reference/cli.md#output-formats)). Use `-o json` in a
-script or an agent: `-o yaml` prints a string such as `yes` without quotes,
-and a YAML 1.1 reader takes it for a boolean
-([#246](https://github.com/kernpilot/lok8s/issues/246)). A field that the api
-leaves out is `null`. Before `lo` prints a string from the api, it removes
-these characters: C0, DEL, C1 (U+0080 to U+009F), the line and paragraph
+[Output formats](../reference/cli.md#output-formats)). In `-o yaml`, a string
+that a YAML 1.1 reader reads as a bool, a null, a number or a time (such as
+`yes`, `off`, `0777`, `1:20` or `2026-11-20`) is in double quotes, so that
+reader keeps it a string. A field that the api leaves out is `null`. Before
+`lo` prints a string from the api, it removes these characters: C0, DEL, C1
+(U+0080 to U+009F), the line and paragraph
 separators (U+2028, U+2029), these bidi, zero-width and invisible format
 characters (U+00AD, U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to
 U+2064, U+2066 to U+2069, U+206A to U+206F, U+FEFF), the Hangul fillers
@@ -1128,9 +1407,49 @@ KUBECONFIG=agent.yaml kubectl get pods
 
 The command does not replace a file that exists, so `--file ~/.kube/config`
 cannot remove your other contexts by accident. A file that appears while
-`lo` downloads stays too. Add `--force` (or `-f`) to replace the file. The
-new file belongs to you and has mode 0600. A hard link to the old file keeps
-the old content.
+`lo` downloads stays too. `lo` publishes a new file with a hard link. When
+the link fails and no file is at the path, for example on a file system
+with no hard links (vfat, exFAT, some FUSE and SMB mounts), `lo` writes the
+new file with an exclusive create. A program that reads the file during
+that write can see a part of it. When the write fails, `lo` removes the
+part that it wrote and names the cause. When `lo` cannot remove the part,
+it names the file to remove before the next run. A SIGKILL during the
+write can leave a part of the file. Add `--force` (or `-f`) to replace
+the file. The new file belongs to you and has mode 0600. On vfat and exFAT,
+the mount options (`uid=`, `gid=`, `fmask=`, `umask=`) set the owner and
+the mode of every file, often 0644: then `lo` writes the file and prints a
+warning that names the mode. A hard link to the old file keeps the old
+content.
+
+`lo` first writes the kubeconfig to a temporary file (mode 0600) in the
+directory of the file. With `--force`, a rename puts the temporary file at
+the path. Without `--force`, the hard link publishes it, and the exclusive
+create above is the fallback. `lo` opens that directory one time. After a successful open,
+each step of the publish and of the cleanup works relative to the open
+directory: the create of the temporary file, the rename, the hard link, the
+exclusive create, each check and each remove. Thus when a directory of the
+path changes after the open (another directory, or a link put in its
+place), no step goes to another directory. This is for the builds of `lo`
+for Linux and macOS (amd64 and arm64). The tests run on Linux.
+
+The exclusive create checks that the name still names the new file before
+it writes to the file, and before it removes a part of the file. Each check
+is a separate step before the write or the remove. At the end, `lo` makes
+one attempt to remove the temporary file, and removes it only while its
+name still names that file. When the `Stat` of the open temporary file
+fails, `lo` removes the name with no check, because a temporary file that
+stays holds the kubeconfig. A process that can change the entries of the
+directory can still interfere. It can put another file in place of the
+temporary file before the link or the rename. It can also put a file at a
+name between a check and the remove after it.
+
+To open the directory, `lo` needs the read right on it. A directory with
+only the write and the search rights (mode 0300) is refused with
+`cannot write` and a hint that names the read right. The bash
+implementation (`lok8s.yaml` `spec.implementation`) does each step by path,
+needs no read right on the directory, and removes the temporary file by
+path with no check. There, a change of a directory of the path during the
+write can still send a step to another directory.
 
 When the path is a link, `--force` replaces the file that the link points
 to, and the link stays. `lo` does this only when the owners and the mode
@@ -1270,6 +1589,93 @@ fail-soft, and sent **at most once per 24 h** (or when the platform requests
 a refresh through the heartbeat response). The platform turns it into a
 handover **feasibility** verdict.
 
+The agent keeps the time of the last send on `kubehz-agent-state`, and it
+sends an assessment only when it has stored that time. Before the probes, it
+writes the new time, and the same call removes a pending platform request
+(one `kubectl annotate`, one patch). The write comes first, so the agent
+never sends an assessment whose time it has not stored: an agent that cannot
+store the time sends no assessment, and thus cannot send one on every tick.
+What the agent writes for each outcome of the send:
+
+| Outcome | Before the send | After the send |
+|---|---|---|
+| Delivered: the beat with the assessment lands | the new time; a pending request removed | nothing |
+| Rejected: that beat fails, the plain retry lands | the new time; a pending request removed | nothing (the next assessment comes after 24 h) |
+| Failed: both beats fail | the new time; a pending request removed | the old time (or none) and the request put back, in one call (the next tick sends again) |
+
+A tick that writes the time and then sends no assessment (a probe has no
+answer, the probes run out of the tick budget, or the beat is skipped) puts
+back the old values the same way.
+
+The table shows what the agent saw, not what the api or the apiserver
+stored. A beat whose answer does not come back (the api stored it, but curl
+stopped at its bound) counts as failed, so the next tick can send the same
+assessment again. A write whose answer does not come back counts as refused.
+
+If the agent cannot write the ConfigMap (its RBAC lacks the `patch`, or an
+admission webhook refuses it), the tick sends no assessment, keeps the
+request, and logs
+`kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'`.
+If the agent cannot read the ConfigMap, the tick logs
+`kubehz: assessment and desired-state poll skipped: …`. In both cases the
+plain heartbeat still goes out. `lo kubehz deploy` puts back the ConfigMap
+and the agent's RBAC. An admission webhook that refuses the write is yours
+to change.
+
+The write of the new time can reach the apiserver and be stored while its
+answer comes after the 5 s bound: `timeout` stops kubectl. The agent cannot
+tell this from a refusal. The tick sends no assessment, logs the line of a
+refused write (above), and puts nothing back. The stored time holds and a
+pending request is used up, so the next assessment comes after the 24-hour
+window or on a new platform request: one lost window.
+
+If the write that puts back the old values fails too, the tick logs
+`kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request`.
+That assessment is lost. The agent does not send it again on each tick.
+
+Each tick has a time budget, so that it ends before the Job's
+`activeDeadlineSeconds` (120 s) stops the pod and leaves the new time in
+place. Every kubectl call runs under `timeout -k 2 5` (the node list under
+`timeout -k 2 30`), the register POST and the desired-state poll under
+`timeout -k 2 10`, and each heartbeat POST under `timeout -k 2 15`. Each
+`jq` and `awk` step on an answer runs under `timeout -k 2 5` too (the `jq`
+of the node list under the bound of its call), so the local work on a large
+answer counts, and a step that hangs stops. Those bounds sum to more than
+the deadline. So a call or a step starts only if it ends before the budget:
+
+| Calls and steps | Budget ends after the start of the tick |
+|---|---|
+| The reads before the assessment | 73 s |
+| The send gate and the probes | 56 s |
+| The heartbeat POSTs and the calls after them | 90 s |
+
+The budget counts the seconds since the node started (`/proc/uptime`), so a
+step of the wall clock does not make it longer or shorter. If
+`/proc/uptime` gives no number, the budget uses the wall clock, and the tick
+logs
+`kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move`.
+
+The write that puts back the old values runs outside the budget. So the
+calls and the steps of a tick end 97 s after its start at the latest. That
+bound does not include:
+
+- less than 1 s more, because the budget counts whole seconds;
+- the pod start and the image pull, before the tick starts;
+- the local work between two budget checks: shell builtins and short text
+  filters such as `sed`, `sort` and `base64`;
+- a second pod when the Job runs again (`backoffLimit: 1`). The deadline
+  counts from the start of the Job, not of the pod, so it can stop that pod
+  during its tick. A time that its send gate wrote then stays: one lost
+  window, as above.
+
+A call or a step that does not start logs
+`kubehz: tick budget: … not started: …`. When the probes run out of the
+budget, the tick logs
+`kubehz: assessment deferred: the tick budget ran out during the probes; the next tick probes again`
+and puts back the old values. When the reads run out of the budget, the
+tick logs `kubehz: assessment and desired-state poll skipped: the tick budget is spent; the next tick tries again`.
+In both cases the plain heartbeat still goes out.
+
 ```bash
 lo kubehz assess    # pretty-print the stored assessment + feasibility
 ```
@@ -1303,10 +1709,84 @@ pre-seeded state, and **verifies the resulting cluster CA is byte-identical
 to the bundle's** before telling you to cut DNS over. If that verify fails,
 do not cut over: the restored cluster did not keep its identity.
 
+Both commands accept a bundle that holds only regular files and directories.
+A bundle with a link (a symlink or a hardlink entry in a `.tar.gz`, or a key
+file that is a link in a bundle directory) is refused before anything reads
+it.
+
+`preseed` sends the cluster's CA keys over SSH, so it checks the node's host
+key on every call. An unknown or a changed key fails before a key leaves your
+machine. Before the first `preseed` to a new node, put the node's host key in
+your known_hosts file (or in the file that you give with `--known-hosts`).
+Compare its fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+on the node's console first. `--accept-new-host-key` trusts the key that the
+node shows on the first contact instead: the handover then checks that ssh
+recorded it, and every later call checks against that record.
+
+Every call sets the host key options itself. `StrictHostKeyChecking=yes`
+turns the check on, `NoHostAuthenticationForLocalhost=no` checks a node behind
+a forwarded port on localhost too, `VerifyHostKeyDNS=no` takes no key from
+DNS, and `UpdateHostKeys=no` keeps the node from changing your known_hosts
+file. No call opens a shared connection.
+
+With `--known-hosts`, that file is the only known_hosts file: every call also
+sets `GlobalKnownHostsFile=/dev/null`. ssh expands `%`, `$` and `~` in that
+path and splits it at whitespace, quotes and backslashes, so `preseed`
+refuses a path with one of these characters or with a control character. A
+relative path starts at the working directory. The check still assumes that
+you trust your ssh config, because the config controls other sources of
+trust:
+
+- a `KnownHostsCommand`
+- a `HostName` or a `HostKeyAlias` (each one changes the name that ssh checks)
+- a `Match exec` block
+- without `--known-hosts`, the known_hosts files that it names (`UserKnownHostsFile`, `GlobalKnownHostsFile`, by default `/etc/ssh/ssh_known_hosts`)
+
+On the node, `preseed` stops before a key leaves your machine unless each
+directory on the path to `/etc/kubernetes/pki` is safe. `/` and `/etc` must be
+directories (not links) that root owns. `/etc/kubernetes` and
+`/etc/kubernetes/pki` must be directories (not links) that root or the ssh
+user owns. None of them can have a write bit for the group or others. The
+message names the directory and what `stat` shows (owner, mode, type).
+
+These checks have limits:
+
+- `preseed` trusts the mounts that root made on the node. It does not check
+  the type of a file system, so a mount that another user controls (a network
+  or a FUSE file system, for example) can still show the keys to that user.
+- A node that is fully hostile and holds a host key that you accepted is out
+  of scope. Such a node can change what each command prints, and no check
+  that runs on the node can find that.
+
+Each file then goes to a new private file in `/etc/kubernetes/pki` first, and
+a rename puts it in place. A link that is already at a destination is
+replaced, and its target never gets a key.
+
+`preseed` keeps the output of the node off your terminal. On success, it
+shows only the stderr of the first call (ssh's error lines). On a failure,
+it shows the lines of the call that failed, escaped, and at most 20 lines
+for each stream.
+
+The node needs GNU coreutils and findutils: `mv -T`, `stat -c` and
+`find -perm /MODE`.
+
+If a step fails, `preseed` names it and removes the new files. If a rename
+fails, the files before it are already in place, and the message names
+them. If the install
+call fails and its output names no step, the state of the install is unknown:
+`preseed` lists the six destination files to check on the node. If the ssh
+connection of the install call fails (exit 255), the state is unknown too,
+also when the output names a step: the node can run more steps after the last
+line that came back.
+
 ## Troubleshooting
 
 **No heartbeats arriving?** Check the CronJob is present, not suspended,
-and actually firing, then read the last run's logs:
+and actually firing, then read the last run's logs. A `lo kubehz deploy`
+that stopped can leave the CronJob suspended: fix the cause that its error
+names, then run `lo kubehz deploy` again. Read the logs before that run:
+each deploy deletes the Jobs of the CronJob, also the failed ones, and
+their pods and logs go with them.
 
 ```bash
 kubectl -n kubehz-system get cronjob kubehz-heartbeat   # SUSPEND + LAST SCHEDULE

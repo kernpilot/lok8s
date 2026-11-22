@@ -383,10 +383,11 @@ func TestTemplate_PasswdSubsectionNoStrayCacheFile(t *testing.T) {
 	if _, err := g.Generate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Only the composed entry (Secret.test-secret.default.K) should exist.
+	// Only the composed entry (Secret.test-secret.default.K) should exist,
+	// next to the .gitignore that the cache writes before its first entry.
 	entries, _ := osReadDir(dir)
 	for _, name := range entries {
-		if name != "Secret.test-secret.default.K" {
+		if name != "Secret.test-secret.default.K" && name != ".gitignore" {
 			t.Errorf("unexpected cache file %q — passwd sub-section must not cache per-field", name)
 		}
 	}

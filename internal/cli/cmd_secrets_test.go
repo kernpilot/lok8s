@@ -99,7 +99,7 @@ func TestSecretsSetHandParser(t *testing.T) {
 	for _, flag := range []string{"--encrypt", "--enc", "-e"} {
 		os.RemoveAll(paths.Base + "/.secrets")
 		_, errStr, err := runSecrets(t, paths, "secrets", "set", "-n", "app", flag, "K4", "v4")
-		if err == nil || !strings.Contains(errStr, "No .sops.yaml found — run: lo secrets init") {
+		if err == nil || !strings.Contains(errStr, "No .sops.yaml found. Run: lo secrets init") {
 			t.Errorf("%s: err=%v stderr=%q", flag, err, errStr)
 		}
 		if raw, rerr := os.ReadFile(paths.Base + "/.secrets/Secret.app.default.K4"); rerr != nil || string(raw) != "v4" {
@@ -129,16 +129,17 @@ func TestSecretsSubcommandAnnotations(t *testing.T) {
 	paths := secretsProject(t)
 	root := NewRoot(paths)
 	want := map[string]string{
-		"init":    AnnotationIdempotent,
-		"add-key": AnnotationDestructive,
-		"set":     AnnotationDestructive,
-		"encrypt": AnnotationIdempotent,
-		"decrypt": AnnotationIdempotent,
-		"allow":   AnnotationDestructive,
-		"list":    AnnotationReadonly,
-		"print":   AnnotationReadonly,
-		"env":     AnnotationReadonly,
-		"path":    AnnotationReadonly,
+		"init":       AnnotationIdempotent,
+		"add-key":    AnnotationDestructive,
+		"remove-key": AnnotationDestructive,
+		"set":        AnnotationDestructive,
+		"encrypt":    AnnotationIdempotent,
+		"decrypt":    AnnotationIdempotent,
+		"allow":      AnnotationDestructive,
+		"list":       AnnotationReadonly,
+		"print":      AnnotationReadonly,
+		"env":        AnnotationReadonly,
+		"path":       AnnotationReadonly,
 	}
 	aliases := map[string]string{
 		"init": "i", "set": "s", "encrypt": "e", "decrypt": "d",

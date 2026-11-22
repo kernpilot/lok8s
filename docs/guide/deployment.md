@@ -871,16 +871,82 @@ jobs:
 ```
 
 It needs **only** `HCLOUD_TOKEN` (your Hetzner Cloud API token, used to create the
-infrastructure). The `cluster.lok8s.yaml` for the domain must already be committed
-under `clusters/<domain>/`.
+infrastructure and to upload the claim key). The `cluster.lok8s.yaml` for the domain
+must already be committed under `clusters/<domain>/`. The domain must match the
+domain rule of lo (`^[A-Za-z0-9][A-Za-z0-9._-]*$`), or the workflow stops before
+`lo` runs.
 
 ### Claiming a registered cluster
 
 When a cluster opts into kubehz dashboard visibility (`spec.kubehz.access` is set
-to `registered` or `managed`), `lo provision` registers it as **pending** and
-prints its SSH-key **MD5 fingerprint**. You then claim the cluster in the
-dashboard with that fingerprint plus your own Hetzner Cloud token (used once as
-ownership proof, never stored). CI needs no platform token.
+to `registered` or `managed`), `lo provision` registers it as **pending**. With
+`HCLOUD_TOKEN`, lo uploads a claim key, `kubehz-claim-<domain>`, to your Hetzner
+Cloud project. The MD5 fingerprint of that key is a **one-time claim ticket**.
+Sign in to the dashboard, open the **Claim** page and paste the ticket: the
+cluster is then yours. Any signed-in user who has the ticket can claim the
+cluster, so keep it private. CI needs no platform token.
+
+A public repository shows its job logs and job summaries to everyone, so the
+workflow keeps the ticket out of them:
+
+- Both workflows pipe the output of `lo` into the log filter, and the
+  runner sets `CI`. So the stdout of `lo` is not a terminal, and `lo` prints
+  `<hidden: one-time claim ticket>` in place of the ticket. Do not add
+  `--print-token` to a CI job: with it, `lo` prints the ticket on any
+  stdout. A terminal is not a private place either: a pty that a runner
+  gives a job, a terminal recording and the scrollback keep what `lo`
+  prints. In a CI run, `lo` hides the ticket on a terminal too.
+- The workflow also filters the job log, as a second layer. The filter puts
+  the same placeholder in place of a ticket that gets through.
+  The log also hides every other string with the shape of an MD5 fingerprint
+  (16 or more pairs of hex digits, with a colon between each two), for example
+  the server-key fingerprint of the legacy registration. A longer run of such
+  pairs is hidden whole. Every other text stays as `lo` printed it (the
+  filter drops a NUL byte).
+- No step output, environment value or job summary holds the ticket.
+- The job summary tells you where to read the ticket: in the Hetzner Console
+  (**Security → SSH keys**, the key `kubehz-claim-<domain>`). People with
+  access to that Hetzner Cloud project can read it there.
+
+The log filter covers the ticket as an older `lo`, or `lo` with
+`--print-token`, prints it: on one line. It is a text filter, not a guarantee
+for any encoding: a ticket split over two lines, or in another form, would
+pass it.
+
+Claim the cluster soon. The runner does not keep the bind secret of an earlier
+run (`clusters/<domain>/.kubehz-bind`). So each run that registers a claim key
+with success adds a new pending registration with its own ticket, and lo
+replaces the claim key in Hetzner with the key of that run. A registration can
+also fail. At registration, the platform refuses a new pending registration
+when the domain already has five. That is a check at registration time, not a
+hard limit on the number of pending registrations. The tickets of earlier runs
+keep working until someone claims them, or until the cleanup removes their
+registration. By default, the cleanup removes a pending registration that is
+older than about 14 days and has had no heartbeat for that time (the kubehz
+deployment can change this). It is a cleanup that can run late, not a promised
+time at which a ticket stops working.
+
+::: warning Job logs of earlier runs
+An earlier version of this workflow wrote the ticket in clear text into the
+job log and the job summary. If your repository ran it, each pending
+registration of those runs is exposed, and claiming the newest one does not
+spend the tickets of the others. For each exposed registration, claim it with
+its ticket: the claim ends the pending registration. The cluster is then in
+your account, and an owner or admin of the account can delete it there.
+Before the claim, a pending registration is in no account, so neither the
+cluster delete of your account nor `lo kubehz deregister` can remove it.
+Deleting the claim key in Hetzner does not end a ticket either: the claim
+compares the ticket with the registration, not with the key in Hetzner.
+Without a claim, a pending registration ends at the cleanup. Then delete
+those workflow runs (this removes their logs and summaries). Deleting a log
+does not take back a copy that someone already read.
+:::
+
+When lo reports a successful legacy registration, it did not confirm a
+claim-key upload, and it printed no ticket. That does not mean that no ticket
+exists: the platform can make one before the upload fails, and the tickets of
+earlier runs stay. The job summary then tells you to claim the cluster with
+the heartbeat agent and `lo kubehz claim-code`.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.

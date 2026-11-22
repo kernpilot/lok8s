@@ -1,0 +1,3 @@
+# ids: ClusterRole//a
+kind: ClusterRole
+metadata: {name: a, namespace: ignored}

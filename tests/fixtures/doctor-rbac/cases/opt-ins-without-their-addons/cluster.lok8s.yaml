@@ -1,0 +1,8 @@
+apiVersion: lok8s.dev/v1
+kind: KubeOne
+metadata:
+  name: rbac-test
+spec:
+  bootstrap:
+    - system-upgrade-controller-cluster-admin
+    - redis-operator-chart-rbac
