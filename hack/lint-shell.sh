@@ -19,6 +19,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # ghcr.io/arg-sh/argsh:0.10.0 =
 export ARGSH_DOCKER_IMAGE="${ARGSH_DOCKER_IMAGE:-ghcr.io/arg-sh/argsh@sha256:99037ed056fe6271b2c020a78387e376c49d9700c23128d2fe6dbbc37b4a2c49}"
 
+# The lint call below gets no PATH_BIN. With PATH_BIN, argsh mounts that
+# directory read-only at /usr/local/sbin in its container, and that comes
+# before the /usr/local/bin of the image's shellcheck. A local
+# .bin/shellcheck (TESTING.md, "Shell lint") would then shadow the one of
+# the pinned image. On the host, argsh also finds its argsh.so builtin
+# through PATH_BIN, so give it that path directly.
+if [[ -z "${ARGSH_BUILTIN_PATH:-}" && -n "${PATH_BIN:-}" && -f "${PATH_BIN}/argsh.so" ]]; then
+  export ARGSH_BUILTIN_PATH="${PATH_BIN}/argsh.so"
+fi
+
 # *.sh files (sourced libs often lack a shebang) UNION the extensionless
 # argsh/bash scripts a -name filter alone would skip. Overlap is fine.
 # grep exits 1 on zero matches — tolerate exactly that (the find half may
@@ -44,4 +54,4 @@ SETS=(.lok8s .archive operator/hooks docs/.vitepress hack install tests)
   find "${SETS[@]}" -type f \( -name '*.sh' -o -name '*.bash' \) -print
   grep -rlE '^#!/usr/bin/env (argsh|bash)' --exclude='*.bats' "${SETS[@]}" \
     || { rc="${?}"; [[ "${rc}" -eq 1 ]] || exit "${rc}"; }
-} | sort -u | grep -v '^tests/e2e/[^/]*/\.lok8s/' | xargs -r ./.bin/argsh lint
+} | sort -u | grep -v '^tests/e2e/[^/]*/\.lok8s/' | xargs -r env -u PATH_BIN ./.bin/argsh lint

@@ -2,13 +2,15 @@ package toolchain
 
 // shellcheck_test.go: the shellcheck entry of the contributor .bin/b.yaml.
 // It is the local lint of one shell file before CI (TESTING.md, "Shell
-// lint"). So it must be the release that the CI lint container runs, and no
-// env-sync profile may give it to a consumer.
+// lint"). So it must be the release that the CI lint container runs, the
+// .bin/b.lock row must name that pin, and no env-sync profile may give it to
+// a consumer.
 
 import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -36,6 +38,9 @@ var (
 	byamlShellcheck = pinSource{file: ".bin/b.yaml", prefix: "v", read: byamlVersion(shellcheckEntry)}
 	ciShellcheck    = pinSource{file: ".github/workflows/ci.yml", read: matchPin(ciShellcheckPattern)}
 	lintShellcheck  = pinSource{file: "hack/lint-shell.sh", read: matchPin(lintShellcheckPattern)}
+	// The lock row of the entry: b install writes its version after a "v".
+	// The tests do not read the sha256 of the row.
+	lockShellcheck = pinSource{file: ".bin/b.lock", prefix: "v", read: lockVersion(shellcheckEntry)}
 )
 
 // byamlVersion returns a reader of a .bin/b.yaml: the version of its
@@ -63,17 +68,28 @@ func byamlVersion(key string) func(raw []byte) (string, error) {
 
 // TestShellcheckPinIsTheCIRelease: .bin/b.yaml pins the shellcheck that
 // the CI lint container runs, so a local lint gives the findings of CI.
+// The .bin/b.lock row of the entry names the same pin.
 func TestShellcheckPinIsTheCIRelease(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
 	ci := releaseOf(t, root, ciShellcheck)
+	pin := releaseOf(t, root, byamlShellcheck)
+	testutil.Drift{
+		Want: testutil.Tree{Name: "the pin of " + byamlShellcheck.file, Files: map[string]string{
+			lockShellcheck.file: pin,
+		}},
+		Got: testutil.Tree{Name: "the shellcheck row of " + lockShellcheck.file, Files: map[string]string{
+			lockShellcheck.file: releaseOf(t, root, lockShellcheck),
+		}},
+		Sync: "run ./.bin/b install " + shellcheckEntry + " to refresh .bin/b.lock",
+	}.Check(t)
 	testutil.Drift{
 		Want: testutil.Tree{Name: "the shellcheck that " + ciShellcheck.file + " names", Files: map[string]string{
 			byamlShellcheck.file: ci,
 			lintShellcheck.file:  ci,
 		}},
 		Got: testutil.Tree{Name: "the other shellcheck sources", Files: map[string]string{
-			byamlShellcheck.file: releaseOf(t, root, byamlShellcheck),
+			byamlShellcheck.file: pin,
 			lintShellcheck.file:  releaseOf(t, root, lintShellcheck),
 		}},
 		Sync: "bump the shellcheck of .bin/b.yaml and the comments of hack/lint-shell.sh and ci.yml with the argsh image digest, then run ./.bin/b install " + shellcheckEntry + " to refresh .bin/b.lock",
@@ -98,6 +114,8 @@ func TestShellcheckSourcesFailWithoutThePin(t *testing.T) {
 			".github/workflows/ci.yml: 0 matches of " + ciShellcheckPattern + ", want one"},
 		{lintShellcheck, dropLines("+ argsh-lint"),
 			"hack/lint-shell.sh: 0 matches of " + lintShellcheckPattern + ", want one"},
+		{lockShellcheck, dropLockSource(shellcheckEntry),
+			".bin/b.lock: 0 entries with source " + shellcheckEntry + ", want one"},
 	} {
 		t.Run(tc.src.file, func(t *testing.T) {
 			t.Parallel()
@@ -162,11 +180,16 @@ func TestShellcheckIsInNoProfile(t *testing.T) {
 // profileProblems can read: the entries whose groups contain one group.
 var profileSelectRE = regexp.MustCompile(`^\{binaries: from_items\(items\(binaries\)\[\?\[1\]\.groups && contains\(\[1\]\.groups, '([^']+)'\)\]\)\}$`)
 
+// globChars are the characters that make a profile file key a glob.
+const globChars = "*?[{"
+
 // profileProblems returns why a profile of the b.yaml raw can give the
 // binaries entry key to a consumer, or nil. A profile gives it when its
 // select picks a group of the entry, or when it syncs .bin/b.yaml without
 // a select. A select of another form is a problem too: this check cannot
-// read it.
+// read it. So is another file key that can sync a file of .bin/: a key
+// that cleans to a path in .bin/ (such as ./.bin/b.yaml), or a glob in
+// .bin/ or in the first path element (such as .b*/**).
 func profileProblems(raw []byte, key string) []string {
 	var doc struct {
 		Binaries map[string]*struct {
@@ -195,8 +218,14 @@ func profileProblems(raw []byte, key string) []string {
 		for _, file := range slices.Sorted(maps.Keys(files)) {
 			spec := files[file]
 			if file != ".bin/b.yaml" {
-				if strings.HasPrefix(file, ".bin/") || strings.HasPrefix(file, "*") {
+				rel := path.Clean(file)
+				first, _, _ := strings.Cut(rel, "/")
+				switch {
+				case rel == ".bin/b.yaml" || strings.ContainsAny(first, globChars) ||
+					first == ".bin" && strings.ContainsAny(rel, globChars):
 					problems = append(problems, fmt.Sprintf("profile %s: the file pattern %s can sync .bin/b.yaml without a select", name, file))
+				case first == ".bin":
+					problems = append(problems, fmt.Sprintf("profile %s syncs %s without a select", name, file))
 				}
 				continue
 			}
@@ -240,6 +269,13 @@ func TestProfileProblemsFindEachLeak(t *testing.T) {
 			[]string{"profile core syncs all of .bin/b.yaml"}},
 		{"a glob", "binaries:\n  x/y:\n    groups: [lint]\n" + profile(selected+"      .bin/**:\n"),
 			[]string{"profile core: the file pattern .bin/** can sync .bin/b.yaml without a select"}},
+		{"a dot-slash form", "binaries:\n  x/y:\n    groups: [lint]\n" + profile(selected+"      ./.bin/b.yaml:\n"),
+			[]string{"profile core: the file pattern ./.bin/b.yaml can sync .bin/b.yaml without a select"}},
+		{"a glob of the directory", "binaries:\n  x/y:\n    groups: [lint]\n" + profile(selected+"      .b*/**:\n"),
+			[]string{"profile core: the file pattern .b*/** can sync .bin/b.yaml without a select"}},
+		{"the lock", "binaries:\n  x/y:\n    groups: [lint]\n" + profile(selected+"      .bin/b.lock:\n"),
+			[]string{"profile core syncs .bin/b.lock without a select"}},
+		{"another directory", "binaries:\n  x/y:\n    groups: [lint]\n" + profile(selected+"      .lok8s/**:\n      .envrc:\n"), nil},
 		{"another select form", "binaries:\n  x/y:\n    groups: [lint]\n" + profile("      .bin/b.yaml:\n        select:\n          - \"{binaries: binaries}\"\n"),
 			[]string{"profile core: a select of another form: {binaries: binaries}"}},
 		{"no entry", "binaries:\n  a/b:\n    groups: [lint]\n" + profile(selected),

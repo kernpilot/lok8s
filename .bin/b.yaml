@@ -100,11 +100,11 @@ binaries:
     groups: [kubeone]
 
   # shellcheck: the local lint of one shell file before CI, with the
-  # repository's .shellcheckrc (TESTING.md, "Shell lint"). CI lints in the
-  # argsh container of hack/lint-shell.sh, which bundles shellcheck v0.11.0:
-  # bump this pin with that image digest. No profile selects the `lint`
-  # group, so a consumer never gets this entry
-  # (internal/toolchain/shellcheck_test.go).
+  # repository's .shellcheckrc (TESTING.md, "Shell lint"). The gating job
+  # (the ShellCheck job of ci.yml) lints in the argsh container of
+  # hack/lint-shell.sh, which bundles this release: bump this pin with that
+  # image digest. No profile selects the `lint` group, so a consumer never
+  # gets this entry (internal/toolchain/shellcheck_test.go).
   github.com/koalaman/shellcheck:
     version: v0.11.0
     groups: [lint]
