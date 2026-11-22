@@ -43,8 +43,9 @@ func (c *Context) heartbeatDrainSeconds() int {
 }
 
 // How long the deploy waits for the pods of the CronJob agent's Jobs to end
-// after it deleted the Jobs (waitAgentJobsGone). The Job's own deadline is
-// 120 s; this allows a little more.
+// after it deleted the Jobs (waitAgentJobsGone). A pod of a deleted Job gets
+// its grace period (30 s); a pod of a Job that the delete did not match ends
+// within that Job's deadline (120 s). This allows a little more.
 func (c *Context) agentJobsDrainSeconds() int {
 	return c.envSeconds("KUBEHZ_AGENT_JOBS_DRAIN_SECONDS", 130)
 }
@@ -279,13 +280,16 @@ func (c *Context) deployPrint(ctx context.Context, workdir, domain, owner, acces
 // deployApply ports kubehz::deploy_apply — the load-bearing apply order.
 //
 // No agent pod runs between the CronJob agent apply and the stage of the
-// bind secret, in both directions. The manifest sets spec.suspend: true, so
+// bind secret, in both directions, unless the CronJob controller acts on a
+// copy of the CronJob from before the suspended apply and starts a Job
+// after the pod wait. The manifest sets spec.suspend: true, so
 // the CronJob agent apply leaves the CronJob suspended, and it makes no new
 // Job. settleCronJobAgent then deletes the Jobs that it made before, waits
 // until their pods have ended, stages the bind secret, and only then sets
 // spec.suspend to false. A step that fails stops the deploy with the CronJob
-// suspended. The CronJob reads the Secret through an optional env ref, so its
-// pods start with or without it.
+// suspended. An INT or a TERM in these steps stops it too, with one line
+// that says so (suspendInterrupted). The CronJob reads the Secret through an
+// optional env ref, so its pods start with or without it.
 //
 // In the operator direction, the CronJob agent apply of step 1 stops the
 // CronJob's beat, and only the live agent of step 3 beats again. So the deploy
@@ -307,6 +311,9 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 		}
 		// 1. The marker first (the CronJob stops beating), suspended.
 		if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
+			if ctx.Err() != nil {
+				return c.suspendInterrupted(ctx)
+			}
 			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap). %s Fix the cause, then run 'lo kubehz deploy' again.", agentApplyMayHaveChanged)
 			return ErrHandled
 		}
@@ -357,6 +364,9 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 		return err
 	}
 	if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
+		if ctx.Err() != nil {
+			return c.suspendInterrupted(ctx)
+		}
 		c.errorf("kubehz: could not apply the CronJob agent. The live agent is gone. %s Fix the cause, then run 'lo kubehz deploy' again.", agentApplyMayHaveChanged)
 		return ErrHandled
 	}
@@ -370,7 +380,27 @@ const (
 	agentApplyMayHaveChanged = "The apply can have applied part of the agent objects; an applied CronJob is suspended, so " + heartbeatsCanStop + "."
 	agentStaysSuspended      = "The CronJob agent stays suspended, so " + heartbeatsCanStop + "."
 	operatorNotLive          = "The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator) and this deploy did not apply the live agent, so " + heartbeatsCanStop + "."
+	// After agentStaysSuspended, when the pod wait stops the deploy.
+	agentSuspendIsSafe = "That is the safe state: a suspended CronJob starts no Job."
+	// The next step after the pod wait. A pod that the Job delete removes
+	// gets its grace period (the default of 30 s: the pod spec sets none),
+	// and a pod on a node that does not answer stays Terminating, in the
+	// phase Running, until the node answers or a force delete removes it.
+	agentPodsStuck = "A pod ends within about 30 s (its grace period) after the Job delete, unless its node does not answer: then the pod stays Terminating. Check the node of each pod: kubectl -n kubehz-system get pods -l " + agentJobsSelector + " -o wide. If the node is gone, delete the pod: kubectl -n kubehz-system delete pod <name> --force --grace-period=0. Then run 'lo kubehz deploy' again."
+	// The one line of an INT or a TERM from the CronJob agent apply to the
+	// end of the suspend (suspendInterrupted).
+	agentInterrupted = "kubehz: the deploy was interrupted. The CronJob agent can stay suspended, so " + heartbeatsCanStop + ". Run 'lo kubehz deploy' again: it ends the suspend."
 )
+
+// suspendInterrupted ends a deploy that an INT or a TERM (the context
+// ended) stopped between the CronJob agent apply and the end of the
+// suspend. It prints agentInterrupted in place of the error of the step and
+// returns the context's error, so lo prints nothing more and exits 128+n
+// (130 for an INT, 143 for a TERM), as the bash twin does.
+func (c *Context) suspendInterrupted(ctx context.Context) error {
+	c.errorf("%s", agentInterrupted)
+	return ctx.Err()
+}
 
 // The CronJob agent's Jobs and their pods carry these labels: the
 // jobTemplate and the pod template of manifests/agent/cronjob.yaml set both,
@@ -403,7 +433,10 @@ func (c *Context) settleCronJobAgent(ctx context.Context, workdir, domain, secre
 // waits until their pods have ended (waitAgentJobsGone).
 func (c *Context) quiesceAgentJobs(ctx context.Context) error {
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", "-l", agentJobsSelector, "--ignore-not-found=true"); err != nil {
-		c.errorf("kubehz: could not delete the Jobs of the CronJob agent (-l %s). The delete can have removed some of them. %s The kubeconfig needs delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again.", agentJobsSelector, agentStaysSuspended)
+		if ctx.Err() != nil {
+			return c.suspendInterrupted(ctx)
+		}
+		c.errorf("kubehz: could not delete the Jobs of the CronJob agent (-l %s). The delete can have removed some of them. %s The kubeconfig needs list and delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again.", agentJobsSelector, agentStaysSuspended)
 		return ErrHandled
 	}
 	return c.waitAgentJobsGone(ctx)
@@ -414,15 +447,21 @@ func (c *Context) quiesceAgentJobs(ctx context.Context) error {
 // waitLiveAgentGone: a probe that fails counts as a pod that has not ended,
 // and a window that ends on a failed probe refuses with that reason. The
 // poll selects the pods by their own labels, so it also waits for a pod of a
-// Job that the delete did not match.
+// Job that the delete did not match. The window (agentJobsDrainSeconds) is
+// the bound: a pod that never ends, such as a pod on a lost node that stays
+// Terminating, stops the deploy at its end with the CronJob suspended, and
+// the error names the pods and how to remove them (agentPodsStuck).
 func (c *Context) waitAgentJobsGone(ctx context.Context) error {
 	drain := c.agentJobsDrainSeconds()
-	probeError := ""
+	probeError, running := "", ""
 	for waited := 0; waited < drain; waited += 5 {
 		out, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "pods", "-l", agentJobsSelector,
 			"--field-selector=status.phase!=Succeeded,status.phase!=Failed", "-o", "name")
+		if ctx.Err() != nil {
+			return c.suspendInterrupted(ctx)
+		}
 		if err == nil {
-			probeError = ""
+			probeError, running = "", out
 			if !podLines(out) {
 				return nil
 			}
@@ -436,21 +475,49 @@ func (c *Context) waitAgentJobsGone(ctx context.Context) error {
 			c.echo("kubehz: waiting until the pods of the CronJob agent's Jobs have ended, before the stage…")
 		}
 		if err := c.sleep(ctx, 5*time.Second); err != nil {
+			if ctx.Err() != nil {
+				return c.suspendInterrupted(ctx)
+			}
 			return err
 		}
 	}
 	if probeError != "" {
-		c.errorf("kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for %ds: %s. %s The kubeconfig needs list on Pods in kubehz-system. See the pods: kubectl -n kubehz-system get pods -l %s. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone.", drain, probeError, agentStaysSuspended, agentJobsSelector)
+		c.errorf("kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for %ds: %s. %s %s The kubeconfig needs list on Pods in kubehz-system. %s", drain, probeError, agentStaysSuspended, agentSuspendIsSafe, agentPodsStuck)
 		return ErrHandled
 	}
-	c.errorf("kubehz: pods of the CronJob agent's Jobs did not end within %ds after the deploy deleted the Jobs. %s See the pods: kubectl -n kubehz-system get pods -l %s. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone.", drain, agentStaysSuspended, agentJobsSelector)
+	still := ""
+	if names := agentPodNames(running); names != "" {
+		still = " The pods that have not ended: " + names + "."
+	}
+	c.errorf("kubehz: pods of the CronJob agent's Jobs did not end within %ds after the deploy deleted the Jobs.%s %s %s %s", drain, still, agentStaysSuspended, agentSuspendIsSafe, agentPodsStuck)
 	return ErrHandled
+}
+
+// One `pod/<name>` line of the pod poll whose name the stop text prints: a
+// DNS name, ASCII only, as in the pull hint (liveAgentPodLineRe).
+var agentPodNameRe = regexp.MustCompile(`^pod/([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)$`)
+
+// agentPodNames are the pod names in the `pod/<name>` lines of out, joined
+// by ", ". A line with a name of another shape counts as a pod for the wait
+// (podLines), but its name is not printed. The NUL bytes go first: the bash
+// twin reads the poll with a command substitution, which drops them.
+func agentPodNames(out string) string {
+	var names []string
+	for line := range strings.SplitSeq(strings.ReplaceAll(out, "\x00", ""), "\n") {
+		if m := agentPodNameRe.FindStringSubmatch(line); m != nil {
+			names = append(names, m[1])
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // resumeCronJobAgent sets spec.suspend to false, after the stage. The deploy
 // owns the field: the next CronJob agent apply sets it to true again.
 func (c *Context) resumeCronJobAgent(ctx context.Context) error {
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "patch", "cronjob", "kubehz-heartbeat", "--type=merge", "-p", agentResumePatch); err != nil {
+		if ctx.Err() != nil {
+			return c.suspendInterrupted(ctx)
+		}
 		c.errorf("kubehz: could not set spec.suspend to false on cronjob/kubehz-heartbeat. The CronJob agent can stay suspended, so %s. The kubeconfig needs patch on CronJobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. The deploy sets it with: kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p '%s'.", heartbeatsCanStop, agentResumePatch)
 		return ErrHandled
 	}
@@ -625,6 +692,9 @@ func (c *Context) proveBindSecret(ctx context.Context, workdir, domain, secret s
 // not reach the Secret.
 func (c *Context) stageBindSecretBytes(ctx context.Context, workdir, domain, secret string) error {
 	if err := c.applyBindSecret(ctx, workdir, secret); err != nil {
+		if ctx.Err() != nil {
+			return c.suspendInterrupted(ctx)
+		}
 		c.errorf("kubehz: could not stage the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The stage can have applied the namespace or the Secret. %s %s If you deploy without the secret, %s. %s", domain, agentStaysSuspended, bindSecretRBAC, pendingRowIfUnbound, deployWithoutSecret)
 		return ErrHandled
 	}

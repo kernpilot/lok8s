@@ -105,9 +105,11 @@ KUBEHZ_LIVE_AGENT_MANIFESTS="${PATH_LOK8S}/libs/kubehz/manifests/live-agent"
 KUBEHZ_HEARTBEAT_DRAIN_SECONDS="${KUBEHZ_HEARTBEAT_DRAIN_SECONDS:-130}"
 
 # How long to wait, after the deploy deleted the CronJob agent's Jobs, until
-# their pods have ended (kubehz::wait_agent_jobs_gone). The Job's own
-# activeDeadlineSeconds is 120; this allows a little more. Fail-hard: the
-# stage of the bind secret must not run beside an agent pod.
+# their pods have ended (kubehz::wait_agent_jobs_gone). A pod of a deleted
+# Job gets its grace period (30 s); a pod of a Job that the delete did not
+# match ends within that Job's activeDeadlineSeconds (120). This allows a
+# little more. Fail-hard: the stage of the bind secret must not run beside an
+# agent pod.
 KUBEHZ_AGENT_JOBS_DRAIN_SECONDS="${KUBEHZ_AGENT_JOBS_DRAIN_SECONDS:-130}"
 
 # How long to wait for the live agent's Deployment to report Ready before the
@@ -218,7 +220,15 @@ kubehz::deploy_agent() {
     return $?
   fi
 
-  kubehz::deploy_apply "${workdir}" "${domain}" "${owner}" "${access}" || return 1
+  # An INT or a TERM ends the subshell of deploy_apply with 130 or 143 (its
+  # traps). Pass that status on, as the Go binary exits 128+n; any other
+  # failure is 1.
+  local rc=0
+  kubehz::deploy_apply "${workdir}" "${domain}" "${owner}" "${access}" || rc=$?
+  if (( rc == 130 || rc == 143 )); then
+    return "${rc}"
+  fi
+  (( rc == 0 )) || return 1
   kubehz::deploy_summary "${domain}" "${owner}" "${access}"
 }
 
@@ -394,13 +404,16 @@ kubehz::deploy_print() (
 # ── Apply ────────────────────────────────────────────────
 
 # No agent pod runs between the CronJob agent apply and the stage of the
-# bind secret, in both directions. The manifest sets spec.suspend: true, so
+# bind secret, in both directions, unless the CronJob controller acts on a
+# copy of the CronJob from before the suspended apply and starts a Job after
+# the pod wait. The manifest sets spec.suspend: true, so
 # the CronJob agent apply leaves the CronJob suspended, and it makes no new
 # Job. kubehz::settle_cron_agent then deletes the Jobs that it made before,
 # waits until their pods have ended, stages the bind secret, and only then
 # sets spec.suspend to false. A step that fails stops the deploy with the
-# CronJob suspended. The CronJob reads the Secret through an optional env ref,
-# so its pods start with or without it.
+# CronJob suspended. An INT or a TERM in these steps stops it too, with one
+# line that says so (kubehz::hold_suspend_traps). The CronJob reads the
+# Secret through an optional env ref, so its pods start with or without it.
 #
 # In the operator direction, the CronJob agent apply of step 1 stops the
 # CronJob's beat, and only the live agent of step 3 beats again. So the deploy
@@ -429,6 +442,7 @@ kubehz::deploy_apply() (
     #    suspend (step 1b), from the CronJob's next tick on it bootstraps and
     #    enrolls but does not beat, so the beat is unowned rather than
     #    contested while we start the live agent.
+    kubehz::hold_suspend_traps
     kubectl apply -k "${workdir}/agent" || {
       rm -f -- "${workdir}/bind-secret"
       error "kubehz: could not apply the CronJob agent (identity bootstrap). ${_KUBEHZ_AGENT_APPLY_MAY_HAVE_CHANGED} Fix the cause, then run 'lo kubehz deploy' again."
@@ -437,6 +451,7 @@ kubehz::deploy_apply() (
     # 1b. The Jobs, the bind secret with the copy of step 0, and the end of
     #     the suspend, before the identity bootstrap Job of step 2b registers.
     kubehz::settle_cron_agent "${workdir}" "${domain}" "${bound}" || return 1
+    kubehz::release_suspend_traps
     # 2. A pod that started BEFORE the marker landed is already past the guard
     #    and will still POST once. Wait it out, so the live agent's first beat
     #    cannot overlap it.
@@ -496,6 +511,7 @@ kubehz::deploy_apply() (
   # background and the Go agent beats until its process exits. Wait it out
   # before the CronJob is allowed to beat again.
   kubehz::wait_live_agent_gone || return 1
+  kubehz::hold_suspend_traps
   kubectl apply -k "${workdir}/agent" || {
     error "kubehz: could not apply the CronJob agent. The live agent is gone. ${_KUBEHZ_AGENT_APPLY_MAY_HAVE_CHANGED} Fix the cause, then run 'lo kubehz deploy' again."
     return 1
@@ -516,6 +532,36 @@ _KUBEHZ_OPERATOR_NOT_LIVE="The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=ope
 # that `kubectl create job --from=cronjob/...` makes copies them. The deploy
 # deletes the Jobs and waits for the pods by this selector.
 _KUBEHZ_AGENT_JOBS_SELECTOR="app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent"
+
+# After _KUBEHZ_AGENT_STAYS_SUSPENDED, when the pod wait stops the deploy.
+_KUBEHZ_AGENT_SUSPEND_IS_SAFE="That is the safe state: a suspended CronJob starts no Job."
+# The next step after the pod wait. A pod that the Job delete removes gets
+# its grace period (the default of 30 s: the pod spec sets none), and a pod
+# on a node that does not answer stays Terminating, in the phase Running,
+# until the node answers or a force delete removes it.
+_KUBEHZ_AGENT_PODS_STUCK="A pod ends within about 30 s (its grace period) after the Job delete, unless its node does not answer: then the pod stays Terminating. Check the node of each pod: kubectl -n kubehz-system get pods -l ${_KUBEHZ_AGENT_JOBS_SELECTOR} -o wide. If the node is gone, delete the pod: kubectl -n kubehz-system delete pod <name> --force --grace-period=0. Then run 'lo kubehz deploy' again."
+# The one line of an INT or a TERM from the CronJob agent apply to the end
+# of the suspend (kubehz::hold_suspend_traps).
+_KUBEHZ_AGENT_INTERRUPTED="kubehz: the deploy was interrupted. The CronJob agent can stay suspended, so ${_KUBEHZ_HEARTBEATS_CAN_STOP}. Run 'lo kubehz deploy' again: it ends the suspend."
+
+# From the CronJob agent apply to the end of the suspend, an INT or a TERM
+# prints _KUBEHZ_AGENT_INTERRUPTED and ends the subshell of
+# kubehz::deploy_apply with 130 or 143, as the Go binary exits 128+n. The
+# EXIT trap of kubehz::own_private_copy still removes the private copy. Call
+# it only in that subshell: the traps belong to the shell that sets them.
+# Usage: kubehz::hold_suspend_traps
+kubehz::hold_suspend_traps() {
+  trap 'error "${_KUBEHZ_AGENT_INTERRUPTED}"; exit 130' INT
+  trap 'error "${_KUBEHZ_AGENT_INTERRUPTED}"; exit 143' TERM
+}
+
+# After the end of the suspend: back to the INT and TERM traps of
+# kubehz::own_private_copy.
+# Usage: kubehz::release_suspend_traps
+kubehz::release_suspend_traps() {
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
 
 # The patch that ends the suspend that the CronJob agent apply set.
 _KUBEHZ_AGENT_RESUME_PATCH='{"spec":{"suspend":false}}'
@@ -540,7 +586,7 @@ kubehz::settle_cron_agent() {
 # pods have ended (kubehz::wait_agent_jobs_gone).
 kubehz::quiesce_agent_jobs() {
   kubectl -n kubehz-system delete job -l "${_KUBEHZ_AGENT_JOBS_SELECTOR}" --ignore-not-found=true || {
-    error "kubehz: could not delete the Jobs of the CronJob agent (-l ${_KUBEHZ_AGENT_JOBS_SELECTOR}). The delete can have removed some of them. ${_KUBEHZ_AGENT_STAYS_SUSPENDED} The kubeconfig needs delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
+    error "kubehz: could not delete the Jobs of the CronJob agent (-l ${_KUBEHZ_AGENT_JOBS_SELECTOR}). The delete can have removed some of them. ${_KUBEHZ_AGENT_STAYS_SUSPENDED} The kubeconfig needs list and delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
     return 1
   }
   kubehz::wait_agent_jobs_gone
@@ -908,9 +954,12 @@ kubehz::wait_live_agent_gone() {
 # a probe that fails counts as a pod that has not ended, and a window that
 # ends on a failed probe refuses with that reason. The poll selects the pods
 # by their own labels, so it also waits for a pod of a Job that the delete
-# did not match.
+# did not match. The window (KUBEHZ_AGENT_JOBS_DRAIN_SECONDS) is the bound: a
+# pod that never ends, such as a pod on a lost node that stays Terminating,
+# stops the deploy at its end with the CronJob suspended, and the error names
+# the pods and how to remove them (_KUBEHZ_AGENT_PODS_STUCK).
 kubehz::wait_agent_jobs_gone() {
-  local waited=0 out rc running probe_error=""
+  local waited=0 out rc running="" probe_error="" names
   while (( waited < KUBEHZ_AGENT_JOBS_DRAIN_SECONDS )); do
     out=$(kubectl -n kubehz-system get pods -l "${_KUBEHZ_AGENT_JOBS_SELECTOR}" \
       --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name 2>&1); rc=$?
@@ -930,11 +979,28 @@ kubehz::wait_agent_jobs_gone() {
     waited=$(( waited + 5 ))
   done
   if [[ -n "${probe_error}" ]]; then
-    error "kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for ${KUBEHZ_AGENT_JOBS_DRAIN_SECONDS}s: ${probe_error}. ${_KUBEHZ_AGENT_STAYS_SUSPENDED} The kubeconfig needs list on Pods in kubehz-system. See the pods: kubectl -n kubehz-system get pods -l ${_KUBEHZ_AGENT_JOBS_SELECTOR}. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone."
+    error "kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for ${KUBEHZ_AGENT_JOBS_DRAIN_SECONDS}s: ${probe_error}. ${_KUBEHZ_AGENT_STAYS_SUSPENDED} ${_KUBEHZ_AGENT_SUSPEND_IS_SAFE} The kubeconfig needs list on Pods in kubehz-system. ${_KUBEHZ_AGENT_PODS_STUCK}"
     return 1
   fi
-  error "kubehz: pods of the CronJob agent's Jobs did not end within ${KUBEHZ_AGENT_JOBS_DRAIN_SECONDS}s after the deploy deleted the Jobs. ${_KUBEHZ_AGENT_STAYS_SUSPENDED} See the pods: kubectl -n kubehz-system get pods -l ${_KUBEHZ_AGENT_JOBS_SELECTOR}. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone."
+  names=$(kubehz::agent_pod_names "${running}")
+  error "kubehz: pods of the CronJob agent's Jobs did not end within ${KUBEHZ_AGENT_JOBS_DRAIN_SECONDS}s after the deploy deleted the Jobs.${names:+ The pods that have not ended: ${names}.} ${_KUBEHZ_AGENT_STAYS_SUSPENDED} ${_KUBEHZ_AGENT_SUSPEND_IS_SAFE} ${_KUBEHZ_AGENT_PODS_STUCK}"
   return 1
+}
+
+# The pod names in <lines>, the `pod/<name>` lines of a pod poll, joined by
+# ", ". Only a DNS name is printed, ASCII only (LC_ALL=C), as in the pull hint
+# and in the Go twin: a line with a name of another shape counts as a pod for
+# the wait, but its name is not printed.
+# Usage: kubehz::agent_pod_names <lines>
+kubehz::agent_pod_names() {
+  local LC_ALL=C
+  local line names=""
+  local re='^pod/([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)$'
+  while IFS= read -r line; do
+    [[ "${line}" =~ ${re} ]] || continue
+    names+="${names:+, }${BASH_REMATCH[1]}"
+  done <<< "${1}"
+  printf '%s' "${names}"
 }
 
 # ── Summary ──────────────────────────────────────────────

@@ -449,6 +449,14 @@ AGENT_JOBS_DELETE='-n kubehz-system delete job -l app=kubehz-heartbeat,app.kuber
 AGENT_JOBS_POLL='-n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name'
 AGENT_RESUME='-n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p {"spec":{"suspend":false}}'
 
+# The texts of the stop of the pod wait and of an interrupt while the
+# CronJob agent is suspended. Literal on purpose: a change in the lib fails
+# here.
+_AGENT_STAYS_SUSPENDED_TEXT="The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again."
+_AGENT_SUSPEND_SAFE_TEXT="That is the safe state: a suspended CronJob starts no Job."
+_AGENT_PODS_STUCK_TEXT="A pod ends within about 30 s (its grace period) after the Job delete, unless its node does not answer: then the pod stays Terminating. Check the node of each pod: kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent -o wide. If the node is gone, delete the pod: kubectl -n kubehz-system delete pod <name> --force --grace-period=0. Then run 'lo kubehz deploy' again."
+_AGENT_INTERRUPTED_TEXT="[error] kubehz: the deploy was interrupted. The CronJob agent can stay suspended, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again: it ends the suspend."
+
 _stub_kubectl_log() {
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   export AGENT_JOBS_POLL
@@ -1623,10 +1631,13 @@ _bind_manifest() {
 # that value into the bind file: a change after the check. The calls around
 # the stage have their own switches: STUB_JOBS_DELETE_FAIL fails the Job
 # delete, STUB_POLL_FAIL fails each pod poll, STUB_PODS_STAY makes each pod
-# poll answer a pod that has not ended, and STUB_RESUME_FAIL fails the patch
-# that ends the suspend. With STUB_TERM_ON_NAMESPACE set, the namespace
-# apply saves what <workdir> holds (STUB_TERM_SEEN) and sends TERM to the
-# shell that runs it.
+# poll answer a pod that has not ended (STUB_PODS_LINES, when it is set, is
+# the answer), and STUB_RESUME_FAIL fails the patch that ends the suspend.
+# With STUB_TERM_ON_NAMESPACE set, the namespace apply saves what <workdir>
+# holds (STUB_TERM_SEEN) and sends TERM to the shell that runs it. With
+# STUB_SIGNAL_AT set to an argv, that call sends the signal STUB_SIGNAL to
+# the shell that runs it, from the CronJob agent apply on (so not in the
+# preflight), and runs nothing else.
 _stub_kubectl_bind() {
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   export STUB_KUBECTL_FAIL="${1:-}"
@@ -1639,6 +1650,12 @@ _stub_kubectl_bind() {
   : > "${STUB_KUBECTL_LOG}"
   rm -f "${STUB_CREATE_STDIN}" "${STUB_CREATE_STDINS}" "${STUB_SSA_STDIN}" "${STUB_DRY_STDIN}" "${STUB_TERM_SEEN}"
   kubectl() {
+    if [[ -n "${STUB_SIGNAL_AT:-}" && "$*" == "${STUB_SIGNAL_AT}" ]] \
+      && { [[ "$*" == "apply -k "*"/agent" ]] || grep -qE '^apply -k .*/agent$' "${STUB_KUBECTL_LOG}"; }; then
+      echo "$*" >> "${STUB_KUBECTL_LOG}"
+      kill -"${STUB_SIGNAL}" "${BASHPID}"
+      return 0
+    fi
     case "$*" in
       "${AGENT_JOBS_POLL}")
         echo "$*" >> "${STUB_KUBECTL_LOG}"
@@ -1646,7 +1663,7 @@ _stub_kubectl_bind() {
           echo 'Error from server (Forbidden): pods is forbidden' >&2
           return 1
         fi
-        [[ -z "${STUB_PODS_STAY:-}" ]] || printf 'pod/kubehz-heartbeat-29000000-x2k4q\n'
+        [[ -z "${STUB_PODS_STAY:-}" ]] || printf '%s\n' "${STUB_PODS_LINES:-pod/kubehz-heartbeat-29000000-x2k4q}"
         return 0 ;;
       *"get pods"*) printf ''; return 0 ;;
       "${AGENT_JOBS_DELETE}")
@@ -2132,14 +2149,18 @@ live-agent"
 @test "settle_cron_agent: Jobs that do not go stop the deploy before the stage, with the CronJob suspended, in both directions" {
   _source_deploy
   _write_bind_secret
-  sleep() { :; }
+  # After 100 sleeps the stub sends TERM: a wait without its bound ends with
+  # 143 and does not hang.
+  sleep() {
+    _sleeps=$(( ${_sleeps:-0} + 1 ))
+    (( _sleeps < 100 )) || kill -TERM "${BASHPID}"
+  }
   export -f sleep
   local mode owner access switch want work n=0
-  local suspended="The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again."
-  local see="See the pods: kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone."
-  local delete="kubehz: could not delete the Jobs of the CronJob agent (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent). The delete can have removed some of them. ${suspended} The kubeconfig needs delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
-  local poll="kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for 1s: Error from server (Forbidden): pods is forbidden. ${suspended} The kubeconfig needs list on Pods in kubehz-system. ${see}"
-  local stay="kubehz: pods of the CronJob agent's Jobs did not end within 1s after the deploy deleted the Jobs. ${suspended} ${see}"
+  local suspended="${_AGENT_STAYS_SUSPENDED_TEXT}"
+  local delete="kubehz: could not delete the Jobs of the CronJob agent (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent). The delete can have removed some of them. ${suspended} The kubeconfig needs list and delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
+  local poll="kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for 1s: Error from server (Forbidden): pods is forbidden. ${suspended} ${_AGENT_SUSPEND_SAFE_TEXT} The kubeconfig needs list on Pods in kubehz-system. ${_AGENT_PODS_STUCK_TEXT}"
+  local stay="kubehz: pods of the CronJob agent's Jobs did not end within 1s after the deploy deleted the Jobs. The pods that have not ended: kubehz-heartbeat-29000000-x2k4q. ${suspended} ${_AGENT_SUSPEND_SAFE_TEXT} ${_AGENT_PODS_STUCK_TEXT}"
   KUBEHZ_AGENT_JOBS_DRAIN_SECONDS=1
   for mode in "operator managed" "cronjob registered"; do
     read -r owner access <<< "${mode}"
@@ -2156,8 +2177,14 @@ live-agent"
       run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
       assert_failure
       assert_output --partial "${!want}"
-      refute_output --partial "delete pod"
-      refute_output --partial -- "--force"
+      # The pod wait names the force delete for a pod on a node that is
+      # gone; the Job delete has no pod to name.
+      if [[ "${want}" == delete ]]; then
+        refute_output --partial "delete pod"
+        refute_output --partial -- "--force"
+      else
+        assert_output --partial -- "--force --grace-period=0"
+      fi
       # The Job delete ran; the poll ran once unless the delete failed. No
       # stage, no end of the suspend, no live agent.
       run grep -c -F -x -e "${AGENT_JOBS_DELETE}" "${STUB_KUBECTL_LOG}"
@@ -2172,6 +2199,49 @@ live-agent"
     done
   done
   unset STUB_JOBS_DELETE_FAIL STUB_POLL_FAIL STUB_PODS_STAY
+}
+
+@test "wait_agent_jobs_gone: a pod that never ends stops the deploy at the end of the window, names the pods, and keeps the CronJob suspended, in both directions" {
+  # A pod on a node that does not answer stays Terminating, in the phase
+  # Running. KUBEHZ_AGENT_JOBS_DRAIN_SECONDS is the default 130: 26 polls,
+  # each followed by a sleep of 5 s. Only names of the DNS shape are printed.
+  _source_deploy
+  _write_bind_secret
+  export STUB_SLEEP_LOG="${BATS_TEST_TMPDIR}/sleep.log"
+  # The sleep is instant, so only the bound of the wait ends it. After 1000
+  # sleeps the stub sends TERM: a wait without its bound then ends with 143,
+  # not 1, and does not hang.
+  sleep() {
+    echo "slept $*" >> "${STUB_SLEEP_LOG}"
+    (( $(wc -l < "${STUB_SLEEP_LOG}") < 1000 )) || kill -TERM "${BASHPID}"
+  }
+  export -f sleep
+  export STUB_PODS_STAY=1
+  export STUB_PODS_LINES=$'pod/kubehz-heartbeat-29000000-x2k4q\npod/kubehz-heartbeat-29000005-b7m2p\npod/Bad\e[31mName'
+  local want="[error] kubehz: pods of the CronJob agent's Jobs did not end within 130s after the deploy deleted the Jobs. The pods that have not ended: kubehz-heartbeat-29000000-x2k4q, kubehz-heartbeat-29000005-b7m2p. ${_AGENT_STAYS_SUSPENDED_TEXT} ${_AGENT_SUSPEND_SAFE_TEXT} ${_AGENT_PODS_STUCK_TEXT}"
+  local mode owner access work n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    : > "${STUB_SLEEP_LOG}"
+    _stub_kubectl_bind
+    work="${BATS_TEST_TMPDIR}/never${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_equal "${status}" 1
+    assert_line "${want}"
+    refute_output --partial "Bad"
+    run grep -c -F -x -e "${AGENT_JOBS_POLL}" "${STUB_KUBECTL_LOG}"
+    assert_output "26"
+    run grep -c -F -x -e "slept 5" "${STUB_SLEEP_LOG}"
+    assert_output "26"
+    # spec.suspend stays true: no stage, no patch, no live agent.
+    run grep -c -e "apply --server-side --force-conflicts -f -" -e "patch cronjob" -e "apply -k ${work}/live-agent" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+  done
+  unset STUB_PODS_STAY STUB_PODS_LINES
 }
 
 @test "resume_cron_agent: a failed end of the suspend stops the deploy and says the CronJob can stay suspended" {
@@ -2226,4 +2296,94 @@ live-agent"
     assert_output "apply -f ${work}/agent/namespace.yaml"
   done
   unset STUB_TERM_ON_NAMESPACE
+}
+
+@test "deploy_apply: an INT or a TERM from the CronJob agent apply to the end of the suspend says that the CronJob can stay suspended and ends with 130 or 143, in both directions" {
+  # At each step: the CronJob agent apply, the Job delete, the sleep of the
+  # pod wait, the namespace apply of the stage and the patch that ends the
+  # suspend. One line in place of the error of the step, and no step after
+  # it. A stub in the shell that runs deploy_apply sends the signal to that
+  # shell, not to the test.
+  _source_deploy
+  _write_bind_secret
+  export STUB_SLEEP_LOG="${BATS_TEST_TMPDIR}/sleep.log"
+  sleep() {
+    echo "slept $*" >> "${STUB_SLEEP_LOG}"
+    [[ "${STUB_SIGNAL_AT:-}" != sleep ]] || kill -"${STUB_SIGNAL}" "${BASHPID}"
+  }
+  export -f sleep
+  local mode owner access work at sig want_rc last n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    for at in cron delete sleep stage resume; do
+      for sig in INT TERM; do
+        n=$(( n + 1 ))
+        work="${BATS_TEST_TMPDIR}/signal${n}"
+        mkdir -p "${work}"
+        kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+        unset STUB_PODS_STAY
+        case "${at}" in
+          cron) STUB_SIGNAL_AT="apply -k ${work}/agent" ;;
+          delete) STUB_SIGNAL_AT="${AGENT_JOBS_DELETE}" ;;
+          sleep) STUB_SIGNAL_AT=sleep; export STUB_PODS_STAY=1 ;;
+          stage) STUB_SIGNAL_AT="apply -f ${work}/agent/namespace.yaml" ;;
+          resume) STUB_SIGNAL_AT="${AGENT_RESUME}" ;;
+        esac
+        export STUB_SIGNAL_AT STUB_SIGNAL="${sig}"
+        _stub_kubectl_bind
+        : > "${STUB_SLEEP_LOG}"
+
+        run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+        want_rc=130
+        [[ "${sig}" == INT ]] || want_rc=143
+        assert_equal "${status}" "${want_rc}"
+        # The line, once, and no error of the step.
+        assert_equal "$(grep -c -F -x -e "${_AGENT_INTERRUPTED_TEXT}" <<< "${output}")" 1
+        refute_output --partial "could not"
+        refute_output --partial "cannot list"
+        # No step after the signal.
+        last="${STUB_SIGNAL_AT}"
+        [[ "${at}" != sleep ]] || last="${AGENT_JOBS_POLL}"
+        run tail -1 "${STUB_KUBECTL_LOG}"
+        assert_output -- "${last}"
+        if [[ "${at}" != resume ]]; then
+          run grep -c -e "patch cronjob" "${STUB_KUBECTL_LOG}"
+          assert_output "0"
+        fi
+        run grep -c -e "apply -k ${work}/live-agent" -e "create job" "${STUB_KUBECTL_LOG}"
+        assert_output "0"
+        # The private copy is gone.
+        run ls -A "${work}"
+        assert_output "agent
+live-agent"
+      done
+    done
+  done
+  unset STUB_SIGNAL_AT STUB_SIGNAL STUB_PODS_STAY
+}
+
+@test "deploy_agent: an INT or a TERM while the CronJob agent is suspended ends the deploy with 130 or 143, not 1, and prints no summary" {
+  # The subshell of deploy_apply ends with the status of its trap, and
+  # deploy_agent passes it on, as the Go binary exits 128+n.
+  _source_deploy
+  export LOK8S_KUBEHZ_HOSTING="self" LOK8S_KUBEHZ_ACCESS="registered"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.cloud" LOK8S_KUBEHZ_AGENT="cronjob"
+  _write_bind_secret
+  sleep() { kill -"${STUB_SIGNAL}" "${BASHPID}"; }
+  export -f sleep
+  export STUB_PODS_STAY=1
+  local sig want_rc
+  for sig in INT TERM; do
+    export STUB_SIGNAL="${sig}"
+    _stub_kubectl_bind
+    run kubehz::deploy_agent acme.example.com
+    want_rc=130
+    [[ "${sig}" == INT ]] || want_rc=143
+    assert_equal "${status}" "${want_rc}"
+    assert_line "${_AGENT_INTERRUPTED_TEXT}"
+    refute_output --partial "heartbeat CronJob deployed"
+    run tail -1 "${STUB_KUBECTL_LOG}"
+    assert_output -- "${AGENT_JOBS_POLL}"
+  done
+  unset STUB_SIGNAL STUB_PODS_STAY
 }

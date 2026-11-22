@@ -8,6 +8,7 @@ package kubehz
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -133,9 +134,13 @@ const (
 
 // agentJobsFake switches the fake answers of the calls around the stage:
 // deleteFails fails the Job delete, pollFails fails each pod poll, podsStay
-// makes each pod poll answer a pod that has not ended, and patchFails fails
-// the patch that ends the suspend. Use it as the override of kubectlLogger.
-type agentJobsFake struct{ deleteFails, pollFails, podsStay, patchFails bool }
+// makes each pod poll answer a pod that has not ended (pods, when it is set,
+// is the answer), and patchFails fails the patch that ends the suspend. Use
+// it as the override of kubectlLogger.
+type agentJobsFake struct {
+	deleteFails, pollFails, podsStay, patchFails bool
+	pods                                         string
+}
 
 func (f agentJobsFake) answer(c execx.Cmd) (bool, error) {
 	line := argvLine(c)
@@ -147,13 +152,46 @@ func (f agentJobsFake) answer(c execx.Cmd) (bool, error) {
 		io.WriteString(c.Stderr, "Error from server (Forbidden): pods is forbidden\n")
 		return true, exitErr(1)
 	case f.podsStay && line == agentJobsPollArgv:
-		io.WriteString(c.Stdout, "pod/kubehz-heartbeat-29000000-x2k4q\n")
+		pods := f.pods
+		if pods == "" {
+			pods = "pod/kubehz-heartbeat-29000000-x2k4q\n"
+		}
+		io.WriteString(c.Stdout, pods)
 		return true, nil
 	case f.patchFails && line == agentResumeArgv:
 		io.WriteString(c.Stderr, "Error from server (Forbidden): cronjobs.batch is forbidden\n")
 		return true, exitErr(1)
 	}
 	return false, nil
+}
+
+// The texts of the stop of the pod wait and of an interrupt while the
+// CronJob agent is suspended. Literal on purpose: a change in deploy.go
+// fails here.
+const (
+	agentStaysSuspendedText = "The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again."
+	agentSuspendSafeText    = "That is the safe state: a suspended CronJob starts no Job."
+	agentPodsStuckText      = "A pod ends within about 30 s (its grace period) after the Job delete, unless its node does not answer: then the pod stays Terminating. Check the node of each pod: kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent -o wide. If the node is gone, delete the pod: kubectl -n kubehz-system delete pod <name> --force --grace-period=0. Then run 'lo kubehz deploy' again."
+	agentInterruptedText    = "[error] kubehz: the deploy was interrupted. The CronJob agent can stay suspended, so heartbeats can stop until the deploy runs again. Run 'lo kubehz deploy' again: it ends the suspend."
+)
+
+// errSleepRunaway ends a wait whose fake sleep ran more often than a
+// bounded wait can.
+var errSleepRunaway = errors.New("the fake sleep ran too often: the wait has no bound")
+
+// guardSleep makes the sleep of h count its calls and fail after limit of
+// them. The sleep is instant, so only the bound of a wait loop ends it: a
+// wait without its bound then stops with errSleepRunaway and does not hang.
+func guardSleep(h *harness, limit int) *int {
+	n := 0
+	h.ctx.Sleep = func(ctx context.Context, _ time.Duration) error {
+		n++
+		if n > limit {
+			return errSleepRunaway
+		}
+		return ctx.Err()
+	}
+	return &n
 }
 
 // The manifest applies the CronJob suspended, and the jobTemplate and the pod
@@ -520,9 +558,10 @@ func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 	}
 }
 
-// No agent pod runs between the CronJob agent apply and the stage, in both
-// directions, with or without a bind secret on disk: the apply leaves the
-// CronJob suspended, the Job delete and the pod poll come right after it,
+// The CronJob stays suspended from the CronJob agent apply to the end of the
+// stage, in both directions, with or without a bind secret on disk: the
+// apply leaves the CronJob suspended, the Job delete and the pod poll come
+// right after it,
 // and the patch that ends the suspend comes after the stage. Between the
 // apply and the patch, only these calls run.
 func TestDeployApplyKeepsTheCronJobSuspendedUntilTheStage(t *testing.T) {
@@ -565,11 +604,11 @@ func TestDeployApplyKeepsTheCronJobSuspendedUntilTheStage(t *testing.T) {
 // A step around the stage that fails stops the deploy and leaves the
 // CronJob suspended, in both directions: a Job delete that fails, a pod poll
 // that keeps failing, and a pod that does not end. The error says so and
-// names what to do; no stage, no resume, no live agent and no bootstrap Job
+// names what to do: after the pod wait, how to remove a pod that stays
+// Terminating. No stage, no resume, no live agent and no bootstrap Job
 // follow.
 func TestDeployApplyAgentJobsThatDoNotGoLeaveTheCronJobSuspended(t *testing.T) {
-	suspended := "The CronJob agent stays suspended, so heartbeats can stop until the deploy runs again."
-	see := "See the pods: kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent. They end within the Job's deadline (120 s). Run 'lo kubehz deploy' again after they are gone."
+	suspended := agentStaysSuspendedText
 	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
 		for _, tc := range []struct {
 			name string
@@ -578,19 +617,20 @@ func TestDeployApplyAgentJobsThatDoNotGoLeaveTheCronJobSuspended(t *testing.T) {
 			poll bool
 		}{
 			{"the Job delete fails", agentJobsFake{deleteFails: true}, []string{
-				"kubehz: could not delete the Jobs of the CronJob agent (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent). The delete can have removed some of them. " + suspended + " The kubeconfig needs delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again.",
+				"kubehz: could not delete the Jobs of the CronJob agent (-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent). The delete can have removed some of them. " + suspended + " The kubeconfig needs list and delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again.",
 			}, false},
 			{"the pod poll fails", agentJobsFake{pollFails: true}, []string{
-				"kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for 1s: Error from server (Forbidden): pods is forbidden. " + suspended + " The kubeconfig needs list on Pods in kubehz-system. " + see,
+				"kubehz: could not list the pods of the CronJob agent's Jobs in kubehz-system for 1s: Error from server (Forbidden): pods is forbidden. " + suspended + " " + agentSuspendSafeText + " The kubeconfig needs list on Pods in kubehz-system. " + agentPodsStuckText,
 				"[warn] kubehz: cannot list the pods of the CronJob agent's Jobs in kubehz-system (Error from server (Forbidden): pods is forbidden). The deploy counts that as a pod that has not ended, and tries again.",
 			}, true},
 			{"a pod does not end", agentJobsFake{podsStay: true}, []string{
-				"kubehz: pods of the CronJob agent's Jobs did not end within 1s after the deploy deleted the Jobs. " + suspended + " " + see,
+				"kubehz: pods of the CronJob agent's Jobs did not end within 1s after the deploy deleted the Jobs. The pods that have not ended: kubehz-heartbeat-29000000-x2k4q. " + suspended + " " + agentSuspendSafeText + " " + agentPodsStuckText,
 			}, true},
 		} {
 			t.Run(mode.owner+"/"+tc.name, func(t *testing.T) {
 				h := newHarness(t)
 				h.env["KUBEHZ_AGENT_JOBS_DRAIN_SECONDS"] = "1"
+				guardSleep(h, 100)
 				work := renderInto(t, h, mode.owner, mode.access)
 				writeBindSecret(t, h, "acme.example.com", testBindSecret)
 				bindStageLoggerFake(h, func(string) bool { return false }, tc.fake)
@@ -598,7 +638,13 @@ func TestDeployApplyAgentJobsThatDoNotGoLeaveTheCronJobSuspended(t *testing.T) {
 				for _, w := range tc.want {
 					mustContain(t, h.output(), w)
 				}
-				mustNotContain(t, h.output(), "--force")
+				// The pod wait names the force delete for a pod on a node
+				// that is gone; the Job delete has no pod to name.
+				if tc.poll {
+					mustContain(t, h.output(), "--force --grace-period=0")
+				} else {
+					mustNotContain(t, h.output(), "--force")
+				}
 				calls := strings.Join(h.runner.lines(), "\n")
 				if got := strings.Contains(calls, agentJobsPollArgv); got != tc.poll {
 					t.Fatalf("pod poll ran: %v, want %v:\n%s", got, tc.poll, calls)
@@ -613,6 +659,122 @@ func TestDeployApplyAgentJobsThatDoNotGoLeaveTheCronJobSuspended(t *testing.T) {
 				for _, not := range []string{"patch cronjob", "create job", "get secret kubehz-agent ", "apply -k " + filepath.Join(work, "live-agent")} {
 					mustNotContain(t, calls, not)
 				}
+			})
+		}
+	}
+}
+
+// A pod that never ends (a pod on a node that does not answer stays
+// Terminating, in the phase Running) stops the deploy at the end of the
+// window, in both directions: KUBEHZ_AGENT_JOBS_DRAIN_SECONDS is unset, so
+// 130 s, which is 26 polls, each followed by a sleep of 5 s. The error names
+// the pods that have not ended (only names of the DNS shape), says that the
+// CronJob agent stays suspended and that this is the safe state, and says
+// how to remove such a pod. No stage and no patch follow, so spec.suspend
+// stays true. The sleep fails after 1000 calls, so a wait without its bound
+// fails here and does not hang.
+func TestDeployApplyAgentPodThatNeverEndsStopsAtTheEndOfTheWindow(t *testing.T) {
+	want := "[error] kubehz: pods of the CronJob agent's Jobs did not end within 130s after the deploy deleted the Jobs. " +
+		"The pods that have not ended: kubehz-heartbeat-29000000-x2k4q, kubehz-heartbeat-29000005-b7m2p. " +
+		agentStaysSuspendedText + " " + agentSuspendSafeText + " " + agentPodsStuckText + "\n"
+	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
+		t.Run(mode.owner, func(t *testing.T) {
+			h := newHarness(t)
+			sleeps := guardSleep(h, 1000)
+			work := renderInto(t, h, mode.owner, mode.access)
+			writeBindSecret(t, h, "acme.example.com", testBindSecret)
+			bindStageLoggerFake(h, func(string) bool { return false }, agentJobsFake{
+				podsStay: true,
+				pods:     "pod/kubehz-heartbeat-29000000-x2k4q\npod/kubehz-heartbeat-29000005-b7m2p\npod/Bad\x1b[31mName\n",
+			})
+			err := h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access)
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v, want ErrHandled (exit 1):\n%s", err, h.output())
+			}
+			mustContain(t, h.output(), want)
+			mustNotContain(t, h.output(), "Bad")
+			if n := h.runner.countCalls(agentJobsPollArgv); n != 26 || *sleeps != 26 {
+				t.Fatalf("polls = %d, sleeps = %d, want 26 of each", n, *sleeps)
+			}
+			calls := strings.Join(h.runner.lines(), "\n")
+			if strings.Contains(calls, " "+bindApplyArgv) {
+				t.Fatalf("the Secret was staged:\n%s", calls)
+			}
+			for _, not := range []string{"patch cronjob", "create job", "apply -k " + filepath.Join(work, "live-agent")} {
+				mustNotContain(t, calls, not)
+			}
+		})
+	}
+}
+
+// An INT or a TERM (the context ends) from the CronJob agent apply to the
+// end of the suspend stops the deploy, in both directions and at each step:
+// the CronJob agent apply, the Job delete, the pod poll, the sleep of the
+// pod wait, the stage and the patch that ends the suspend. The deploy prints
+// one line, that the CronJob agent can stay suspended and that a run of
+// 'lo kubehz deploy' ends the suspend, in place of the error of the step,
+// and returns the context's error: lo then prints nothing more and exits
+// 128+n (130 for an INT). No step runs after it.
+func TestDeployApplyInterruptWhileSuspendedSaysSo(t *testing.T) {
+	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
+		for _, step := range []struct {
+			name string
+			argv func(work string) string
+			// sleep: the signal comes in the sleep after a poll that
+			// lists a pod, not in a kubectl call.
+			sleep bool
+		}{
+			{"the CronJob agent apply", func(work string) string { return "kubectl apply -k " + filepath.Join(work, "agent") }, false},
+			{"the Job delete", func(string) string { return agentJobsDeleteArgv }, false},
+			{"the pod poll", func(string) string { return agentJobsPollArgv }, false},
+			{"the sleep of the pod wait", func(string) string { return agentJobsPollArgv }, true},
+			{"the stage", func(string) string { return "kubectl " + bindApplyArgv }, false},
+			{"the end of the suspend", func(string) string { return agentResumeArgv }, false},
+		} {
+			t.Run(mode.owner+"/"+step.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				h := newHarness(t)
+				work := renderInto(t, h, mode.owner, mode.access)
+				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+				target := step.argv(work)
+				bindStageLoggerFake(h, func(string) bool { return false }, agentJobsFake{podsStay: step.sleep})
+				logged := h.runner.handler
+				h.runner.handler = func(c execx.Cmd, stdin string) error {
+					if !step.sleep && argvLine(c) == target {
+						cancel()
+						return exitErr(130) // a kubectl that the signal stopped
+					}
+					return logged(c, stdin)
+				}
+				if step.sleep {
+					h.ctx.Sleep = func(ctx context.Context, _ time.Duration) error {
+						cancel()
+						return ctx.Err()
+					}
+				}
+				err := h.ctx.deployApply(ctx, work, "acme.example.com", mode.owner, mode.access)
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("err = %v, want context.Canceled:\n%s", err, h.output())
+				}
+				if n := strings.Count(h.output(), agentInterruptedText+"\n"); n != 1 {
+					t.Fatalf("want the interrupt line once, got %d:\n%s", n, h.output())
+				}
+				mustNotContain(t, h.output(), "could not")
+				mustNotContain(t, h.output(), "cannot list")
+				lines := h.runner.lines()
+				if last := lines[len(lines)-1]; last != target {
+					t.Fatalf("the deploy ran %q after the interrupt at %q", last, target)
+				}
+				if n := h.runner.countCalls(target); n != 1 {
+					t.Fatalf("%q ran %d times, want 1", target, n)
+				}
+				calls := strings.Join(lines, "\n")
+				if target != agentResumeArgv {
+					mustNotContain(t, calls, "patch cronjob")
+				}
+				mustNotContain(t, calls, "create job")
+				mustNotContain(t, calls, "apply -k "+filepath.Join(work, "live-agent"))
 			})
 		}
 	}
