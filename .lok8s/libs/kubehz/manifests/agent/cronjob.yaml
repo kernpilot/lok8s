@@ -7,11 +7,23 @@ metadata:
     app.kubernetes.io/name: kubehz-agent
     app.kubernetes.io/part-of: kubehz
 spec:
+  # 'lo kubehz deploy' applies the CronJob suspended, deletes its Jobs by the
+  # jobTemplate labels below, waits until their pods have ended, stages the
+  # bind secret, and then sets suspend to false. So no agent pod runs between
+  # the apply and the stage, unless the CronJob controller acts on a copy of
+  # the CronJob from before the suspended apply and starts a Job after the
+  # pod wait. An apply of these manifests without the deploy leaves the
+  # CronJob suspended.
+  suspend: true
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   jobTemplate:
+    metadata:
+      labels:
+        app: kubehz-heartbeat
+        app.kubernetes.io/name: kubehz-agent
     spec:
       backoffLimit: 1
       activeDeadlineSeconds: 120
@@ -247,17 +259,21 @@ spec:
                     # staged (optional env from kubehz-agent-bind). Present: the
                     # register ADOPTS the announced row wherever it lives now
                     # (pending, claimed or attributed) instead of minting a
-                    # sibling. Sent only when it is exactly 64 hex, so a garbled
+                    # sibling. Sent only as 64 hex or khzb_ and 64 hex, so a garbled
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
                     # Absent: the api does not adopt an announced row by
                     # domain alone, so the register gets a separate
-                    # pending row. That is why the deploy stages the Secret
-                    # before it applies this CronJob.
+                    # pending row. The deploy stages the Secret while this
+                    # CronJob is suspended, after it deleted the Jobs and
+                    # their pods ended. LC_ALL=C makes the classes
+                    # byte-wise. An env value cannot hold a NUL (execve
+                    # strings end at one), and this grep is BusyBox, so the
+                    # check does not use -a.
                     BIND_FIELD=""
                     if [ -n "${BIND_SECRET}" ] \
-                      && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
-                      && printf %s "${BIND_SECRET}" | grep -Eq '^[0-9a-f]{64}$'; then
+                      && [ "$(printf %s "${BIND_SECRET}" | LC_ALL=C wc -l)" -eq 0 ] \
+                      && printf %s "${BIND_SECRET}" | LC_ALL=C grep -Eq '^(khzb_)?[0-9a-f]{64}$'; then
                       BIND_FIELD=$(printf ',"bindSecret":"%s"' "${BIND_SECRET}")
                     fi
                     REGISTER_PAYLOAD=$(printf \
@@ -1076,8 +1092,8 @@ spec:
                     name: kubehz-agent-config
               env:
                 # The one-time bind secret `lo kubehz deploy` stages in
-                # kubehz-agent-bind, before it applies this CronJob, when a
-                # register wrote one. Optional: the Secret is absent on any
+                # kubehz-agent-bind while this CronJob is suspended, when
+                # a register wrote one. Optional: the Secret is absent on any
                 # install with no bind secret in play. The bootstrap then
                 # registers without it and gets a separate pending row, which
                 # the user claims by its claim code.

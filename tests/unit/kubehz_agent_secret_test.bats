@@ -450,6 +450,64 @@ STUBS_EOF
   assert_output --partial "Authorization: Bearer ${a} ;"
 }
 
+# The bind secret comes in two forms: 64 lowercase hex, or khzb_ and 64
+# lowercase hex. The register sends either one byte for byte. The hex of the
+# fixture holds digits and letters.
+@test "agent: a khzb_ bind secret goes into the register body as it is" {
+  export BIND_SECRET="khzb_$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+  assert_agent_calls_bounded
+  run command jq -r '.bindSecret' "${REGISTER_OUT}"
+  assert_output "${BIND_SECRET}"
+}
+
+# Any other value is left out of the register body, and the body stays
+# valid JSON: a wrong case, a wrong prefix, a length next to 64 or 69, a line
+# end or a newline inside, and a quote, a backslash, a tab or a letter that
+# is no hex digit in place of one hex digit (64 and 69 bytes). An env value
+# cannot hold a NUL (execve strings end at one), so no row has one.
+@test "agent: a bind secret of any other shape is left out of the register body" {
+  local hex name
+  hex="$(printf '5e%.0s' $(seq 1 32))"
+  _build_runner
+  for name in upper-prefix upper-hex khza prefixed-63 prefixed-65 long65 short63 \
+    prefixed-newline prefixed-cr prefixed-crlf nl64 nl69 nl69-first \
+    quote backslash tab not-hex prefixed-quote prefixed-backslash prefixed-tab prefixed-not-hex; do
+    case "${name}" in
+      quote) BIND_SECRET="${hex:0:63}\"" ;;
+      backslash) BIND_SECRET="${hex:0:63}\\" ;;
+      tab) BIND_SECRET="${hex:0:32}"$'\t'"${hex:33}" ;;
+      not-hex) BIND_SECRET="${hex:0:63}g" ;;
+      prefixed-quote) BIND_SECRET="khzb_${hex:0:32}\"${hex:33}" ;;
+      prefixed-backslash) BIND_SECRET="khzb_${hex:0:32}\\${hex:33}" ;;
+      prefixed-tab) BIND_SECRET="khzb_${hex:0:63}"$'\t' ;;
+      prefixed-not-hex) BIND_SECRET="khzb_z${hex:1}" ;;
+      upper-prefix) BIND_SECRET="KHZB_${hex}" ;;
+      upper-hex) BIND_SECRET="khzb_${hex^^}" ;;
+      khza) BIND_SECRET="khza_${hex}" ;;
+      prefixed-63) BIND_SECRET="khzb_${hex:1}" ;;
+      prefixed-65) BIND_SECRET="khzb_${hex}a" ;;
+      long65) BIND_SECRET="${hex}a" ;;
+      short63) BIND_SECRET="${hex:1}" ;;
+      prefixed-newline) BIND_SECRET="khzb_${hex}"$'\n' ;;
+      prefixed-cr) BIND_SECRET="khzb_${hex}"$'\r' ;;
+      prefixed-crlf) BIND_SECRET="khzb_${hex}"$'\r\n' ;;
+      nl64) BIND_SECRET="${hex:0:32}"$'\n'"${hex:33}" ;;
+      nl69) BIND_SECRET="${hex}"$'\nabcd' ;;
+      nl69-first) BIND_SECRET=$'abcd\n'"${hex}" ;;
+    esac
+    export BIND_SECRET
+    _store_load no-data
+    rm -f "${REGISTER_OUT}"
+    run sh "${RUNNER}"
+    assert_success
+    run command jq -e 'has("agentTokenHash") and (has("bindSecret") | not)' "${REGISTER_OUT}"
+    [ "${status}" -eq 0 ] || { echo "the register body of ${name} is not valid JSON without bindSecret"; return 1; }
+  done
+}
+
 @test "agent: agent-register posts sha256(A)/sha256(C) — never the plaintext secrets" {
   _build_runner
   run sh "${RUNNER}"

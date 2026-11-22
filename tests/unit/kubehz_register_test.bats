@@ -760,10 +760,11 @@ EOF
   }
   export -f curl
 
+  # The real jq checks and prints the bind secret of the answer.
   jq() {
     case "$2" in
       '.id // empty') echo "cl-001" ;;
-      '.bindSecret // empty') echo "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70" ;;
+      *bindSecret*) command jq "$@" ;;
       *) echo "" ;;
     esac
   }
@@ -820,12 +821,60 @@ EOF
 
 BIND_STORED="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 BIND_NEXT="009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+# The khzb_ form: khzb_ and 64 lowercase hex characters, 69 bytes. The hex
+# holds digits and letters.
+BIND_PREFIXED="khzb_$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+BIND_PREFIXED_NEXT="khzb_$(printf 'fedcba9876543210%.0s' 1 2 3 4)"
 
-# _register_sandbox <response bindSecret>: the real jq behind a wrapper that
-# saves its argv, a Lo spec through the yq stub, and a curl that saves its
-# argv and its stdin (the request body). Every register response hands out
-# <response bindSecret>. STUB_FINGERPRINT and STUB_PUBLIC_KEY set the claim
-# key of the answer. With STUB_ENV_DUMP set, each jq child writes its
+# The file contents that are no bind secret, in both forms (the names of
+# _write_bind_fixture). nl69 is the trap of a check per line: 64 hex, a
+# newline and 4 bytes make 69 bytes, and the first line matches. nul69 is
+# the same trap with a NUL: a grep in binary mode can read the NUL as a line
+# end.
+BIND_UNUSABLE=(upper short short-newline newline cr crlf prefixed-newline prefixed-cr prefixed-crlf
+  nl64 nl69 nl69-first prefixed-upper prefixed-upper-hex khza long65 prefixed-short68 prefixed-long70
+  not-hex oversized nul69 nul69-first suffix hex69)
+
+# _write_bind_fixture <name> <path>: write the fixture <name> at <path>.
+_write_bind_fixture() {
+  local name="${1}" path="${2}"
+  case "${name}" in
+    valid) printf %s "${BIND_STORED}" ;;
+    prefixed) printf %s "${BIND_PREFIXED}" ;;
+    upper) printf %s "${BIND_STORED^^}" ;;
+    short) printf %s "${BIND_STORED:1}" ;;
+    short-newline) printf '%s\n' "${BIND_STORED:1}" ;;
+    newline) printf '%s\n' "${BIND_STORED}" ;;
+    cr) printf '%s\r' "${BIND_STORED}" ;;
+    crlf) printf '%s\r\n' "${BIND_STORED}" ;;
+    prefixed-newline) printf '%s\n' "${BIND_PREFIXED}" ;;
+    prefixed-cr) printf '%s\r' "${BIND_PREFIXED}" ;;
+    prefixed-crlf) printf '%s\r\n' "${BIND_PREFIXED}" ;;
+    nl64) printf '%s\n%s' "${BIND_STORED:0:32}" "${BIND_STORED:33}" ;;
+    nl69) printf '%s\nabcd' "${BIND_STORED}" ;;
+    nl69-first) printf 'abcd\n%s' "${BIND_STORED}" ;;
+    prefixed-upper) printf %s "KHZB_${BIND_STORED}" ;;
+    prefixed-upper-hex) printf %s "khzb_${BIND_STORED^^}" ;;
+    khza) printf %s "khza_${BIND_STORED}" ;;
+    long65) printf %s "${BIND_STORED}a" ;;
+    prefixed-short68) printf %s "khzb_${BIND_STORED:1}" ;;
+    prefixed-long70) printf %s "khzb_${BIND_STORED}a" ;;
+    not-hex) printf %s "g${BIND_STORED:1}" ;;
+    oversized) printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a ;;
+    nul69) printf '%s\0abcd' "${BIND_STORED}" ;;
+    nul69-first) printf 'abcd\0%s' "${BIND_STORED}" ;;
+    suffix) printf %s "${BIND_STORED}khzb_" ;;
+    hex69) printf %s "${BIND_STORED}${BIND_STORED:0:5}" ;;
+    *) echo "unknown bind fixture ${name}" >&2; return 1 ;;
+  esac > "${path}"
+}
+
+# _register_sandbox <response bindSecret> [<JSON value>]: the real jq behind
+# a wrapper that saves its argv, a Lo spec through the yq stub, and a curl
+# that saves its argv and its stdin (the request body). Every register
+# response hands out <response bindSecret> as a string, or the raw <JSON
+# value> when one is given. STUB_FINGERPRINT and STUB_PUBLIC_KEY set the
+# claim key of the answer. With STUB_ENV_DUMP set, each jq child writes its
 # environment to that file.
 _register_sandbox() {
   yq() {
@@ -836,7 +885,7 @@ _register_sandbox() {
     esac
   }
   export -f yq
-  export STUB_NEXT="${1}" STUB_CURL_ARGV="${BATS_TEST_TMPDIR}/curl.argv" STUB_CURL_BODY="${BATS_TEST_TMPDIR}/curl.body"
+  export STUB_NEXT="${1}" STUB_NEXT_JSON="${2:-}" STUB_CURL_ARGV="${BATS_TEST_TMPDIR}/curl.argv" STUB_CURL_BODY="${BATS_TEST_TMPDIR}/curl.body"
   export STUB_JQ_ARGV="${BATS_TEST_TMPDIR}/jq.argv"
   : > "${STUB_CURL_ARGV}"
   : > "${STUB_CURL_BODY}"
@@ -852,9 +901,11 @@ _register_sandbox() {
     echo "$*" >> "${STUB_CURL_ARGV}"
     curl_capture "$@"
     [[ "${CURL_URL}" != *"/api/clusters/register" ]] || printf '%s' "${CURL_BODY}" >> "${STUB_CURL_BODY}"
+    local next_json="\"${STUB_NEXT}\""
+    [[ -z "${STUB_NEXT_JSON:-}" ]] || next_json="${STUB_NEXT_JSON}"
     case "$*" in
       *"/api/clusters/register"*)
-        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"%s","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${STUB_NEXT}" "${STUB_PUBLIC_KEY:-ssh-ed25519 AAAA k}" "${STUB_FINGERPRINT:-aa:bb}" ;;
+        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":%s,"claimKey":{"publicKey":"%s","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${next_json}" "${STUB_PUBLIC_KEY:-ssh-ed25519 AAAA k}" "${STUB_FINGERPRINT:-aa:bb}" ;;
       *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n' ;;
       *) printf '{}\n' ;;
     esac
@@ -894,7 +945,7 @@ _register_base() {
     # `command jq`: the test's own jq calls stay out of the argv record.
     run command jq -c . "${STUB_CURL_BODY}"
     assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_STORED}" '. + {bindSecret: $b}')"
-    # The register call refuses a redirect off https (F7).
+    # The register call refuses a redirect off https.
     run grep -c -e " --proto-redir =https -X POST https://api.kubehz.dev/api/clusters/register " "${STUB_CURL_ARGV}"
     assert_output "1"
     run grep -c -e "${BIND_STORED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"
@@ -905,23 +956,61 @@ ${STUB_JQ_ARGV}:0"
   done
 }
 
+@test "register: every mode sends a stored khzb_ bind secret byte for byte and stores a khzb_ one" {
+  local mode bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    _register_sandbox "${BIND_PREFIXED_NEXT}"
+    _write_bind_fixture prefixed "${bind_file}"
+
+    run _register_mode "${mode}"
+    assert_success
+    refute_output --partial "${BIND_PREFIXED}"
+    run command jq -c . "${STUB_CURL_BODY}"
+    assert_output "$(_register_base "${mode}" | command jq -c --arg b "${BIND_PREFIXED}" '. + {bindSecret: $b}')"
+    run grep -c -e "${BIND_PREFIXED}" "${STUB_CURL_ARGV}" "${STUB_JQ_ARGV}"
+    assert_output "${STUB_CURL_ARGV}:0
+${STUB_JQ_ARGV}:0"
+    run cat "${bind_file}"
+    assert_output "${BIND_PREFIXED_NEXT}"
+    run stat -c '%s' "${bind_file}"
+    assert_output "69"
+  done
+}
+
+@test "bind_secret_ok: takes 64 hex or khzb_ and 64 hex, and refuses every other file (a newline inside one too)" {
+  _source_main_for_persist
+  local name bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for name in valid prefixed; do
+    _write_bind_fixture "${name}" "${bind_file}"
+    run kubehz::bind_secret_ok "${bind_file}"
+    [ "${status}" -eq 0 ] || { echo "bind_secret_ok refused the fixture ${name}"; return 1; }
+  done
+  # The trap: 69 bytes, and grep -x finds a line of 64 hex.
+  _write_bind_fixture nl69 "${bind_file}"
+  run wc -c < "${bind_file}"
+  assert_output "69"
+  run grep -Ecx '[0-9a-f]{64}' "${bind_file}"
+  assert_output "1"
+  for name in "${BIND_UNUSABLE[@]}"; do
+    _write_bind_fixture "${name}" "${bind_file}"
+    run kubehz::bind_secret_ok "${bind_file}"
+    [ "${status}" -ne 0 ] || { echo "bind_secret_ok took the fixture ${name}"; return 1; }
+  done
+  rm -f "${bind_file}"
+}
+
 @test "register: a missing, irregular or malformed stored bind secret adds no bindSecret" {
   local mode stored bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   for mode in legacy bearer claim-key; do
-    for stored in missing directory unreadable upper short short-newline newline not-hex oversized; do
+    for stored in missing directory unreadable "${BIND_UNUSABLE[@]}"; do
       [[ "${stored}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
       _register_sandbox ""
       rm -rf "${bind_file}"
       case "${stored}" in
         missing) ;;
         unreadable) printf %s "${BIND_STORED}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
-        oversized) { printf %s "${BIND_STORED}"; head -c 200000 /dev/zero | tr '\0' a; } > "${bind_file}" ;;
         directory) mkdir -p "${bind_file}" ;;
-        upper) printf %s "${BIND_STORED^^}" > "${bind_file}" ;;
-        short) printf %s "${BIND_STORED:1}" > "${bind_file}" ;;
-        short-newline) printf '%s\n' "${BIND_STORED:1}" > "${bind_file}" ;;
-        newline) printf '%s\n' "${BIND_STORED}" > "${bind_file}" ;;
-        not-hex) printf %s "g${BIND_STORED:1}" > "${bind_file}" ;;
+        *) _write_bind_fixture "${stored}" "${bind_file}" ;;
       esac
 
       run _register_mode "${mode}"
@@ -936,6 +1025,136 @@ ${STUB_JQ_ARGV}:0"
     done
   done
   rm -rf "${bind_file}"
+}
+
+@test "register: every mode refuses an answer whose bind secret is not one, keeps the file and warns once" {
+  local mode answer count bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  local warning="[warn] kubehz: the platform answer holds a bind secret that lo cannot use (lo accepts 64 lowercase hex characters, or khzb_ and 64 lowercase hex characters). lo did not change clusters/test.kubehz.dev/.kubehz-bind."
+  # JSON values: a final LF, a NUL inside and at the end, upper case, a
+  # khzb_ value with a final LF, a number of 64 digits, a bool, a list.
+  local -a answers=(
+    "\"${BIND_NEXT}\\n\""
+    "\"${BIND_NEXT:0:32}\\u0000${BIND_NEXT:32}\""
+    "\"${BIND_NEXT}\\u0000\""
+    "\"${BIND_NEXT^^}\""
+    "\"khzb_${BIND_NEXT}\\n\""
+    "$(printf '1%.0s' $(seq 1 64))"
+    "true"
+    "[\"${BIND_NEXT}\"]"
+  )
+  for mode in legacy bearer claim-key; do
+    for answer in "${answers[@]}"; do
+      _register_sandbox "" "${answer}"
+      printf %s "${BIND_STORED}" > "${bind_file}"
+
+      run _register_mode "${mode}"
+      assert_success
+      count=$(grep -cF -- "${warning}" <<< "${output}") || true
+      [ "${count}" -eq 1 ] || { echo "${mode} ${answer}: the warning came ${count} times: ${output}"; return 1; }
+      # The answer can have rotated the secret: the warning says so, and
+      # names the recovery.
+      assert_output --partial "The platform can have rotated the bind secret with this answer: then the value in the file no longer counts, and lo cannot get the new value again."
+      assert_output --partial "An agent that has no binding yet can then register a separate pending row: claim that row with the code from 'lo kubehz claim-code'."
+      refute_output --partial "${BIND_NEXT}"
+      refute_output --partial "${BIND_NEXT^^}"
+      refute_output --partial "${BIND_STORED}"
+      run cat "${bind_file}"
+      assert_output "${BIND_STORED}"
+    done
+  done
+}
+
+@test "register: an answer with no bind secret (null, false or empty) keeps the stored file in every mode, with no warning" {
+  local mode answer bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  for mode in legacy bearer claim-key; do
+    for answer in null false '""'; do
+      _register_sandbox "" "${answer}"
+      _write_bind_fixture prefixed "${bind_file}"
+
+      run _register_mode "${mode}"
+      assert_success
+      refute_output --partial "cannot use"
+      run cat "${bind_file}"
+      assert_output "${BIND_PREFIXED}"
+    done
+  done
+}
+
+@test "register_body: the check reads a private copy that is gone afterwards, and no copy means no bind secret and a warning" {
+  _source_main_for_persist
+  local name tmp="${BATS_TEST_TMPDIR}/register-tmp" bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkdir -p "${tmp}"
+  export TMPDIR="${tmp}"
+  # shellcheck disable=SC2016  # the filter is jq program text
+  for name in valid prefixed nul69 oversized; do
+    _write_bind_fixture "${name}" "${bind_file}"
+    run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
+    assert_success
+    run ls -A "${tmp}"
+    assert_output ""
+  done
+  # No temporary file: the body goes out without the bind secret.
+  _write_bind_fixture valid "${bind_file}"
+  export TMPDIR="${BATS_TEST_TMPDIR}/missing"
+  # shellcheck disable=SC2016  # the filter is jq program text
+  run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
+  assert_success
+  assert_output --partial "[warn] kubehz: could not create a temporary directory to read clusters/test.kubehz.dev/.kubehz-bind, so this register call does not send the bind secret."
+  refute_output --partial "${BIND_STORED}"
+  refute_output --partial "bindSecret"
+  assert_output --partial '"domain": "test.kubehz.dev"'
+}
+
+# A TERM after the copy exists: the trap of the subshell body removes the
+# private directory with the copy. The jq stub is the step after the copy:
+# it saves what the directory holds, then sends TERM to the shell that runs
+# register_body.
+@test "register_body: a TERM after the copy exists removes the private copy" {
+  _source_main_for_persist
+  local tmp="${BATS_TEST_TMPDIR}/register-term" bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
+  mkdir -p "${tmp}"
+  export TMPDIR="${tmp}"
+  export STUB_SEEN="${BATS_TEST_TMPDIR}/seen"
+  _write_bind_fixture valid "${bind_file}"
+  jq() {
+    ls -A -- "${TMPDIR}"/* > "${STUB_SEEN}"
+    kill -TERM "${BASHPID}"
+  }
+  # shellcheck disable=SC2016  # the filter is jq program text
+  run kubehz::register_body test.kubehz.dev '{domain: $d}' --arg d test.kubehz.dev
+  [ "${status}" -eq 143 ] || { echo "status ${status}: ${output}"; return 1; }
+  run cat "${STUB_SEEN}"
+  assert_output "bind-secret"
+  run ls -A "${tmp}"
+  assert_output ""
+  unset -f jq
+}
+
+@test "bind_secret_snapshot: copies at most 70 bytes at 0600, checks the copy, and refuses a FIFO without a read" {
+  _source_main_for_persist
+  local bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" copy="${BATS_TEST_TMPDIR}/copy"
+  _write_bind_fixture prefixed "${bind_file}"
+  run kubehz::bind_secret_snapshot "${bind_file}" "${copy}"
+  assert_success
+  run cmp "${bind_file}" "${copy}"
+  assert_success
+  run stat -c '%a' "${copy}"
+  assert_output "600"
+  # 200 kB: the copy holds 70 bytes, and the check refuses it.
+  _write_bind_fixture oversized "${bind_file}"
+  run kubehz::bind_secret_snapshot "${bind_file}" "${copy}"
+  assert_failure
+  run stat -c '%s' "${copy}"
+  assert_output "70"
+  # A FIFO is no regular file: refused before any open, so nothing blocks.
+  rm -f "${bind_file}" "${copy}"
+  mkfifo "${bind_file}"
+  export -f kubehz::bind_secret_ok kubehz::bind_secret_snapshot
+  # A read of a FIFO waits for a writer; timeout turns a hang into status 124.
+  run timeout 10 bash -c 'kubehz::bind_secret_snapshot "$1" "$2"' _ "${bind_file}" "${copy}"
+  [ "${status}" -eq 1 ] || { echo "a FIFO gave status ${status}"; return 1; }
+  assert [ ! -e "${copy}" ]
+  rm -f "${bind_file}"
 }
 
 @test "register: a new bind secret replaces an unreadable stored file (0600, no temporary file left)" {
@@ -1073,7 +1292,7 @@ _persist_with_a_planted_link() {
   _source_main_for_persist
   local slot="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   mkfifo "${slot}"
-  export -f kubehz::bind_secret_ok kubehz::register_body
+  export -f kubehz::bind_secret_ok kubehz::bind_secret_snapshot kubehz::register_body kubehz::own_private_copy
 
   # A read of a FIFO waits for a writer; timeout turns a hang into status 124.
   run timeout 10 bash -c 'kubehz::bind_secret_ok "$1"' _ "${slot}"

@@ -376,16 +376,29 @@ EOF
 for d in bind-cron.dev bind-op.dev; do
   printf %s 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/${d}/.kubehz-bind"
 done
-# bind-bad.dev — the file holds no bind secret (a trailing newline): the
-# deploy warns and stages nothing.
-mk bind-bad.dev <<'EOF'
+# bind-pfx.dev — the khzb_ form (digits and letters in the hex) is staged
+# as it is.
+mk bind-pfx.dev <<'EOF'
 kind: KubeOne
 spec:
   kubehz:
     access: registered
     apiUrl: https://api.kubehz.example
 EOF
+printf 'khzb_%s' "$(printf '0123456789abcdef%.0s' 1 2 3 4)" > "${CL}/bind-pfx.dev/.kubehz-bind"
+# bind-bad.dev / bind-nul.dev — the file holds no bind secret (a trailing
+# newline; 64 hex, a NUL and 4 bytes): the deploy warns and stages nothing.
+for d in bind-bad.dev bind-nul.dev; do
+  mk "${d}" <<'EOF'
+kind: KubeOne
+spec:
+  kubehz:
+    access: registered
+    apiUrl: https://api.kubehz.example
+EOF
+done
 printf '%s\n' 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/bind-bad.dev/.kubehz-bind"
+printf '%s\0abcd' 9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70 > "${CL}/bind-nul.dev/.kubehz-bind"
 # broken.dev — unparsable spec.
 mkdir -p "${CL}/broken.dev"
 printf '{{ not yaml' > "${CL}/broken.dev/cluster.lok8s.yaml"
@@ -456,32 +469,78 @@ check - kubehz deploy --domain lo-hosted.dev
 check - kubehz deploy --domain kubehz-self.dev
 check "${PARSEERR}" kubehz deploy --domain broken.dev
 
-# ── deploy: the bind secret goes in before an agent changes ────────────────
-# A kubectl that names each call on stderr, answers the three staging calls
-# and the dry-run render, and fails the first call after them. The diff then
-# covers the staging calls, the stdin of the server-side apply and the first
-# call that changes an agent, in order. The render dir is random per run (Go
-# /tmp/<n>, bash /tmp/tmp.<x>), so the stub prints it as <work>.
+# ── deploy: the bind secret goes in while the CronJob agent is suspended ───
+# A kubectl that names each call on stderr. It answers the CronJob path (the
+# live-agent removal, an empty pod list, the CronJob apply, the delete of its
+# Jobs, the patch that ends the suspend), the three staging calls, the server
+# dry run of the preflight of the operator direction before the CronJob
+# apply, an identity Secret that holds an agent-token, and the dry-run
+# render, and fails every other call: in operator mode the first one is the
+# live agent apply. The dry-run create
+# prints the SHA-256 of its stdin, so the stdin of the server-side apply (and
+# of its dry run) shows which bytes were staged. A call whose argv contains
+# PARITY_BIND_FAIL fails too. The diff then covers the calls in order. The
+# render dir is a new temporary dir on each run, in both twins, so the stub
+# prints it as <work>.
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
 # Parity stub: no live cluster may be reached.
 printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' >&2
+[[ -z "${PARITY_BIND_FAIL:-}" || "$*" != *"${PARITY_BIND_FAIL}"* ]] || exit 1
 case "$*" in
+  "apply -k "*/agent) exit 0 ;;
+  "delete -k "*/live-agent/managed" --ignore-not-found=true") exit 0 ;;
+  "-n kubehz-system delete deployment -l "*) exit 0 ;;
+  "-n kubehz-system delete job -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --ignore-not-found=true") exit 0 ;;
+  "-n kubehz-system get pods "*) exit 0 ;;
+  "-n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p "*) exit 0 ;;
+  "-n kubehz-system get secret kubehz-agent -o go-template="*) printf 'agent-token\n'; exit 0 ;;
   "apply -f "*/agent/namespace.yaml) exit 0 ;;
-  *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml") printf 'kind: Secret\n'; exit 0 ;;
+  *"create secret generic kubehz-agent-bind "*"--dry-run=client -o yaml")
+    printf 'kind: Secret\nbind-secret-sha256: %s\n' "$(sha256sum | cut -d' ' -f1)"; exit 0 ;;
   "apply --server-side --force-conflicts -f -") sed 's/^/stdin: /' >&2; exit 0 ;;
+  "apply --server-side --force-conflicts --dry-run=server -f -") sed 's/^/dry-run stdin: /' >&2; exit 0 ;;
   "kustomize "*) printf 'kind: Rendered\n'; exit 0 ;;
 esac
 exit 1
 SH
 check - kubehz deploy --domain bind-cron.dev
 check - kubehz deploy --domain bind-op.dev
+check - kubehz deploy --domain bind-pfx.dev              # the khzb_ form, staged as it is
 check - kubehz deploy --domain reg.dev                   # no bind secret: warn, then today's order
 check - kubehz deploy --domain op-reg.dev
 check - kubehz deploy --domain bind-bad.dev              # no bind secret in the file: warn, stage nothing
-check - kubehz deploy --dry-run --domain bind-cron.dev    # the Secret line comes first
+check - kubehz deploy --domain bind-nul.dev              # a NUL in the file: warn, stage nothing
+check - kubehz deploy --dry-run --domain bind-cron.dev    # the Secret line follows the CronJob agent
+check - kubehz deploy --dry-run --domain bind-op.dev
 check - kubehz deploy --dry-run --domain reg.dev
-# A failed stage stops the deploy before the CronJob agent.
+# A failed stage stops the deploy with the CronJob agent suspended. In the
+# operator direction the same calls run first as the preflight, so a failed
+# namespace apply, dry-run create or server dry run stops the deploy before
+# the CronJob agent.
+export PARITY_BIND_FAIL=namespace.yaml
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev               # the preflight fails: the namespace apply can have changed it
+export PARITY_BIND_FAIL=--dry-run=client
+check - kubehz deploy --domain bind-op.dev               # the preflight fails: only the namespace was applied
+export PARITY_BIND_FAIL=--dry-run=server
+check - kubehz deploy --domain bind-op.dev
+# The real server-side apply only (its dry run passes): the preflight
+# passes, and the stage after the CronJob agent fails.
+export PARITY_BIND_FAIL="--force-conflicts -f -"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+# The delete of the CronJob agent's Jobs fails: no stage, and the CronJob
+# stays suspended. The patch that ends the suspend fails: after the stage.
+export PARITY_BIND_FAIL="delete job -l"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+export PARITY_BIND_FAIL="patch cronjob"
+check - kubehz deploy --domain bind-cron.dev
+check - kubehz deploy --domain bind-op.dev
+unset PARITY_BIND_FAIL
+# A kubectl that fails every call: the deploy stops at its first call and
+# stages nothing.
 parity::stub_kubectl_fail "${PROJ}"
 check - kubehz deploy --domain bind-cron.dev
 check - kubehz deploy --domain bind-op.dev
@@ -501,6 +560,11 @@ printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' 
 case "$*" in
   "apply -k "*) exit 0 ;;
   "-n kubehz-system get pods -l app=kubehz-heartbeat "*) exit 0 ;;
+  # The delete of the CronJob agent's Jobs, the poll for their pods (none),
+  # and the patch that ends the suspend.
+  "-n kubehz-system delete job -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent --ignore-not-found=true") exit 0 ;;
+  "-n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent "*) exit 0 ;;
+  "-n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p "*) exit 0 ;;
   # The identity probe: the Secret holds an agent-token, so no bootstrap runs.
   "-n kubehz-system get secret kubehz-agent -o go-template="*) printf 'agent-token'; exit 0 ;;
   "-n kubehz-system rollout status "*) echo 'error: timed out waiting for the condition' >&2; exit 1 ;;
@@ -1252,7 +1316,12 @@ EOF
   # BIND_FIXTURE: what the slot .kubehz-bind holds before each run: a valid
   # value, one with a trailing newline, one in upper case, a valid value in
   # a file nobody may read, a valid value with 200 kB after it, a
-  # directory, a link to a directory, or no file.
+  # directory, a link to a directory, or no file. The khzb_ form too: a
+  # valid one (digits and letters in the hex), one with an upper-case
+  # prefix, and 64 hex, a newline and 4 bytes (69 bytes with a line of 64
+  # hex). And 64 hex with a NUL and 4 bytes after or before it (69 bytes, no
+  # newline), 64 hex with khzb_ at the end, and 69 hex with no prefix.
+  BIND_PREFIXED="khzb_$(printf '0123456789abcdef%.0s' 1 2 3 4)"
   bind_reset() {
     rm -rf "${CL}/bind-reg.dev/.kubehz-bind" "${WORK}/bind-target"
     : > "${STUB_LOG}"
@@ -1260,6 +1329,13 @@ EOF
       valid) printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
       newline) printf '%s\n' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
       upper) printf %s "${BIND_STORED^^}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      prefixed) printf %s "${BIND_PREFIXED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      prefixed-upper) printf %s "KHZB_${BIND_PREFIXED#khzb_}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      prefixed-nl69) printf '%s\nabcd' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      nul69) printf '%s\0abcd' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      nul69-first) printf 'abcd\0%s' "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      suffix) printf %s "${BIND_STORED}khzb_" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
+      hex69) printf %s "${BIND_STORED}${BIND_STORED:0:5}" > "${CL}/bind-reg.dev/.kubehz-bind" ;;
       unreadable)
         printf %s "${BIND_STORED}" > "${CL}/bind-reg.dev/.kubehz-bind"
         chmod 000 "${CL}/bind-reg.dev/.kubehz-bind"
@@ -1288,7 +1364,8 @@ EOF
     } >> "${WORK}/${1}.out"
   }
   bind_check() { PARITY_PRE_EACH=bind_reset PARITY_POST_EACH=bind_record check "$@"; }
-  BIND_FIXTURES=(valid newline upper oversized directory dirlink missing)
+  BIND_FIXTURES=(valid newline upper prefixed prefixed-upper prefixed-nl69 nul69 nul69-first suffix hex69
+    oversized directory dirlink missing)
   # root reads a 0000 file, so the case proves nothing there.
   [[ "$(id -u)" == 0 ]] || BIND_FIXTURES+=(unreadable)
   for BIND_FIXTURE in "${BIND_FIXTURES[@]}"; do
@@ -1300,6 +1377,46 @@ EOF
     bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
     unset HCLOUD_TOKEN HCLOUD_API_BASE
   done
+
+  # ── register: an answer whose bind secret is not one ──────────────────────
+  # The stub answers these domains with a bindSecret that is no bind secret
+  # (BAD_BIND in the stub): a final LF, a NUL inside, upper case, a number.
+  # Each run starts with a valid stored .kubehz-bind. lo keeps it as it is and
+  # warns once. The request log and the stored file join stdout.
+  for BAD_DOMAIN in bad-lf.dev bad-nul.dev bad-upper.dev bad-number.dev; do
+    mk "${BAD_DOMAIN}" <<EOF
+kind: Lo
+metadata:
+  name: ${BAD_DOMAIN%%.*}
+spec:
+  cluster:
+    domain: ${BAD_DOMAIN}
+  kubehz:
+    access: registered
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+  done
+  bad_reset() { printf %s "${BIND_STORED}" > "${CL}/${BAD_DOMAIN}/.kubehz-bind"; : > "${STUB_LOG}"; }
+  bad_record() {
+    {
+      echo "--- requests"
+      cat "${STUB_LOG}"
+      echo "--- .kubehz-bind"
+      cat "${CL}/${BAD_DOMAIN}/.kubehz-bind"
+      echo
+    } >> "${WORK}/${1}.out"
+  }
+  bad_check() { PARITY_PRE_EACH=bad_reset PARITY_POST_EACH=bad_record check "$@"; }
+  for BAD_DOMAIN in bad-lf.dev bad-nul.dev bad-upper.dev bad-number.dev; do
+    bad_check "${UNBOUND}" kubehz register --domain "${BAD_DOMAIN}"         # fingerprint announce
+    export KUBEHZ_TOKEN=khzt_parity
+    bad_check "${UNBOUND}" kubehz register --domain "${BAD_DOMAIN}"         # bearer (direct claim)
+    unset KUBEHZ_TOKEN
+    export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+    bad_check "${UNBOUND}" kubehz register --domain "${BAD_DOMAIN}"         # claim key
+    unset HCLOUD_TOKEN HCLOUD_API_BASE
+  done
+  unset BAD_DOMAIN
 
   # ── register: a platform that stays unavailable (#312) ────────────────────
   # The stub refuses these domains every time: busy-reg.dev with 503 and
@@ -1397,7 +1514,7 @@ EOF
     key_check - kubehz deregister --domain "${KEY_DOMAIN}"
   done
   unset KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE KEY_DOMAIN TICKET_WANT
-  unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
+  unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES BIND_PREFIXED
 fi
 
 report
