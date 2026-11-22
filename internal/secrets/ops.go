@@ -320,7 +320,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	if err := c.encryptChecked(checked); err != nil {
 		return err
 	}
-	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
+	fmt.Fprintln(c.Out, "done. Commit .sops.yaml and the updated .enc files together")
 	return nil
 }
 
@@ -395,7 +395,7 @@ func (c *Context) finishReKey(checked sweepList, left []string, recipient string
 		ui.ErrorTo(c.ErrOut, "  the key is in .sops.yaml, but the creation rule of these files may not list it (for example, the key is only in a comment): fix .sops.yaml, then run this command again")
 		return ErrHandled
 	}
-	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
+	fmt.Fprintln(c.Out, "done. Commit .sops.yaml and the updated .enc files together")
 	return nil
 }
 
@@ -566,7 +566,7 @@ func (c *Context) encryptFile(plaintext string) error {
 	}
 	encPath := plaintext + ".enc"
 	if !encDestinationOK(encPath) {
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again", c.rel(encPath))
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written. Remove it, then encrypt again", c.rel(encPath))
 		return ErrHandled
 	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))

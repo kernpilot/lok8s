@@ -72,7 +72,7 @@ func (c *Context) sopsConfigDest() (string, error) {
 	path := c.sopsConfigPath()
 	dest, err := resolveConfig(path)
 	if err != nil {
-		ui.ErrorTo(c.ErrOut, "%s does not resolve to a regular file — nothing was changed; run this command again", path)
+		ui.ErrorTo(c.ErrOut, "%s does not resolve to a regular file: nothing was changed. Run this command again", path)
 		return "", ErrHandled
 	}
 	return dest, nil
@@ -132,7 +132,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		return nil, ErrHandled
 	}
 	if err != nil {
-		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s — the lock goes beside the file that .sops.yaml names, so lo needs write access to %s; nothing was changed", path, filepath.Dir(path))
+		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s: the lock goes beside the file that .sops.yaml names, so lo needs write access to %s. Nothing was changed", path, filepath.Dir(path))
 		return nil, ErrHandled
 	}
 	lockOpened(path)
@@ -162,7 +162,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		}
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
-			ui.ErrorTo(c.ErrOut, "%s is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends", path)
+			ui.ErrorTo(c.ErrOut, "%s is held by another lo secrets add-key or remove-key: nothing was changed. Run it again when that one ends", path)
 			return nil, ErrHandled
 		}
 		_ = lockSleep(context.Background(), 200*time.Millisecond)
@@ -172,7 +172,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 // refuseLockPath prints the refusal of a lock path that is not a regular
 // file (bash: the same line in secrets::_lock).
 func (c *Context) refuseLockPath(path string) {
-	ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again", path)
+	ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed. Remove it, then run this command again", path)
 }
 
 // openedPathOK reports whether f, opened from path, is a regular file and
