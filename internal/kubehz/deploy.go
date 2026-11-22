@@ -662,7 +662,7 @@ func (c *Context) takeBindSecret(domain string) string {
 // The texts of the warnings and errors about the bind secret.
 const (
 	pendingRowIfUnbound = "the agent can register a separate pending row if it has no binding and no staged value yet"
-	bindSecretRBAC      = "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
+	bindRBACNeeded      = "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
 	deployWithoutSecret = "To deploy without the secret, remove the file and the Secret (kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found), then claim the new row with the code from 'lo kubehz claim-code'."
 )
 
@@ -681,7 +681,7 @@ func (c *Context) proveBindSecret(ctx context.Context, workdir, domain, secret s
 		err = c.bindSecretUpsert(ctx, secret, "--dry-run=server")
 	}
 	if err != nil {
-		c.errorf("kubehz: the preflight of the bind secret stage failed (a server-side dry run of Secret kubehz-system/kubehz-agent-bind with the value from clusters/%s/.kubehz-bind), so the deploy stopped before the CronJob agent apply. %s %s %s", domain, changed, bindSecretRBAC, deployWithoutSecret)
+		c.errorf("kubehz: the preflight of the bind secret stage failed (a server-side dry run of Secret kubehz-system/kubehz-agent-bind with the value from clusters/%s/.kubehz-bind), so the deploy stopped before the CronJob agent apply. %s %s %s", domain, changed, bindRBACNeeded, deployWithoutSecret)
 		return ErrHandled
 	}
 	return nil
@@ -695,7 +695,7 @@ func (c *Context) stageBindSecretBytes(ctx context.Context, workdir, domain, sec
 		if ctx.Err() != nil {
 			return c.suspendInterrupted(ctx)
 		}
-		c.errorf("kubehz: could not stage the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The stage can have applied the namespace or the Secret. %s %s If you deploy without the secret, %s. %s", domain, agentStaysSuspended, bindSecretRBAC, pendingRowIfUnbound, deployWithoutSecret)
+		c.errorf("kubehz: could not stage the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The stage can have applied the namespace or the Secret. %s %s If you deploy without the secret, %s. %s", domain, agentStaysSuspended, bindRBACNeeded, pendingRowIfUnbound, deployWithoutSecret)
 		return ErrHandled
 	}
 	return nil
