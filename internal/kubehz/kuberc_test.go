@@ -1,9 +1,10 @@
 package kubehz
 
 // kuberc_test.go — every kubectl apply of the agent deploy (the namespace,
-// the bind Secret, the CronJob agent and the live agent) runs with the
-// kubectl user defaults off (execx.KubeRCOff). The applies run through
-// Context.run, which sets it on each kubectl child (execx.KubectlEnv). The
+// the bind Secret, its server-side dry run, the CronJob agent and the live
+// agent) runs with the kubectl user defaults off (execx.KubeRCOff). The
+// applies run through Context.run, which sets it on each kubectl child
+// (execx.KubectlEnv), or set it on their own Cmd (bindSecretUpsert). The
 // bash twin is libs/kubehz/deploy (the KUBERC=off prefix).
 
 import (
@@ -29,8 +30,10 @@ func TestDeployAppliesRunWithKubeRCOff(t *testing.T) {
 			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
 		}
 	}
-	// the namespace, the bind Secret, the CronJob agent, the live agent
-	if applies != 4 {
-		t.Errorf("applies = %d, want 4:\n%v", applies, h.runner.lines())
+	// The preflight (the namespace, the server-side dry run of the bind
+	// Secret), the CronJob agent, the stage (the namespace, the bind
+	// Secret), the live agent.
+	if applies != 6 {
+		t.Errorf("applies = %d, want 6:\n%v", applies, h.runner.lines())
 	}
 }
