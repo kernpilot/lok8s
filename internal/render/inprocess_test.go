@@ -714,3 +714,29 @@ env:
 		t.Error("overlay left in the process environment")
 	}
 }
+
+// A failure of the Secret plugin that lo serves itself (DispatchPlugin)
+// prints each line of the error with the prefix "secret plugin: "
+// (plugin.WriteFailure), as the plugin binary does. The error here has two
+// lines: a value of LOK8S_SECRETS_OUTPUT with a newline in it, which the
+// generator refuses before it reads the spec or the store.
+func TestDispatchPluginPrefixesEachLineOfASecretFailure(t *testing.T) {
+	t.Setenv(secret.OutputEnv, "a\nb")
+	t.Setenv(secret.DisableEnv, "")
+	t.Setenv(secret.KeysOnlyEnv, "")
+	t.Setenv(secret.PathSecretsEnv, t.TempDir())
+	argv0 := filepath.Join(t.TempDir(), filepath.FromSlash(secretPluginRel))
+	var stdout, stderr bytes.Buffer
+	handled, rc := DispatchPlugin(t.Context(), []string{argv0}, strings.NewReader(""), &stdout, &stderr)
+	if !handled || rc != 1 {
+		t.Fatalf("DispatchPlugin = %v, %d; want true, 1\n%s", handled, rc, stderr.String())
+	}
+	want := "secret plugin: " + secret.OutputEnv + ": unknown value \"a\n" +
+		"secret plugin: b\" (want \"none\" or unset)\n"
+	if stderr.String() != want {
+		t.Errorf("stderr:\n%q\nwant %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout %q, want nothing", stdout.String())
+	}
+}

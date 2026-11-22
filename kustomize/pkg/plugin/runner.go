@@ -84,10 +84,21 @@ func Fail(err error) {
 // line of its text with the prefix "secret plugin: ". A refusal of more
 // lines (a *storeguard.Stop) thus keeps the prefix on each line, and a
 // reader that filters the lines of the plugin by the prefix gets all of
-// them. A text of one line prints as before. Fail, and the callers that run
-// the plugin in their own process, print with it.
+// them. A text of one line prints as before. An empty line of the text (or
+// a line of spaces only: a trailing newline, a blank line between two
+// paragraphs) prints nothing. A text with no other line prints one line,
+// the prefix only, as an empty text did before. Fail, and the callers that
+// run the plugin in their own process, print with it.
 func WriteFailure(w io.Writer, err error) {
+	printed := false
 	for line := range strings.SplitSeq(err.Error(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		fmt.Fprintln(w, "secret plugin:", line)
+		printed = true
+	}
+	if !printed {
+		fmt.Fprintln(w, "secret plugin:", "")
 	}
 }
