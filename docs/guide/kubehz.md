@@ -769,28 +769,39 @@ these steps in this order, in both modes:
 3. The deploy deletes the Jobs of the CronJob
    (`-l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent`).
 4. The deploy waits until the pods with these labels have ended
-   (`KUBEHZ_AGENT_JOBS_DRAIN_SECONDS`, default 130 s). A Job pod ends within
-   the Job's deadline of 120 s.
+   (`KUBEHZ_AGENT_JOBS_DRAIN_SECONDS`, default 130 s). After the Job delete,
+   a pod ends within about 30 s (its grace period), unless its node does not
+   answer.
 5. The deploy stages the secret: it applies the namespace, then the Secret
    `kubehz-agent-bind` with a server-side apply. It reads `.kubehz-bind` once
    and stages the bytes that it checked.
-6. The deploy sets `spec.suspend` to `false`. The CronJob then starts its
-   next Job on its schedule.
+6. The deploy sets `spec.suspend` to `false`. If a schedule time went by
+   while the CronJob was suspended, the CronJob starts a Job at once (it has
+   no `startingDeadlineSeconds`), in the operator mode at the same time as
+   the identity bootstrap Job of step 7.
 7. In the operator mode, the deploy then runs the identity bootstrap Job and
    applies the live agent.
 
-The kubeconfig needs `delete` on Jobs, `list` on Pods and `patch` on CronJobs
-in `kubehz-system`. For the Secret it needs `patch` on Secrets in
-`kubehz-system`, and `create` when the Secret is new. It does not need
-`delete` on Secrets.
+The kubeconfig needs `list` and `delete` on Jobs (a delete by label lists the
+Jobs first), `list` on Pods and `patch` on CronJobs in `kubehz-system`. For
+the Secret it needs `patch` on Secrets in `kubehz-system`, and `create` when
+the Secret is new. It does not need `delete` on Secrets.
 
 - If a step from 2 to 6 fails, the deploy stops. The CronJob can stay
   suspended, so heartbeats can stop until the deploy runs again. The error
   says what the step can have changed.
-- If the pods do not end in time, the deploy stops and does not delete them.
-  See them with
-  `kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent`,
-  and run `lo kubehz deploy` again after they are gone.
+- An interrupt (Ctrl-C, or a TERM signal) from step 2 to 6 stops the deploy
+  with exit code 130 (143 for a TERM). The deploy prints one line: the
+  CronJob can stay suspended. Run `lo kubehz deploy` again to end the
+  suspend.
+- If the pods do not end in time, the deploy stops with exit code 1 and does
+  not delete them. The error names the pods. The CronJob stays suspended,
+  which is the safe state: a suspended CronJob starts no Job. A pod on a node
+  that does not answer stays `Terminating`. Find the node of each pod with
+  `kubectl -n kubehz-system get pods -l app=kubehz-heartbeat,app.kubernetes.io/name=kubehz-agent -o wide`.
+  If the node is gone, delete the pod with
+  `kubectl -n kubehz-system delete pod <name> --force --grace-period=0`.
+  Then run `lo kubehz deploy` again.
 - If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on
   another machine) or holds no valid secret, the deploy warns and continues
   without the secret: it skips step 5 only. A Secret `kubehz-agent-bind` from
@@ -1773,7 +1784,9 @@ line that came back.
 **No heartbeats arriving?** Check the CronJob is present, not suspended,
 and actually firing, then read the last run's logs. A `lo kubehz deploy`
 that stopped can leave the CronJob suspended: fix the cause that its error
-names, then run `lo kubehz deploy` again.
+names, then run `lo kubehz deploy` again. Read the logs before that run:
+each deploy deletes the Jobs of the CronJob, also the failed ones, and
+their pods and logs go with them.
 
 ```bash
 kubectl -n kubehz-system get cronjob kubehz-heartbeat   # SUSPEND + LAST SCHEDULE
