@@ -17,6 +17,7 @@
 // Then it writes a new private temp file in the store and renames it onto
 // the path (WriteReplacing). A symlink or a hard link at the path is
 // replaced as a name, and the file that it names keeps its old content.
+// Guard.CheckPlaintext runs the same checks and writes nothing.
 //
 // The package uses the standard library only: the lo binary and the
 // standalone Secret plugin both import it. A refusal or a failed write is a
@@ -80,9 +81,12 @@ type Plaintext struct {
 // Secret.<name>.<namespace>.<key>, in the store dir, or a *Stop with the
 // refusal of lo secrets set. It checks, in this order: each part
 // (PartProblem), that the file is an entry of dir itself (Destination), and
-// that the name does not end in .enc (ReservedName). set checks a key with
-// it before it reads the value. A refusal names the field and its text,
-// never the value.
+// that the name does not end in .enc (ReservedName). The part check refuses
+// each part that makes the name a path, so the Destination check refuses
+// only an empty dir (the file would be at the root of the file system):
+// New of the cache refuses an empty dir before, and set has a store path.
+// set checks a key with it before it reads the value. A refusal names the
+// field and its text, never the value.
 func CheckName(dir, name, namespace, key string) (string, error) {
 	for _, part := range []struct{ field, text string }{{"name", name}, {"namespace", namespace}, {"key", key}} {
 		if why := PartProblem(part.text); why != "" {
@@ -94,9 +98,17 @@ func CheckName(dir, name, namespace, key string) (string, error) {
 		return "", stop(notInStore(base))
 	}
 	if ReservedName(base) {
-		return "", stop(fmt.Sprintf("the key '%s' is refused: the plaintext file %s would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc", Printable(key), Printable(base)))
+		return "", stop(reservedRefusal("the key '"+Printable(key)+"'", base))
 	}
 	return base, nil
+}
+
+// reservedRefusal is the one text of the refusal of a plaintext file base
+// whose name ends in .enc (ReservedName). subject is what is refused: the
+// key of lo secrets set (CheckName, the text of the bash twin), or the
+// plaintext write of a caller that has no key (WritePlaintext).
+func reservedRefusal(subject, base string) string {
+	return subject + " is refused: the plaintext file " + Printable(base) + " would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc"
 }
 
 // notInStore is the refusal of a plaintext file that is not an entry of the
@@ -120,24 +132,17 @@ func notRegular(rel, step string) string {
 //   - the .gitignore of p.Dir cannot protect the store, or its write fails
 //     (EnsureGitignore).
 //
+// The callers check the name before (set and the cache with CheckName,
+// decrypt with its own check of each entry), so a name refusal here comes
+// from a direct caller, or from an entry that decrypt lists after its check.
 // Then it writes a new private temp file in p.Dir and renames it onto the
 // path (WriteReplacing). A write that fails leaves the old file as it was
 // and returns a *Stop that names the path, and the temp file if its remove
 // failed too. The caller makes p.Dir.
 func (g Guard) WritePlaintext(p Plaintext, data []byte) error {
-	step := p.Step
-	if step == "" {
-		step = StepPlaintext
-	}
-	path, ok := Destination(p.Dir, p.Base)
-	if !ok {
-		return stop(notInStore(p.Base))
-	}
-	if ReservedName(p.Base) {
-		return stop("the plaintext file " + Printable(p.Base) + " is refused: its name ends in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc")
-	}
-	if !DestinationOK(path) {
-		return stop(notRegular(g.rel(path), step))
+	path, step, err := g.destination(p)
+	if err != nil {
+		return err
 	}
 	if _, err := g.EnsureGitignore(p.Dir, step); err != nil {
 		return err
@@ -153,6 +158,43 @@ func (g Guard) WritePlaintext(p Plaintext, data []byte) error {
 		return g.FailedWrite(err, final)
 	}
 	return nil
+}
+
+// CheckPlaintext runs the checks of WritePlaintext for the plaintext file p
+// and writes nothing: the name and the path (Destination, ReservedName,
+// DestinationOK), then the .gitignore of p.Dir (GitignorePlan, which does
+// not write the block). It returns the *Stop that WritePlaintext returns
+// for a refusal. A caller runs it before it computes a value that it will
+// write (the cache, before a generator), or in place of the write (a dry
+// run). A store directory that does not exist passes: the write makes the
+// .gitignore and the file.
+func (g Guard) CheckPlaintext(p Plaintext) error {
+	_, step, err := g.destination(p)
+	if err == nil {
+		_, _, err = g.GitignorePlan(p.Dir, step)
+	}
+	return err
+}
+
+// destination checks the name and the path of the plaintext file p, as
+// WritePlaintext does before the .gitignore, and returns the path and the
+// step of a refusal.
+func (g Guard) destination(p Plaintext) (path, step string, err error) {
+	step = p.Step
+	if step == "" {
+		step = StepPlaintext
+	}
+	path, ok := Destination(p.Dir, p.Base)
+	if !ok {
+		return "", "", stop(notInStore(p.Base))
+	}
+	if ReservedName(p.Base) {
+		return "", "", stop(reservedRefusal("the plaintext write", p.Base))
+	}
+	if !DestinationOK(path) {
+		return "", "", stop(notRegular(g.rel(path), step))
+	}
+	return path, step, nil
 }
 
 // GitignorePlan reads the .gitignore of dir once and returns the bytes

@@ -9,7 +9,10 @@ package cache
 // later Secret of the same run (another plugin process) reads it back. Each
 // such value is reported (by name only) to LOK8S_BOOTSTRAP_DRYRUN_REPORT:
 // lo marks that entry "non-repeatable", because the real run generates new
-// bytes for it.
+// bytes for it. Before it generates or keeps a value, the overlay runs the
+// checks of the real write (Cache.checkWrite: the name, the path and the
+// .gitignore, which it reads and does not write): a dry run refuses a write
+// that the real run refuses, with the same text.
 
 import (
 	"bytes"
@@ -207,7 +210,12 @@ func (o *overlay) Has(key string) bool {
 
 // Put keeps the value in the run store when it differs from what the store
 // holds: the real run writes (updates) it, so the entry is reported too.
+// It first runs the checks of the real write (checkWrite), also for a value
+// that the store holds already: the real Put writes each value.
 func (o *overlay) Put(key string, value []byte) error {
+	if err := o.disk.checkWrite(key); err != nil {
+		return err
+	}
 	name := FormatName(o.disk.name, o.disk.namespace, key)
 	if cur, err := o.Get(key); err == nil && bytes.Equal(cur, value) {
 		return nil
@@ -218,12 +226,16 @@ func (o *overlay) Put(key string, value []byte) error {
 	return o.runPut(name, value)
 }
 
-// GetOrCreate returns the stored value; on a miss it generates the value in
-// memory and reports it.
+// GetOrCreate returns the stored value; on a miss it runs the checks of the
+// real write (checkWrite), then generates the value in memory and reports
+// it.
 func (o *overlay) GetOrCreate(key string, gen func() ([]byte, error)) ([]byte, error) {
 	if v, err := o.Get(key); err == nil {
 		return v, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err := o.disk.checkWrite(key); err != nil {
 		return nil, err
 	}
 	v, err := gen()

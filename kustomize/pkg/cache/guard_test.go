@@ -8,13 +8,16 @@ package cache
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
@@ -29,6 +32,10 @@ const block = "# BEGIN lok8s secrets. lo rewrites the lines up to the END line: 
 	"!Secret.*.enc\n" +
 	"*/\n" +
 	"# END lok8s secrets\n"
+
+// rel is the store path of a refusal: the per-domain store of newStore,
+// relative to its project, as `lo secrets set` prints it.
+const rel = "clusters/alpha.dev/secrets/"
 
 // newStore makes the cache of the Secret app in namespace default, in a new
 // per-domain store under a temp project, and returns it with its directory.
@@ -96,11 +103,29 @@ func mode(t *testing.T, path string) os.FileMode {
 }
 
 // A generator run into a store with no .gitignore writes the lok8s block
-// before the plaintext, as `lo secrets set` does. A .gitignore with rules of
-// the user and no block gets the block on top, and each line of the user
-// stays after it. A store whose .gitignore has the block already is not
-// rewritten.
+// before the plaintext, as `lo secrets set` does: when the write of the
+// .gitignore fails, no plaintext is written. A .gitignore with rules of the
+// user and no block gets the block on top, and each line of the user stays
+// after it. A store whose .gitignore has the block already is not
+// rewritten: the file keeps its inode and its time.
 func TestPutWritesTheGitignoreBeforeThePlaintext(t *testing.T) {
+	// The order: the .gitignore write fails part way, and the store gets
+	// no plaintext and no temp file.
+	cf, dirf := newStore(t)
+	cf.fillGitignore = func(w io.Writer, want []byte) error {
+		if _, err := w.Write(want[:10]); err != nil {
+			return err
+		}
+		return errors.New("the disk is full")
+	}
+	_, err := cf.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("minted"), nil })
+	if got, want := stopLines(t, err), []string{"cannot write " + rel + ".gitignore: it was not changed"}; !slices.Equal(got, want) {
+		t.Errorf("failed .gitignore write:\n%q\nwant:\n%q", got, want)
+	}
+	if got := names(t, dirf); len(got) != 0 {
+		t.Errorf("store %q: a plaintext or a temp file was written without the .gitignore", got)
+	}
+
 	c, dir := newStore(t)
 	got, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("minted"), nil })
 	if err != nil {
@@ -122,12 +147,28 @@ func TestPutWritesTheGitignoreBeforeThePlaintext(t *testing.T) {
 		t.Errorf("store %q, want %q (no temp file)", names(t, dir), want)
 	}
 
-	// The block is there: a second write leaves the file as it is.
-	before := mode(t, filepath.Join(dir, ".gitignore"))
+	// The block is there: a second write leaves the file as it is. A
+	// rewrite is a new file (a temp file and a rename) with the time of now.
+	gitignore := filepath.Join(dir, ".gitignore")
+	past := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(gitignore, past, past); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(gitignore)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Put("USER", []byte("u")); err != nil {
 		t.Fatal(err)
 	}
-	if g := readString(t, filepath.Join(dir, ".gitignore")); g != block || mode(t, filepath.Join(dir, ".gitignore")) != before {
+	after, err := os.Lstat(gitignore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || !after.ModTime().Equal(past) || after.Mode() != before.Mode() {
+		t.Errorf("the second write rewrote the .gitignore: same file %v, time %v, mode %v", os.SameFile(before, after), after.ModTime(), after.Mode())
+	}
+	if g := readString(t, gitignore); g != block {
 		t.Errorf("the second write changed the .gitignore: %q", g)
 	}
 
@@ -154,8 +195,8 @@ func TestPutRefusesAnUnsafeGitignoreBeforeAnyWrite(t *testing.T) {
 
 	_, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("minted"), nil })
 	want := []string{
-		gitignore + ":9: this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store",
-		gitignore + " was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again",
+		rel + ".gitignore:9: this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store",
+		rel + ".gitignore was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again",
 	}
 	if got := stopLines(t, err); !slices.Equal(got, want) {
 		t.Errorf("refusal:\n%q\nwant:\n%q", got, want)
@@ -179,7 +220,7 @@ func TestPutRefusesAnUnsafeGitignoreBeforeAnyWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = c2.Put("PASSWORD", []byte("v"))
-	wantLink := []string{filepath.Join(dir2, ".gitignore") + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
+	wantLink := []string{rel + ".gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
 	if got := stopLines(t, err); !slices.Equal(got, wantLink) {
 		t.Errorf("refusal:\n%q\nwant:\n%q", got, wantLink)
 	}
@@ -254,7 +295,10 @@ func TestPutRefusesAPathPart(t *testing.T) {
 // A symlink at the entry is refused and not followed: the link stays, and
 // the file that it names keeps its content. That file can be the
 // ciphertext of the store or its .gitignore, which git commits. A dangling
-// link and a directory are refused the same way.
+// link, a FIFO and a directory are refused with the same text. The rename
+// would replace a link and a FIFO, so only the check refuses them; the
+// rename of a file onto a directory fails, and the text tells the check
+// from that failure.
 func TestPutDoesNotFollowALink(t *testing.T) {
 	entry := "Secret.app.default.PASSWORD"
 	for _, tc := range []struct {
@@ -278,7 +322,7 @@ func TestPutDoesNotFollowALink(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := c.Put("PASSWORD", []byte("the-value"))
-			want := []string{link + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
+			want := []string{rel + entry + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
 			if got := stopLines(t, err); !slices.Equal(got, want) {
 				t.Errorf("refusal:\n%q\nwant:\n%q", got, want)
 			}
@@ -291,22 +335,210 @@ func TestPutDoesNotFollowALink(t *testing.T) {
 		})
 	}
 
+	notRegular := func(base string) []string {
+		return []string{rel + base + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
+	}
 	c, dir := newStore(t)
 	dangling := filepath.Join(dir, entry)
 	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("minted"), nil }); err == nil {
-		t.Error("a dangling link at the entry was not refused")
+	_, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("minted"), nil })
+	if got := stopLines(t, err); !slices.Equal(got, notRegular(entry)) {
+		t.Errorf("dangling link:\n%q\nwant:\n%q", got, notRegular(entry))
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "gone")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the write made the target of a dangling link: %v", err)
 	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "Secret.app.default.FIFO"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopLines(t, c.Put("FIFO", []byte("v"))); !slices.Equal(got, notRegular("Secret.app.default.FIFO")) {
+		t.Errorf("FIFO:\n%q\nwant:\n%q", got, notRegular("Secret.app.default.FIFO"))
+	}
+	if mode(t, filepath.Join(dir, "Secret.app.default.FIFO"))&os.ModeNamedPipe == 0 {
+		t.Error("the FIFO was replaced")
+	}
 	if err := os.Mkdir(filepath.Join(dir, "Secret.app.default.DIR"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Put("DIR", []byte("v")); err == nil {
-		t.Error("a directory at the entry was not refused")
+	if got := stopLines(t, c.Put("DIR", []byte("v"))); !slices.Equal(got, notRegular("Secret.app.default.DIR")) {
+		t.Errorf("directory:\n%q\nwant:\n%q", got, notRegular("Secret.app.default.DIR"))
+	}
+}
+
+// GetOrCreate runs the checks of the write before it generates a value: a
+// generator (a bash: command has side effects) does not run for a write
+// that Put refuses. The store keeps its files as they were.
+func TestGetOrCreateRunsNoGeneratorForARefusedWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{"a negation below the block", func(t *testing.T, dir string) {
+			writeString(t, filepath.Join(dir, ".gitignore"), block+"!README.md\n")
+		}},
+		{"a .gitignore that is a symlink", func(t *testing.T, dir string) {
+			other := filepath.Join(t.TempDir(), "rules")
+			writeString(t, other, block)
+			if err := os.Symlink(other, filepath.Join(dir, ".gitignore")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a symlink at the entry", func(t *testing.T, dir string) {
+			writeString(t, filepath.Join(dir, ".gitignore"), block)
+			if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "Secret.app.default.PASSWORD")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, dir := newStore(t)
+			tc.setup(t, dir)
+			before := dirListing(t, dir)
+			calls := 0
+			_, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) {
+				calls++
+				return []byte("minted"), nil
+			})
+			stopLines(t, err)
+			if calls != 0 {
+				t.Errorf("the generator ran %d times for a refused write", calls)
+			}
+			if after := dirListing(t, dir); after != before {
+				t.Errorf("the store changed:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+	c, _ := newStore(t)
+	calls := 0
+	if _, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) { calls++; return []byte("v"), nil }); err != nil || calls != 1 {
+		t.Fatalf("the control: %v, %d calls", err, calls)
+	}
+}
+
+// A dry run (the overlay) runs the checks of the real write and refuses
+// what the real run refuses, with the same text: a key whose entry name
+// ends in .enc and a store whose .gitignore cannot keep the plaintext out
+// of git. It writes nothing: no store, no .gitignore, no file of the run
+// store, no line of the report. A store with no .gitignore passes, and the
+// dry run does not write the block.
+func TestDryRunRefusesWhatTheRealRunRefuses(t *testing.T) {
+	open := func(t *testing.T, store string) (Store, string, string) {
+		t.Helper()
+		root := t.TempDir()
+		report, run := filepath.Join(root, "report"), filepath.Join(root, "run")
+		writeString(t, report, "")
+		s, err := Open(store, "default", "app", DryRunFromEnv(dryRunEnvStore(report, run)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, report, run
+	}
+	nothingKept := func(t *testing.T, report, run string) {
+		t.Helper()
+		if got := readString(t, report); got != "" {
+			t.Errorf("report %q, want empty", got)
+		}
+		if _, err := os.Stat(run); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the run store has a value: %v", err)
+		}
+	}
+	gen := func(calls *int) func() ([]byte, error) {
+		return func() ([]byte, error) { *calls++; return []byte("minted"), nil }
+	}
+
+	// A reserved key, in a store that does not exist yet.
+	store := filepath.Join(t.TempDir(), "clusters", "alpha.dev", "secrets")
+	s, report, run := open(t, store)
+	for _, key := range []string{"x.enc", "x.ENC"} {
+		want := []string{"the key '" + key + "' is refused: the plaintext file Secret.app.default." + key + " would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc"}
+		calls := 0
+		_, err := s.GetOrCreate(key, gen(&calls))
+		if got := stopLines(t, err); !slices.Equal(got, want) || calls != 0 {
+			t.Errorf("GetOrCreate(%q): %q (generated %d times), want %q", key, got, calls, want)
+		}
+		if got := stopLines(t, s.Put(key, []byte("v"))); !slices.Equal(got, want) {
+			t.Errorf("Put(%q): %q, want %q", key, got, want)
+		}
+	}
+	if _, err := os.Stat(store); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the dry run made the store: %v", err)
+	}
+	nothingKept(t, report, run)
+
+	// An unsafe rule below the block.
+	store = filepath.Join(t.TempDir(), "clusters", "alpha.dev", "secrets")
+	unsafe := block + "!Secret.app.default.PASSWORD\n"
+	writeString(t, filepath.Join(store, ".gitignore"), unsafe)
+	s, report, run = open(t, store)
+	want := []string{
+		rel + ".gitignore:9: this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store",
+		rel + ".gitignore was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again",
+	}
+	calls := 0
+	_, err := s.GetOrCreate("PASSWORD", gen(&calls))
+	if got := stopLines(t, err); !slices.Equal(got, want) || calls != 0 {
+		t.Errorf("GetOrCreate: %q (generated %d times), want %q", got, calls, want)
+	}
+	if got := stopLines(t, s.Put("PASSWORD", []byte("v"))); !slices.Equal(got, want) {
+		t.Errorf("Put: %q, want %q", got, want)
+	}
+	if got := names(t, store); !slices.Equal(got, []string{".gitignore"}) {
+		t.Errorf("store %q, want the .gitignore only", got)
+	}
+	if got := readString(t, filepath.Join(store, ".gitignore")); got != unsafe {
+		t.Errorf("the dry run changed the .gitignore: %q", got)
+	}
+	nothingKept(t, report, run)
+
+	// The control: an empty store passes, and the dry run writes no block.
+	store = filepath.Join(t.TempDir(), "clusters", "alpha.dev", "secrets")
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ = open(t, store)
+	calls = 0
+	if v, err := s.GetOrCreate("PASSWORD", gen(&calls)); err != nil || string(v) != "minted" || calls != 1 {
+		t.Fatalf("the control: %q, %v, %d calls", v, err, calls)
+	}
+	if err := s.Put("FROM_ENV", []byte("v")); err != nil {
+		t.Fatalf("the control Put: %v", err)
+	}
+	if got := names(t, store); len(got) != 0 {
+		t.Errorf("store %q: the dry run wrote a file", got)
+	}
+}
+
+// A refusal names a file as `lo secrets set` names it: relative to the
+// project for a per-domain store, relative to the parent of any other store
+// (the flat .secrets of a project).
+func TestARefusalNamesTheFileAsSetDoes(t *testing.T) {
+	for _, tc := range []struct{ dir, path, want string }{
+		{"/p/clusters/alpha.dev/secrets", "/p/clusters/alpha.dev/secrets/.gitignore", "clusters/alpha.dev/secrets/.gitignore"},
+		{"/p/clusters/alpha.dev/secrets/", "/p/clusters/alpha.dev/secrets/.gitignore", "clusters/alpha.dev/secrets/.gitignore"},
+		{"/p/.secrets", "/p/.secrets/Secret.app.default.K", ".secrets/Secret.app.default.K"},
+		{"/p/other/secrets", "/p/other/secrets/.gitignore", "secrets/.gitignore"},
+		{"clusters/alpha.dev/secrets", "clusters/alpha.dev/secrets/.gitignore", "clusters/alpha.dev/secrets/.gitignore"},
+		{"/secrets", "/secrets/.gitignore", "/secrets/.gitignore"},
+	} {
+		if got := storeRel(tc.dir)(tc.path); got != tc.want {
+			t.Errorf("storeRel(%q)(%q) = %q, want %q", tc.dir, tc.path, got, tc.want)
+		}
+	}
+
+	dir := filepath.Join(t.TempDir(), ".secrets")
+	c, err := New(dir, "default", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeString(t, filepath.Join(dir, ".gitignore"), block+"!x\n")
+	want := []string{
+		".secrets/.gitignore:9: this negation can re-include a plaintext secret file (the last matching rule wins): remove the line, or keep the file outside the store",
+		".secrets/.gitignore was not changed, and lo stopped before the plaintext write: fix each cause above, then run this command again",
+	}
+	if got := stopLines(t, c.Put("K", []byte("v"))); !slices.Equal(got, want) {
+		t.Errorf("flat store:\n%q\nwant:\n%q", got, want)
 	}
 }
 
@@ -355,10 +587,14 @@ func TestReadKeepsAnEntryThatPutRefuses(t *testing.T) {
 }
 
 // Git is the oracle: after generator runs into a store in a git repository
-// (no .gitignore first, or one with rules of the user), git would commit
-// only the .gitignore and the ciphertext, with core.ignorecase off and on.
-// The keys that the cache refuses leave no file. Git must be installed: the
-// CI job of this module runs on the runner, with its git.
+// (no .gitignore first, one with rules of the user, or the legacy lines),
+// git would commit only the .gitignore and the ciphertext, with
+// core.ignorecase off and on. The keys that the cache refuses leave no
+// file. The store also holds a directory that the rule !Secret.*.enc
+// matches, with a .gitignore of its own that re-includes its files: only
+// the */ rule of the block keeps git out of it, so the case of the legacy
+// lines fails when the plan leaves those lines as they are. Git must be
+// installed: the CI job of this module runs on the runner, with its git.
 func TestGeneratedPlaintextStaysOutOfGit(t *testing.T) {
 	gitBin, err := exec.LookPath("git")
 	if err != nil {
@@ -393,6 +629,10 @@ func TestGeneratedPlaintextStaysOutOfGit(t *testing.T) {
 			}
 			// The ciphertext that `lo secrets encrypt` writes next to it.
 			writeString(t, filepath.Join(dir, "Secret.app.default.PASSWORD.enc"), "cipher")
+			// A directory that !Secret.*.enc re-includes, whose .gitignore
+			// re-includes each file in it.
+			writeString(t, filepath.Join(dir, "Secret.app.default.d.enc", ".gitignore"), "!*\n")
+			writeString(t, filepath.Join(dir, "Secret.app.default.d.enc", "leak"), "plain")
 
 			env := []string{
 				"PATH=" + os.Getenv("PATH"), "HOME=" + home, "LC_ALL=C",
