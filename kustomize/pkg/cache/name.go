@@ -16,10 +16,15 @@ import (
 // Empty namespace is normalized to the literal "default", matching the
 // bash plugin's behavior.
 func FormatName(secret, namespace, key string) string {
+	return fmt.Sprintf("Secret.%s.%s.%s", secret, defaultNamespace(namespace), key)
+}
+
+// defaultNamespace is namespace, or "default" when it is empty.
+func defaultNamespace(namespace string) string {
 	if namespace == "" {
-		namespace = "default"
+		return "default"
 	}
-	return fmt.Sprintf("Secret.%s.%s.%s", secret, namespace, key)
+	return namespace
 }
 
 // ParseRef parses a cross-secret reference into (secret, namespace, key).

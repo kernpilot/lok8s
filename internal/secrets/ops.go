@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // ── Init ─────────────────────────────────────────────────
@@ -108,7 +108,7 @@ creation_rules:
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := c.makeStore(dir); err != nil {
 		return err
 	}
 	return c.ensureGitignore(dir, stepGitignoreWrite)
@@ -439,28 +439,16 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 		ui.ErrorTo(c.ErrOut, "Key argument is required")
 		return ErrHandled
 	}
-	// Before the prompt and any write: each part of the name of the
-	// plaintext file is one part of a path (setPartProblem), and the file is
-	// an entry of the store itself (setDestination). The store of this check
-	// is StorePath: the write below checks the resolved store again. Each
-	// refusal names the field and its text, never the value.
-	for _, part := range []struct{ field, text string }{{"name", name}, {"namespace", namespace}, {"key", key}} {
-		if why := setPartProblem(part.text); why != "" {
-			ui.ErrorTo(c.ErrOut, "the %s '%s' is refused: %s. Nothing was written: use a %s without it", part.field, printable(part.text), why, part.field)
-			return ErrHandled
-		}
-	}
-	base := "Secret." + name + "." + namespace + "." + key
-	if _, ok := setDestination(c.StorePath(), base); !ok {
-		c.refuseSetDestination(base)
-		return ErrHandled
-	}
-	// A plaintext name that ends in .enc (reservedPlaintextName). The rule
+	// Before the prompt and any write (storeguard.CheckName): each part of
+	// the name of the plaintext file is one part of a path, the file is an
+	// entry of the store itself, and its name does not end in .enc (the rule
 	// !Secret.*.enc of the .gitignore re-includes it, and git would commit
-	// the plaintext.
-	if reservedPlaintextName(base) {
-		ui.ErrorTo(c.ErrOut, "the key '%s' is refused: the plaintext file %s would end in .enc (in any letter case), and the .gitignore rule !Secret.*.enc lets git commit it. Nothing was written: use a key name that does not end in .enc", printable(key), printable(base))
-		return ErrHandled
+	// the plaintext). The store of this check is StorePath: the write below
+	// checks the resolved store again. Each refusal names the field and its
+	// text, never the value.
+	base, err := storeguard.CheckName(c.StorePath(), name, namespace, key)
+	if err != nil {
+		return c.printStop(err)
 	}
 
 	if value == "-" {
@@ -502,38 +490,21 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+	if err := c.makeStore(secretsDir); err != nil {
 		return err
 	}
-	cacheFile, ok := setDestination(secretsDir, base)
-	if !ok {
-		c.refuseSetDestination(base)
-		return ErrHandled
-	}
-	// The plaintext file is a regular file or absent (encDestinationOK): a
-	// symlink, a directory, a FIFO, a socket or a device is refused, and
-	// nothing is written. The write below renames over the name, so it
-	// never writes through a link at it.
-	if !encDestinationOK(cacheFile) {
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before %s — remove it, then run this command again", printable(c.rel(cacheFile)), stepPlaintext)
-		return ErrHandled
-	}
-	// Before the plaintext: the .gitignore that keeps it out of git.
-	if err := c.ensureGitignore(secretsDir, stepPlaintext); err != nil {
+	// The one plaintext write of a store (storeguard: Guard.WritePlaintext),
+	// also of decrypt and the Secret generator. It refuses a file that is
+	// not an entry of the resolved store, a name that ends in .enc, and a
+	// file that is not a regular file and not absent (a symlink, a
+	// directory, a FIFO, a socket or a device). Then it checks the
+	// .gitignore that keeps the plaintext out of git, and writes a new
+	// private temp file in the store (mode 0600, an exclusive create) and a
+	// rename onto the file: a symlink or a hard link there is replaced as a
+	// name, and the file that it names keeps its old content.
+	cacheFile := secretsDir + "/" + base
+	if err := c.writePlaintext(storeguard.Plaintext{Dir: secretsDir, Base: base, Step: stepPlaintext, Who: "set"}, []byte(value)); err != nil {
 		return err
-	}
-
-	// A new private temp file in the store (mode 0600, made with an
-	// exclusive create) and a rename onto cacheFile (writeReplacing). A
-	// symlink or a hard link at cacheFile is replaced as a name: the file
-	// that it names, or the other name of a hard link, keeps its old
-	// content.
-	if err := writeReplacing(cacheFile, 0o600, func(w io.Writer) error {
-		_, err := io.WriteString(w, value)
-		return err
-	}); err != nil {
-		c.reportFailedWrite(err, "set cannot write "+printable(c.rel(cacheFile))+": it was not changed")
-		return ErrHandled
 	}
 	ui.Debug("Wrote %s", printable(cacheFile))
 
@@ -563,13 +534,6 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	c.liveDrift(ctx, name, namespace, key, value)
 	fmt.Fprintf(c.Out, "Set %s/%s/%s\n", name, namespace, key)
 	return nil
-}
-
-// refuseSetDestination prints the refusal of a plaintext file of set that is
-// not an entry of the store itself (setDestination; bash: the same line in
-// secrets::set).
-func (c *Context) refuseSetDestination(base string) {
-	ui.ErrorTo(c.ErrOut, "the plaintext file %s is refused: it is not a file of the store directory itself. Nothing was written: use a name, a namespace and a key without a path part", printable(base))
 }
 
 // ── Encrypt ──────────────────────────────────────────────
@@ -628,25 +592,12 @@ func (c *Context) encryptFile(plaintext string) error {
 	return nil
 }
 
-// encDestinationOK reports whether path, read with lstat (a symlink is not
-// followed), is a regular file or does not exist (bash:
-// secrets::_enc_path_ok). Any other lstat error refuses too, for example
-// ENAMETOOLONG for a name that is too long: the bash twin tells "does not
-// exist" from the other errors with secrets::_absent. ensureGitignore checks
-// the .gitignore of the store with it too.
-//
-// It checks the last part of the path only. The store directory and its
-// parent directories are trusted: they belong to the user who runs lo. A
-// symlink in a parent is followed, and a parent that another user can
-// replace could move the temp file and the rename out of the store. The
-// encrypt does not anchor its writes to an opened store directory.
-func encDestinationOK(path string) bool {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return errors.Is(err, fs.ErrNotExist)
-	}
-	return fi.Mode().IsRegular()
-}
+// encDestinationOK is storeguard.DestinationOK: path, read with lstat (a
+// symlink is not followed), is a regular file or does not exist (bash:
+// secrets::_enc_path_ok; the bash twin tells "does not exist" from the
+// other lstat errors with secrets::_absent). It checks the last part of the
+// path only: the store directory and its parents are trusted.
+func encDestinationOK(path string) bool { return storeguard.DestinationOK(path) }
 
 // sweepPlaintexts returns the plaintext cache files of dir that the encrypt
 // sweep reads (plaintextsOf over the names of storeEntries, bash:
@@ -881,15 +832,14 @@ func (c *Context) Decrypt(sshKey string) error {
 			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", printable(base))
 			return ErrHandled
 		}
-		// A new private temp file in the store (mode 0600) and a rename onto
-		// the plaintext file (writeReplacing): a hard link there is replaced
-		// as a name, and its other name keeps its old content.
-		if err := writeReplacing(plaintext, 0o600, func(w io.Writer) error {
-			_, err := w.Write(dec)
+		// The one plaintext write of a store (Guard.WritePlaintext): the
+		// checks above ran for each entry before the first write, and the
+		// write checks this entry and the .gitignore again. A new private
+		// temp file in the store (mode 0600) and a rename onto the plaintext
+		// file: a hard link there is replaced as a name, and its other name
+		// keeps its old content.
+		if err := c.writePlaintext(storeguard.Plaintext{Dir: secretsDir, Base: filepath.Base(plaintext), Step: stepPlaintext, Who: "decrypt"}, dec); err != nil {
 			return err
-		}); err != nil {
-			c.reportFailedWrite(err, "decrypt cannot write "+printable(c.rel(plaintext))+": it was not changed")
-			return ErrHandled
 		}
 		// An .enc dated in the future keeps the plaintext the older file,
 		// as in the bash twin, which sets no time. On an equal time the

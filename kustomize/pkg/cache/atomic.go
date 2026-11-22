@@ -13,6 +13,11 @@ import (
 //
 // Same-directory tmp file is required for atomic rename on POSIX (cross-
 // device renames fall back to copy+delete and aren't atomic).
+//
+// It writes the run store of a dry run (DryRun.Save), a directory that lo
+// owns for one run. It does not write a secrets store: an entry there goes
+// through Put and storeguard, which check the name, the link and the
+// .gitignore first.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
