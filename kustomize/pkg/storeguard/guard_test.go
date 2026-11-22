@@ -168,7 +168,7 @@ func TestWritePlaintextSyncsTheStoreDirectory(t *testing.T) {
 	dir, g = newStore(t)
 	g.syncDir = func(string) error { return errors.New("input/output error") }
 	err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K", Who: "set"}, []byte("v"))
-	want := []string{"secrets/.gitignore was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before the plaintext write — run this command again"}
+	want := []string{"secrets/.gitignore was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before the plaintext write. Run this command again"}
 	if got := lines(t, err); !slices.Equal(got, want) {
 		t.Errorf("failed sync after the .gitignore:\n%q\nwant %q", got, want)
 	}
@@ -234,7 +234,7 @@ func TestMakeDirSyncsTheParentOfEachNewDirectory(t *testing.T) {
 	}
 	other := filepath.Join(base, "other", "a", "b")
 	err := g.MakeDir(other, 0o700)
-	wantLines := []string{"the sync of the parent directory of other/a failed, so lo removed the directories that it made: lo wrote no file — run this command again"}
+	wantLines := []string{"the sync of the parent directory of other/a failed, so lo removed the directories that it made: lo wrote no file. Run this command again"}
 	if got := lines(t, err); !slices.Equal(got, wantLines) {
 		t.Errorf("failed sync:\n%q\nwant %q", got, wantLines)
 	}
@@ -260,7 +260,7 @@ func TestMakeDirSyncsTheParentOfEachNewDirectory(t *testing.T) {
 	err = g.MakeDir(filepath.Join(base, "third"), 0o700)
 	wantLines = []string{
 		"lo cannot remove third, which it made",
-		"the sync of the parent directory of third failed: lo wrote no file — remove each directory above, then run this command again",
+		"the sync of the parent directory of third failed: lo wrote no file. Remove each directory above, then run this command again",
 	}
 	if got := lines(t, err); !slices.Equal(got, wantLines) {
 		t.Errorf("failed sync and remove:\n%q\nwant %q", got, wantLines)
@@ -295,7 +295,7 @@ func TestMakeDirNamesEachDirectoryThatStays(t *testing.T) {
 	want := []string{
 		"lo cannot remove four, which it made",
 		"lo cannot remove four/a, which it made",
-		"the sync of the parent directory of four/a/b failed: lo wrote no file — remove each directory above, then run this command again",
+		"the sync of the parent directory of four/a/b failed: lo wrote no file. Remove each directory above, then run this command again",
 	}
 	if got := lines(t, err); !slices.Equal(got, want) {
 		t.Errorf("failed sync, the middle directory not empty:\n%q\nwant %q", got, want)
@@ -315,7 +315,7 @@ func TestMakeDirNamesEachDirectoryThatStays(t *testing.T) {
 		return errors.New("input/output error")
 	}
 	err = g.MakeDir(filepath.Join(base, "five", "a"), 0o700)
-	want = []string{"the sync of the parent directory of five failed, so lo removed the directories that it made: lo wrote no file — run this command again"}
+	want = []string{"the sync of the parent directory of five failed, so lo removed the directories that it made: lo wrote no file. Run this command again"}
 	if got := lines(t, err); !slices.Equal(got, want) {
 		t.Errorf("a directory gone before the remove:\n%q\nwant %q", got, want)
 	}
@@ -433,7 +433,7 @@ func TestEnsureGitignoreRefusesAFillThatWritesOtherBytes(t *testing.T) {
 		dir, g := newStore(t)
 		g.FillGitignore = fill
 		err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K"}, []byte("the-value"))
-		want := []string{"secrets/.gitignore was written, but it does not have the bytes that lo planned for it: lo stopped before the plaintext write — fix the file, then run this command again"}
+		want := []string{"secrets/.gitignore was written, but it does not have the bytes that lo planned for it: lo stopped before the plaintext write. Fix the file, then run this command again"}
 		if got := lines(t, err); !slices.Equal(got, want) {
 			t.Errorf("%s: %q, want %q", name, got, want)
 		}
@@ -453,7 +453,7 @@ func TestEnsureGitignoreRefusesAFillThatWritesOtherBytes(t *testing.T) {
 // back (here: gone before the open) has its own text. No plaintext is
 // written.
 func TestEnsureGitignoreRefusesAnOpenedFileThatIsNotTheRegularFile(t *testing.T) {
-	notRegular := "secrets/.gitignore was written, but now it is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or another file came to its path while lo read it back: lo stopped before the plaintext write — fix the file, then run this command again"
+	notRegular := "secrets/.gitignore was written, but now it is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or another file came to its path while lo read it back: lo stopped before the plaintext write. Fix the file, then run this command again"
 	open := openReadBack
 	t.Cleanup(func() { openReadBack = open })
 	for _, tc := range []struct {
@@ -493,7 +493,7 @@ func TestEnsureGitignoreRefusesAnOpenedFileThatIsNotTheRegularFile(t *testing.T)
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
-		}, "cannot read secrets/.gitignore back after its write: lo stopped before the plaintext write — check the file, then run this command again"},
+		}, "cannot read secrets/.gitignore back after its write: lo stopped before the plaintext write. Check the file, then run this command again"},
 	} {
 		dir, g := newStore(t)
 		gitignore := filepath.Join(dir, ".gitignore")

@@ -490,7 +490,7 @@ _ls_then_missing() {
     before="$(_state "${PATH_BASE}" "${store}" "${outside%/*}")"
     DOMAIN=a.dev run _add "${key}"
     [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] ${store}/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again" ] || {
+    [ "$output" = "[error] ${store}/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write. Remove it, then run this command again" ] || {
       echo "$output" >&2; return 1; }
     [ "$(_state "${PATH_BASE}" "${store}" "${outside%/*}")" = "${before}" ] || { echo "${key}: a write" >&2; return 1; }
     [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "${key}: a lock file" >&2; return 1; }

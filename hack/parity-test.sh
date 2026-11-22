@@ -203,7 +203,7 @@ for target in Secret.app.default.JWT_SECRET.enc .gitignore; do
     ln -s "${target}" "${WORK}/sec-${impl}/.secrets/Secret.app.default.LINKED"
   done
   sec_check secrets set -n app LINKED link-value
-  sec_refused 1 "[error] .secrets/Secret.app.default.LINKED${NOT_REGULAR}lo stopped before the plaintext write — remove it, then run this command again" \
+  sec_refused 1 "[error] .secrets/Secret.app.default.LINKED${NOT_REGULAR}lo stopped before the plaintext write. Remove it, then run this command again" \
     "secrets set <a symlink to ${target}>"
   for impl in go bash; do
     cmp -s "${WORK}/sec-${impl}.target.saved" "${WORK}/sec-${impl}/.secrets/${target}" \

@@ -154,7 +154,7 @@ func TestSetRefusesALinkedPlaintextFile(t *testing.T) {
 			if err := c.Set(context.Background(), "app", "default", "K", "the-value", false); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] .secrets/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write — remove it, then run this command again\n"
+			want := "[error] .secrets/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write. Remove it, then run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -294,7 +294,7 @@ func TestDecryptRefusesALinkMadeAfterItsCheck(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("the seam ran %d times, want 1: the link was not made after the check", calls)
 	}
-	want := "[error] .secrets/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write — remove it, then run this command again\n"
+	want := "[error] .secrets/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write. Remove it, then run this command again\n"
 	if errOut.String() != want {
 		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 	}
@@ -359,7 +359,7 @@ func TestPlaintextRefusalsPrintAPathAsPrintable(t *testing.T) {
 		if err := c.Set(context.Background(), "app", "default", "K", "the-value", false); !errors.Is(err, ErrHandled) {
 			t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 		}
-		want := "[error] st?[2Jore/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write — remove it, then run this command again\n"
+		want := "[error] st?[2Jore/Secret.app.default.K" + litNotRegular + "lo stopped before the plaintext write. Remove it, then run this command again\n"
 		if errOut.String() != want {
 			t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 		}
