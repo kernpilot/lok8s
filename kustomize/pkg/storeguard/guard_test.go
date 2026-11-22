@@ -258,12 +258,69 @@ func TestMakeDirSyncsTheParentOfEachNewDirectory(t *testing.T) {
 		return errors.New("input/output error")
 	}
 	err = g.MakeDir(filepath.Join(base, "third"), 0o700)
-	wantLines = []string{"the sync of the parent directory of third failed, and lo cannot remove third, which it made: a power loss can lose it. lo wrote no file in it — remove it, then run this command again"}
+	wantLines = []string{
+		"lo cannot remove third, which it made",
+		"the sync of the parent directory of third failed: lo wrote no file — remove each directory above, then run this command again",
+	}
 	if got := lines(t, err); !slices.Equal(got, wantLines) {
 		t.Errorf("failed sync and remove:\n%q\nwant %q", got, wantLines)
 	}
 	if got := entries(t, filepath.Join(base, "third")); !slices.Equal(got, []string{"theirs"}) {
 		t.Errorf("third holds %q, want the file that came into it", got)
+	}
+}
+
+// After a failed sync, MakeDir tries to remove each directory that it
+// made, also after a remove that failed. Here it made three levels, and a
+// file came into the middle one: the deepest goes, the middle one and the
+// top one stay, and the *Stop names both, from the top. A directory that
+// is gone already counts as removed.
+func TestMakeDirNamesEachDirectoryThatStays(t *testing.T) {
+	base := t.TempDir()
+	calls := 0
+	g := Guard{
+		Rel: func(p string) string { return strings.TrimPrefix(p, base+"/") },
+		// The third sync (the parent of four/a/b, four/a) fails.
+		syncDir: func(string) error {
+			if calls++; calls < 3 {
+				return nil
+			}
+			if err := os.WriteFile(filepath.Join(base, "four", "a", "theirs"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return errors.New("input/output error")
+		},
+	}
+	err := g.MakeDir(filepath.Join(base, "four", "a", "b"), 0o700)
+	want := []string{
+		"lo cannot remove four, which it made",
+		"lo cannot remove four/a, which it made",
+		"the sync of the parent directory of four/a/b failed: lo wrote no file — remove each directory above, then run this command again",
+	}
+	if got := lines(t, err); !slices.Equal(got, want) {
+		t.Errorf("failed sync, the middle directory not empty:\n%q\nwant %q", got, want)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "four", "a", "b")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the deepest directory stays: %v", err)
+	}
+	if got := entries(t, filepath.Join(base, "four", "a")); !slices.Equal(got, []string{"theirs"}) {
+		t.Errorf("four/a holds %q, want the file that came into it", got)
+	}
+
+	// The deepest directory is gone before the remove: no directory stays.
+	g.syncDir = func(string) error {
+		if err := os.Remove(filepath.Join(base, "five", "a")); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("input/output error")
+	}
+	err = g.MakeDir(filepath.Join(base, "five", "a"), 0o700)
+	want = []string{"the sync of the parent directory of five failed, so lo removed the directories that it made: lo wrote no file — run this command again"}
+	if got := lines(t, err); !slices.Equal(got, want) {
+		t.Errorf("a directory gone before the remove:\n%q\nwant %q", got, want)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "five")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("five stays: %v", err)
 	}
 }
 
@@ -387,6 +444,84 @@ func TestEnsureGitignoreRefusesAFillThatWritesOtherBytes(t *testing.T) {
 		if !wrote || err == nil {
 			t.Errorf("%s: EnsureGitignore = %v, %v, want true and the refusal", name, wrote, err)
 		}
+	}
+}
+
+// The read-back of the .gitignore checks the file that it opened: an entry
+// that comes to the path between the lookup and the open is refused, also
+// a symlink to a file with the planned bytes. A file that it cannot read
+// back (here: gone before the open) has its own text. No plaintext is
+// written.
+func TestEnsureGitignoreRefusesAnOpenedFileThatIsNotTheRegularFile(t *testing.T) {
+	notRegular := "secrets/.gitignore was written, but now it is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or another file came to its path while lo read it back: lo stopped before the plaintext write — fix the file, then run this command again"
+	open := openReadBack
+	t.Cleanup(func() { openReadBack = open })
+	for _, tc := range []struct {
+		name string
+		swap func(t *testing.T, path string)
+		want string
+	}{
+		{"a symlink to the planned bytes", func(t *testing.T, path string) {
+			other := filepath.Join(filepath.Dir(filepath.Dir(path)), "other")
+			if err := os.WriteFile(other, []byte(gitignoreContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(other, path); err != nil {
+				t.Fatal(err)
+			}
+		}, notRegular},
+		{"a directory", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, notRegular},
+		{"a FIFO", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, notRegular},
+		{"no file", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}, "cannot read secrets/.gitignore back after its write: lo stopped before the plaintext write — check the file, then run this command again"},
+	} {
+		dir, g := newStore(t)
+		gitignore := filepath.Join(dir, ".gitignore")
+		swapped := 0
+		openReadBack = func(path string) (*os.File, error) {
+			if path == gitignore {
+				swapped++
+				tc.swap(t, path)
+			}
+			return open(path)
+		}
+		err := g.WritePlaintext(Plaintext{Dir: dir, Base: "Secret.app.default.K"}, []byte("the-value"))
+		if got := lines(t, err); !slices.Equal(got, []string{tc.want}) {
+			t.Errorf("%s:\n%q\nwant %q", tc.name, got, []string{tc.want})
+		}
+		if swapped != 1 {
+			t.Errorf("%s: the read-back opened the .gitignore %d times, want 1", tc.name, swapped)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "Secret.app.default.K")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: a plaintext was written: %v", tc.name, err)
+		}
+	}
+	openReadBack = open
+
+	// The control: the file of the lookup passes.
+	dir, g := newStore(t)
+	if wrote, err := g.EnsureGitignore(dir, StepPlaintext); !wrote || err != nil {
+		t.Errorf("the control: EnsureGitignore = %v, %v", wrote, err)
 	}
 }
 
