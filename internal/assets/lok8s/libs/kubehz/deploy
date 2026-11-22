@@ -551,8 +551,17 @@ _KUBEHZ_AGENT_INTERRUPTED="kubehz: the deploy was interrupted. The CronJob agent
 # it only in that subshell: the traps belong to the shell that sets them.
 # Usage: kubehz::hold_suspend_traps
 kubehz::hold_suspend_traps() {
-  trap 'error "${_KUBEHZ_AGENT_INTERRUPTED}"; exit 130' INT
-  trap 'error "${_KUBEHZ_AGENT_INTERRUPTED}"; exit 143' TERM
+  trap 'kubehz::suspend_interrupted 130' INT
+  trap 'kubehz::suspend_interrupted 143' TERM
+}
+
+# The trap of kubehz::hold_suspend_traps: print _KUBEHZ_AGENT_INTERRUPTED
+# and end the subshell with <code> (130 for an INT, 143 for a TERM). The
+# trap calls a function, so the trap string expands no variable.
+# Usage: kubehz::suspend_interrupted <code>
+kubehz::suspend_interrupted() {
+  error "${_KUBEHZ_AGENT_INTERRUPTED}"
+  exit "${1}"
 }
 
 # After the end of the suspend: back to the INT and TERM traps of
