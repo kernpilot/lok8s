@@ -211,9 +211,13 @@ func CheckName(dir, name, namespace, key string) (string, error) {
 }
 
 // EntryName is the name of the plaintext file of the key key of the Secret
-// name in namespace, Secret.<name>.<namespace>.<key>. It is the one builder
-// of the name: CheckName (the writers) and FormatName of the cache (the
-// readers) both build it here. It checks nothing (CheckName does).
+// name in namespace, Secret.<name>.<namespace>.<key>. These build the name
+// of one entry with it: CheckName (the writers), FormatName of the cache
+// (the readers), the .sha file of a bash: entry of the Secret generator
+// (the name, then .sha) and the registry credentials of the KubeOne driver.
+// A listing by a name or a namespace (lo secrets env, the plaintexts of
+// encrypt) matches the start of the name, and builds that start itself. It
+// checks nothing (CheckName does).
 func EntryName(name, namespace, key string) string {
 	return "Secret." + name + "." + namespace + "." + key
 }
