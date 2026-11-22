@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // The tests of the .gitignore plan (bash: tests/unit/secrets_test.bats).
@@ -157,7 +159,7 @@ func TestPlanGitignore(t *testing.T) {
 // plan.
 func planCase(t *testing.T, raw, want string, problems []string) {
 	t.Helper()
-	got, gotProblems := planGitignore([]byte(raw), testGitignoreRel)
+	got, gotProblems := storeguard.PlanGitignore([]byte(raw), testGitignoreRel)
 	if !slices.Equal(gotProblems, problems) {
 		t.Errorf("problems:\n%q\nwant:\n%q", gotProblems, problems)
 	}
@@ -317,7 +319,7 @@ func TestGitignoreKeepsPlaintextOutOfGit(t *testing.T) {
 		{"the legacy lines", litLegacy + "extra\n"},
 		{"a BOM on line 3 below the block", litBlock + "a\nb\n" + litBOM + "!Secret.app.default.K\n"},
 	} {
-		plan, problems := planGitignore([]byte(tc.raw), testGitignoreRel)
+		plan, problems := storeguard.PlanGitignore([]byte(tc.raw), testGitignoreRel)
 		if problems != nil {
 			t.Fatalf("%s: refused: %q", tc.name, problems)
 		}

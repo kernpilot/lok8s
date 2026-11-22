@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kernpilot/lok8s/kustomize/pkg/storeguard"
 )
 
 // litNotRegular is the middle of each refusal of a destination that is not
@@ -32,7 +34,7 @@ func (r spyReader) Read([]byte) (int, error) {
 
 func TestSetPartProblem(t *testing.T) {
 	for _, s := range []string{"app", "default", "kube-system", "tls.crt", "JWT_SECRET", "a.b-c_d", "...", "x..y", "", "ü"} {
-		if why := setPartProblem(s); why != "" {
+		if why := storeguard.PartProblem(s); why != "" {
 			t.Errorf("%q is refused: %s", s, why)
 		}
 	}
@@ -48,7 +50,7 @@ func TestSetPartProblem(t *testing.T) {
 		"a\nb":                 "it has a control byte",
 		"a\x7fb":               "it has a control byte",
 	} {
-		if got := setPartProblem(s); got != want {
+		if got := storeguard.PartProblem(s); got != want {
 			t.Errorf("%q: got %q, want %q", s, got, want)
 		}
 	}
@@ -65,7 +67,7 @@ func TestSetDestination(t *testing.T) {
 		{"/p/.secrets", "Secret.app.default.a/b", "/p/.secrets/Secret.app.default.a/b", false},
 		{"/p/.secrets", "Secret.app.default.K/", "/p/.secrets/Secret.app.default.K/", false},
 	} {
-		dest, ok := setDestination(tc.dir, tc.base)
+		dest, ok := storeguard.Destination(tc.dir, tc.base)
 		if dest != tc.dest || ok != tc.ok {
 			t.Errorf("%q + %q: got %q %v, want %q %v", tc.dir, tc.base, dest, ok, tc.dest, tc.ok)
 		}
@@ -404,7 +406,7 @@ func TestGitignoreAtTheSizeLimitPassesTwice(t *testing.T) {
 // (with printable bytes only, relative to the project), then the final
 // line. The text of the file system errors (it has the raw path) is not
 // printed.
-func TestReportFailedWritePrintsNoErrorText(t *testing.T) {
+func TestFailedWritePrintsNoErrorText(t *testing.T) {
 	c, _, errOut := testEnv(t)
 	tmp := c.Paths.Base + "/.secrets/.Secret.app.default.K\x1b[2J.tmp-123"
 	left := &tempLeftError{
@@ -412,7 +414,7 @@ func TestReportFailedWritePrintsNoErrorText(t *testing.T) {
 		Name: tmp,
 		Rm:   fmt.Errorf("remove %s: permission denied", tmp),
 	}
-	c.reportFailedWrite(left, "set cannot write .secrets/Secret.app.default.K?[2J: it was not changed")
+	_ = c.printStop(c.guard().FailedWrite(left, "set cannot write .secrets/Secret.app.default.K?[2J: it was not changed"))
 	want := "[error] cannot remove the temp file .secrets/.Secret.app.default.K?[2J.tmp-123: remove it by hand\n" +
 		"[error] set cannot write .secrets/Secret.app.default.K?[2J: it was not changed\n"
 	if errOut.String() != want {
@@ -420,7 +422,7 @@ func TestReportFailedWritePrintsNoErrorText(t *testing.T) {
 	}
 
 	errOut.Reset()
-	c.reportFailedWrite(errors.New("rename "+tmp+": no such file or directory"), "decrypt cannot write .secrets/X: it was not changed")
+	_ = c.printStop(c.guard().FailedWrite(errors.New("rename "+tmp+": no such file or directory"), "decrypt cannot write .secrets/X: it was not changed"))
 	if want := "[error] decrypt cannot write .secrets/X: it was not changed\n"; errOut.String() != want {
 		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 	}

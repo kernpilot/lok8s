@@ -244,16 +244,6 @@ func (c *Context) ensureGitignore(dir, step string) error {
 	return nil
 }
 
-// reportFailedWrite prints the lines of a write through writeReplacing that
-// failed, on a file that lo checks before it writes it (bash: the same
-// lines in secrets::_ensure_gitignore and secrets::_plain_write_failed):
-// the temp file that stays, if its remove failed too, then final
-// (storeguard: Guard.FailedWrite). It prints no error text of the file
-// system, because that text has the raw path.
-func (c *Context) reportFailedWrite(err error, final string) {
-	_ = c.printStop(c.guard().FailedWrite(err, final))
-}
-
 // writeGitignore fills the temp file of the .gitignore write of
 // ensureGitignore with want (a seam: a test makes it stop part way).
 var writeGitignore = func(w io.Writer, want []byte) error {
