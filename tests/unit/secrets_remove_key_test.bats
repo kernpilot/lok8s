@@ -1720,7 +1720,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
   exec {fd}>&-
   [ "$status" -eq 1 ]
-  [ "$output" = "[error] ${CFG}.lock is held by another lo secrets add-key or remove-key: nothing was changed. Run it again when that one ends" ] || {
+  [ "$output" = "[error] ${CFG}.lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${CFG}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]
@@ -1773,7 +1773,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
   exec {lockfd}>&-
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key: nothing was changed. Run it again when that one ends" ] || {
+  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${conf}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]

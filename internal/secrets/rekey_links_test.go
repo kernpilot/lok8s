@@ -682,7 +682,7 @@ func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
 			if err := f.run(); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 			}
-			want := "[error] " + target + ".lock is held by another lo secrets add-key or remove-key: nothing was changed. Run it again when that one ends\n"
+			want := "[error] " + target + ".lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again\n"
 			if f.errOut.String() != want || f.out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 			}

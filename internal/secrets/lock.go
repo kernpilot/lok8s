@@ -162,7 +162,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		}
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
-			ui.ErrorTo(c.ErrOut, "%s is held by another lo secrets add-key or remove-key: nothing was changed. Run it again when that one ends", path)
+			ui.ErrorTo(c.ErrOut, "%s is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again", path)
 			return nil, ErrHandled
 		}
 		_ = lockSleep(context.Background(), 200*time.Millisecond)

@@ -330,7 +330,7 @@ func TestKeyCommandsRefuseWhileTheLockIsHeld(t *testing.T) {
 			if err := tc.run(c); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v", err)
 			}
-			want := "[error] " + lockPath(t, c) + " is held by another lo secrets add-key or remove-key: nothing was changed. Run it again when that one ends\n"
+			want := "[error] " + lockPath(t, c) + " is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
