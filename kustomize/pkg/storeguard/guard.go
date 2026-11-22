@@ -158,13 +158,13 @@ func (g Guard) unmake(failed string, made []string) *Stop {
 	}
 	syncFailed := "the sync of the parent directory of " + Printable(g.rel(failed)) + " failed"
 	if len(left) == 0 {
-		return stop(syncFailed + ", so lo removed the directories that it made: lo wrote no file — run this command again")
+		return stop(syncFailed + ", so lo removed the directories that it made: lo wrote no file. Run this command again")
 	}
 	lines := make([]string, 0, len(left)+1)
 	for i := len(left) - 1; i >= 0; i-- {
 		lines = append(lines, "lo cannot remove "+Printable(g.rel(left[i]))+", which it made")
 	}
-	return stop(append(lines, syncFailed+": lo wrote no file — remove each directory above, then run this command again")...)
+	return stop(append(lines, syncFailed+": lo wrote no file. Remove each directory above, then run this command again")...)
 }
 
 func (g Guard) rel(path string) string {
@@ -244,7 +244,7 @@ func notInStore(base string) string {
 // notRegular is the refusal of a path that is not a regular file and not
 // absent (DestinationOK), before step.
 func notRegular(rel, step string) string {
-	return Printable(rel) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before " + step + " — remove it, then run this command again"
+	return Printable(rel) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before " + step + ". Remove it, then run this command again"
 }
 
 // WritePlaintext writes data into the plaintext file p.Base of the store
@@ -416,14 +416,14 @@ func (g Guard) EnsureGitignore(dir, step string) (wrote bool, err error) {
 	switch err := holds(gitignore, want); {
 	case err == nil:
 	case errors.Is(err, errOtherBytes):
-		return true, stop(rel + " was written, but it does not have the bytes that lo planned for it: lo stopped before " + step + " — fix the file, then run this command again")
+		return true, stop(rel + " was written, but it does not have the bytes that lo planned for it: lo stopped before " + step + ". Fix the file, then run this command again")
 	case errors.Is(err, errNotRegular):
-		return true, stop(rel + " was written, but now it is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or another file came to its path while lo read it back: lo stopped before " + step + " — fix the file, then run this command again")
+		return true, stop(rel + " was written, but now it is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or another file came to its path while lo read it back: lo stopped before " + step + ". Fix the file, then run this command again")
 	default:
-		return true, stop("cannot read " + rel + " back after its write: lo stopped before " + step + " — check the file, then run this command again")
+		return true, stop("cannot read " + rel + " back after its write: lo stopped before " + step + ". Check the file, then run this command again")
 	}
 	if err := g.sync(dir); err != nil {
-		return true, stop(rel + " was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before " + step + " — run this command again")
+		return true, stop(rel + " was written, but the sync of its directory failed, so a power loss can lose it: lo stopped before " + step + ". Run this command again")
 	}
 	return true, nil
 }

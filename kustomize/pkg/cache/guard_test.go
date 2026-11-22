@@ -220,7 +220,7 @@ func TestPutRefusesAnUnsafeGitignoreBeforeAnyWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = c2.Put("PASSWORD", []byte("v"))
-	wantLink := []string{rel + ".gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
+	wantLink := []string{rel + ".gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write. Remove it, then run this command again"}
 	if got := stopLines(t, err); !slices.Equal(got, wantLink) {
 		t.Errorf("refusal:\n%q\nwant:\n%q", got, wantLink)
 	}
@@ -328,7 +328,7 @@ func TestPutDoesNotFollowALink(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := c.Put("PASSWORD", []byte("the-value"))
-			want := []string{rel + entry + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
+			want := []string{rel + entry + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write. Remove it, then run this command again"}
 			if got := stopLines(t, err); !slices.Equal(got, want) {
 				t.Errorf("refusal:\n%q\nwant:\n%q", got, want)
 			}
@@ -342,7 +342,7 @@ func TestPutDoesNotFollowALink(t *testing.T) {
 	}
 
 	notRegular := func(base string) []string {
-		return []string{rel + base + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write — remove it, then run this command again"}
+		return []string{rel + base + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the plaintext write. Remove it, then run this command again"}
 	}
 	c, dir := newStore(t)
 	dangling := filepath.Join(dir, entry)

@@ -76,7 +76,7 @@ func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 	if err := os.Symlink(outside, c.Paths.Base+"/.secrets/.gitignore"); err != nil {
 		t.Fatal(err)
 	}
-	want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again\n"
+	want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write. Remove it, then run this command again\n"
 	before := fileStates(t, c.Paths.Base)
 	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())

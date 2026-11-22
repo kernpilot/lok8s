@@ -515,7 +515,7 @@ func TestEncryptRefusesAGitignoreThatIsALinkOrNotARegularFile(t *testing.T) {
 			if err := c.Encrypt(""); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 			}
-			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the .enc writes — remove it, then run this command again\n"
+			want := "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the .enc writes. Remove it, then run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -814,7 +814,7 @@ func TestAddKeyRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 			if err := f.run(); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 			}
-			want := "[error] " + f.c.rel(gitignore) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again\n"
+			want := "[error] " + f.c.rel(gitignore) + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write. Remove it, then run this command again\n"
 			if f.errOut.String() != want || f.out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 			}

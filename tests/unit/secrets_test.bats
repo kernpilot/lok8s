@@ -226,7 +226,7 @@ _gitignore_refused() { # <link|dir>
   before="$(_states)"
   run secrets::encrypt
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the .enc writes — remove it, then run this command again" ] || {
+  [ "$output" = "[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before the .enc writes. Remove it, then run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ ! -s "${log}" ] || { echo "encrypted: $(cat "${log}")" >&2; return 1; }
   [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
@@ -827,7 +827,7 @@ _not_regular=' is not a regular file (a symlink, a directory, a FIFO, a socket o
     before="$(_store_state "${PATH_SECRETS}")"
     run secrets::set
     [ "$status" -eq 1 ] || { echo "${target:-a directory}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] .secrets/Secret.app.default.K${_not_regular}lo stopped before the plaintext write — remove it, then run this command again" ] || {
+    [ "$output" = "[error] .secrets/Secret.app.default.K${_not_regular}lo stopped before the plaintext write. Remove it, then run this command again" ] || {
       echo "${target:-a directory}: $output" >&2; return 1; }
     [ "$(_store_state "${PATH_SECRETS}")" = "${before}" ] || { echo "${target:-a directory}: a store entry changed" >&2; return 1; }
   done
@@ -927,7 +927,7 @@ _hard_link_replaced() {
   _block > "${PATH_SECRETS}/.gitignore"
   run secrets::set
   [ "$status" -eq 1 ] || { echo "set: status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] st?[2Jore/Secret.app.default.K${_not_regular}lo stopped before the plaintext write — remove it, then run this command again" ] || {
+  [ "$output" = "[error] st?[2Jore/Secret.app.default.K${_not_regular}lo stopped before the plaintext write. Remove it, then run this command again" ] || {
     echo "set: $output" >&2; return 1; }
 }
 
@@ -1140,7 +1140,7 @@ _hard_link_replaced() {
   mkdir -p "${outside%/*}"
   printf '# not the rules of lok8s\n' > "${outside}"
   ln -s "${outside}" "${PATH_SECRETS}/.gitignore"
-  line="[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write — remove it, then run this command again"
+  line="[error] .secrets/.gitignore is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: lo stopped before its first write. Remove it, then run this command again"
   run secrets::init
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$output" = "${line}" ] || { echo "$output" >&2; return 1; }
