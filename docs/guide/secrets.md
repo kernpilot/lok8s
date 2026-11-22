@@ -281,16 +281,45 @@ bash implementation, `set` and `decrypt` need a `mv` that takes `-T` (see the
 encrypt below), also without `--encrypt`.
 
 The secret generator of `lo build` writes its cache into the same store
-with the same checks and the same refusal texts as `set`. It refuses a name,
-a namespace or a key with a path part, a key whose plaintext name ends in
-`.enc` (in any letter case), and a plaintext path that is not a regular file
-and not absent. Before it writes a plaintext, it writes the block into the
-`.gitignore`, or it refuses a `.gitignore` that cannot keep the plaintext
-out of git. A build still reads an entry whose name ends in `.enc` that the
-store has already: a read writes nothing. The generator writes the `.sha`
-file of a `bash:` entry and the `.bash-allow` file without these checks:
-they hold hashes, not values. A dry run (`lo bootstrap --dry-run`) writes no
-file into the store and does not do these checks.
+with the same checks as `set`. It refuses a name, a namespace or a key with
+a path part, a key whose plaintext name ends in `.enc` (in any letter case),
+and a plaintext path that is not a regular file and not absent. Before it
+writes a plaintext, it writes the block into the `.gitignore`, or it refuses
+a `.gitignore` that cannot keep the plaintext out of git. It does these
+checks before it generates a value too: for a refused key, no generator runs
+(a `bash:` command has side effects). A refusal has the text of `set`. It
+names a file of a store `clusters/<domain>/secrets` relative to the project,
+as `set` does, and a file of any other store relative to the parent
+directory of the store. When a write fails, the error names the file and
+no command.
+
+Thus a build can fail where it passed before:
+
+- The `.gitignore` of the store has a line that starts with `!` below the
+  lok8s block, or anywhere in a file with no block. The build refuses each
+  such line, also a line such as `!README.md` that matches no plaintext.
+  Remove the line, or move the file out of the store, then build again. The
+  other refusals of the `.gitignore` above apply too.
+- A key ends in `.enc` (in any letter case). Before this check, the build
+  wrote its plaintext, and the rule `!Secret.*.enc` let git commit it.
+- The plaintext path is a symlink, a FIFO, a socket or a device. Before this
+  check, the build replaced it.
+
+A build that writes no plaintext (each value is in the store already, and
+no entry has `update: true`) does not read the `.gitignore` and changes no
+file of the store. A build that writes a plaintext into a store with no
+`.gitignore` makes the file. Into a store whose `.gitignore` has no lok8s
+block, it puts the block at the top of the file (in place of the old lines
+of lo, if the file has them). Thus the committed `.gitignore` changes:
+commit that change. A build still reads an entry whose name ends in `.enc`
+that the store has already: a read writes nothing. The generator writes the
+`.sha` file of a `bash:` entry and the `.bash-allow` file without these
+checks: they hold hashes, not values.
+
+A dry run (`lo bootstrap --dry-run`) writes no file into the store, and no
+`.gitignore`. Before it generates or keeps a value, it does the same checks
+as the build: it reads the `.gitignore` and does not write the block. Thus a
+dry run refuses what the build refuses, with the same text.
 
 The `.gitignore` of the store does not cover these cases:
 
