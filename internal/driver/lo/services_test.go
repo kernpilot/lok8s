@@ -217,6 +217,24 @@ func TestExposeTLSCertDefectPreserved(t *testing.T) {
 	}
 }
 
+// The proxy container runs the pinned nginx image: the tag of one version
+// and its digest, never a floating tag. The literal is the value of
+// ExposeImage and of LO_EXPOSE_IMAGE (the bash twin). bats: "expose: the
+// proxy runs the pinned nginx image, by tag and digest"
+// (tests/unit/lo_expose_test.bats).
+func TestExposeRunsThePinnedImage(t *testing.T) {
+	d, runner, _, cy := exposeFixture(t)
+	var out, errBuf bytes.Buffer
+	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
+		t.Fatal(err)
+	}
+	const want = "docker run -d --restart=always --name test-dns-proxy --network lok8s -p 80:80 -p 443:443 " +
+		"nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
+	if got := runner.callsMatching("docker run"); len(got) != 1 || got[0] != want {
+		t.Fatalf("docker run calls = %q, want exactly one: %s", got, want)
+	}
+}
+
 func TestExposeMissingTemplateFails(t *testing.T) {
 	d, _, p, cy := exposeFixture(t)
 	os.Remove(filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
