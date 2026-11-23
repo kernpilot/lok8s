@@ -271,24 +271,33 @@ func TestKeyParseErrorsPrintNoLibraryError(t *testing.T) {
 	})
 }
 
-// The key file is read once and at most 64 KiB: a bigger file and a file
-// that cannot be read are refused with the path and the cause, and nothing
-// from the file (bash twin: the cap and the read refusal of
-// secrets::_read_public_key).
+// The key file is read once and at most 64 KiB: a bigger file, a file that
+// holds a NUL byte and a file that cannot be read are refused with the path
+// and the cause, and nothing from the file, by init, add-key and remove-key.
+// A file over 64 KiB of NUL bytes is a file over 64 KiB, as in bash (bash
+// twin: the cap, the NUL and the read refusals of secrets::_read_public_key).
 func TestKeyFileReadIsCappedAndFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	big := filepath.Join(dir, "big.pub")
 	write(t, big, "ssh-ed25519 AAAA "+keyCanary+strings.Repeat("x", maxPublicKeyFile))
 	atCap := filepath.Join(dir, "at-cap.pub")
 	write(t, atCap, "ssh-ed25519 AAAA"+strings.Repeat("x", maxPublicKeyFile-len("ssh-ed25519 AAAA")))
-	if _, err := deriveAgePublicKey(big); !errors.Is(err, errKeyFileTooBig) {
-		t.Errorf("a file over 64 KiB: want errKeyFileTooBig, got %v", err)
+	nul := filepath.Join(dir, "nul.pub")
+	write(t, nul, "ssh-ed25519 AAAA\x00"+keyCanary+"\n")
+	bigNUL := filepath.Join(dir, "big-nul.pub")
+	write(t, bigNUL, strings.Repeat("\x00", maxPublicKeyFile+1))
+	for path, want := range map[string]error{big: errKeyFileTooBig, bigNUL: errKeyFileTooBig, nul: errKeyFileNUL} {
+		if _, err := deriveAgePublicKey(path); !errors.Is(err, want) {
+			t.Errorf("%s: want %v, got %v", filepath.Base(path), want, err)
+		}
 	}
 	if _, err := deriveAgePublicKey(atCap); errors.Is(err, errKeyFileTooBig) || errors.Is(err, errKeyFileUnreadable) {
 		t.Errorf("a file of exactly 64 KiB was refused by the cap: %v", err)
 	}
 	cases := map[string]string{
-		big: "[error] " + big + " is bigger than 64 KiB, which no public key file is: nothing from it is printed\n",
+		big:    "[error] " + big + " is bigger than 64 KiB, which no public key file is: nothing from it is printed\n",
+		bigNUL: "[error] " + bigNUL + " is bigger than 64 KiB, which no public key file is: nothing from it is printed\n",
+		nul:    "[error] " + nul + " holds a NUL byte, which no public key file holds: nothing from it is printed\n",
 	}
 	if os.Geteuid() != 0 {
 		closed := filepath.Join(dir, "closed.pub")
@@ -306,15 +315,183 @@ func TestKeyFileReadIsCappedAndFailsClosed(t *testing.T) {
 		if errOut.String() != want || out.String() != "" {
 			t.Errorf("init: stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
 		}
-		c, _, errOut = testEnv(t)
-		sopsYAMLWith(t, c, keyA)
-		if err := c.AddKey(path, false, false); !errors.Is(err, ErrHandled) {
-			t.Fatalf("add-key %s: want ErrHandled, got %v", path, err)
-		}
-		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(errOut.String(), keyCanary) {
-			t.Errorf("add-key: stderr %q\nwant %q first", errOut.String(), want)
+		for name, run := range map[string]func(*Context) func(string, bool, bool) error{
+			"add-key":    func(c *Context) func(string, bool, bool) error { return c.AddKey },
+			"remove-key": func(c *Context) func(string, bool, bool) error { return c.RemoveKey },
+		} {
+			c, _, errOut = testEnv(t)
+			sopsYAMLWith(t, c, keyA)
+			if err := run(c)(path, false, false); !errors.Is(err, ErrHandled) {
+				t.Fatalf("%s %s: want ErrHandled, got %v", name, path, err)
+			}
+			if !strings.HasPrefix(errOut.String(), want) || strings.Contains(errOut.String(), keyCanary) {
+				t.Errorf("%s: stderr %q\nwant %q first", name, errOut.String(), want)
+			}
 		}
 	}
+}
+
+// The own-identity check reads the .pub through the same read: a file that
+// holds a valid key line and more than 64 KiB, or a NUL byte after the key
+// line, is no match, although the library would parse its first line (bash
+// twin: the own-identity cases of the cap and NUL test in
+// tests/unit/secrets_remove_key_test.bats).
+func TestOwnIdentityReadIsCappedAndFailsClosed(t *testing.T) {
+	testEnv(t)
+	dir := t.TempDir()
+	_, pub := testSSHKeypair(t, dir)
+	raw, err := os.ReadFile(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := deriveAgePublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOK8S_SSH_KEY", pub)
+	if got := ownIdentity(recipient); got != pub {
+		t.Fatalf("the plain .pub: own identity %q, want %q", got, pub)
+	}
+	for name, content := range map[string]string{
+		"over 64 KiB": string(raw) + "#" + strings.Repeat("x", maxPublicKeyFile) + "\n",
+		"a NUL byte":  string(raw) + "\x00\n",
+	} {
+		write(t, pub, content)
+		if got := ownIdentity(recipient); got != "" {
+			t.Errorf("%s: own identity %q, want no match", name, got)
+		}
+	}
+}
+
+// A key path with the shape of a private key is not printed: every message
+// of init, decrypt and remove-key that names the key file prints a
+// placeholder (shownKeyPath). The path is a real file in a directory whose
+// name holds an age identity marker. Bash twin: the shaped-path test in
+// tests/unit/secrets_test.bats.
+func TestKeyPathMessagesHideAPrivateKeyShape(t *testing.T) {
+	const shown = "(not printed: it looks like a private key)"
+	marker := "AGE-SECRET-" + "KEY-1SHAPEDPATH"
+	newShaped := func(t *testing.T) string {
+		return mkdir(t, filepath.Join(t.TempDir(), marker))
+	}
+	check := func(t *testing.T, out, errOut string) {
+		t.Helper()
+		if strings.Contains(out+errOut, marker) || strings.Contains(out+errOut, keyCanary) {
+			t.Errorf("the path or the file reached the output:\nstdout %q\nstderr %q", out, errOut)
+		}
+	}
+
+	t.Run("init refusals", func(t *testing.T) {
+		dir := newShaped(t)
+		cases := map[string][2]string{
+			"key":     {privateKeyForms["openssh"], "[error] " + shown + " holds a private key, not a public key: nothing from it is printed\n[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key\n"},
+			"big.pub": {strings.Repeat("x", maxPublicKeyFile+1), "[error] " + shown + " is bigger than 64 KiB, which no public key file is: nothing from it is printed\n"},
+			"nul.pub": {"ssh-ed25519 AAAA\x00\n", "[error] " + shown + " holds a NUL byte, which no public key file holds: nothing from it is printed\n"},
+			"bad.pub": {"ssh-ed25519 AAAA" + keyCanary + "!!\n", "[error] Failed to derive age public key from " + shown + "\n[error] Only ed25519 SSH keys are supported\n"},
+		}
+		if os.Geteuid() != 0 {
+			cases["closed.pub"] = [2]string{"ssh-ed25519 AAAA\n", "[error] cannot read the key file " + shown + ": nothing from it is printed\n"}
+		}
+		for name, tc := range cases {
+			c, out, errOut := testEnv(t)
+			path := filepath.Join(dir, name)
+			write(t, path, tc[0])
+			if name == "closed.pub" {
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.Init(path); !errors.Is(err, ErrHandled) {
+				t.Fatalf("%s: want ErrHandled, got %v", name, err)
+			}
+			if errOut.String() != tc[1] || out.String() != "" {
+				t.Errorf("%s: stdout %q\nstderr %q\nwant %q", name, out.String(), errOut.String(), tc[1])
+			}
+			check(t, out.String(), errOut.String())
+		}
+	})
+
+	t.Run("init with an rsa key", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		raw, err := os.ReadFile(testRSAPublicKey(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(newShaped(t), "rsa.pub")
+		write(t, path, string(raw))
+		if err := c.Init(path); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		if want := "[error] no age recipient derived from " + shown + " (ed25519 SSH keys only)"; !strings.HasPrefix(errOut.String(), want) {
+			t.Errorf("stderr %q\nwant it to start with %q", errOut.String(), want)
+		}
+		check(t, out.String(), errOut.String())
+	})
+
+	t.Run("init, and init again with another key in .sops.yaml", func(t *testing.T) {
+		_, pub := testSSHKeypair(t, newShaped(t))
+		c, out, errOut := testEnv(t)
+		if err := c.Init(pub); err != nil {
+			t.Fatalf("%v\n%s", err, errOut.String())
+		}
+		if want := "Derived from: " + shown + "\n"; !strings.Contains(out.String(), want) {
+			t.Errorf("stdout %q lacks %q", out.String(), want)
+		}
+		check(t, out.String(), errOut.String())
+		c, out, errOut = testEnv(t)
+		sopsYAMLWith(t, c, keyA)
+		if err := c.Init(pub); err != nil {
+			t.Fatalf("%v\n%s", err, errOut.String())
+		}
+		if want := "[warn] Add it with: lo secrets add-key " + shown + "\n"; !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr %q lacks %q", errOut.String(), want)
+		}
+		check(t, out.String(), errOut.String())
+	})
+
+	t.Run("decrypt with a key that does not derive", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		c.Domain = "a.dev"
+		mkdir(t, c.Paths.Clusters+"/a.dev/secrets")
+		path := filepath.Join(newShaped(t), "id_ed25519")
+		write(t, path, "not a key "+keyCanary+"\n")
+		if err := c.Decrypt(path); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+		}
+		for _, want := range []string{
+			"[error] Failed to derive age key from " + shown + "\n",
+			"[error]   ssh-to-age -private-key -i " + shown + " > ~/.config/sops/age/keys.txt\n",
+		} {
+			if !strings.Contains(errOut.String(), want) {
+				t.Errorf("stderr %q lacks %q", errOut.String(), want)
+			}
+		}
+		check(t, out.String(), errOut.String())
+	})
+
+	t.Run("remove-key of the own identity", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		c.Domain = "a.dev"
+		keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+		k, g := keep.Recipient().String(), gone.Recipient().String()
+		file := filepath.Join(newShaped(t), "keys.txt")
+		t.Setenv("SOPS_AGE_KEY_FILE", file)
+		write(t, file, "# created: test\n# public key: "+g+"\n"+gone.String()+"\n")
+		sopsRules(t, c, k+","+g)
+		a := c.Paths.Clusters + "/a.dev/secrets"
+		write(t, a+"/Secret.app.default.K", "v")
+		encryptStore(t, c, "a.dev", out, errOut)
+		freshen(t, a+"/Secret.app.default.K")
+		if err := c.RemoveKey(g, false, false); err != nil {
+			t.Fatalf("%v\n%s", err, errOut.String())
+		}
+		if want := "[warn] the recipient is your own decrypt identity (" + shown + "): once it is removed"; !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr %q lacks %q", errOut.String(), want)
+		}
+		if strings.Contains(out.String()+errOut.String(), marker) {
+			t.Error("the path of the keys file reached the output")
+		}
+	})
 }
 
 // The guard itself, with a HOME of the test as the real one: it names a

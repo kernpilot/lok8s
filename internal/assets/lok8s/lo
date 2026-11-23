@@ -183,6 +183,11 @@ main() {
     break
   done
 
+  # A private key pasted into an argument of lo secrets is refused before
+  # :usage can print it: :usage takes the global flags (--domain too) from
+  # anywhere in the argv, and prints a command that it does not know. Go
+  # twin: GuardPrivateKeyArgv, which cmd/lo/main.go runs first.
+  secrets::_guard_lo_argv "${@}" || return 1
   :usage "lok8s - local dev orchestration" "${@}"
   if (( verbose )); then export DEBUG=1; fi
   if (( remote )); then export LOK8S_REMOTE=1; fi

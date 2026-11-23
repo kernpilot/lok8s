@@ -47,7 +47,7 @@ func (c *Context) Init(sshKey string) error {
 		return ErrHandled
 	}
 	if err != nil && !errors.Is(err, errUnsupportedKey) {
-		ui.ErrorTo(c.ErrOut, "Failed to derive age public key from %s", sshKey)
+		ui.ErrorTo(c.ErrOut, "Failed to derive age public key from %s", shownKeyPath(sshKey))
 		ui.ErrorTo(c.ErrOut, "Only ed25519 SSH keys are supported")
 		return ErrHandled
 	}
@@ -59,7 +59,7 @@ func (c *Context) Init(sshKey string) error {
 	// every config (grepQF), so a rerun took it for a key that is
 	// configured. A config with `age: ''` is one that no encrypt can use.
 	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
+		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only): nothing written to %s", shownKeyPath(sshKey), sopsConfig)
 		return ErrHandled
 	}
 
@@ -85,7 +85,7 @@ func (c *Context) Init(sshKey string) error {
 			return nil
 		}
 		ui.WarnTo(c.ErrOut, ".sops.yaml exists but doesn't contain this key")
-		ui.WarnTo(c.ErrOut, "Add it with: lo secrets add-key %s", sshKey)
+		ui.WarnTo(c.ErrOut, "Add it with: lo secrets add-key %s", shownKeyPath(sshKey))
 		fmt.Fprintf(c.Out, "Your age public key: %s\n", agePubkey)
 		return nil
 	}
@@ -155,7 +155,7 @@ creation_rules:
 
 	fmt.Fprintf(c.Out, "Created %s\n", sopsConfig)
 	fmt.Fprintf(c.Out, "Age public key: %s\n", agePubkey)
-	fmt.Fprintf(c.Out, "Derived from: %s\n", sshKey)
+	fmt.Fprintf(c.Out, "Derived from: %s\n", shownKeyPath(sshKey))
 	return nil
 }
 
@@ -842,10 +842,10 @@ func (c *Context) Decrypt(sshKey string) error {
 		if err != nil {
 			// Contained: the library error (like the binary's stderr) can
 			// carry input material for a private key — never surface it.
-			ui.ErrorTo(c.ErrOut, "Failed to derive age key from %s", sshKey)
+			ui.ErrorTo(c.ErrOut, "Failed to derive age key from %s", shownKeyPath(sshKey))
 			ui.ErrorTo(c.ErrOut, "If your SSH key is passphrase-protected, derive once:")
 			ui.ErrorTo(c.ErrOut, "  mkdir -p ~/.config/sops/age")
-			ui.ErrorTo(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", sshKey)
+			ui.ErrorTo(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", shownKeyPath(sshKey))
 			ui.ErrorTo(c.ErrOut, "  chmod 600 ~/.config/sops/age/keys.txt")
 			ui.ErrorTo(c.ErrOut, "(you'll be prompted for the passphrase once)")
 			return ErrHandled

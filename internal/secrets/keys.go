@@ -13,6 +13,7 @@ package secrets
 // stream.
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -43,12 +44,14 @@ var errUnsupportedKey = errors.New("unsupported ssh key type")
 // library parses the file.
 var errPrivateKeyFile = errors.New("the file holds a private key")
 
-// errKeyFileUnreadable and errKeyFileTooBig mark a key file that
-// deriveAgePublicKey does not parse: one it cannot open or read as a regular
-// file, and one bigger than maxPublicKeyFile.
+// errKeyFileUnreadable, errKeyFileTooBig and errKeyFileNUL mark a key file
+// that deriveAgePublicKey does not parse: one it cannot open or read as a
+// regular file, one bigger than maxPublicKeyFile, and one that holds a NUL
+// byte.
 var (
 	errKeyFileUnreadable = errors.New("the key file cannot be read")
 	errKeyFileTooBig     = errors.New("the key file is too big for a public key")
+	errKeyFileNUL        = errors.New("the key file holds a NUL byte")
 )
 
 // maxPublicKeyFile is the most that deriveAgePublicKey reads from a key file:
@@ -69,13 +72,16 @@ var privateKeyFileRe = regexp.MustCompile(`(?m)^\x{FEFF}?[ \t]*(-{4,5} ?BEGIN ([
 
 // readPublicKeyFile reads a key file once, at most maxPublicKeyFile bytes,
 // for the check and the parse to see the same bytes. It reads a regular file
-// only.
+// only, and refuses a file that holds a NUL byte: no public key file holds
+// one, and the bash twin cannot keep one in a variable, so the twins refuse
+// the same files.
 func readPublicKeyFile(path string) ([]byte, error) {
 	f, err := os.Open(path) // #nosec G304 -- the key file that the user names
 	if err != nil {
 		return nil, errKeyFileUnreadable
 	}
-	defer f.Close()
+	// A read-only file: its close error changes nothing that was read.
+	defer func() { _ = f.Close() }()
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
 		return nil, errKeyFileUnreadable
 	}
@@ -86,12 +92,15 @@ func readPublicKeyFile(path string) ([]byte, error) {
 	if len(raw) > maxPublicKeyFile {
 		return nil, errKeyFileTooBig
 	}
+	if bytes.IndexByte(raw, 0) >= 0 {
+		return nil, errKeyFileNUL
+	}
 	return raw, nil
 }
 
 // deriveAgePublicKey derives an age recipient from an SSH public key file.
-// Returns errKeyFileUnreadable or errKeyFileTooBig for a file that it does
-// not read (readPublicKeyFile); ("", errPrivateKeyFile) for a file that holds
+// Returns errKeyFileUnreadable, errKeyFileTooBig or errKeyFileNUL for a file
+// that it does not parse (readPublicKeyFile); ("", errPrivateKeyFile) for a file that holds
 // a private key, before the library parses it; ("", errUnsupportedKey) for a
 // parseable non-ed25519 key (the CLI's "skipped key" case → empty output,
 // rc 0 in bash); and a generic error for anything unparseable (the CLI's rc 1
@@ -116,15 +125,19 @@ func deriveAgePublicKey(path string) (string, error) {
 
 // refuseKeyFile prints the refusal for a key file that deriveAgePublicKey
 // did not parse: a file it could not read, a file too big for a public key,
-// or a file that holds a private key. It prints the path and the cause, and
-// nothing from the file, and reports whether err was one of these. Bash twin:
+// a file that holds a NUL byte, or a file that holds a private key. It
+// prints the path (shownKeyPath) and the cause, and nothing from the file,
+// and reports whether err was one of these. Bash twin:
 // secrets::_read_public_key.
 func refuseKeyFile(w io.Writer, path string, err error) bool {
+	shown := shownKeyPath(path)
 	switch {
 	case errors.Is(err, errKeyFileUnreadable):
-		ui.ErrorTo(w, "cannot read the key file %s: nothing from it is printed", path)
+		ui.ErrorTo(w, "cannot read the key file %s: nothing from it is printed", shown)
 	case errors.Is(err, errKeyFileTooBig):
-		ui.ErrorTo(w, "%s is bigger than 64 KiB, which no public key file is: nothing from it is printed", path)
+		ui.ErrorTo(w, "%s is bigger than 64 KiB, which no public key file is: nothing from it is printed", shown)
+	case errors.Is(err, errKeyFileNUL):
+		ui.ErrorTo(w, "%s holds a NUL byte, which no public key file holds: nothing from it is printed", shown)
 	case errors.Is(err, errPrivateKeyFile):
 		refusePrivateKeyFile(w, path)
 	default:
@@ -135,10 +148,11 @@ func refuseKeyFile(w io.Writer, path string, err error) bool {
 
 // refusePrivateKeyFile prints the refusal for a key file that holds a
 // private key (errPrivateKeyFile): the path and the fix, and nothing from
-// the file.
+// the file. For a path that it does not print, the fix names ssh-keygen.
 func refusePrivateKeyFile(w io.Writer, path string) {
-	ui.ErrorTo(w, "%s holds a private key, not a public key: nothing from it is printed", path)
-	if strings.HasSuffix(path, ".pub") {
+	shown := shownKeyPath(path)
+	ui.ErrorTo(w, "%s holds a private key, not a public key: nothing from it is printed", shown)
+	if strings.HasSuffix(path, ".pub") || shown != path {
 		ui.ErrorTo(w, "pass the public key file instead: ssh-keygen -y -f <private key> prints the public key")
 		return
 	}

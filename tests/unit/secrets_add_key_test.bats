@@ -230,8 +230,8 @@ _add() { # <key> [all] [skip_orphans]
   local before; before="$(cat "${PATH_BASE}/.sops.yaml")"
   run _add "${fake}"
   [ "$status" -eq 1 ]
-  [ "$output" = "[error] the key argument looks like a private key — it is not printed
-[error] pass an age public key (age1…) or the path to an ed25519 SSH public key" ] || {
+  [ "$output" = "[error] an argument looks like a private key: it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)" ] || {
     echo "unexpected output (${#output} bytes)" >&2; return 1; }
   [[ "$output" != *"${fake}"* ]]
   [ "$(cat "${PATH_BASE}/.sops.yaml")" = "${before}" ]

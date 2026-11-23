@@ -23,8 +23,10 @@ const pemLine = "-----BEGIN OPENSSH PRIVATE " + "KEY-----"
 // fixtureRcpt has the shape of an age public key.
 var fixtureRcpt = "age1" + strings.Repeat("q", 57) + "z"
 
-const privateKeyRefusal = "[error] the key argument looks like a private key — it is not printed\n" +
-	"[error] pass an age public key (age1…) or the path to an ed25519 SSH public key\n"
+// privateKeyRefusal is what every argv check of lo secrets prints
+// (secrets.RefusePrivateKey; bash: secrets::_no_private_key).
+const privateKeyRefusal = "[error] an argument looks like a private key: it is not printed\n" +
+	"[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
 
 // privateKeyArgvs are the argvs of one key command with a private key shape
 // in each place a parser could print it: a flag-like PEM line, the PEM block
@@ -65,8 +67,9 @@ func TestSecretsKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
 	}
 }
 
-// The raw argv guard of main: it refuses before cobra parses, for the two
-// key commands only.
+// The raw argv guard of main: it refuses before cobra parses. The argvs of
+// add-key and remove-key here; the rest of lo secrets in
+// TestGuardPrivateKeyArgvCoversTheSecretsTree.
 func TestGuardPrivateKeyArgv(t *testing.T) {
 	paths := secretsProject(t)
 	for _, cmd := range []string{"add-key", "remove-key"} {
@@ -83,7 +86,6 @@ func TestGuardPrivateKeyArgv(t *testing.T) {
 	for _, argv := range [][]string{
 		{"secrets", "remove-key", fixtureRcpt},
 		{"secrets", "add-key", fixtureRcpt, "--all"},
-		{"secrets", "list", fillerIdentity},
 		{"version"},
 	} {
 		var errOut bytes.Buffer

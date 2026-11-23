@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -98,9 +99,6 @@ func TestSecretsSSHKeyHelpNamesTheDefault(t *testing.T) {
 	}
 }
 
-const pathRefusal = "[error] an argument looks like a private key, not the path of a key file: it is not printed\n" +
-	"[error] pass the path of the key file with --ssh-key\n"
-
 // sshKeyArgvs are the argvs of init or decrypt with a private key shape in
 // each place a parser could print it: the --ssh-key value in both forms and
 // with the short flag, a paste split into words, and a --domain value.
@@ -117,17 +115,17 @@ func sshKeyArgvs(cmd string) [][]string {
 
 // init and decrypt take the path of a key file: a key pasted into their
 // argv is refused before any parser prints it, through cobra Execute and
-// through the argv guard of main (bash twin: secrets::_no_private_key_path).
+// through the argv guard of main (bash twin: secrets::_no_private_key).
 func TestSecretsSSHKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
 	paths := secretsProject(t)
 	for _, cmd := range []string{"init", "decrypt"} {
 		for i, argv := range sshKeyArgvs(cmd) {
 			out, errOut, err := runSecrets(t, paths, argv...)
-			if err == nil || out != "" || errOut != pathRefusal {
+			if err == nil || out != "" || errOut != privateKeyRefusal {
 				t.Errorf("%s argv %d: err %v, stdout %d bytes, stderr %q", cmd, i, err, len(out), errOut)
 			}
 			var guard bytes.Buffer
-			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != pathRefusal {
+			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyRefusal {
 				t.Errorf("%s argv %d: the guard of main did not refuse: %q", cmd, i, guard.String())
 			}
 		}
@@ -173,5 +171,86 @@ func TestSecretsKeyNotFoundHidesAPrivateKeyShape(t *testing.T) {
 				t.Error("the value of LOK8S_SSH_KEY reached the output")
 			}
 		})
+	}
+}
+
+// The guard of main covers lo secrets and every command under it, over the
+// whole argv joined with spaces: a key in a flag value of the parent
+// (--domain, a flag that cobra does not know), in a command that takes no
+// key, and a paste split into words (the SSH.com and the PuTTY forms). An
+// argv that cobra cannot resolve is refused too: the guard fails closed. A
+// path of a key file passes, and a command outside lo secrets is left to
+// cobra. The Args check of add-key joins the words the same way.
+// Bash twin: the main::secrets test in tests/unit/secrets_test.bats.
+func TestGuardPrivateKeyArgvCoversTheSecretsTree(t *testing.T) {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	paths := secretsProject(t)
+	// "PRIVATE KEY" in two parts: no private-key rule of a secret scanner
+	// matches this file.
+	sshcom := strings.Fields("---- BEGIN SSH2 ENCRYPTED PRIVATE " + "KEY ---- " + canary)
+	putty := []string{"PuTTY-User-Key-File-3:", "ssh-ed25519", "Encryption:", "none", canary}
+	puttyTail := []string{"Private-Lines:", "1", canary}
+	for i, argv := range [][]string{
+		{"secrets", "--domain", fillerIdentity, "init"},
+		{"secrets", "--unknown=" + fillerIdentity, "init"},
+		{"secrets", "--domain", fillerIdentity, "list"},
+		{"secrets", fillerIdentity},
+		{"s", "--domain", fillerIdentity, "init"},
+		{"--domain", fillerIdentity, "secrets", "list"},
+		{"-v", "--cluster", fillerIdentity, "s", "list"},
+		{fillerIdentity},
+		{fillerIdentity, "up"},
+		{"--domain", fillerIdentity},
+		{"secrets", "list", pemLine + "\n" + canary},
+		append([]string{"secrets", "init", "--ssh-key"}, sshcom...),
+		append([]string{"secrets", "add-key"}, putty...),
+		append([]string{"secrets", "add-key"}, puttyTail...),
+	} {
+		var guard bytes.Buffer
+		if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyRefusal {
+			t.Errorf("argv %d: the guard did not refuse, or printed %q", i, guard.String())
+		}
+	}
+	// A word "----" stops cobra's flag parser before any Args check (it
+	// prints only that word), so the SSH.com words here start at BEGIN.
+	for i, argv := range [][]string{
+		append([]string{"secrets", "add-key"}, sshcom[1:len(sshcom)-2]...),
+		append([]string{"secrets", "add-key"}, putty...),
+	} {
+		out, errOut, err := runSecrets(t, paths, argv...)
+		if err == nil || out != "" || errOut != privateKeyRefusal {
+			t.Errorf("Execute, argv %d: err %v, stdout %d bytes, stderr %q", i, err, len(out), errOut)
+		}
+	}
+
+	// An unknown command resolves to the root, whose error prints the first
+	// word; a root without Args makes Find fail. Both are refused.
+	unresolved := []string{"no-such-command", fillerIdentity}
+	bare := &cobra.Command{Use: "lo"}
+	bare.AddCommand(&cobra.Command{Use: "other", Run: func(*cobra.Command, []string) {}})
+	if cmd, _, err := NewRoot(paths).Find(unresolved); err != nil || cmd.HasParent() {
+		t.Fatalf("lo resolves %q to %v (%v), not to the root", unresolved, cmd, err)
+	}
+	if _, _, err := bare.Find(unresolved); err == nil {
+		t.Fatal("the root without Args resolves the argv: the case does not reach the Find error")
+	}
+	for name, root := range map[string]*cobra.Command{"lo": NewRoot(paths), "a root without Args": bare} {
+		var guard bytes.Buffer
+		if !GuardPrivateKeyArgv(root, unresolved, &guard) || guard.String() != privateKeyRefusal {
+			t.Errorf("%s, an argv that it cannot resolve: not refused, or printed %q", name, guard.String())
+		}
+	}
+
+	for _, argv := range [][]string{
+		{"secrets", "init", "--ssh-key", "/k/id_ed25519.pub"},
+		{"secrets", "--domain", "alpha.dev", "list"},
+		{"version", fillerIdentity},
+		{"--domain", "alpha.dev", "version", fillerIdentity},
+		{"-s", fillerIdentity, "up"},
+	} {
+		var guard bytes.Buffer
+		if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
+			t.Errorf("%q: refused, or printed %q", argv, guard.String())
+		}
 	}
 }

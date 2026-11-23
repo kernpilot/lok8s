@@ -1986,32 +1986,47 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   for arg in "${fake}" "${PEM_HEAD}" "-----BEGIN"; do
     DOMAIN=a.dev run _rm "${arg}"
     [ "$status" -eq 1 ]
-    [ "$output" = "[error] the key argument looks like a private key — it is not printed
-[error] pass an age public key (age1…) or the path to an ed25519 SSH public key" ] || {
+    [ "$output" = "[error] an argument looks like a private key: it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)" ] || {
       echo "unexpected output (${#output} bytes)" >&2; return 1; }
     [[ "$output" != *"${arg}"* ]]
   done
   [ "$(cat "${CFG}")" = "${before}" ]
 }
 
-@test "the real entrypoint refuses a private key before :args can print it" {
+# The real entrypoint (the pure-bash parser when argsh.so is absent): the
+# refusal comes before :usage and :args can print the argument. That
+# includes a key in the --domain value, which the parser of lo takes from
+# anywhere in the argv, a key in a flag that no parser knows, and a key as
+# a command that lo does not know (that parser prints it).
+@test "the real entrypoint refuses a private key before :usage or :args can print it" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
   local fake cmd; fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
   for cmd in add-key remove-key; do
     _run_lo secrets "${cmd}" "${PEM_HEAD}"
     [ "$status" -ne 0 ] || { echo "${cmd} <PEM line>: rc 0" >&2; return 1; }
-    [[ "$output" == *"looks like a private key — it is not printed"* && "$output" != *OPENSSH* ]] || {
+    [[ "$output" == *"looks like a private key: it is not printed"* && "$output" != *OPENSSH* ]] || {
       echo "${cmd} <PEM line>: ${output}" >&2; return 1; }
     # shellcheck disable=SC2086 # the four words of the PEM line
     _run_lo secrets "${cmd}" ${PEM_HEAD}
     [ "$status" -ne 0 ] || { echo "${cmd} <PEM words>: rc 0" >&2; return 1; }
-    [[ "$output" == *"looks like a private key — it is not printed"* && "$output" != *OPENSSH* ]] || {
+    [[ "$output" == *"looks like a private key: it is not printed"* && "$output" != *OPENSSH* ]] || {
       echo "${cmd} <PEM words>: ${output}" >&2; return 1; }
     _run_lo secrets "${cmd}" "${RCPT_A}" "${fake}"
     [ "$status" -ne 0 ] || { echo "${cmd} <age key> <private key>: rc 0" >&2; return 1; }
-    [[ "$output" == *"looks like a private key — it is not printed"* && "$output" != *"${fake}"* ]] || {
+    [[ "$output" == *"looks like a private key: it is not printed"* && "$output" != *"${fake}"* ]] || {
       echo "${cmd} <age key> <private key>: ${output}" >&2; return 1; }
   done
+  _lo_refused() {
+    _run_lo "${@}"
+    [ "$status" -ne 0 ] && [[ "$output" == *"looks like a private key: it is not printed"* && "$output" != *"${fake}"* ]] || {
+      echo "lo ${*//${fake}/<private key>}: rc ${status}: ${output//${fake}/<private key>}" >&2; return 1; }
+  }
+  _lo_refused secrets --domain "${fake}" init
+  _lo_refused s --domain "${fake}" init
+  _lo_refused --domain "${fake}" secrets list
+  _lo_refused secrets "--unknown=${fake}" init
+  _lo_refused "${fake}"
 }
 
 @test "the help of remove-key carries the revocation caveat" {
@@ -2165,4 +2180,101 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   secrets::_own_identity "${RCPT_A}"
   [ "${own}" = "${pub}" ] || { echo "own identity '${own}', want ${pub}" >&2; return 1; }
   cmp -s "${pub}" "${BATS_TEST_TMPDIR}/ssh-to-age.in" || { echo "ssh-to-age did not read ${pub}" >&2; return 1; }
+}
+
+# remove-key reads its key file through the same read as add-key: a file
+# over 64 KiB, with a NUL byte, or one that cannot be read, is refused with
+# the path and the cause, and .sops.yaml stays as it was (Go twin:
+# TestKeyFileReadIsCappedAndFailsClosed).
+@test "remove-key: a key file over 64 KiB, with a NUL byte, or one that cannot be read, is refused" {
+  _load
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; cat > /dev/null; echo "${RCPT_A}"; }
+  local canary="CANARY_SECRET_MATERIAL_DO_NOT_LEAK" path before
+  local big="${BATS_TEST_TMPDIR}/big.pub" nul="${BATS_TEST_TMPDIR}/nul.pub" closed="${BATS_TEST_TMPDIR}/closed.pub"
+  { printf 'ssh-ed25519 AAAA %s' "${canary}"; head -c 65536 /dev/zero | tr '\0' x; } > "${big}"
+  printf 'ssh-ed25519 AAAA\0%s\n' "${canary}" > "${nul}"
+  local -A cases=(
+    ["${big}"]="[error] ${big} is bigger than 64 KiB, which no public key file is: nothing from it is printed"
+    ["${nul}"]="[error] ${nul} holds a NUL byte, which no public key file holds: nothing from it is printed"
+  )
+  if (( EUID != 0 )); then
+    printf 'ssh-ed25519 AAAA %s\n' "${canary}" > "${closed}"
+    chmod 000 "${closed}"
+    cases["${closed}"]="[error] cannot read the key file ${closed}: nothing from it is printed"
+  fi
+  before="$(cat "${CFG}")"
+  for path in "${!cases[@]}"; do
+    DOMAIN=a.dev run _rm "${path}"
+    [ "$status" -eq 1 ] && [[ "$output" == "${cases[${path}]}"* ]] && [[ "$output" != *"${canary}"* ]] || {
+      echo "${path##*/}: status $status: $output" >&2; return 1; }
+  done
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ]
+}
+
+# The own-identity check reads the .pub through the same read: a .pub with
+# the key line and more than 64 KiB, or a NUL byte after the key line, is no
+# match, and ssh-to-age does not run (Go twin:
+# TestOwnIdentityReadIsCappedAndFailsClosed).
+@test "remove-key: the own-identity check reads at most 64 KiB, and no NUL byte" {
+  _load
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; cat > /dev/null; echo "${RCPT_A}"; }
+  local pub="${BATS_TEST_TMPDIR}/keys/work.pub" form own
+  mkdir -p "${pub%/*}"
+  export LOK8S_SSH_KEY="${pub}"
+  printf 'ssh-ed25519 AAAA work\n' > "${pub}"
+  own=""
+  secrets::_own_identity "${RCPT_A}"
+  [ "${own}" = "${pub}" ] || { echo "the plain .pub: own identity '${own}'" >&2; return 1; }
+  for form in big nul; do
+    case "${form}" in
+      big) { printf 'ssh-ed25519 AAAA work\n#'; head -c 65536 /dev/zero | tr '\0' x; } > "${pub}" ;;
+      nul) printf 'ssh-ed25519 AAAA work\n\0\n' > "${pub}" ;;
+    esac
+    rm -f -- "${BATS_TEST_TMPDIR}/ssh-to-age.called"
+    own=""
+    secrets::_own_identity "${RCPT_A}"
+    [ -z "${own}" ] && [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || {
+      echo "${form}: own identity '${own}', or ssh-to-age ran" >&2; return 1; }
+  done
+}
+
+# The own-identity check gives ssh-to-age the text that it checked, on
+# stdin: head (the read) is a function here that removes the .pub after it
+# read it, so a second open of the file fails.
+@test "remove-key: the own-identity check gives ssh-to-age the checked text, not a second read" {
+  _load
+  ssh-to-age() { cat > "${BATS_TEST_TMPDIR}/ssh-to-age.in"; echo "${RCPT_A}"; }
+  local pub="${BATS_TEST_TMPDIR}/keys/once.pub"
+  mkdir -p "${pub%/*}"
+  printf 'ssh-ed25519 AAAA once\n' > "${pub}"
+  cp -- "${pub}" "${BATS_TEST_TMPDIR}/expect"
+  export LOK8S_SSH_KEY="${pub}"
+  head() { local rc=0; command head "${@}" || rc=$?; rm -f -- "${LOK8S_SSH_KEY}"; return "${rc}"; }
+  local own=""
+  secrets::_own_identity "${RCPT_A}"
+  unset -f head
+  [ "${own}" = "${pub}" ] || { echo "own identity '${own}'" >&2; return 1; }
+  [ ! -e "${pub}" ] || { echo "the read did not go through head" >&2; return 1; }
+  cmp -s "${BATS_TEST_TMPDIR}/expect" "${BATS_TEST_TMPDIR}/ssh-to-age.in" || {
+    echo "ssh-to-age read other bytes than the file held" >&2; return 1; }
+}
+
+# The warning about the own identity names the file through
+# secrets::_shown_path: a keys file whose path has the shape of a private
+# key prints as a placeholder (Go twin: the remove-key case of
+# TestKeyPathMessagesHideAPrivateKeyShape).
+@test "remove-key: the own-identity warning does not print a key file path with the shape of a private key" {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local marker="AGE-SECRET-""KEY-1SHAPEDPATH"
+  mkdir -p "${BATS_TEST_TMPDIR}/${marker}"
+  export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/${marker}/keys.txt"
+  printf '# created: test\n# public key: %s\n' "${RCPT_B}" > "${SOPS_AGE_KEY_FILE}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [[ "$output" == *"[warn] the recipient is your own decrypt identity ((not printed: it looks like a private key)): once it is removed"* ]] || {
+    echo "$output" >&2; return 1; }
+  [[ "$output" != *"${marker}"* ]] || { echo "the path reached the output" >&2; return 1; }
 }

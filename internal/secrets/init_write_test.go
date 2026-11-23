@@ -91,7 +91,7 @@ func TestInitRefusesAKeyThatDerivesNoRecipient(t *testing.T) {
 				t.Fatalf("want ErrHandled, got %v\nstdout %q", err, out.String())
 			}
 			want := "[error] no age recipient derived from " + pub +
-				" (ed25519 SSH keys only) — nothing written to " + c.sopsConfigPath() + "\n"
+				" (ed25519 SSH keys only): nothing written to " + c.sopsConfigPath() + "\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}

@@ -233,8 +233,8 @@ func TestKeyArgumentRefusesAPrivateKey(t *testing.T) {
 				if err := tc.run(c, arg); !errors.Is(err, ErrHandled) {
 					t.Fatalf("want ErrHandled, got %v", err)
 				}
-				want := "[error] the key argument looks like a private key — it is not printed\n" +
-					"[error] pass an age public key (age1…) or the path to an ed25519 SSH public key\n"
+				want := "[error] an argument looks like a private key: it is not printed\n" +
+					"[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
 				if errOut.String() != want || out.String() != "" {
 					t.Errorf("output not contained to the two refusal lines: stdout %d bytes, stderr %d bytes", out.Len(), errOut.Len())
 				}

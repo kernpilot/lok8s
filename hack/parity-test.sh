@@ -136,7 +136,7 @@ ssh-keygen -t rsa -b 2048 -N '' -C parity -f "${WORK}/home/rsa" -q
 # sec_refused_no_recipient <case>: after sec_check of an init with the RSA
 # key, each side exited 1 and its last line of stderr is the refusal.
 sec_refused_no_recipient() {
-  local want="[error] no age recipient derived from WORK/home/rsa.pub (ed25519 SSH keys only) — nothing written to PROJ/.sops.yaml"
+  local want="[error] no age recipient derived from WORK/home/rsa.pub (ed25519 SSH keys only): nothing written to PROJ/.sops.yaml"
   # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
   (( go_rc == 1 && bash_rc == 1 )) || fail "init with an RSA key (${1}): rc go=${go_rc} bash=${bash_rc}, want 1"
   [[ "$(tail -n 1 "${WORK}/go.err")" == "${want}" && "$(tail -n 1 "${WORK}/bash.err")" == "${want}" ]] \
@@ -380,6 +380,19 @@ for cmd in init decrypt; do
   sec_check secrets "${cmd}" -k ${PEM_HEAD}
   sec_no_echo "OPENSSH" "secrets ${cmd} -k <PEM words>"
 done
+# The whole argv of lo secrets, before any parser: a key in the --domain
+# value (on either side of the command), in a flag that no parser knows, as
+# a command that lo does not know, and a PuTTY paste split into words.
+sec_check secrets --domain "${FAKE_ID}" init
+sec_no_echo "${FAKE_ID}" "secrets --domain <private key> init"
+sec_check --domain "${FAKE_ID}" secrets list
+sec_no_echo "${FAKE_ID}" "--domain <private key> secrets list"
+sec_check secrets "--unknown=${FAKE_ID}" init
+sec_no_echo "${FAKE_ID}" "secrets --unknown=<private key> init"
+sec_check "${FAKE_ID}"
+sec_no_echo "${FAKE_ID}" "<private key> as the command"
+sec_check secrets add-key PuTTY-User-Key-File-3: ssh-ed25519 Encryption: none
+sec_no_echo "PuTTY" "secrets add-key <PuTTY words>"
 
 # remove-key: the refusals first. None of them may write .sops.yaml.
 KEY2B="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key2.pub")"

@@ -29,12 +29,15 @@ import (
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// privateKeyMarkers are the spellings of a private key pasted as the key
+// privateKeyMarkers are the spellings of a private key pasted as an
 // argument: an age identity (in either case, because bech32 allows both), a
-// PEM or OpenSSH private key block, and the first line of any PEM block
+// PEM, OpenSSH or SSH.com private key block, the first line of any PEM block
 // (an unquoted paste splits the block into words, and the first one is
-// "-----BEGIN").
-var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "-----BEGIN"}
+// "-----BEGIN"), and a PuTTY key file (its first line, and the line before
+// its private part). The argv checks join the words with spaces, so "PRIVATE
+// KEY" also matches a paste split into words. Bash twin:
+// secrets::_is_private_key.
+var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "-----BEGIN", "PuTTY-User-Key-File-", "Private-Lines:"}
 
 // LooksLikePrivateKey reports whether arg has the shape of a private key.
 func LooksLikePrivateKey(arg string) bool {
@@ -46,25 +49,20 @@ func LooksLikePrivateKey(arg string) bool {
 	return false
 }
 
-// RefusePrivateKey prints the refusal for a private key argument. It never
-// prints the argument.
+// RefusePrivateKey prints the refusal for an argument of lo secrets that has
+// the shape of a private key. It never prints the argument. Every argv check
+// of lo secrets prints it: the guard of main for the whole argv, and the
+// checks of add-key, remove-key, init and decrypt. Bash twin:
+// secrets::_no_private_key.
 func RefusePrivateKey(w io.Writer) {
-	ui.ErrorTo(w, "the key argument looks like a private key — it is not printed")
-	ui.ErrorTo(w, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
-}
-
-// RefusePrivateKeyPath prints the refusal for an argument of init or decrypt
-// that has the shape of a private key: their --ssh-key value is the path of
-// a key file. It never prints the argument. Bash twin:
-// secrets::_no_private_key_path.
-func RefusePrivateKeyPath(w io.Writer) {
-	ui.ErrorTo(w, "an argument looks like a private key, not the path of a key file: it is not printed")
-	ui.ErrorTo(w, "pass the path of the key file with --ssh-key")
+	ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+	ui.ErrorTo(w, "pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)")
 }
 
 // shownKeyPath is path for a message, or a placeholder when it has the shape
-// of a private key: a key pasted into LOK8S_SSH_KEY reaches the not-found
-// lines of init and decrypt, which no argv guard sees. Bash twin:
+// of a private key: a key pasted into LOK8S_SSH_KEY reaches the messages of
+// init, decrypt and remove-key, which no argv guard sees. Every message that
+// prints a key path prints it through shownKeyPath. Bash twin:
 // secrets::_shown_path.
 func shownKeyPath(path string) string {
 	if LooksLikePrivateKey(path) {
@@ -1519,7 +1517,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		return ErrHandled
 	}
 	if own := ownIdentity(agePubkey); own != "" {
-		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file", own)
+		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file", shownKeyPath(own))
 	}
 	ui.WarnTo(c.ErrOut, "%s", ownIdentityScope)
 
