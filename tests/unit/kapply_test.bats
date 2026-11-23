@@ -798,6 +798,9 @@ Invalid value: \"${CANARY_VALUE}\""
   assert_output 1
   run grep -c "${CANARY_VALUE}" "${trace}"
   assert_output 0
+  # A call in the test shell, not in a subshell: a KUBERC=off that the
+  # wrapper exports would stay in this shell.
+  kapply::run_private "the objects" apply -f /dev/null > /dev/null
   [ "${KUBERC}" = /user/kuberc ]
 }
 
