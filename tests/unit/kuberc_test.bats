@@ -278,7 +278,9 @@ W
 # The kubeone driver deletes a stale node with the kubectl of the leader
 # control plane, over ssh. The scan above does not see a command that a
 # remote shell runs, so this case reads the command that ssh gets: the
-# remote delete runs with KUBERC=off, and the read before it does not.
+# remote delete runs as `env KUBERC=off kubectl …` (env sets the variable in
+# each login shell of root, also in a csh, which does not read a VAR=value
+# prefix), and the read before it keeps the kuberc.
 @test "kuberc: the kubeone stale node delete runs the remote kubectl with KUBERC=off" {
   command -v yq &>/dev/null || skip "yq not available"
   import() { :; }
@@ -305,7 +307,7 @@ YAML
     esac
   }
   kubeone::_clean_reinstalled_workers "${work}"
-  grep -qx 'KUBERC=off kubectl --kubeconfig /etc/kubernetes/admin.conf delete node w1 --timeout=20s' "${log}" || { cat "${log}"; return 1; }
+  grep -qx 'env KUBERC=off kubectl --kubeconfig /etc/kubernetes/admin.conf delete node w1 --timeout=20s' "${log}" || { cat "${log}"; return 1; }
   grep -q '^kubectl --kubeconfig /etc/kubernetes/admin.conf get node w1 ' "${log}" || { cat "${log}"; return 1; }
 }
 

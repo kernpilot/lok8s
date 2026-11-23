@@ -1141,8 +1141,10 @@ kubeone::_clean_reinstalled_workers() {
     [[ -n "${ready}" && "${ready}" != "True" ]] || continue
     warn "kubeone: ${wname} reinstalled (no kubelet) but a stale ${ready}-Ready node exists — removing it so apply re-joins cleanly"
     # The delete is a write: the remote kubectl runs with its user defaults off.
+    # env sets the variable in each login shell of root, also in a csh, which
+    # does not read a VAR=value prefix.
     # shellcheck disable=SC2029  # client-side expansion intended (same command composition)
-    ssh "${ssh_opts[@]}" "root@${cp_ip}" "KUBERC=off ${kctl} delete node ${wname} --timeout=20s" >/dev/null 2>&1 || true
+    ssh "${ssh_opts[@]}" "root@${cp_ip}" "env KUBERC=off ${kctl} delete node ${wname} --timeout=20s" >/dev/null 2>&1 || true
   done
 }
 
