@@ -20,7 +20,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
-func TestKubectlApplyRunsWithKubeRCOff(t *testing.T) {
+func TestRunOutRunsKubectlWithKubeRCOff(t *testing.T) {
 	d, runner, _, _ := testDriver(t)
 	envs := map[string][]string{}
 	runner.handler = func(c execx.Cmd) error {
