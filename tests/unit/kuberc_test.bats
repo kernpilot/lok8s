@@ -43,7 +43,8 @@ setup() {
 #
 # It does not see a kubectl that runs through another variable or through a
 # wrapper function (the callers of a wrapper), a command that a remote shell
-# runs (ssh "kubectl …"), or a subcommand inside a quoted word with spaces.
+# runs (ssh "kubectl …"; a case below checks the one of the kubeone driver),
+# or a subcommand inside a quoted word with spaces.
 _kubectl_sites() {
   local dir="${1:-${_PROJECT_ROOT}/.lok8s}" f
   while IFS= read -r f; do
@@ -272,6 +273,40 @@ on	write	scale	utils/a.sh:22
 W
 )"
   [ "${sites}" = "${want}" ] || { diff <(printf '%s\n' "${want}") <(printf '%s\n' "${sites}") >&2; return 1; }
+}
+
+# The kubeone driver deletes a stale node with the kubectl of the leader
+# control plane, over ssh. The scan above does not see a command that a
+# remote shell runs, so this case reads the command that ssh gets: the
+# remote delete runs with KUBERC=off, and the read before it does not.
+@test "kuberc: the kubeone stale node delete runs the remote kubectl with KUBERC=off" {
+  command -v yq &>/dev/null || skip "yq not available"
+  import() { :; }
+  warn() { :; }
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/config"
+  local work="${BATS_TEST_TMPDIR}/work" log="${BATS_TEST_TMPDIR}/ssh.log"
+  mkdir -p "${work}"
+  : > "${log}"
+  cat > "${work}/kubeone.yaml" <<'YAML'
+controlPlane:
+  hosts:
+    - publicAddress: 203.0.113.10
+staticWorkers:
+  hosts:
+    - hostname: w1
+      publicAddress: 203.0.113.21
+YAML
+  # The remote command is the last argument. The node is not Ready.
+  ssh() {
+    printf '%s\n' "${*: -1}" >> "${log}"
+    case "${*: -1}" in
+      *" get node "*) echo False ;;
+    esac
+  }
+  kubeone::_clean_reinstalled_workers "${work}"
+  grep -qx 'KUBERC=off kubectl --kubeconfig /etc/kubernetes/admin.conf delete node w1 --timeout=20s' "${log}" || { cat "${log}"; return 1; }
+  grep -q '^kubectl --kubeconfig /etc/kubernetes/admin.conf get node w1 ' "${log}" || { cat "${log}"; return 1; }
 }
 
 @test "kuberc: a KUBERC=off prefix reaches the kubectl child, and the shell keeps its own KUBERC" {
