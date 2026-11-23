@@ -274,6 +274,11 @@ _kubectl_sites() {
   printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tdrivers/capi/main:.* create namespace '
   printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tdrivers/lo/utils/services.sh:.* create configmap coredns-custom '
   printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tlibs/kubehz/deploy:.* create secret generic kubehz-agent-bind '
+  # The dry run of the agent deploy (kubehz::deploy_print) renders as the
+  # apply does: both of its kustomize renders run with KUBERC=off.
+  [ "$(printf '%s\n' "${sites}" | grep -c $'^off\tread\tkustomize\tlibs/kubehz/deploy:')" -eq 2 ] || {
+    printf '%s\n' "${sites}" | grep $'\tkustomize\tlibs/kubehz/deploy:' >&2; return 1
+  }
   missing="$(printf '%s\n' "${sites}" | grep -E $'^on\t(write|[?])\t' || true)"
   if [[ -n "${missing}" ]]; then
     printf 'a kubectl write (or a call whose subcommand the scan cannot read) without KUBERC=off:\n%s\n' "${missing}" >&2

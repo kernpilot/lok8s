@@ -376,6 +376,8 @@ kubehz::live_agent_overlay() {
 # because the apply below is `kubectl apply -k` — the same embedded kustomize,
 # at the same version. A dry run whose renderer can differ from the applier's
 # is a dry run you cannot trust for exactly the cases you would use it for.
+# For the same reason both renders run with KUBERC=off, as the apply does: a
+# kuberc default of the user must not make the print differ from the apply.
 # Comment lines name the steps around the CronJob agent: the Job delete and
 # the wait, the bind Secret (its line names the file and never prints the
 # value), and the patch that ends the suspend. The check reads a private copy
@@ -388,7 +390,7 @@ kubehz::deploy_print() (
   kubehz::own_private_copy "${copy}"
 
   echo "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: ${owner} ---"
-  kubectl kustomize "${workdir}/agent" || return 1
+  KUBERC=off kubectl kustomize "${workdir}/agent" || return 1
   echo "---"
   echo "# The CronJob agent is applied suspended. The deploy then deletes its Jobs (-l ${_KUBEHZ_AGENT_JOBS_SELECTOR}) and waits until their pods have ended."
   kubehz::bind_secret_snapshot "${PATH_CLUSTERS}/${domain}/.kubehz-bind" "${copy}" && bound=1
@@ -402,7 +404,7 @@ kubehz::deploy_print() (
   if [[ "${owner}" == "operator" ]]; then
     echo "---"
     echo "# --- Live agent (kubehz-live-agent) — ${access} tier RBAC ---"
-    kubectl kustomize "$(kubehz::live_agent_overlay "${workdir}" "${access}")" || return 1
+    KUBERC=off kubectl kustomize "$(kubehz::live_agent_overlay "${workdir}" "${access}")" || return 1
   else
     echo "---"
     echo "# The live agent is NOT deployed in cronjob mode; a previous install would be removed."
