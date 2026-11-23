@@ -9,15 +9,24 @@ package execx
 // tests/unit/kuberc_test.bats.
 //
 // A child is "off" (it runs with the user kuberc off) when:
-//   - the Env of its Cmd literal names KubeRCOff or KubectlEnv;
+//   - the last KUBERC entry of the Env of its Cmd literal is KubeRCOff
+//     (os/exec keeps the last entry of a name). The scan reads a list
+//     literal, append, slices.Clip, slices.Clone, nil, KubectlEnv of the
+//     tool name kubectl (the literal, or the variable that is also the Name
+//     of the Cmd), and a variable that holds one of these. An entry or a
+//     value that it cannot read counts as another KUBERC value;
 //   - the function passes the literal, or a variable that holds it, to a
-//     function that sets the Env of the Cmd it takes to KubeRCOff
-//     (kapply.RunPrivate), or sets <variable>.Env itself;
+//     function that sets the Env of the Cmd it takes so (kapply.RunPrivate),
+//     or sets <variable>.Env itself;
 //   - it runs through a wrapper: a function whose Cmd takes the tool name,
 //     the arguments or the Env from a parameter. The wrapper is off when its
 //     Cmd is off, or, for an Env parameter, when the caller passes a value
-//     that names KubeRCOff. The scan follows a wrapper to its callers, also
-//     over more than one wrapper.
+//     that is off by the first rule. The scan follows a wrapper to its
+//     callers, also over more than one wrapper.
+//
+// A render (create --dry-run=client) counts as a write: lo applies the
+// output of each render, and a kuberc default such as --append-hash would
+// rename the object that lo applies.
 //
 // The scan reads the arguments of a call from its string literals, and a
 // variable from its assignments in the same function or in the package. A
@@ -52,12 +61,25 @@ import (
 	"testing"
 )
 
-// kubectlWriteVerbs are the subcommands that change an object, and diff,
-// which a kuberc default can make print the data of a Secret.
+// kubectlWriteVerbs are the subcommands that change an object; exec, cp,
+// attach and debug, which run a command in a pod, copy a file to or from
+// it, send it input or add a container to it; and diff, which a kuberc
+// default can make print the data of a Secret. rollout, certificate, auth
+// and config write with some subcommands only (classifyKubectl).
 var kubectlWriteVerbs = map[string]bool{
 	"apply": true, "create": true, "replace": true, "patch": true, "delete": true, "annotate": true,
 	"label": true, "scale": true, "set": true, "taint": true, "cordon": true, "uncordon": true,
 	"drain": true, "edit": true, "expose": true, "run": true, "autoscale": true, "diff": true,
+	"exec": true, "cp": true, "attach": true, "debug": true,
+}
+
+// kubeconfigWrites are the subcommands of kubectl config that change the
+// kubeconfig. view, get-contexts, get-clusters, get-users and
+// current-context read it.
+var kubeconfigWrites = map[string]bool{
+	"set": true, "set-cluster": true, "set-context": true, "set-credentials": true, "unset": true,
+	"use-context": true, "use": true, "delete-cluster": true, "delete-context": true,
+	"delete-user": true, "rename-context": true,
 }
 
 // kubectlValueFlags are the global flags that take the next word as their
@@ -146,12 +168,16 @@ func classifyKubectl(ws []word) (verb string, known, write bool) {
 			return "rollout " + sub, true, sub == "restart" || sub == "undo" || sub == "pause" || sub == "resume"
 		case "certificate":
 			return "certificate " + sub, true, sub == "approve" || sub == "deny"
+		case "auth":
+			return "auth " + sub, true, sub == "reconcile"
+		case "config":
+			return "config " + sub, true, kubeconfigWrites[sub]
 		case "create":
 			// create --dry-run=client -o yaml renders a manifest on the
-			// client: it writes nothing.
+			// client, and lo applies it: a write.
 			for _, r := range ws[i+1:] {
 				if r.ok && r.lit == "--dry-run=client" {
-					return "create (render)", true, false
+					return "create (render)", true, true
 				}
 			}
 		}
@@ -342,30 +368,158 @@ func isKubectlName(e ast.Expr) bool {
 	return false
 }
 
-// mentionsOff reports whether e names KubeRCOff or KubectlEnv, also
-// through a variable of the function or of the package.
-func (s *kubectlScanner) mentionsOff(pkg *scanPkg, fn *ast.FuncDecl, e ast.Expr, depth int) bool {
-	if e == nil || depth > 4 {
-		return false
+// envState is what the Env of a kubectl child does to KUBERC. os/exec
+// keeps the last entry of a name, so the last KUBERC entry decides.
+type envState int
+
+const (
+	envNone  envState = iota // no KUBERC entry: the child gets the KUBERC of lo
+	envOff                   // the last KUBERC entry is KubeRCOff
+	envOther                 // another KUBERC value, or a value that the scan cannot read
+)
+
+// envOff reports whether the Env value e runs the child with the user
+// kuberc off. name is the Name of the Cmd, nil when the scan does not know
+// it.
+func (s *kubectlScanner) envOff(pkg *scanPkg, fn *ast.FuncDecl, e, name ast.Expr) bool {
+	return s.envValue(pkg, fn, e, name, 0) == envOff
+}
+
+// envValue reads an Env value: nil, a list literal, append, slices.Clip,
+// slices.Clone, KubectlEnv, or a variable of the function or the package
+// that holds one of these.
+func (s *kubectlScanner) envValue(pkg *scanPkg, fn *ast.FuncDecl, e, name ast.Expr, depth int) envState {
+	if e == nil {
+		return envNone
 	}
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && (id.Name == "KubeRCOff" || id.Name == "KubectlEnv") {
-			found = true
+	if depth > 6 {
+		return envOther
+	}
+	switch x := e.(type) {
+	case *ast.Ident:
+		if x.Name == "nil" {
+			return envNone
 		}
-		return !found
-	})
-	if found {
-		return true
-	}
-	if id, ok := e.(*ast.Ident); ok {
-		for _, v := range s.assigned(pkg, fn, id.Name) {
-			if s.mentionsOff(pkg, fn, v, depth+1) {
-				return true
+		if fn != nil && paramIdx(fn, x) >= 0 {
+			return envOther
+		}
+		// Each value must give the same state: the scan does not follow
+		// the flow. A value that adds to the one before it gives the state
+		// of what it adds, when that has a KUBERC entry.
+		st, seen := envNone, false
+		for _, v := range s.assigned(pkg, fn, x.Name) {
+			var vs envState
+			if call, ok := v.(*ast.CallExpr); ok && isSelfAppend(v, x.Name) {
+				if vs = s.appended(pkg, fn, call, name, depth+1); vs == envNone {
+					continue
+				}
+			} else {
+				vs = s.envValue(pkg, fn, v, name, depth+1)
+			}
+			if seen && vs != st {
+				return envOther
+			}
+			st, seen = vs, true
+		}
+		if !seen {
+			return envOther
+		}
+		return st
+	case *ast.CompositeLit:
+		for i := len(x.Elts) - 1; i >= 0; i-- {
+			if st := s.envEntry(pkg, fn, x.Elts[i], depth+1); st != envNone {
+				return st
+			}
+		}
+		return envNone
+	case *ast.CallExpr:
+		switch f := x.Fun.(type) {
+		case *ast.Ident:
+			if f.Name == "append" && len(x.Args) > 0 {
+				if st := s.appended(pkg, fn, x, name, depth+1); st != envNone {
+					return st
+				}
+				return s.envValue(pkg, fn, x.Args[0], name, depth+1)
+			}
+		case *ast.SelectorExpr:
+			if p, ok := f.X.(*ast.Ident); ok && p.Name == "slices" && (f.Sel.Name == "Clip" || f.Sel.Name == "Clone") && len(x.Args) == 1 {
+				return s.envValue(pkg, fn, x.Args[0], name, depth+1)
+			}
+		}
+		if n := callName(x.Fun); (n == "KubectlEnv" || strings.HasSuffix(n, ".KubectlEnv")) && len(x.Args) == 1 {
+			// KubectlEnv is KubeRCOff for kubectl and nil for any other tool.
+			a := x.Args[0]
+			if v, ok := strLit(a); ok {
+				if filepath.Base(v) == "kubectl" {
+					return envOff
+				}
+				return envNone
+			}
+			if isKubectlName(a) || sameIdent(a, name) {
+				return envOff
 			}
 		}
 	}
-	return false
+	return envOther
+}
+
+// appended reads the entries that a call append(base, …) adds, the last
+// first: the state of the last one with a KUBERC entry, else envNone.
+func (s *kubectlScanner) appended(pkg *scanPkg, fn *ast.FuncDecl, call *ast.CallExpr, name ast.Expr, depth int) envState {
+	args := call.Args[1:]
+	for i := len(args) - 1; i >= 0; i-- {
+		var st envState
+		if i == len(args)-1 && call.Ellipsis.IsValid() {
+			st = s.envValue(pkg, fn, args[i], name, depth)
+		} else {
+			st = s.envEntry(pkg, fn, args[i], depth)
+		}
+		if st != envNone {
+			return st
+		}
+	}
+	return envNone
+}
+
+// envEntry reads one entry of an Env list: KubeRCOff, a literal NAME=value,
+// a literal "NAME=" + a value, or a variable with one value.
+func (s *kubectlScanner) envEntry(pkg *scanPkg, fn *ast.FuncDecl, e ast.Expr, depth int) envState {
+	if v, ok := strLit(e); ok {
+		switch {
+		case v == "KUBERC=off":
+			return envOff
+		case strings.HasPrefix(v, "KUBERC="):
+			return envOther
+		}
+		return envNone
+	}
+	switch x := e.(type) {
+	case *ast.SelectorExpr:
+		if x.Sel.Name == "KubeRCOff" {
+			return envOff
+		}
+	case *ast.Ident:
+		if x.Name == "KubeRCOff" {
+			return envOff
+		}
+		if fn == nil || paramIdx(fn, x) < 0 {
+			if vals := s.assigned(pkg, fn, x.Name); len(vals) == 1 && depth < 6 {
+				return s.envEntry(pkg, fn, vals[0], depth+1)
+			}
+		}
+	case *ast.BinaryExpr:
+		if v, ok := strLit(x.X); ok && x.Op == token.ADD && strings.Contains(v, "=") && !strings.HasPrefix(v, "KUBERC=") {
+			return envNone
+		}
+	}
+	return envOther
+}
+
+// sameIdent reports whether a and b are the same variable name.
+func sameIdent(a, b ast.Expr) bool {
+	x, ok := a.(*ast.Ident)
+	y, ok2 := b.(*ast.Ident)
+	return ok && ok2 && x.Name == y.Name
 }
 
 // assigned returns the values that a function (or else the package)
@@ -678,10 +832,10 @@ func (s *kubectlScanner) eachFunc(do func(pkg *scanPkg, fn *ast.FuncDecl)) {
 }
 
 // litOff reports whether the child of a Cmd literal runs with KubeRCOff:
-// its Env names it, the function passes the literal (or a variable that
-// holds it) to a function that sets the Env, or it sets <variable>.Env.
+// its Env is off (envOff), the function passes the literal (or a variable
+// that holds it) to a function that sets the Env, or it sets <variable>.Env.
 func (s *kubectlScanner) litOff(pkg *scanPkg, fn *ast.FuncDecl, cl *ast.CompositeLit) bool {
-	if s.mentionsOff(pkg, fn, field(cl, "Env"), 0) {
+	if s.envOff(pkg, fn, field(cl, "Env"), field(cl, "Name")) {
 		return true
 	}
 	holds := func(e ast.Expr) bool {
@@ -712,7 +866,7 @@ func (s *kubectlScanner) litOff(pkg *scanPkg, fn *ast.FuncDecl, cl *ast.Composit
 			if len(st.Lhs) == len(st.Rhs) {
 				for i, l := range st.Lhs {
 					if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "Env" && holds(sel.X) &&
-						s.mentionsOff(pkg, fn, st.Rhs[i], 0) {
+						s.envOff(pkg, fn, st.Rhs[i], field(cl, "Name")) {
 						off = true
 					}
 				}
@@ -732,7 +886,7 @@ func (s *kubectlScanner) findRunners() {
 			if st, ok := n.(*ast.AssignStmt); ok && len(st.Lhs) == len(st.Rhs) {
 				for i, l := range st.Lhs {
 					if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "Env" {
-						if idx := paramIdx(fn, sel.X); idx >= 0 && s.mentionsOff(pkg, fn, st.Rhs[i], 0) {
+						if idx := paramIdx(fn, sel.X); idx >= 0 && s.envOff(pkg, fn, st.Rhs[i], nil) {
 							s.setters[fn] = idx
 						}
 					}
@@ -812,7 +966,7 @@ func (s *kubectlScanner) findRunners() {
 					}
 					if r.envIdx >= 0 && r.envIdx < len(call.Args) {
 						nr.envIdx = paramIdx(fn, call.Args[r.envIdx])
-						nr.off = s.mentionsOff(pkg, fn, call.Args[r.envIdx], 0)
+						nr.off = s.envOff(pkg, fn, call.Args[r.envIdx], nil)
 					}
 					names, variadic := params(fn)
 					nr.variadic = variadic && nr.argsIdx == len(names)-1
@@ -876,7 +1030,7 @@ func (s *kubectlScanner) findSites() {
 				}
 				off := r.off
 				if r.envIdx >= 0 && r.envIdx < len(call.Args) {
-					off = s.mentionsOff(pkg, fn, call.Args[r.envIdx], 0)
+					off = s.envOff(pkg, fn, call.Args[r.envIdx], nil)
 				}
 				s.add(call.Pos(), ws, off, c.Name.Name)
 				break
@@ -918,7 +1072,11 @@ func TestEveryKubectlWriteRunsWithKubeRCOff(t *testing.T) {
 		"internal/hooks/hooks.go off write rollout restart (Cmd)",
 		"internal/hooks/hooks.go on read get (Cmd)",
 		"internal/driver/capi/capi.go off write delete (Cmd)",
-		"internal/driver/capi/capi.go on read create (render) (Cmd)",
+		"internal/driver/capi/capi.go off write create (render) (Cmd)",
+		"internal/driver/capi/generate.go off write create (render) (Cmd)",
+		"internal/driver/lo/services.go off write create (render) (cmdWith)",
+		"internal/kubehz/deploy.go off write create (render) (Cmd)",
+		"internal/operator/lo.go off write create (render) (run)",
 		"internal/driver/lo/heal.go off write delete (cmdWith)",
 		"internal/driver/lo/heal.go on read get (runQuiet)",
 		"internal/driver/lo/services.go off write annotate (runOut)",
@@ -983,6 +1141,12 @@ func (c *ctxT) quiet(ctx context.Context, env []string, args ...string) error {
 	return c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: args, Env: env})
 }
 
+func (c *ctxT) helmEnv(ctx context.Context, name string, args ...string) error {
+	return c.r.Run(ctx, execx.Cmd{Name: name, Args: args, Env: execx.KubectlEnv("helm")})
+}
+
+var offEnv = []string{execx.KubeRCOff}
+
 func (c *ctxT) sites(ctx context.Context, x bool, in []string) {
 	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"-n", "x", "delete", "pod", "p"}}) // want: on write delete (Cmd)
 	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"patch", "cm", "x", "-p", "{}"}, Env: []string{execx.KubeRCOff}}) // want: off write patch (Cmd)
@@ -991,7 +1155,8 @@ func (c *ctxT) sites(ctx context.Context, x bool, in []string) {
 	_ = c.runQuiet(ctx, "docker", "rm", "x")
 	_ = k.RunPrivate(ctx, c.r, execx.Cmd{Name: "kubectl", Args: []string{"apply", "-f", "-"}}) // want: off write apply (Cmd)
 	_ = c.runQuiet(ctx, "kubectl", "--kubeconfig", "/k", "get", "pods") // want: on read get (runQuiet)
-	_ = c.run(ctx, "kubectl", "create", "secret", "generic", "s", "--dry-run=client", "-o", "yaml") // want: off read create (render) (run)
+	_ = c.run(ctx, "kubectl", "create", "secret", "generic", "s", "--dry-run=client", "-o", "yaml") // want: off write create (render) (run)
+	_ = c.runQuiet(ctx, "kubectl", "create", "configmap", "x", "--from-file=a", "--dry-run=client", "-o", "yaml") // want: on write create (render) (runQuiet)
 	_ = c.runQuiet(ctx, "kubectl", "--request-timeout="+"5s", "create", "job", "j", "--from=cronjob/c") // want: on write create (runQuiet)
 	ns := "default"
 	if x {
@@ -1008,6 +1173,23 @@ func (c *ctxT) sites(ctx context.Context, x bool, in []string) {
 	_ = c.quiet(ctx, []string{execx.KubeRCOff}, label...) // want: off write label (quiet)
 	_ = c.kubectl(ctx, "cordon", "n1") // want: on write cordon (kubectl)
 	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: mk()}) // want: on ? ? (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: []string{execx.KubeRCOff, "KUBERC=/x"}}) // want: on write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: []string{"KUBERC=/x", execx.KubeRCOff, "A=1"}}) // want: off write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: append([]string{execx.KubeRCOff}, "KUBERC="+"/x")}) // want: on write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: execx.KubectlEnv("helm")}) // want: on write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: execx.KubectlEnv("kubectl")}) // want: off write delete (Cmd)
+	_ = c.helmEnv(ctx, "kubectl", "drain", "n1") // want: on write drain (helmEnv)
+	_ = c.quiet(ctx, []string{execx.KubeRCOff, "KUBERC=/x"}, "uncordon", "n1") // want: on write uncordon (quiet)
+	_ = c.quiet(ctx, offEnv, "uncordon", "n2") // want: off write uncordon (quiet)
+	_ = c.runQuiet(ctx, "kubectl", "exec", "p", "--", "ls") // want: on write exec (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "cp", "a", "p:/a") // want: on write cp (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "attach", "p") // want: on write attach (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "debug", "node/n", "--image=x") // want: on write debug (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "auth", "reconcile", "-f", "r.yaml") // want: on write auth reconcile (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "auth", "can-i", "get", "pods") // want: on read auth can-i (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "config", "set-context", "--current", "--namespace=x") // want: on write config set-context (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "config", "use-context", "x") // want: on write config use-context (runQuiet)
+	_ = c.runQuiet(ctx, "kubectl", "config", "view", "--raw") // want: on read config view (runQuiet)
 	cmd := execx.Cmd{Name: "kubectl", Args: []string{"taint", "nodes", "--all", "x-"}} // want: off write taint (Cmd)
 	cmd.Env = []string{execx.KubeRCOff}
 	_ = c.r.Run(ctx, cmd)

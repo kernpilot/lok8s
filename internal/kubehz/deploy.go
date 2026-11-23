@@ -723,12 +723,15 @@ func (c *Context) applyBindSecret(ctx context.Context, workdir, secret string) e
 // for the preflight (proveBindSecret), so the two cannot drift: the dry-run
 // create renders the manifest from the bytes on its stdin, and the
 // server-side apply sends it. extra goes before "-f -" (the preflight passes
-// --dry-run=server).
+// --dry-run=server). The render runs with the kubectl user defaults off too:
+// a kuberc default such as --append-hash would rename the Secret that the
+// apply sends.
 func (c *Context) bindSecretUpsert(ctx context.Context, secret string, extra ...string) error {
 	var manifest bytes.Buffer
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
 			"--from-file=bind-secret=/dev/stdin", "--dry-run=client", "-o", "yaml"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(secret), Stdout: &manifest, Stderr: c.errOut(),
 	}); err != nil {
 		return err

@@ -23,7 +23,7 @@ func applyCallsWithoutKubeRCOff(calls []execx.Cmd) ([]string, int) {
 			continue
 		}
 		n++
-		if !slices.Contains(c.Env, execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(c.Env) {
 			bad = append(bad, argvLine(c))
 		}
 	}
@@ -75,6 +75,53 @@ func TestKubectlApplyRunsWithKubeRCOff(t *testing.T) {
 	}
 }
 
+// Each render (create --dry-run=client) feeds an apply, so it runs with the
+// kubectl user defaults off too: a kuberc default such as --append-hash
+// would rename the object that lo applies. The provision renders the
+// namespace (capi.go) and the credentials Secret (generate.go).
+func TestKubectlRenderRunsWithKubeRCOff(t *testing.T) {
+	t.Setenv("HCLOUD_TOKEN", "test-token")
+	t.Setenv("HROBOT_USER", "")
+	t.Setenv("HROBOT_PASSWORD", "")
+	for name, tc := range map[string]struct {
+		run  func(t *testing.T) []execx.Cmd
+		want []string // the object kind of each render, in order
+	}{
+		"provision": {func(t *testing.T) []execx.Cmd {
+			d, runner, _ := provisionSetup(t)
+			if err := d.Provision(t.Context(), "test.dev"); err != nil {
+				t.Fatalf("Provision: %v", err)
+			}
+			return runner.calls
+		}, []string{"namespace", "secret"}},
+		"credentials": {func(t *testing.T) []execx.Cmd {
+			d, runner, _ := testDriver(t)
+			if err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "hetzner", "/tmp/kubeconfig.yaml"); err != nil {
+				t.Fatal(err)
+			}
+			return runner.calls
+		}, []string{"secret"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var kinds []string
+			for _, c := range tc.run(t) {
+				if c.Name != "kubectl" || !slices.Contains(c.Args, "--dry-run=client") {
+					continue
+				}
+				if i := slices.Index(c.Args, "create"); i >= 0 && i+1 < len(c.Args) {
+					kinds = append(kinds, c.Args[i+1])
+				}
+				if !execx.KubeRCIsOff(c.Env) {
+					t.Errorf("the render %s runs with Env %q, want %s as the last KUBERC entry", argvLine(c), c.Env, execx.KubeRCOff)
+				}
+			}
+			if !slices.Equal(kinds, tc.want) {
+				t.Errorf("renders = %q, want %q", kinds, tc.want)
+			}
+		})
+	}
+}
+
 // The destroy deletes the workload Cluster with the kubectl user defaults
 // off: a kuberc default such as --dry-run=client would report the delete
 // and keep the Hetzner servers.
@@ -89,7 +136,7 @@ func TestDestroyDeleteRunsWithKubeRCOff(t *testing.T) {
 			continue
 		}
 		deletes++
-		if !slices.Contains(c.Env, execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(c.Env) {
 			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
 		}
 	}

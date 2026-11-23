@@ -310,8 +310,12 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	// non-zero one: a failed apply decides, and a failed create with a
 	// passing apply still fails the function. Both halves run either way (a
 	// failed create feeds apply an empty stream).
+	// The render runs with the kubectl user defaults off too: a kuberc
+	// default such as --append-hash would rename the Secret that the apply
+	// sends.
 	var manifest strings.Builder
-	createErr := d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
+	createErr := d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Env: []string{execx.KubeRCOff},
+		Stdin: strings.NewReader(envFile), Stdout: &manifest})
 	// The apply keeps the kubectl output private (kapply.RunPrivate): it
 	// can quote a value of the Secret.
 	if err := kapply.RunPrivate(ctx, d.deps.Runner, execx.Cmd{

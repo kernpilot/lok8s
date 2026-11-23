@@ -20,10 +20,12 @@ setup() {
 
 # _kubectl_sites [<dir>]: each kubectl call of the bash tree (default
 # .lok8s), one per line, with four fields divided by a tab:
-#   - "off" or "on": with a KUBERC=off prefix or not;
+#   - "off" or "on": the kubectl child gets KUBERC=off or not;
 #   - "write", "read" or "?" (the scan cannot read the subcommand);
-#   - the subcommand ("rollout restart" for a rollout, "create (render)" for
-#     a create with --dry-run=client, which writes nothing);
+#   - the subcommand ("rollout restart" for a rollout, "config view" for a
+#     config, "create (render)" for a create with --dry-run=client, which
+#     counts as a write: lo applies the output of each render, and a kuberc
+#     default such as --append-hash would rename the object);
 #   - <file>:<line>:<the text of the command>.
 # The scan reads the shell text as the shell does: it cuts the text into
 # commands at | ; & and a new line, and at each ( and $( outside single
@@ -31,15 +33,20 @@ setup() {
 # message is not a command. A backslash at the end of a line joins the next
 # line. A comment and the body of a here-document are not code. A command is
 # a call when, after the shell words in front of it (if, then, do, ! and the
-# like), its variable assignments, `command` and `timeout`, it starts with
-# kubectl or ${KUBECTL}. The subcommand is the first word that is not a
-# flag, the value of a global flag (-n, --kubeconfig and the like) or an
-# array; a word that is a variable is "?". A call with "$@" there passes
-# the arguments of its function on: it is a wrapper, not a call. A call of
-# kapply::run_private with a quoted label counts as "off": the wrapper runs
-# `KUBERC=off kubectl` with the arguments after the label (kapply_test.bats
-# runs it). The addon and Tilt data and the manifests of the in-cluster
-# agent (manifests/) are not code of lo.
+# like), it starts with kubectl, ${KUBECTL} or ${kctl}. In front of it can
+# be variable assignments and the words command, timeout, nohup, env, sudo,
+# xargs and exec, with their options. The state is the value of the last
+# KUBERC assignment in front of kubectl: env -i, env -u KUBERC and exec -c
+# clear it, and sudo drops each assignment before it (sudo resets the
+# environment). The subcommand is the first word that is not a flag, the
+# value of a global flag (-n, --kubeconfig and the like) or an array; the
+# quotes of a quoted word with no $ in it do not count, and a word that is
+# a variable is "?". A call with "$@" there passes the arguments of its
+# function on: it is a wrapper, not a call. A call of kapply::run_private
+# with a quoted label counts as "off": the wrapper runs `KUBERC=off kubectl`
+# with the arguments after the label (kapply_test.bats runs it). The addon
+# and Tilt data and the manifests of the in-cluster agent (manifests/) are
+# not code of lo.
 #
 # It does not see a kubectl that runs through another variable or through a
 # wrapper function (the callers of a wrapper), a command that a remote shell
@@ -65,7 +72,19 @@ _kubectl_sites() {
         if (!start) start = FNR
         depth--
       }
-      function emit(   c, text, env, w, n, i, x, verb, vi, kind) {
+      # unq(v): v without the quotes around it.
+      function unq(v) {
+        if (v ~ /^".*"$/ || v ~ ("^" sq ".*" sq "$")) v = substr(v, 2, length(v) - 2)
+        return v
+      }
+      # word(): cut the first word off c, and return it.
+      function word(   x) {
+        match(c, /^[^[:space:]]+[[:space:]]*/)
+        x = substr(c, 1, RLENGTH); c = substr(c, RLENGTH + 1)
+        sub(/[[:space:]]+$/, "", x)
+        return x
+      }
+      function emit(   text, kr, more, a, w, n, i, x, verb, vi, kind, sub2) {
         c = cur; line = start
         cur = ""; start = 0
         text = c
@@ -74,20 +93,63 @@ _kubectl_sites() {
         sub(/^[[:space:]]*[A-Za-z_][A-Za-z0-9_:.-]*X[[:space:]]*[{][[:space:]]+/, "", c)
         while (sub(/^[[:space:]]*(!|[{]|if|then|do|elif|else|while|until|time)([[:space:]]|$)/, "", c)) {}
         sub(/^[[:space:]]+/, "", c)
-        env = " "
-        while (match(c, /^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+/)) {
-          env = env substr(c, 1, RLENGTH)
-          c = substr(c, RLENGTH + 1)
+        # kr is the KUBERC value that the kubectl child gets ("": the one of
+        # the user).
+        kr = ""
+        for (more = 1; more; ) {
+          more = 1
+          if (c ~ /^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]/) {
+            a = word()
+            if (a ~ /^KUBERC=/) kr = unq(substr(a, 8))
+          } else if (c ~ /^(command|nohup)[[:space:]]/) {
+            word()
+          } else if (match(c, /^timeout([[:space:]]+-[A-Za-z][[:space:]]+[^[:space:]]+)*[[:space:]]+[^[:space:]]+[[:space:]]+/)) {
+            c = substr(c, RLENGTH + 1)
+          } else if (c ~ /^env[[:space:]]/) {
+            word()
+            while (c ~ /^-[^[:space:]]*[[:space:]]/) {
+              a = word()
+              if (a == "-" || a == "-i" || a == "--ignore-environment") kr = ""
+              else if (a == "-u" || a == "--unset") { if (word() == "KUBERC") kr = "" }
+              else if (a == "-uKUBERC" || a == "--unset=KUBERC") kr = ""
+              else if (a == "-C" || a == "--chdir" || a == "-S" || a == "--split-string") word()
+            }
+          } else if (c ~ /^sudo[[:space:]]/) {
+            # sudo resets the environment: only an assignment after it counts.
+            word(); kr = ""
+            while (c ~ /^-[^[:space:]]*[[:space:]]/) {
+              a = word()
+              if (a ~ /^-[ugCDhprtUT]$/) word()
+            }
+          } else if (c ~ /^xargs[[:space:]]/) {
+            word()
+            while (c ~ /^-[^[:space:]]*[[:space:]]/) {
+              a = word()
+              if (a ~ /^-[nILPdaEs]$/) word()
+            }
+          } else if (c ~ /^exec[[:space:]]/) {
+            # exec -c starts the command with an empty environment.
+            word()
+            while (c ~ /^-[^[:space:]]*[[:space:]]/) {
+              a = word()
+              if (a ~ /^-[a-z]*c/) kr = ""
+              if (a ~ /^-[a-z]*a$/) word()
+            }
+          } else {
+            more = 0
+          }
         }
-        sub(/^command[[:space:]]+/, "", c)
-        sub(/^timeout([[:space:]]+-[A-Za-z][[:space:]]+[^[:space:]]+)*[[:space:]]+[^[:space:]]+[[:space:]]+/, "", c)
         if (match(c, /^kapply::run_private[[:space:]]+"[^"]*"[[:space:]]+/)) {
           c = "kubectl " substr(c, RLENGTH + 1)
-          env = env "KUBERC=off "
+          kr = "off"
         }
-        if (c !~ /^("[$][{]KUBECTL[}]"|[$][{]KUBECTL[}]|[$]KUBECTL|kubectl)([[:space:]]|$)/) return
+        if (c !~ /^("[$][{](KUBECTL|kctl)[}]"|[$][{](KUBECTL|kctl)[}]|"?[$](KUBECTL|kctl)"?|kubectl)([[:space:]]|$)/) return
         sub(/[[:space:]]+$/, "", c)
         n = split(c, w, /[[:space:]]+/)
+        # A quoted word with no $ in it is the word without its quotes.
+        for (i = 2; i <= n; i++) {
+          if (w[i] ~ /^"[^"$`]*"$/ || w[i] ~ ("^" sq "[^" sq "]*" sq "$")) w[i] = substr(w[i], 2, length(w[i]) - 2)
+        }
         verb = "?"; vi = 0
         for (i = 2; i <= n; i++) {
           x = w[i]
@@ -103,15 +165,19 @@ _kubectl_sites() {
         kind = "read"
         if (!vi || verb ~ /^"?[$]/) {
           verb = "?"; kind = "?"
-        } else if (verb == "rollout" || verb == "certificate") {
-          if (w[vi + 1] ~ /^(restart|undo|pause|resume|approve|deny)$/) kind = "write"
-          verb = verb " " w[vi + 1]
+        } else if (verb ~ /^(rollout|certificate|auth|config)$/) {
+          sub2 = w[vi + 1]
+          if (verb == "rollout" && sub2 ~ /^(restart|undo|pause|resume)$/) kind = "write"
+          if (verb == "certificate" && sub2 ~ /^(approve|deny)$/) kind = "write"
+          if (verb == "auth" && sub2 == "reconcile") kind = "write"
+          if (verb == "config" && sub2 ~ /^(set|set-cluster|set-context|set-credentials|unset|use-context|use|delete-cluster|delete-context|delete-user|rename-context)$/) kind = "write"
+          verb = verb " " sub2
         } else if (verb == "create" && c ~ /[[:space:]]--dry-run=client([[:space:]]|$)/) {
-          verb = "create (render)"
-        } else if (verb ~ /^(apply|diff|replace|patch|create|delete|annotate|label|scale|set|taint|cordon|uncordon|drain|edit|expose|run|autoscale)$/) {
+          verb = "create (render)"; kind = "write"
+        } else if (verb ~ /^(apply|diff|replace|patch|create|delete|annotate|label|scale|set|taint|cordon|uncordon|drain|edit|expose|run|autoscale|exec|cp|attach|debug)$/) {
           kind = "write"
         }
-        print (env ~ /[[:space:]]KUBERC=off[[:space:]]/ ? "off" : "on") "\t" kind "\t" verb "\t" f ":" line ":" text
+        print (kr == "off" ? "off" : "on") "\t" kind "\t" verb "\t" f ":" line ":" text
       }
       inhd {
         l = $0
@@ -181,8 +247,8 @@ _kubectl_sites() {
   # Anti-vacuity: the sweep finds the writes (kapply, the bootstrap diff and
   # restore.d, the drivers, the inventory, the agent deploy, the claim patch,
   # the hooks, the heal and the handover), the replaces of the kapply heals,
-  # the coredns patch (split over four lines), and it reads a read as a
-  # read and a render as a render.
+  # the coredns patch (split over four lines), the renders that feed an
+  # apply, and it reads a read as a read.
   [ "$(printf '%s\n' "${sites}" | grep -c $'\twrite\t')" -ge 40 ]
   [ "$(printf '%s\n' "${sites}" | grep -c $'\tread\t')" -ge 30 ]
   printf '%s\n' "${sites}" | grep -q $'^off\twrite\tapply\tutils/kapply.sh:.* apply --server-side'
@@ -204,7 +270,10 @@ _kubectl_sites() {
   printf '%s\n' "${sites}" | grep $'^off\twrite\tpatch\tlibs/kubehz/main:' \
     | grep -qF 'patch configmap "${cm}" --type merge --patch-file /dev/stdin'
   printf '%s\n' "${sites}" | grep -q $'^on\tread\tget\tlibs/kubehz/deploy:.*get secret kubehz-agent '
-  printf '%s\n' "${sites}" | grep -q $'^on\tread\tcreate (render)\tdrivers/capi/generate:'
+  printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tdrivers/capi/generate:'
+  printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tdrivers/capi/main:.* create namespace '
+  printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tdrivers/lo/utils/services.sh:.* create configmap coredns-custom '
+  printf '%s\n' "${sites}" | grep -q $'^off\twrite\tcreate (render)\tlibs/kubehz/deploy:.* create secret generic kubehz-agent-bind '
   missing="$(printf '%s\n' "${sites}" | grep -E $'^on\t(write|[?])\t' || true)"
   if [[ -n "${missing}" ]]; then
     printf 'a kubectl write (or a call whose subcommand the scan cannot read) without KUBERC=off:\n%s\n' "${missing}" >&2
@@ -240,6 +309,32 @@ kubectl "${flags[@]}" label ns x a=b
 kubectl "${verb}" x
 w() { kubectl "$@" --request-timeout=5s; }
 timeout -k 2 "$(bound)" kubectl scale deploy/x --replicas=0
+env KUBERC=on kubectl delete pod p
+env KUBERC=off kubectl delete pod p
+KUBERC=off env -i kubectl delete pod p
+KUBERC=off env -u KUBERC kubectl delete pod p
+KUBERC=off sudo kubectl delete pod p
+sudo -u root env KUBERC=off kubectl delete pod p
+KUBERC=off xargs -n 1 kubectl delete pod
+xargs kubectl annotate pod a=b
+exec kubectl delete pod p
+KUBERC=off exec -c kubectl delete pod p
+nohup kubectl delete pod p &
+"${kctl}" delete node n
+${kctl} get node n
+kubectl "delete" pod p
+kubectl 'get' pods
+KUBERC=off KUBERC=/x kubectl delete pod p
+KUBERC="off" kubectl delete pod p
+kubectl exec p -- ls
+kubectl cp a p:/a
+kubectl attach p
+kubectl debug node/n -it --image=x
+kubectl auth reconcile -f r.yaml
+kubectl auth can-i get pods
+kubectl config set-context --current --namespace=x
+kubectl config view --raw
+KUBERC=off kubectl create configmap c --from-file=a --dry-run=client -o yaml
 ssh h 'kubectl delete node n'
 cat <<EOF
 kubectl delete -f e.yaml
@@ -264,12 +359,38 @@ on	write	delete	utils/a.sh:13
 off	write	annotate	utils/a.sh:14
 on	write	rollout restart	utils/a.sh:15
 on	read	rollout status	utils/a.sh:16
-on	read	create (render)	utils/a.sh:17
+on	write	create (render)	utils/a.sh:17
 off	write	apply	utils/a.sh:17
 on	write	patch	utils/a.sh:18
 on	write	label	utils/a.sh:19
 on	?	?	utils/a.sh:20
 on	write	scale	utils/a.sh:22
+on	write	delete	utils/a.sh:23
+off	write	delete	utils/a.sh:24
+on	write	delete	utils/a.sh:25
+on	write	delete	utils/a.sh:26
+on	write	delete	utils/a.sh:27
+off	write	delete	utils/a.sh:28
+off	write	delete	utils/a.sh:29
+on	write	annotate	utils/a.sh:30
+on	write	delete	utils/a.sh:31
+on	write	delete	utils/a.sh:32
+on	write	delete	utils/a.sh:33
+on	write	delete	utils/a.sh:34
+on	read	get	utils/a.sh:35
+on	write	delete	utils/a.sh:36
+on	read	get	utils/a.sh:37
+on	write	delete	utils/a.sh:38
+off	write	delete	utils/a.sh:39
+on	write	exec	utils/a.sh:40
+on	write	cp	utils/a.sh:41
+on	write	attach	utils/a.sh:42
+on	write	debug	utils/a.sh:43
+on	write	auth reconcile	utils/a.sh:44
+on	read	auth can-i	utils/a.sh:45
+on	write	config set-context	utils/a.sh:46
+on	read	config view	utils/a.sh:47
+off	write	create (render)	utils/a.sh:48
 W
 )"
   [ "${sites}" = "${want}" ] || { diff <(printf '%s\n' "${want}") <(printf '%s\n' "${sites}") >&2; return 1; }

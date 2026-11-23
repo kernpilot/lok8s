@@ -529,6 +529,9 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 		return ui.Handled(fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy))
 	}
 
+	// The render feeds the apply below, so it runs with the kubectl user
+	// defaults off too: a kuberc default can change the object that lo
+	// applies.
 	var nsManifest strings.Builder
 	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl",
@@ -536,6 +539,7 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 			"--kubeconfig", mgmtKubeconfig, "create", "namespace", namespace,
 			"--dry-run=client", "-o", "yaml",
 		},
+		Env:    []string{execx.KubeRCOff},
 		Stdout: &nsManifest,
 	}); err != nil {
 		return err

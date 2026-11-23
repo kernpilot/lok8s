@@ -43,7 +43,7 @@ func TestRunOutRunsKubectlWithKubeRCOff(t *testing.T) {
 			t.Errorf("%s did not run", argv)
 			continue
 		}
-		if got := slices.Contains(env, execx.KubeRCOff); got != want {
+		if got := execx.KubeRCIsOff(env); got != want {
 			t.Errorf("%s: %s in Env = %v, want %v (Env %q)", argv, execx.KubeRCOff, got, want, env)
 		}
 	}
@@ -68,7 +68,7 @@ func TestCorednsPatchRunsWithKubeRCOff(t *testing.T) {
 	if !patched {
 		t.Fatalf("the coredns patch did not run:\n%s", strings.Join(runner.calls, "\n"))
 	}
-	if !slices.Contains(patchEnv, execx.KubeRCOff) {
+	if !execx.KubeRCIsOff(patchEnv) {
 		t.Errorf("coredns patch Env = %q, want %s", patchEnv, execx.KubeRCOff)
 	}
 }
@@ -93,8 +93,38 @@ func TestCorednsRolloutRunsWithKubeRCOff(t *testing.T) {
 	if !rolled {
 		t.Fatalf("the coredns rollout did not run:\n%s", strings.Join(runner.calls, "\n"))
 	}
-	if !slices.Contains(rolloutEnv, execx.KubeRCOff) {
+	if !execx.KubeRCIsOff(rolloutEnv) {
 		t.Errorf("coredns rollout Env = %q, want %s", rolloutEnv, execx.KubeRCOff)
+	}
+}
+
+// The coredns-custom render (create configmap --dry-run=client) feeds the
+// apply, so it runs with the kubectl user defaults off too: a kuberc default
+// such as --append-hash would rename the ConfigMap (bash: lo::coredns_custom,
+// `KUBERC=off kubectl create configmap …`).
+func TestCorednsCustomRenderRunsWithKubeRCOff(t *testing.T) {
+	d, runner, _ := corednsFixture(t, `  coredns:
+    hosts:
+      - name: kubehz.dev
+        target: gateway
+`)
+	var renderEnv []string
+	rendered := false
+	runner.handler = func(c execx.Cmd) error {
+		if c.Name == "kubectl" && strings.Contains(strings.Join(c.Args, " "), "create configmap coredns-custom") {
+			renderEnv, rendered = c.Env, true
+			writeOut(c, "apiVersion: v1\nkind: ConfigMap\n")
+		}
+		return nil
+	}
+	if err := d.coredns(t.Context(), io.Discard, io.Discard, "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !rendered {
+		t.Fatalf("the coredns-custom render did not run:\n%s", strings.Join(runner.calls, "\n"))
+	}
+	if !execx.KubeRCIsOff(renderEnv) {
+		t.Errorf("coredns-custom render Env = %q, want %s as the last KUBERC entry", renderEnv, execx.KubeRCOff)
 	}
 }
 
@@ -112,7 +142,7 @@ func TestHealCiliumDeleteRunsWithKubeRCOff(t *testing.T) {
 			if write {
 				deletes++
 			}
-			if got := slices.Contains(c.Env, execx.KubeRCOff); got != write {
+			if got := execx.KubeRCIsOff(c.Env); got != write {
 				t.Errorf("%s: %s in Env = %v, want %v", strings.Join(c.Args, " "), execx.KubeRCOff, got, write)
 			}
 		}

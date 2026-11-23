@@ -112,8 +112,9 @@ driver::provision() {
     return 1
   }
 
+  # The render feeds the apply, so it runs with the kubectl user defaults off too.
   local ns_manifest
-  ns_manifest=$(kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
+  ns_manifest=$(KUBERC=off kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
     --dry-run=client -o yaml) || return 1
   printf '%s\n' "${ns_manifest}" \
     | kapply::run_private "the CAPI namespace" --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2 || return 1

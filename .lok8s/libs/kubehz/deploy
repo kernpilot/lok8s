@@ -808,12 +808,14 @@ kubehz::apply_bind_secret() {
 # preflight (kubehz::prove_bind_secret), so the two cannot drift: the dry-run
 # create renders the manifest from the bytes of <copy> on its stdin, and the
 # server-side apply sends it. The other arguments go before "-f -" (the
-# preflight passes --dry-run=server).
+# preflight passes --dry-run=server). The render runs with the kubectl user
+# defaults off too: a kuberc default such as --append-hash would rename the
+# Secret that the apply sends.
 # Usage: kubehz::bind_secret_upsert <copy> [<apply args>...]
 kubehz::bind_secret_upsert() {
   local copy="${1}" manifest
   shift
-  manifest=$(kubectl -n kubehz-system create secret generic kubehz-agent-bind \
+  manifest=$(KUBERC=off kubectl -n kubehz-system create secret generic kubehz-agent-bind \
     --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml < "${copy}") || return 1
   printf '%s\n' "${manifest}" | kapply::run_private "the bind secret" apply --server-side --force-conflicts "$@" -f -
 }

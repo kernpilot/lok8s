@@ -32,7 +32,7 @@ func TestDeployAppliesRunWithKubeRCOff(t *testing.T) {
 			continue
 		}
 		applies++
-		if !slices.Contains(c.Env, execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(c.Env) {
 			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
 		}
 	}
@@ -41,6 +41,31 @@ func TestDeployAppliesRunWithKubeRCOff(t *testing.T) {
 	// Secret), the live agent.
 	if applies != 6 {
 		t.Errorf("applies = %d, want 6:\n%v", applies, h.runner.lines())
+	}
+}
+
+// The render of the bind Secret (create secret --dry-run=client) feeds the
+// apply, so it runs with the kubectl user defaults off too: a kuberc default
+// such as --append-hash would rename the Secret that the apply sends. The
+// preflight and the stage render it once each.
+func TestBindSecretRenderRunsWithKubeRCOff(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	writeBindSecret(t, h, "acme.example.com", testBindSecret)
+	bindStageLogger(h, "")
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
+	renders := 0
+	for _, c := range h.runner.calls {
+		if c.Name != "kubectl" || !slices.Contains(c.Args, "--dry-run=client") {
+			continue
+		}
+		renders++
+		if !execx.KubeRCIsOff(c.Env) {
+			t.Errorf("the render %s runs with Env %q, want %s as the last KUBERC entry", argvLine(c), c.Env, execx.KubeRCOff)
+		}
+	}
+	if renders != 2 {
+		t.Errorf("renders = %d, want 2:\n%v", renders, h.runner.lines())
 	}
 }
 
@@ -53,13 +78,13 @@ func TestClaimPatchRunsWithKubeRCOff(t *testing.T) {
 	patches := 0
 	for _, c := range h.runner.calls {
 		if c.Name != "kubectl" || !slices.Contains(c.Args, "patch") {
-			if slices.Contains(c.Env, execx.KubeRCOff) {
+			if execx.KubeRCIsOff(c.Env) {
 				t.Errorf("the read %s runs with %s", argvLine(c), execx.KubeRCOff)
 			}
 			continue
 		}
 		patches++
-		if !slices.Contains(c.Env, execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(c.Env) {
 			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
 		}
 	}
@@ -96,7 +121,7 @@ func TestIdentityBootstrapJobDeleteRunsWithKubeRCOff(t *testing.T) {
 			continue
 		}
 		deletes++
-		if !slices.Contains(c.Env, execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(c.Env) {
 			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
 		}
 	}
@@ -114,7 +139,7 @@ func TestHandoverUntaintRunsWithKubeRCOff(t *testing.T) {
 		"kubectl": func(c execx.Cmd) error {
 			if slices.Contains(c.Args, "taint") {
 				taints++
-				if !slices.Contains(c.Env, execx.KubeRCOff) {
+				if !execx.KubeRCIsOff(c.Env) {
 					t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
 				}
 			}
