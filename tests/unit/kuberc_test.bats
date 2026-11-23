@@ -26,9 +26,12 @@ setup() {
 # the verb apply, diff, replace, patch or create, and holds -f, --filename,
 # --patch-file, -k or --kustomize. So the text of a message that names a
 # kubectl command is not a site. Comment lines and the addon and Tilt data
-# are not code of lo.
+# are not code of lo. A call of the wrapper kapply::run_private with a
+# quoted label is a site too, and it counts as "off": the wrapper runs
+# `KUBERC=off kubectl` with the arguments after the label (kapply_test.bats
+# runs it).
 #
-# It does not see a kubectl that runs through another variable or a
+# It does not see a kubectl that runs through another variable or another
 # wrapper function, a verb or a file flag that comes from a variable or an
 # array, or a call that a | ; & or ( inside a quoted string cuts.
 _kubectl_file_sites() {
@@ -52,6 +55,10 @@ _kubectl_file_sites() {
             c = substr(c, RLENGTH + 1)
           }
           sub(/^command[[:space:]]+/, "", c)
+          if (match(c, /^kapply::run_private[[:space:]]+"[^"]*"[[:space:]]+/)) {
+            c = "kubectl " substr(c, RLENGTH + 1)
+            env = env "KUBERC=off "
+          }
           if (c !~ /^("[$][{]KUBECTL[}]"|[$][{]KUBECTL[}]|[$]KUBECTL|kubectl)[[:space:]]/) continue
           if (c !~ /[[:space:]](apply|diff|replace|patch|create)[[:space:]]/) continue
           if (c !~ /[[:space:]](-f|--filename|--patch-file|-k|--kustomize)([[:space:]=]|$)/) continue
@@ -80,6 +87,7 @@ _KUBERC_NOT_YET='kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch
   printf '%s\n' "${sites}" | grep -q $'^off\tutils/kapply.sh:.* replace --raw '
   printf '%s\n' "${sites}" | grep -q $'^off\tlibs/bootstrap:.* diff --server-side'
   printf '%s\n' "${sites}" | grep -q $'^off\tdrivers/lo/utils/services.sh:.*patch deployment coredns .*--patch-file '
+  printf '%s\n' "${sites}" | grep -q $'^off\tlibs/kubehz/deploy:.*kapply::run_private "the live agent" apply -k '
   [ "$(printf '%s\n' "${sites}" | grep $'^on\tlibs/kubehz/main:' | grep -cF "${_KUBERC_NOT_YET}")" -eq 1 ]
   missing="$(printf '%s\n' "${sites}" | grep $'^on\t' | grep -vF "${_KUBERC_NOT_YET}" || true)"
   if [[ -n "${missing}" ]]; then
@@ -102,19 +110,21 @@ kubectl patch deployment x -n y \
 if ! command kubectl replace --force -f - >/dev/null; then :; fi
 out="$("${KUBECTL}" create -f b.yaml)"
 KUBERC=off kubectl diff -k overlay
+kapply::run_private "the objects" apply --kubeconfig "${k}" -f - <<< "${m}"
 echo "kubectl apply -f c.yaml failed (rc=1)"
 # kubectl apply -f d.yaml
 kubectl get pods -o yaml
 SH
   echo 'kubectl apply -f addon.yaml' > "${d}/addons/x/a.sh"
   sites="$(_kubectl_file_sites "${d}")"
-  [ "$(printf '%s\n' "${sites}" | grep -c .)" -eq 6 ] || { printf '%s\n' "${sites}"; return 1; }
+  [ "$(printf '%s\n' "${sites}" | grep -c .)" -eq 7 ] || { printf '%s\n' "${sites}"; return 1; }
   printf '%s\n' "${sites}" | grep -qx $'on\tutils/a.sh:1:kubectl apply -f a.yaml'
   printf '%s\n' "${sites}" | grep -q $'^off\tutils/a.sh:2:'
   printf '%s\n' "${sites}" | grep -qx $'on\tutils/a.sh:3:kubectl patch deployment x -n y    --type json    --patch-file p.json'
   printf '%s\n' "${sites}" | grep -q $'^on\tutils/a.sh:6:if ! command kubectl replace'
   printf '%s\n' "${sites}" | grep -q $'^on\tutils/a.sh:7:out='
   printf '%s\n' "${sites}" | grep -q $'^off\tutils/a.sh:8:'
+  printf '%s\n' "${sites}" | grep -qx $'off\tutils/a.sh:9:kapply::run_private "the objects" apply --kubeconfig "${k}" -f - <<< "${m}"'
 }
 
 @test "kuberc: a KUBERC=off prefix reaches the kubectl child, and the shell keeps its own KUBERC" {

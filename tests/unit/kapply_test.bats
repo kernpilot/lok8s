@@ -688,6 +688,60 @@ Invalid value: \"${CANARY_VALUE}\""
   done
 }
 
+# ── kapply::run_private (one kubectl write that is not an apply pass) ───────
+# The Go twin is internal/kapply/run_private_test.go.
+
+@test "run_private: a failed write prints the fixed line, never the kubectl output" {
+  export APPLY_RC=1 APPLY_OUT="configmap/cfg configured
+Invalid value: \"${CANARY_VALUE}\""
+  export APPLY_ERR="Warning: the value \"${STDERR_CANARY}\" of ConfigMap cfg is deprecated"
+  local level
+  for level in "" 1; do
+    DEBUG="${level}" run kapply::run_private "the objects" apply -f - <<< "${CFG_MANIFEST}"
+    assert_equal "${status}" 1
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "${STDERR_CANARY}"
+    assert_line "$(_fixed_fail_line "the objects" 1)"
+    assert_line '✓ the objects · 1 resource'
+  done
+  assert_line '[debug] kapply: kubectl apply for the objects exited 1 (1 resources)'
+}
+
+@test "run_private: a clean write prints the summary line, never the kubectl output, and kubectl reads the stdin of the caller" {
+  kubectl() {
+    cat > "${BATS_TEST_TMPDIR}/stdin"
+    printf 'configmap/cfg serverside-applied\nsecret/s configured\nWarning: unknown field "data.%s"\n' "${CANARY_VALUE}"
+  }
+  run kapply::run_private "the objects" apply -f - <<< "${CFG_MANIFEST}"
+  assert_success
+  assert_output '✓ the objects · 2 resources'
+  run cat "${BATS_TEST_TMPDIR}/stdin"
+  assert_output "${CFG_MANIFEST}"
+}
+
+@test "run_private: the KUBERC of the caller does not reach kubectl, and xtrace shows no output" {
+  export KUBERC=/user/kuberc APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  local trace="${BATS_TEST_TMPDIR}/trace"
+  ( set -x; kapply::run_private "the objects" apply -f /dev/null ) > /dev/null 2> "${trace}"
+  run grep -c '^apply KUBERC=off$' "${KENV}"
+  assert_output 1
+  run grep -c "${CANARY_VALUE}" "${trace}"
+  assert_output 0
+  [ "${KUBERC}" = /user/kuberc ]
+}
+
+@test "run_private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line, and no summary" {
+  export LO_SHOW_SENSITIVE_OUTPUT=1 APPLY_RC=1 APPLY_OUT="configmap/cfg configured
+Invalid value: \"${CANARY_VALUE}\"" APPLY_ERR="Warning: ${STDERR_CANARY}"
+  run kapply::run_private "the objects" apply -f - <<< "${CFG_MANIFEST}"
+  assert_equal "${status}" 1
+  assert_line --index 0 '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for the objects, which can quote a value of the manifest'
+  assert_output --partial "${CANARY_VALUE}"
+  assert_output --partial "${STDERR_CANARY}"
+  refute_output --partial '✓ the objects'
+  refute_output --partial 'kapply: kubectl apply failed for'
+}
+
 @test "counted_lines: keeps the <type>/<name> lines that end in an OK verb, nothing else" {
   run kapply::counted_lines < <(printf 'configmap/a serverside-applied\nWarning: %s configured\n  indented/x created\nInvalid value: "%s"\nsecret/b unchanged' "${CANARY_VALUE}" "${CANARY_VALUE}")
   assert_success

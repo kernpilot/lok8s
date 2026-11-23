@@ -389,6 +389,40 @@ kapply::_apply_pass() {
   return "${rc}"
 }
 
+# kapply::run_private <label> <kubectl args...>
+#   Runs `KUBERC=off kubectl <args...>`, one kubectl write that is not a pass
+#   of kapply::apply (an apply of a file, a directory or a kustomization).
+#   Its stdin goes to kubectl. kubectl writes its stdout and stderr into one
+#   private capture, which lo never prints: the output can quote a value of
+#   the manifest. Returns kubectl's exit and prints fixed lines, as
+#   kapply::_apply_pass does: a [debug] line with the exit code and the
+#   number of objects that kubectl reports; on stdout the summary
+#   "✓ <label> · N resources" when N is not 0; and the fixed [error] line
+#   when kubectl fails. Under LO_SHOW_SENSITIVE_OUTPUT=1: a [warn] line, then
+#   the kubectl output on stderr, and no summary. <label> is a fixed text of
+#   the caller, never a value of the manifest. The Go twin: kapply.RunPrivate.
+kapply::run_private() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }   # the output can quote a Secret value
+  local label="${1}" out rc=0 n
+  shift
+  out=$(KUBERC=off kubectl "$@" 2>&1) || rc=$?
+  n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)
+  debug "kapply: kubectl apply for ${label} exited ${rc} (${n} resources)"
+  if kapply::show_sensitive; then
+    warn "kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for ${label}, which can quote a value of the manifest"
+    [[ -z "${out}" ]] || printf '%s\n' "${out}" >&2
+    return "${rc}"
+  fi
+  if (( n > 0 )); then
+    local noun=resources
+    (( n == 1 )) && noun=resource
+    printf '✓ %s · %d %s\n' "${label}" "${n}" "${noun}"
+  fi
+  (( rc == 0 )) || error "kapply: kubectl apply failed for ${label} (rc=${rc}). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1"
+  return "${rc}"
+}
+
 # kapply::output_matches <ere> <output>: whether kubectl's <output>
 # (KAPPLY_LAST_OUTPUT) matches the extended regex <ere>. The output can
 # quote the manifest, so it goes to grep through a pipe, not a here-string

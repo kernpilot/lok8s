@@ -10,9 +10,15 @@ package kapply
 // kapply::_apply_pass, kapply::counted_lines).
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strings"
+
+	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // ShowSensitiveEnv is the opt-in: with the value 1, lo prints the kubectl
@@ -37,6 +43,57 @@ func ApplyFailedText(label string, rc int) string {
 // prints under the opt-in. what names the output.
 func ShowSensitiveText(what string) string {
 	return fmt.Sprintf("%s=1: lo shows %s, which can quote a value of the manifest", ShowSensitiveEnv, what)
+}
+
+// RunPrivate runs c, one kubectl write that is not a pass of Apply (an
+// apply of a file, a directory or a kustomization), and keeps the kubectl
+// output private: kubectl writes its stdout and stderr into one buffer,
+// which lo never prints. The output can quote a value of the manifest.
+// RunPrivate returns the error of the run and prints fixed lines, as a
+// pass of Apply does:
+//   - on stderr, a [debug] line with the exit code and the number of
+//     objects that kubectl reports;
+//   - on stdout, the summary "✓ <label> · N resources" when N is not 0;
+//   - on stderr, the line of ApplyFailedText when the run fails.
+//
+// Under ShowSensitive, it prints a [warn] line and then the kubectl output
+// on stderr, and no summary. The child runs with the kubectl user defaults
+// off (execx.KubeRCOff). label is a fixed text of the caller, never a value
+// of the manifest. The bash twin: kapply::run_private.
+func RunPrivate(ctx context.Context, r execx.Runner, c execx.Cmd, label string, stdout, stderr io.Writer) error {
+	var buf strings.Builder
+	c.Stdout, c.Stderr = &buf, &buf
+	if !slices.Contains(c.Env, execx.KubeRCOff) {
+		c.Env = append(slices.Clip(c.Env), execx.KubeRCOff)
+	}
+	err := r.Run(ctx, c)
+	rc := execx.ExitCode(err)
+	out := buf.String()
+	n := 0
+	for _, l := range splitLines(out) {
+		if OKRe.MatchString(l) {
+			n++
+		}
+	}
+	ui.DebugTo(stderr, "kapply: kubectl apply for %s exited %d (%d resources)", label, rc, n)
+	if ShowSensitive() {
+		ui.WarnTo(stderr, "kapply: %s", ShowSensitiveText("the kubectl output for "+label))
+		if out = strings.TrimRight(out, "\n"); out != "" {
+			fmt.Fprintf(stderr, "%s\n", out)
+		}
+		return err
+	}
+	if n > 0 {
+		noun := "resources"
+		if n == 1 {
+			noun = "resource"
+		}
+		fmt.Fprintf(stdout, "✓ %s · %d %s\n", label, n, noun)
+	}
+	if err != nil {
+		ui.ErrorTo(stderr, "%s", ApplyFailedText(label, rc))
+	}
+	return err
 }
 
 // CountedLines returns the lines of a kubectl output that RenderCaptured

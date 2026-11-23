@@ -107,6 +107,7 @@ _source_deploy() {
   # main holds kubehz::bind_secret_ok, the one bind-secret check the deploy
   # shares with the register calls; lo always loads main before deploy.
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/deploy"
 }
 
@@ -1620,6 +1621,15 @@ _bind_manifest() {
   printf 'kind: Secret\nmetadata:\n  name: kubehz-agent-bind\n  namespace: kubehz-system\ndata:\n  bind-secret: %s\n' "$(base64 -w0 < "${1}")"
 }
 
+# _stub_signal_target sets _stub_target to the shell that runs deploy_apply,
+# for a kubectl stub that sends it a signal. A kubectl call through
+# kapply::run_private runs in the command substitution of the private
+# capture, so that shell is the parent of the stub's shell.
+_stub_signal_target() {
+  _stub_target="${BASHPID}"
+  [[ " ${FUNCNAME[*]} " != *" kapply::run_private "* ]] || read -r _ _ _ _stub_target _ < "/proc/${BASHPID}/stat"
+}
+
 # _stub_kubectl_bind [fail]: log every call. The dry-run create saves the
 # bytes of its stdin (STUB_CREATE_STDIN, and each call appends them to
 # STUB_CREATE_STDINS) and prints _bind_manifest of them; the server-side
@@ -1634,10 +1644,10 @@ _bind_manifest() {
 # poll answer a pod that has not ended (STUB_PODS_LINES, when it is set, is
 # the answer), and STUB_RESUME_FAIL fails the patch that ends the suspend.
 # With STUB_TERM_ON_NAMESPACE set, the namespace apply saves what <workdir>
-# holds (STUB_TERM_SEEN) and sends TERM to the shell that runs it. With
-# STUB_SIGNAL_AT set to an argv, that call sends the signal STUB_SIGNAL to
-# the shell that runs it, from the CronJob agent apply on (so not in the
-# preflight), and runs nothing else.
+# holds (STUB_TERM_SEEN) and sends TERM to the shell that runs deploy_apply.
+# With STUB_SIGNAL_AT set to an argv, that call sends the signal STUB_SIGNAL
+# to that shell, from the CronJob agent apply on (so not in the preflight),
+# and runs nothing else. The shell is _stub_signal_target.
 _stub_kubectl_bind() {
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   export STUB_KUBECTL_FAIL="${1:-}"
@@ -1653,7 +1663,8 @@ _stub_kubectl_bind() {
     if [[ -n "${STUB_SIGNAL_AT:-}" && "$*" == "${STUB_SIGNAL_AT}" ]] \
       && { [[ "$*" == "apply -k "*"/agent" ]] || grep -qE '^apply -k .*/agent$' "${STUB_KUBECTL_LOG}"; }; then
       echo "$*" >> "${STUB_KUBECTL_LOG}"
-      kill -"${STUB_SIGNAL}" "${BASHPID}"
+      _stub_signal_target
+      kill -"${STUB_SIGNAL}" "${_stub_target}"
       return 0
     fi
     case "$*" in
@@ -1678,7 +1689,8 @@ _stub_kubectl_bind() {
         if [[ -n "${STUB_TERM_ON_NAMESPACE:-}" ]]; then
           echo "$*" >> "${STUB_KUBECTL_LOG}"
           ls -A -- "${3%/agent/namespace.yaml}" > "${STUB_TERM_SEEN}"
-          kill -TERM "${BASHPID}"
+          _stub_signal_target
+          kill -TERM "${_stub_target}"
           return 0
         fi ;;
     esac
@@ -1705,7 +1717,7 @@ _stub_kubectl_bind() {
     esac
     return 0
   }
-  export -f kubectl _bind_manifest
+  export -f kubectl _bind_manifest _stub_signal_target
 }
 
 # _write_bind_secret [value]: the stored bind secret (default BIND_SECRET_VALUE).
@@ -2386,4 +2398,73 @@ live-agent"
     assert_output -- "${AGENT_JOBS_POLL}"
   done
   unset STUB_SIGNAL STUB_PODS_STAY
+}
+
+# DEPLOY_CANARY stands for a value of the manifest that kubectl quotes on its
+# stdout, DEPLOY_ERR_CANARY for one on its stderr. Both are made up.
+DEPLOY_CANARY=zq7DeployCanary3vQs
+DEPLOY_ERR_CANARY=zq7DeployStderrCanary8nTb
+
+# _stub_kubectl_leaking [fail]: _stub_kubectl_bind [fail], and each kubectl apply also
+# prints one object line and the canaries on its stdout and stderr.
+_stub_kubectl_leaking() {
+  _stub_kubectl_bind "$@"
+  eval "$(declare -f kubectl | sed '1s/^kubectl /_kubectl_bound /')"
+  kubectl() {
+    local rc=0
+    _kubectl_bound "$@" || rc=$?
+    if [[ "${1-}" == apply ]]; then
+      printf 'configmap/x configured\nInvalid value: "%s"\n' "${DEPLOY_CANARY}"
+      printf 'Warning: the value "%s" is deprecated\n' "${DEPLOY_ERR_CANARY}" >&2
+    fi
+    return "${rc}"
+  }
+  export -f kubectl _kubectl_bound
+  export DEPLOY_CANARY DEPLOY_ERR_CANARY
+}
+
+@test "deploy_apply: each kubectl apply keeps the kubectl output private, in both directions" {
+  # The Go twin: TestDeployApplyKeepsTheKubectlOutputPrivate.
+  _source_deploy
+  _write_bind_secret
+  local mode owner access work label n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    n=$(( n + 1 ))
+    _stub_kubectl_leaking
+    work="${BATS_TEST_TMPDIR}/private${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+    run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_success
+    refute_output --partial "${DEPLOY_CANARY}"
+    refute_output --partial "${DEPLOY_ERR_CANARY}"
+    for label in "the namespace kubehz-system" "the bind secret" "the CronJob agent"; do
+      assert_line "✓ ${label} · 1 resource"
+    done
+    [[ "${owner}" != operator ]] || assert_line "✓ the live agent · 1 resource"
+    refute_output --partial 'kapply: kubectl apply failed'
+
+    LO_SHOW_SENSITIVE_OUTPUT=1 run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+    assert_success
+    assert_output --partial "${DEPLOY_CANARY}"
+    assert_output --partial "${DEPLOY_ERR_CANARY}"
+    assert_line '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for the bind secret, which can quote a value of the manifest'
+  done
+}
+
+@test "deploy_apply: a failed apply prints the fixed line of its label and the error of the step, never the kubectl output" {
+  # The Go twin: TestDeployApplyFailedApplyPrintsTheFixedLine.
+  _source_deploy
+  local work="${BATS_TEST_TMPDIR}/failed"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  _stub_kubectl_leaking "apply -k ${work}/live-agent"
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_failure
+  assert_line "[error] kapply: kubectl apply failed for the live agent (rc=1). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1"
+  assert_output --partial "kubehz: could not apply the live agent."
+  refute_output --partial "${DEPLOY_CANARY}"
+  refute_output --partial "${DEPLOY_ERR_CANARY}"
 }
