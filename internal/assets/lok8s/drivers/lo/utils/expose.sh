@@ -41,13 +41,14 @@ lo::expose() {
   # Start container with default nginx config, then overwrite it.
   # docker cp streams file content over the Docker connection (works
   # with DOCKER_HOST=ssh:// where -v mounts can't reach local paths).
+  # The image is LO_EXPOSE_IMAGE (defaults.sh), pinned by tag and digest.
   local -a docker_args=(
     run -d --restart=always
     --name "${proxy_name}"
     --network "${network}"
     -p 80:80 -p 443:443
   )
-  docker "${docker_args[@]}" nginx:alpine
+  docker "${docker_args[@]}" "${LO_EXPOSE_IMAGE}"
 
   # Copy rendered config + optional TLS certs into the running container
   docker cp "${nginx_conf_file}" "${proxy_name}:/etc/nginx/nginx.conf"

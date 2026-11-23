@@ -26,6 +26,21 @@ const (
 	DefaultPodCIDR = "10.244.0.0/16"
 	DefaultSvcCIDR = "10.96.0.0/12"
 
+	// ExposeImage is the proxy image of `lo expose` (bash: LO_EXPOSE_IMAGE):
+	// the stable nginx line on alpine, pinned by tag and digest, never a
+	// floating tag. No bot bumps this pin. To bump it:
+	//  1. Run `docker buildx imagetools inspect nginx:stable-alpine`. Its
+	//     MediaType must be an image index, and its Manifests must list
+	//     linux/amd64 and linux/arm64. Its Digest line is the new digest.
+	//  2. Find the <version>-alpine<release> tag that has the same digest
+	//     (inspect it the same way). That is the new tag.
+	//  3. Set the tag and the digest together, here, in LO_EXPOSE_IMAGE
+	//     (.lok8s/drivers/lo/utils/defaults.sh), and in the two tests that
+	//     hold the literal: TestExposeRunsThePinnedImage and
+	//     tests/unit/lo_expose_test.bats.
+	// TestExposeImageMatchesTheBashDefault fails when the twins differ.
+	ExposeImage = "nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
+
 	RegistryImage = "registry:2.8.3"
 	// Listen ports. Plain-HTTP registries serve on :80; TLS registries serve
 	// on :443 so that a bare-IP `docker push <ip>/...` (which the Docker
