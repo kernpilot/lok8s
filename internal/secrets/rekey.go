@@ -88,8 +88,13 @@ func (c *Context) recipientArg(key string) (string, error) {
 		// ENTIRE input on failure, which for a mistakenly-passed PRIVATE key
 		// would print the key material (see
 		// tests/unit/secret_material_containment_test.bats). The library
-		// error is likewise never surfaced.
-		derived, _, err := deriveAgePublicKey(key)
+		// error is likewise never surfaced. A private key file is refused
+		// before the library parses it (bash: before ssh-to-age reads it).
+		derived, err := deriveAgePublicKey(key)
+		if errors.Is(err, errPrivateKeyFile) {
+			refusePrivateKeyFile(c.ErrOut, key)
+			return "", ErrHandled
+		}
 		if err != nil && !errors.Is(err, errUnsupportedKey) {
 			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", key)
 			ui.ErrorTo(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
@@ -991,8 +996,9 @@ func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selecte
 // recipient belongs to (bash: secrets::_own_identity): the sops age keys
 // file (${SOPS_AGE_KEY_FILE:-~/.config/sops/age/keys.txt}) by its
 // "# public key: " lines, or the SSH key lo decrypts with
-// (${LOK8S_SSH_KEY:-~/.ssh/id_ed25519}) by the age key of its .pub. "" when
-// neither matches. No private key is printed or derived. It reads these two
+// (${LOK8S_SSH_KEY:-~/.ssh/id_ed25519}) by the age key of its .pub
+// (DefaultSSHPublicKey). "" when neither matches. No private key is printed
+// or derived: a .pub that holds a private key is no match. It reads these two
 // sources only, and the scope line says so (ownIdentityScope).
 func ownIdentity(recipient string) string {
 	keyFile := os.Getenv("SOPS_AGE_KEY_FILE")
@@ -1008,12 +1014,8 @@ func ownIdentity(recipient string) string {
 			}
 		}
 	}
-	sshKey := os.Getenv("LOK8S_SSH_KEY")
-	if sshKey == "" {
-		sshKey = os.Getenv("HOME") + "/.ssh/id_ed25519"
-	}
-	if pub := sshKey + ".pub"; fsutil.IsRegular(pub) {
-		if derived, _, err := deriveAgePublicKey(pub); err == nil && derived == recipient {
+	if pub := DefaultSSHPublicKey(); fsutil.IsRegular(pub) {
+		if derived, err := deriveAgePublicKey(pub); err == nil && derived == recipient {
 			return pub
 		}
 	}

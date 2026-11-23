@@ -911,7 +911,7 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 				write(t, file, "# created: test\n# public key: "+g+"\n"+gone.String()+"\n")
 			} else {
 				_, pub := testSSHKeypair(t, mkdir(t, os.Getenv("HOME")+"/.ssh"))
-				derived, _, err := deriveAgePublicKey(pub)
+				derived, err := deriveAgePublicKey(pub)
 				if err != nil {
 					t.Fatal(err)
 				}

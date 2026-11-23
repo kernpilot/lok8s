@@ -277,6 +277,76 @@ teardown_tmpdir() {
   [[ -d "${BATS_TEST_TMPDIR:-}" ]] && rm -rf "${BATS_TEST_TMPDIR}"
 }
 
+# The HOME that bats started with, recorded at the first load: a setup that
+# moves HOME later does not change it.
+: "${_LOK8S_REAL_HOME=${HOME:-}}"
+export _LOK8S_REAL_HOME
+
+# isolate_secrets_home: for a test that reaches the secrets library, a key
+# lookup or the real sops.
+#
+# The secrets library defaults LOK8S_SSH_KEY to ${HOME}/.ssh/id_ed25519, a
+# private key, and sops reads ${XDG_CONFIG_HOME:-$HOME/.config}/sops/age/keys.txt
+# and the SSH keys under ~/.ssh. So a test that runs with the HOME of the
+# developer can read a real key. A bats test cannot pass --ssh-key either:
+# the test files stub :args, so the key goes in LOK8S_SSH_KEY.
+#
+# This function moves HOME and XDG_CONFIG_HOME under BATS_TEST_TMPDIR. It
+# unsets every LOK8S_* variable (LOK8S_SSH_KEY and each other one that can
+# name a path), the sops identity variables and PATH_SECRETS. Then it checks
+# the result (assert_no_real_home). Call it after setup_tmpdir, which
+# replaces BATS_TEST_TMPDIR, and end the teardown with teardown_secrets_home.
+# The guard tests/unit/test_helper_isolation_test.bats checks that every test
+# file that sources the secrets library or runs the real sops calls it.
+isolate_secrets_home() {
+  if [[ -z "${BATS_TEST_TMPDIR:-}" ]]; then
+    echo "isolate_secrets_home: BATS_TEST_TMPDIR is not set; call it in setup()" >&2
+    return 1
+  fi
+  export HOME="${BATS_TEST_TMPDIR}/home"
+  export XDG_CONFIG_HOME="${HOME}/.config"
+  mkdir -p "${HOME}" || return 1
+  local v
+  for v in $(compgen -v LOK8S_); do
+    unset "${v}"
+  done
+  unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS
+  assert_no_real_home
+}
+
+# assert_no_real_home: fails when HOME is the HOME that bats started with
+# (_LOK8S_REAL_HOME), or when a variable that names a key, an identity or a
+# store names a path under it. A path under BATS_TEST_TMPDIR or under the
+# checkout (_PROJECT_ROOT: test data) is no leak, also when these are under
+# that HOME, as the checkout of a CI runner is. Without a HOME (empty or /)
+# there is nothing to guard. It prints the name of the variable, not its
+# value. Go twin: realHomeLeak in internal/secrets/testutil_test.go.
+assert_no_real_home() {
+  local real="${_LOK8S_REAL_HOME:-}" tmp="${BATS_TEST_TMPDIR:-/nonexistent}" repo="${_PROJECT_ROOT:-/nonexistent}" v val
+  [[ -n "${real}" && "${real}" != / ]] || return 0
+  for v in HOME XDG_CONFIG_HOME SOPS_AGE_KEY_FILE SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS PATH_BASE PATH_CLUSTERS $(compgen -v LOK8S_); do
+    val="${!v:-}"
+    [[ -n "${val}" ]] || continue
+    case "${val}" in
+      "${tmp}" | "${tmp}"/* | "${repo}" | "${repo}"/*) continue ;;
+      "${real}" | "${real}"/*)
+        echo "assert_no_real_home: ${v} names a path under the HOME that bats started with; call isolate_secrets_home after setup_tmpdir" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+# teardown_secrets_home: the teardown of a test that called
+# isolate_secrets_home. It checks again, because a test body can set a
+# variable, then removes the temp dir in either case.
+teardown_secrets_home() {
+  local rc=0
+  assert_no_real_home || rc=1
+  teardown_tmpdir || rc=1
+  return "${rc}"
+}
+
 # Vendor the framework utils that drivers/lo/main sources unconditionally
 # (ip, oidc, yqbound, dnssearch, kapply) into the per-test PATH_LOK8S tree, so
 # a sandbox can source the real lo driver. Single source of truth: when the driver gains

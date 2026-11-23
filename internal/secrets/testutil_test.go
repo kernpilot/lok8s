@@ -25,7 +25,38 @@ import (
 // identity of the caller cannot open a file a test expects to stay closed.
 var isolatedIdentityVars = []string{"SOPS_AGE_KEY", "SOPS_AGE_KEY_CMD", "SOPS_AGE_SSH_PRIVATE_KEY_FILE"}
 
+// realHome is the HOME that the test binary started with. No key or
+// identity lookup of a test may resolve under it (realHomeLeak).
+var realHome = os.Getenv("HOME")
+
+// realHomeLeak names the first key or identity lookup that resolves to home
+// or under it, and "" when none does. A path under base (the temp dir of the
+// test) is no leak, also when the temp dirs are under home. Without a HOME
+// (empty or /) there is nothing to guard. Bash twin: assert_no_real_home.
+func realHomeLeak(base, home string) string {
+	if home == "" || home == "/" {
+		return ""
+	}
+	for _, l := range []struct{ name, path string }{
+		{"HOME", os.Getenv("HOME")},
+		{"XDG_CONFIG_HOME", os.Getenv("XDG_CONFIG_HOME")},
+		{"SOPS_AGE_KEY_FILE", os.Getenv("SOPS_AGE_KEY_FILE")},
+		{"LOK8S_SSH_KEY (DefaultSSHKey)", DefaultSSHKey()},
+		{"LOK8S_SSH_KEY (DefaultSSHPublicKey)", DefaultSSHPublicKey()},
+	} {
+		if l.path == base || strings.HasPrefix(l.path, base+"/") {
+			continue
+		}
+		if l.path == home || strings.HasPrefix(l.path, home+"/") {
+			return l.name + " resolves under the real HOME: run the test with testEnv"
+		}
+	}
+	return ""
+}
+
 // testEnv builds a throwaway project and a Context writing into buffers.
+// It ends with the sentinel realHomeLeak: a test whose setup leaves a key
+// lookup under the real HOME fails before it reads a key.
 func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	base := t.TempDir()
@@ -41,6 +72,9 @@ func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	t.Setenv("SOPS_AGE_KEY_FILE", filepath.Join(base, "no-keys.txt"))
 	// remove-key reads the .pub of the SSH key lo decrypts with.
 	t.Setenv("LOK8S_SSH_KEY", filepath.Join(base, "home", ".ssh", "id_ed25519"))
+	if msg := realHomeLeak(base, realHome); msg != "" {
+		t.Fatal(msg)
+	}
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	c := &Context{
 		Paths: &config.Paths{

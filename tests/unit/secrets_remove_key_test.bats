@@ -16,16 +16,15 @@
 # runs the real sops carries the tag real-sops: the argsh container of CI has
 # no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
 # the step. That step also checks the TAP plan of every tagged test under
-# tests/unit (1..20): a test that gets or loses the tag changes that number
+# tests/unit (1..21): a test that gets or loses the tag changes that number
 # in .github/workflows/ci.yml and TESTING.md. No test prints a private key.
 
 setup() {
   load "../test_helper"
   setup_tmpdir
-  export HOME="${BATS_TEST_TMPDIR}/home"
-  export XDG_CONFIG_HOME="${HOME}/.config"
+  isolate_secrets_home
   export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/no-keys.txt"
-  unset SOPS_AGE_KEY SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS LO_SECRETS_LOCK_WAIT
+  unset LO_SECRETS_LOCK_WAIT
   export LOK8S_SSH_KEY="${HOME}/.ssh/id_ed25519"
   export PATH_BASE="${BATS_TEST_TMPDIR}/base"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
@@ -51,7 +50,7 @@ setup() {
 
 teardown() {
   chmod -R u+rwx "${PATH_CLUSTERS}" 2>/dev/null || true
-  teardown_tmpdir
+  teardown_secrets_home
 }
 
 # _rules <list>... — one creation rule per recipient list. Only the first rule
@@ -2130,4 +2129,25 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   [ "$(_open keep other)" = "w" ] || { echo "the rewritten .enc does not decrypt with the key that stays" >&2; return 1; }
   ! _open gone app >/dev/null || { echo "the removed key still decrypts app" >&2; return 1; }
   [ "$(_open keep app)" = "v" ] || { echo "the key that stays cannot decrypt app" >&2; return 1; }
+}
+
+# The own-identity check reads the .pub of LOK8S_SSH_KEY. A .pub that holds a
+# private key is no match, and ssh-to-age does not read it. The control: a
+# .pub with a public key is read, and its recipient matches. ssh-to-age is a
+# function that logs a call (Go twin: TestDeriveRefusesAPrivateKeyFile; the
+# derivation refuses the file for every caller).
+@test "remove-key: the own-identity check does not read a .pub that holds a private key" {
+  _load
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; echo "${RCPT_A}"; }
+  mkdir -p "${HOME}/.ssh"
+  printf '%s\nCANARY_SECRET_MATERIAL_DO_NOT_LEAK\n' "${PEM_HEAD}" > "${LOK8S_SSH_KEY}.pub"
+  local own=""
+  secrets::_own_identity "${RCPT_A}"
+  [ -z "${own}" ] || { echo "a private key matched: ${own}" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age read the file" >&2; return 1; }
+
+  printf 'ssh-ed25519 AAAA test\n' > "${LOK8S_SSH_KEY}.pub"
+  secrets::_own_identity "${RCPT_A}"
+  [ "${own}" = "${LOK8S_SSH_KEY}.pub" ] || { echo "the control did not match: '${own}'" >&2; return 1; }
+  [ -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "the control did not call ssh-to-age" >&2; return 1; }
 }

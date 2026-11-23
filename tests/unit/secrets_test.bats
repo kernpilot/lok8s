@@ -9,6 +9,9 @@ setup() {
   # `run --separate-stderr` (the decrypt compare test) needs bats >= 1.5.
   bats_require_minimum_version 1.5.0
   setup_tmpdir
+  # HOME under the temp dir, and no LOK8S_* or sops identity variable: the
+  # library defaults LOK8S_SSH_KEY to ${HOME}/.ssh/id_ed25519.
+  isolate_secrets_home
 
   export PATH="${_PROJECT_ROOT}/.bin:${PATH}"
   export PATH_BASE="${BATS_TEST_TMPDIR}"
@@ -23,7 +26,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
 }
 
-teardown() { teardown_tmpdir; }
+teardown() { teardown_secrets_home; }
 
 require_tools() {
   for t in sops ssh-to-age ssh-keygen; do
@@ -1065,6 +1068,8 @@ _init_fakes() {
 # A key that derives no age recipient (ssh-to-age skips a key that is not
 # ed25519: it prints a note and exits 0) is refused with the line of the Go
 # twin and status 1, and nothing is written: no .sops.yaml and no lock file.
+# The note of ssh-to-age does not reach the output: init keeps the stderr of
+# the tool from the terminal, because on a failure it quotes its input.
 # A rerun (a .sops.yaml is there) refuses the key the same way: grep -qF with
 # an empty pattern matches every config, so a rerun took it for a key that
 # is configured (Go twin: TestInitRefusesAKeyThatDerivesNoRecipient).
@@ -1082,16 +1087,15 @@ _init_fakes() {
     before="$(_store_state "${PATH_BASE}")"
     run secrets::init
     [ "$status" -eq 1 ] || { echo "${run_kind}: status $status: $output" >&2; return 1; }
-    [ "$output" = "skipped key: got ssh-rsa key type, but only ed25519 keys are supported
-[error] no age recipient derived from ${LOK8S_SSH_KEY} (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
+    [ "$output" = "[error] no age recipient derived from ${LOK8S_SSH_KEY} (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
       echo "${run_kind}: $output" >&2; return 1; }
     [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${run_kind}: init wrote a file" >&2; return 1; }
   done
 }
 
 # The same with the real ssh-to-age and an RSA key of the test. :args is a
-# stub here, so the key goes in LOK8S_SSH_KEY (its default names the
-# developer's private key).
+# stub here, so the key goes in LOK8S_SSH_KEY (a .pub path, which init reads
+# as it is).
 # bats test_tags=real-sops
 @test "secrets init: a real RSA key derives no age recipient, and nothing is written" {
   require_tools
@@ -1101,9 +1105,149 @@ _init_fakes() {
   before="$(_store_state "${PATH_BASE}")"
   run secrets::init
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "${output##*$'\n'}" = "[error] no age recipient derived from ${BATS_TEST_TMPDIR}/id_rsa.pub (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
+  [ "${output}" = "[error] no age recipient derived from ${BATS_TEST_TMPDIR}/id_rsa.pub (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
     echo "$output" >&2; return 1; }
   [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "init wrote a file" >&2; return 1; }
+}
+
+# The body of every private key fixture: no output may hold it.
+KEY_CANARY=CANARY_SECRET_MATERIAL_DO_NOT_LEAK
+
+# _private_key_forms <dir>: writes one file per form of a private key file,
+# each with KEY_CANARY as its body (Go twin: privateKeyForms). "PRIVATE KEY"
+# is in two parts, so that the private-key rule of a secret scanner does not
+# match this file.
+_private_key_forms() {
+  local d="${1}" k="PRIVATE ""KEY" c="${KEY_CANARY}"
+  mkdir -p "${d}"
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n-----END OPENSSH %s-----\n' "${k}" "${c}" "${k}" > "${d}/openssh"
+  printf -- '-----BEGIN RSA %s-----\n%s\n-----END RSA %s-----\n' "${k}" "${c}" "${k}" > "${d}/rsa-pem"
+  printf -- '-----BEGIN EC %s-----\n%s\n-----END EC %s-----\n' "${k}" "${c}" "${k}" > "${d}/ec-pem"
+  printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${k}" "${c}" "${k}" > "${d}/pkcs8"
+  printf -- '-----BEGIN ENCRYPTED %s-----\n%s\n-----END ENCRYPTED %s-----\n' "${k}" "${c}" "${k}" > "${d}/pkcs8-enc"
+  printf -- '---- BEGIN SSH2 ENCRYPTED %s ----\n%s\n---- END SSH2 ENCRYPTED %s ----\n' "${k}" "${c}" "${k}" > "${d}/ssh2"
+  printf 'PuTTY-User-Key-File-3: ssh-ed25519\n%s\n' "${c}" > "${d}/putty"
+  printf 'AGE-SECRET-KEY-1%s\n' "${c}" > "${d}/age-identity"
+  printf 'age-secret-key-1%s\n' "${c,,}" > "${d}/age-lower"
+  printf -- '-----BEGIN OPENSSH %s-----\r\n%s\r\n' "${k}" "${c}" > "${d}/crlf"
+  printf -- '  -----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${c}" > "${d}/indented"
+  printf -- '# my laptop key\n-----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${c}" > "${d}/comment"
+}
+
+# _private_key_refusal <path>: the refusal of a key file that holds a
+# private key (Go twin: wantPrivateKeyRefusal).
+_private_key_refusal() {
+  printf '[error] %s holds a private key, not a public key: nothing from it is printed\n' "${1}"
+  if [[ "${1}" == *.pub ]]; then
+    printf '[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key'
+  else
+    printf '[error] pass the public key file instead: %s.pub' "${1}"
+  fi
+}
+
+# Without --ssh-key, init reads the public key: the .pub of LOK8S_SSH_KEY,
+# the path itself when it ends in .pub, and ${HOME}/.ssh/id_ed25519.pub
+# without the variable. It never reads the private key beside it: ssh-to-age
+# (a function here) gets the bytes of the .pub (Go twin:
+# TestDefaultSSHKeys, TestSecretsInitDefaultsToThePublicKey).
+@test "secrets init: the default key is the .pub of LOK8S_SSH_KEY, and ~/.ssh/id_ed25519.pub without it" {
+  _init_fakes
+  ssh-to-age() { cat > "${BATS_TEST_TMPDIR}/ssh-to-age.in"; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  local k="PRIVATE ""KEY" dir="${BATS_TEST_TMPDIR}/keys" env want
+  mkdir -p "${HOME}/.ssh" "${dir}"
+  for want in "${HOME}/.ssh/id_ed25519" "${dir}/work"; do
+    printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${KEY_CANARY}" > "${want}"
+    printf 'ssh-ed25519 AAAA %s\n' "${want##*/}" > "${want}.pub"
+  done
+  for env in "" "${dir}/work" "${dir}/work.pub"; do
+    want="${dir}/work.pub"
+    if [[ -z "${env}" ]]; then
+      unset LOK8S_SSH_KEY
+      want="${HOME}/.ssh/id_ed25519.pub"
+    else
+      export LOK8S_SSH_KEY="${env}"
+    fi
+    run secrets::_ssh_public_key
+    [ "$status" -eq 0 ] && [ "$output" = "${want}" ] || { echo "LOK8S_SSH_KEY='${env}': $output" >&2; return 1; }
+    rm -f "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/ssh-to-age.in"
+    run secrets::init
+    [ "$status" -eq 0 ] || { echo "LOK8S_SSH_KEY='${env}': status $status: $output" >&2; return 1; }
+    cmp -s "${BATS_TEST_TMPDIR}/ssh-to-age.in" "${want}" || { echo "LOK8S_SSH_KEY='${env}': ssh-to-age did not read ${want}" >&2; return 1; }
+    [[ "${output}" == *"Derived from: ${want}"* && "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "LOK8S_SSH_KEY='${env}': $output" >&2; return 1; }
+  done
+}
+
+# A key file that holds a private key, in every form, is refused before
+# ssh-to-age reads it: the path and the fix, nothing from the file, status 1,
+# and nothing written. Also when the path ends in .pub. ssh-to-age and sops
+# are functions; ssh-to-age logs a call (Go twin:
+# TestInitRefusesAPrivateKeyFile).
+@test "secrets init: a private key file is refused before ssh-to-age reads it" {
+  _init_fakes
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  local dir="${BATS_TEST_TMPDIR}/forms" f path before n=0
+  _private_key_forms "${dir}"
+  for f in "${dir}"/*; do
+    cp "${f}" "${f}.pub"
+  done
+  for path in "${dir}"/*; do
+    n=$((n + 1))
+    KEY_PATH="${path}"
+    :args() { ssh_key="${KEY_PATH}"; }
+    before="$(_store_state "${PATH_BASE}")"
+    run secrets::init
+    [ "$status" -eq 1 ] || { echo "${path##*/}: status $status: $output" >&2; return 1; }
+    [ "$output" = "$(_private_key_refusal "${path}")" ] || { echo "${path##*/}: $output" >&2; return 1; }
+    [[ "${output,,}" != *"${KEY_CANARY,,}"* ]] || { echo "${path##*/}: the file reached the output" >&2; return 1; }
+    [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "${path##*/}: ssh-to-age read the file" >&2; return 1; }
+    [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${path##*/}: init wrote a file" >&2; return 1; }
+  done
+  [ "${n}" -eq 24 ] || { echo "${n} paths, not 24" >&2; return 1; }
+}
+
+# A derivation that fails (ssh-to-age exits non-zero) prints the two lines
+# of the Go twin and the exit status of the tool, never its output: the tool
+# quotes its input on a failure. ssh-to-age is a function that does so.
+@test "secrets init: the output of a failed ssh-to-age is not shown, its exit status is" {
+  _init_fakes
+  ssh-to-age() { echo "ssh-to-age: failed to convert '${KEY_CANARY}'" >&2; return 3; }
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] Failed to derive age public key from ${LOK8S_SSH_KEY}
+[error] Only ed25519 SSH keys are supported
+[error] ssh-to-age exited 3: its output is not shown, because it can quote the key file" ] || {
+    echo "$output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml" >&2; return 1; }
+}
+
+# The same with the real tools: private keys that ssh-keygen made (ed25519
+# and RSA) are refused, and a file that does not parse prints no line of
+# itself through the real ssh-to-age, which quotes its input on a failure.
+# bats test_tags=real-sops
+@test "secrets init: real private keys are refused, and a real ssh-to-age failure prints no line of the file" {
+  require_tools
+  local k body
+  ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id_ed25519" -q
+  ssh-keygen -t rsa -b 2048 -N '' -C test -f "${BATS_TEST_TMPDIR}/id_rsa" -q
+  for k in id_ed25519 id_rsa; do
+    KEY_PATH="${BATS_TEST_TMPDIR}/${k}"
+    :args() { ssh_key="${KEY_PATH}"; }
+    run secrets::init
+    [ "$status" -eq 1 ] || { echo "${k}: status $status: $output" >&2; return 1; }
+    [ "$output" = "$(_private_key_refusal "${KEY_PATH}")" ] || { echo "${k}: $output" >&2; return 1; }
+    body="${BATS_TEST_TMPDIR}/${k}.body"
+    grep -v -- '-----' "${KEY_PATH}" > "${body}"
+    ! grep -qFf "${body}" <<< "${output}" || { echo "${k}: a line of the key reached the output" >&2; return 1; }
+  done
+  printf 'not a key %s\n' "${KEY_CANARY}" > "${BATS_TEST_TMPDIR}/garbage.pub"
+  KEY_PATH="${BATS_TEST_TMPDIR}/garbage.pub"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "garbage: status $status: $output" >&2; return 1; }
+  [ "${#lines[@]}" -eq 3 ] && [[ "${lines[2]}" =~ ^\[error\]\ ssh-to-age\ exited\ [1-9][0-9]*:\ its\ output\ is\ not\ shown ]] || {
+    echo "garbage: $output" >&2; return 1; }
+  [[ "${output}" != *"${KEY_CANARY}"* ]] || { echo "garbage: the file reached the output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml" >&2; return 1; }
 }
 
 # While another run holds the lock of .sops.yaml, init refuses with the line

@@ -168,7 +168,7 @@ teammates, commit them **encrypted**: no separate key ceremony, your SSH key
 *is* your encryption identity (via `ssh-to-age`; ed25519 only).
 
 ```bash
-# one-time: derive an age key from ~/.ssh/id_ed25519 and write .sops.yaml
+# one-time: derive an age key from ~/.ssh/id_ed25519.pub and write .sops.yaml
 lo secrets init                                 # needs `sops` + `ssh-to-age` (b install)
 
 lo secrets --domain app.example.com encrypt     # write Secret.*.enc for committing
@@ -177,6 +177,17 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 # on another machine / for a teammate whose age key is in .sops.yaml:
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
+
+`init` reads the public key: `--ssh-key`, else the `.pub` file of
+`LOK8S_SSH_KEY` (by default `~/.ssh/id_ed25519.pub`). `LOK8S_SSH_KEY` names
+the private key that `decrypt` reads. When its value ends in `.pub`, `init`
+reads that path.
+
+A key file that holds a private key stops `init`, `add-key` and `remove-key`
+before any tool reads it. The error names the path and the fix, and shows
+nothing from the file. The bash implementation never shows the output of
+`ssh-to-age`, because it can quote the key file. It shows the exit status of
+the tool instead.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

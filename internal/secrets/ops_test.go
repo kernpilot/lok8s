@@ -87,7 +87,7 @@ func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 	sameStates(t, before, fileStates(t, c.Paths.Base))
 
 	// A rerun: the config exists and lists the key.
-	agePubkey, _, err := deriveAgePublicKey(pubPath)
+	agePubkey, err := deriveAgePublicKey(pubPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +585,7 @@ func TestDecryptViaSSHKeyDerivation(t *testing.T) {
 	privPath, pubPath := testSSHKeypair(t, c.Paths.Base)
 
 	// Encrypt to the recipient derived from the SSH public key…
-	pub, _, err := deriveAgePublicKey(pubPath)
+	pub, err := deriveAgePublicKey(pubPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,12 +663,9 @@ func TestAddKeyContainment(t *testing.T) {
 	if strings.Contains(combined, canary) {
 		t.Error("private key material leaked")
 	}
-	// Exact stderr: the two [error] lines and NOTHING else. The Go library's
-	// own parse errors happen not to embed input material today, so a
-	// canary-only assertion would pass even if the raw error were surfaced —
-	// this pins that nothing beyond the ported messages reaches the operator.
-	want := "[error] could not derive an age key from " + keyPath + "\n" +
-		"[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
+	// Exact stderr: the private key refusal and NOTHING else. The file is
+	// refused before the library parses it, and no line of it is printed.
+	want := wantPrivateKeyRefusal(keyPath)
 	if errOut.String() != want {
 		t.Errorf("stderr not contained to the ported messages:\n%q\nwant:\n%q", errOut.String(), want)
 	}

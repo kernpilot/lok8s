@@ -297,7 +297,7 @@ sops (tagged `real-sops`) skip there. The `unit-tests` job runs that tag a
 second time on the runner, with the sops and ssh-to-age of `b install`. The
 step puts `.bin` first on `PATH`, and it fails before bats runs when `sops`
 or `ssh-to-age` resolves to a file other than the one in `.bin`. It also
-fails when a test fails, when the TAP plan is not `1..20` (the twenty tagged
+fails when a test fails, when the TAP plan is not `1..21` (the 21 tagged
 tests: a change to the tags changes that number in
 `.github/workflows/ci.yml`), or when a test skips. Locally,
 `bats --filter-tags real-sops tests/unit/` runs them when `ssh-keygen`,
@@ -310,6 +310,19 @@ run the lib through the real argsh CLI, and they skip without
 when it is not there or bash cannot load it. The step that runs the unit
 tests fails when one of them skips for that reason. Five of these tests
 also run the real sops and carry the tag `real-sops`.
+
+A test file that sources the secrets library, and a test that runs the real
+sops, call `isolate_secrets_home` (`tests/test_helper.bash`) after
+`setup_tmpdir`. The library defaults `LOK8S_SSH_KEY` to
+`${HOME}/.ssh/id_ed25519`, a private key, and sops reads the identities
+under HOME. The function moves HOME under the temp dir of the test and
+unsets every `LOK8S_*` variable and the sops identity variables. Then
+`assert_no_real_home` checks that no key path is under the HOME that bats
+started with. The teardown of such a file calls `teardown_secrets_home`,
+which checks again. `tests/unit/test_helper_isolation_test.bats` fails when
+a test file that reaches the library does not call `isolate_secrets_home`.
+The Go twin is the check at the end of `testEnv` in
+`internal/secrets/testutil_test.go`.
 
 The bats suites keep running against the frozen tree because a command
 routed to bash, the provider plugins and the `lo drivers` fallback still

@@ -29,15 +29,6 @@ import (
 
 func init() { registerPorted("secrets", newSecretsCommand) }
 
-// defaultSSHKey resolves the LOK8S_SSH_KEY default chain
-// (bash: : "${LOK8S_SSH_KEY:=${HOME}/.ssh/id_ed25519}").
-func defaultSSHKey() string {
-	if v := os.Getenv("LOK8S_SSH_KEY"); v != "" {
-		return v
-	}
-	return os.Getenv("HOME") + "/.ssh/id_ed25519"
-}
-
 // secretsRun maps the secrets package's already-printed sentinel onto the cli
 // one.
 func secretsRun(err error) error {
@@ -215,13 +206,13 @@ func newSecretsInit(paths *config.Paths) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sshKey, _ := cmd.Flags().GetString("ssh-key")
 			if sshKey == "" {
-				sshKey = defaultSSHKey()
+				sshKey = secrets.DefaultSSHPublicKey()
 			}
 			ctx := secretsContext(cmd, paths, "", "")
 			return secretsRun(ctx.Init(sshKey))
 		},
 	}
-	c.Flags().StringP("ssh-key", "k", "", "Path to SSH public key")
+	c.Flags().StringP("ssh-key", "k", "", "Path to the SSH public key (default: the .pub file of LOK8S_SSH_KEY, ~/.ssh/id_ed25519.pub)")
 	return c
 }
 
@@ -339,13 +330,13 @@ func newSecretsDecrypt(paths *config.Paths) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sshKey, _ := cmd.Flags().GetString("ssh-key")
 			if sshKey == "" {
-				sshKey = defaultSSHKey()
+				sshKey = secrets.DefaultSSHKey()
 			}
 			ctx := secretsContext(cmd, paths, "", "")
 			return secretsRun(ctx.Decrypt(sshKey))
 		},
 	}
-	c.Flags().StringP("ssh-key", "k", "", "Path to SSH private key")
+	c.Flags().StringP("ssh-key", "k", "", "Path to the SSH private key (default: LOK8S_SSH_KEY, ~/.ssh/id_ed25519)")
 	return c
 }
 

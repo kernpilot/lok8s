@@ -26,7 +26,8 @@ import (
 
 // Init configures SOPS/age encryption from an SSH public key (bash:
 // secrets::init). The bash `command -v ssh-to-age/sops` gates disappear —
-// both are libraries in the Go build.
+// both are libraries in the Go build. The cli passes --ssh-key, else
+// DefaultSSHPublicKey (the .pub of LOK8S_SSH_KEY).
 func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
 		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", sshKey)
@@ -34,18 +35,21 @@ func (c *Context) Init(sshKey string) error {
 		return ErrHandled
 	}
 
-	agePubkey, skipNote, err := deriveAgePublicKey(sshKey)
+	// A private key file is refused before the library parses it, and
+	// nothing from the file is printed (bash: secrets::_refuse_private_key_file
+	// before ssh-to-age reads the file). No library error is printed: it can
+	// quote the input. bash also keeps the stderr of ssh-to-age from the
+	// terminal, and prints the exit status of the tool instead; the library
+	// has no exit status.
+	agePubkey, err := deriveAgePublicKey(sshKey)
+	if errors.Is(err, errPrivateKeyFile) {
+		refusePrivateKeyFile(c.ErrOut, sshKey)
+		return ErrHandled
+	}
 	if err != nil && !errors.Is(err, errUnsupportedKey) {
 		ui.ErrorTo(c.ErrOut, "Failed to derive age public key from %s", sshKey)
 		ui.ErrorTo(c.ErrOut, "Only ed25519 SSH keys are supported")
 		return ErrHandled
-	}
-	// bash leaves ssh-to-age's stderr uncontained here (public keys only —
-	// leaking a public key is not a leak); the CLI's "skipped key: …" note for
-	// a non-ed25519 key is the one line that surfaces, and the derivation
-	// result stays empty exactly like the binary's rc-0 skip.
-	if skipNote != "" {
-		fmt.Fprintln(c.ErrOut, skipNote)
 	}
 
 	sopsConfig := c.sopsConfigPath()

@@ -3791,7 +3791,7 @@ lo secrets decrypt [flags]
 
 ```
   -h, --help[=true|false]   help for decrypt
-  -k, --ssh-key string      Path to SSH private key
+  -k, --ssh-key string      Path to the SSH private key (default: LOK8S_SSH_KEY, ~/.ssh/id_ed25519)
 ```
 
 ### SEE ALSO
@@ -3868,7 +3868,7 @@ lo secrets init [flags]
 
 ```
   -h, --help[=true|false]   help for init
-  -k, --ssh-key string      Path to SSH public key
+  -k, --ssh-key string      Path to the SSH public key (default: the .pub file of LOK8S_SSH_KEY, ~/.ssh/id_ed25519.pub)
 ```
 
 ### SEE ALSO

@@ -48,7 +48,7 @@ func TestDecryptEntryIdentityChain(t *testing.T) {
 	t.Run("LOK8S_SSH_KEY derivation", func(t *testing.T) {
 		c, _, _ := testEnv(t)
 		privPath, pubPath := testSSHKeypair(t, c.Paths.Base)
-		pub, _, err := deriveAgePublicKey(pubPath)
+		pub, err := deriveAgePublicKey(pubPath)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -662,8 +662,9 @@ lo secrets env --name <n> [--namespace <ns>]   # emit injection-safe `export KEY
 lo secrets list | print [pattern...] | path    # inspect the cache
 ```
 
-**Encryption**: `init` derives an age recipient from `~/.ssh/id_ed25519` (via
-`ssh-to-age`, ed25519 only) and writes `.sops.yaml`; `encrypt`/`decrypt`
+**Encryption**: `init` derives an age recipient from the public key
+`~/.ssh/id_ed25519.pub` (the `.pub` of `LOK8S_SSH_KEY`, via `ssh-to-age`,
+ed25519 only, and never from a private key file) and writes `.sops.yaml`; `encrypt`/`decrypt`
 round-trip the cache so secrets commit safely as `Secret.*.enc`. Needs `sops`
 and `ssh-to-age` (`b install`).
 

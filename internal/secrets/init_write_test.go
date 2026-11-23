@@ -57,7 +57,7 @@ func initConfigTemps(t *testing.T, dir string) []string {
 // wantInitConfig is the .sops.yaml that Init writes for the key at pub.
 func wantInitConfig(t *testing.T, pub string) string {
 	t.Helper()
-	agePubkey, _, err := deriveAgePublicKey(pub)
+	agePubkey, err := deriveAgePublicKey(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,19 +67,19 @@ func wantInitConfig(t *testing.T, pub string) string {
 		"creation_rules:\n  - path_regex: 'Secret\\..*'\n    age: '" + agePubkey + "'\n"
 }
 
-// An RSA key derives no recipient. Init prints the skip note of ssh-to-age
-// and the refusal, and writes nothing: no .sops.yaml, no lock file and no
-// store. A rerun (a .sops.yaml is there) refuses the key the same way: the
-// empty recipient is in every config, so a rerun took it for a key that is
-// configured (bash: the same lines and status 1).
+// An RSA key derives no recipient. Init prints the refusal only (no skip
+// note: bash keeps the stderr of ssh-to-age from the terminal), and writes
+// nothing: no .sops.yaml, no lock file and no store. A rerun (a .sops.yaml
+// is there) refuses the key the same way: the empty recipient is in every
+// config, so a rerun took it for a key that is configured (bash: the same
+// line and status 1).
 func TestInitRefusesAKeyThatDerivesNoRecipient(t *testing.T) {
 	for _, rerun := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rerun=%v", rerun), func(t *testing.T) {
 			c, out, errOut := testEnv(t)
 			pub := testRSAPublicKey(t)
-			_, note, err := deriveAgePublicKey(pub)
-			if !errors.Is(err, errUnsupportedKey) || note == "" {
-				t.Fatalf("fixture: want a key that derives nothing, with a skip note, got %v %q", err, note)
+			if _, err := deriveAgePublicKey(pub); !errors.Is(err, errUnsupportedKey) {
+				t.Fatalf("fixture: want a key that derives nothing, got %v", err)
 			}
 			if rerun {
 				_, ed := testSSHKeypair(t, t.TempDir())
@@ -90,7 +90,7 @@ func TestInitRefusesAKeyThatDerivesNoRecipient(t *testing.T) {
 			if err := c.Init(pub); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\nstdout %q", err, out.String())
 			}
-			want := note + "\n[error] no age recipient derived from " + pub +
+			want := "[error] no age recipient derived from " + pub +
 				" (ed25519 SSH keys only) — nothing written to " + c.sopsConfigPath() + "\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)

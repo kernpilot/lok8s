@@ -147,8 +147,27 @@ sec_refused_no_recipient "a first run"
 for impl in go bash; do
   [[ ! -e "${WORK}/sec-${impl}/.sops.yaml" ]] || fail "init (${impl}) with an RSA key wrote .sops.yaml"
 done
+# A private key is refused before any tool reads it: each side exits 1, the
+# last two lines of its stderr are the refusal (the path and the fix), no
+# line of the key reaches its output, and no .sops.yaml is written.
+sec_check secrets init --ssh-key "${WORK}/home/key"
+# shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+(( go_rc == 1 && bash_rc == 1 )) || fail "init with a private key: rc go=${go_rc} bash=${bash_rc}, want 1"
+grep -v -- '-----' "${WORK}/home/key" > "${WORK}/key.body"
+for impl in go bash; do
+  [[ "$(tail -n 2 "${WORK}/${impl}.err")" == "[error] WORK/home/key holds a private key, not a public key: nothing from it is printed
+[error] pass the public key file instead: WORK/home/key.pub" ]] || fail "init (${impl}) with a private key: stderr is not the refusal"
+  ! grep -qFf "${WORK}/key.body" "${WORK}/${impl}.out" "${WORK}/${impl}.err" || fail "init (${impl}) with a private key: a line of the key reached the output"
+  [[ ! -e "${WORK}/sec-${impl}/.sops.yaml" ]] || fail "init (${impl}) with a private key wrote .sops.yaml"
+done
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"   # idempotent branch
+# Without --ssh-key, init reads the .pub of LOK8S_SSH_KEY (WORK/home/key.pub),
+# not the private key that LOK8S_SSH_KEY names: both take the idempotent
+# branch and exit 0.
+sec_check secrets init
+# shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+(( go_rc == 0 && bash_rc == 0 )) || fail "init with the default key: rc go=${go_rc} bash=${bash_rc}, want 0"
 sec_state .sops.yaml
 # A rerun with the RSA key is refused too, and .sops.yaml keeps its bytes.
 for impl in go bash; do cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.init"; done
