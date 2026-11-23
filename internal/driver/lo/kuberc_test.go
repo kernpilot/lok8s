@@ -71,3 +71,28 @@ func TestCorednsPatchRunsWithKubeRCOff(t *testing.T) {
 		t.Errorf("coredns patch Env = %q, want %s", patchEnv, execx.KubeRCOff)
 	}
 }
+
+// The CoreDNS rollout restart is a write: it runs with the kubectl user
+// defaults off too (bash: lo::coredns, `KUBERC=off kubectl rollout restart
+// …`). The bats twin is "coredns: the rollout restart runs with the kubectl
+// user defaults off (KUBERC=off)" in coredns_spec_test.bats.
+func TestCorednsRolloutRunsWithKubeRCOff(t *testing.T) {
+	d, runner, _ := corednsFixture(t, "")
+	var rolloutEnv []string
+	rolled := false
+	runner.handler = func(c execx.Cmd) error {
+		if c.Name == "kubectl" && slices.Contains(c.Args, "rollout") && slices.Contains(c.Args, "restart") {
+			rolloutEnv, rolled = c.Env, true
+		}
+		return nil
+	}
+	if err := d.coredns(t.Context(), io.Discard, io.Discard, "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !rolled {
+		t.Fatalf("the coredns rollout did not run:\n%s", strings.Join(runner.calls, "\n"))
+	}
+	if !slices.Contains(rolloutEnv, execx.KubeRCOff) {
+		t.Errorf("coredns rollout Env = %q, want %s", rolloutEnv, execx.KubeRCOff)
+	}
+}

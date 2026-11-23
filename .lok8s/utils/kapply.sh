@@ -30,11 +30,13 @@
 # KAPPLY_LAST_OUTPUT for callers to inspect (and appended to the private
 # file of the bootstrap scheduler, see kapply::_private_ok), never printed.
 # LO_SHOW_SENSITIVE_OUTPUT=1
-# prints it as before (kapply::show_sensitive). Each kubectl write from
-# stdin (the apply, the replace of the immutable heal, the replace of the
-# namespace finalize) runs with the kubectl user defaults off (KUBERC=off:
-# a kubectl before v1.33 has no kuberc and ignores it). The Go twin:
-# internal/kapply (private.go).
+# prints it as before (kapply::show_sensitive). Each kubectl write (the
+# apply, the replace of the immutable heal, the replace of the namespace
+# finalize, each finalizer patch of the heal and of the preflight) runs
+# with the kubectl user defaults off (KUBERC=off: a kubectl before v1.33
+# has no kuberc and ignores it), also a patch from the argv: a kuberc
+# default such as --dry-run=client would make it report success and change
+# nothing. The Go twin: internal/kapply (private.go).
 #
 # A plain sourceable util — it uses error/warn/debug from utils/verbose.sh,
 # which every caller (the CLI, deploy, bootstrap, the drivers) loads first.
@@ -756,7 +758,7 @@ kapply::_heal_terminating() {
       -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || continue
     [[ -n "${dts}" ]] || continue
     warn "  clearing finalizers on stuck-terminating ${kind}/${name}"
-    kubectl "${kubectl_flags[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
+    KUBERC=off kubectl "${kubectl_flags[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
       --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 \
       || warn "  could not clear finalizers on ${kind}/${name}"
   done < <(printf '%s' "${manifest}" | yq -r '[.kind, .metadata.name, (.metadata.namespace // "")] | @tsv' 2>/dev/null)
@@ -891,7 +893,7 @@ kapply::preflight() {
     stuck="${kind}"
     [[ "${apiver}" == */* ]] && stuck="${kind}.${apiver##*/}.${apiver%%/*}"
     nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
-    if kubectl "${kubectl_flags[@]}" patch "${stuck}" "${name}" "${nsf[@]}" \
+    if KUBERC=off kubectl "${kubectl_flags[@]}" patch "${stuck}" "${name}" "${nsf[@]}" \
          --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
       report+="${stuck,,}/${name} patched"$'\n'
       report+="cleared ${kind}/${name}${ns:+ (ns ${ns})} — stuck $(( (now - epoch) / 60 ))m${fins:+ · finalizers: ${fins}}"$'\n'
@@ -953,7 +955,7 @@ kapply::_preflight_crd() {
     [[ -n "${iname}" ]] || continue
     [[ "${ns}" == "-" ]] && ns=""
     nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
-    if kubectl "${kubectl_flags[@]}" patch "${name}" "${iname}" "${nsf[@]}" \
+    if KUBERC=off kubectl "${kubectl_flags[@]}" patch "${name}" "${iname}" "${nsf[@]}" \
          --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
       drained=$(( drained + 1 ))
     else
@@ -979,7 +981,7 @@ kapply::_preflight_crd() {
   fi
 
   if [[ "${mode}" == "force" ]] && kapply::_crd_allowed "${name}" "${allow}"; then
-    if kubectl "${kubectl_flags[@]}" patch crd "${name}" \
+    if KUBERC=off kubectl "${kubectl_flags[@]}" patch crd "${name}" \
          --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
       echo "customresourcedefinition/${name} patched"
       echo "FORCED CustomResourceDefinition/${name} finalizer off after drain (${drained} cleared, ${failed} failed) — stale etcd CRs may resurrect on re-apply"

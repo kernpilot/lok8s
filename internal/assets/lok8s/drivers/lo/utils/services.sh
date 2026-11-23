@@ -40,7 +40,8 @@ lo::coredns() {
     --type json \
     --patch-file "${coredns_dir}/patch.json" 2>/dev/null || true
 
-  kubectl rollout restart deployment/coredns -n kube-system --kubeconfig "${kubeconfig}"
+  # A write: it runs with the kubectl user defaults off too (the Go twin).
+  KUBERC=off kubectl rollout restart deployment/coredns -n kube-system --kubeconfig "${kubeconfig}"
 }
 
 # Build the coredns-custom ConfigMap from spec.coredns in cluster.lok8s.yaml.

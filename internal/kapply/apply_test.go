@@ -324,6 +324,43 @@ func TestStuckTerminatingForceClearsCRFinalizers(t *testing.T) {
 	}
 }
 
+// The finalizer patch of the heal (a stuck-Terminating manifest object) is
+// a write: it runs with the kubectl user defaults off, also though its
+// patch comes from the argv. A kuberc default such as --dry-run=client
+// would make it report success and clear nothing. The probe (get) is a
+// read and keeps the kuberc of the user. The bats twin is "heal: each
+// finalizer patch runs with KUBERC=off" in kapply_test.bats.
+func TestStuckTerminatingFinalizerPatchRunsWithKubeRCOff(t *testing.T) {
+	f := &fakeKubectl{applyRC: 1,
+		applyOut: `Error from server: object is being deleted: clusters.postgresql.cnpg.io "db" already exists`,
+		getOut:   "2026-01-01T00:00:00Z"}
+	a, _, _ := testApplier(f)
+	a.ForceRecreate = true
+	a.Apply(t.Context(), "resources", crManifest)
+	patches := 0
+	for i, line := range f.calls {
+		args := verbArgs(strings.Fields(line)[1:])
+		if len(args) == 0 {
+			continue
+		}
+		off := slices.Contains(f.envs[i], execx.KubeRCOff)
+		switch args[0] {
+		case "patch":
+			patches++
+			if !off {
+				t.Errorf("%s runs without %s (Env %q)", line, execx.KubeRCOff, f.envs[i])
+			}
+		case "get":
+			if off {
+				t.Errorf("%s: a read runs with %s", line, execx.KubeRCOff)
+			}
+		}
+	}
+	if patches != 1 {
+		t.Errorf("%d finalizer patches, want 1:\n%s", patches, f.log())
+	}
+}
+
 // A global flag of the caller with a separate value before the subcommand
 // (--server <url> apply) must not drop the override of the kubectl user
 // defaults: each write of Apply from stdin (the apply passes, the replace

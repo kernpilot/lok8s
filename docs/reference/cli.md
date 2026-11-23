@@ -116,9 +116,10 @@ before it. Use it only where the log stays with you.
 Each `kubectl apply` and `kubectl diff` that `lo` runs has the kubectl user
 defaults off (`KUBERC=off` for that kubectl only), so a kuberc file (the
 kubectl user preferences) cannot change these calls, for example turn on
-`--show-secrets` for a diff. This also holds for the writes of the kapply
-heals (the replace of an object with an immutable field, the finalize of a
-namespace) and for the CoreDNS patch of the Lo driver. kubectl
+`--show-secrets` for a diff. This also holds for the other writes of
+kapply (the replace of an object with an immutable field, the finalize of
+a namespace, the finalizer patches of the heals and of the preflight) and
+for the CoreDNS patch and rollout of the Lo driver. kubectl
 v1.33 and later read `KUBERC`; an older kubectl has no kuberc and ignores it.
 Your own kubectl calls keep your kuberc.
 

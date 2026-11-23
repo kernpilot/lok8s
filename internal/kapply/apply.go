@@ -174,14 +174,17 @@ func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (st
 	return buf.String(), execx.ExitCode(err)
 }
 
-// writeEnv is the Env of a kubectlQuiet call that writes from stdin (the
-// replace of the heal, the replace of the namespace finalize): the kubectl
-// user defaults are off (bash: `KUBERC=off kubectl …`). A read passes nil.
+// writeEnv is the Env of a kubectlQuiet call that writes (the replace of
+// the heal, the replace of the namespace finalize, each finalizer patch of
+// the heal and of the preflight): the kubectl user defaults are off (bash:
+// `KUBERC=off kubectl …`), also for a patch from the argv. A kuberc default
+// such as --dry-run=client would make a write report success and change
+// nothing. A read passes nil.
 var writeEnv = []string{execx.KubeRCOff}
 
 // kubectlQuiet runs kubectl with all output discarded (bash: &>/dev/null).
-// env is the Env of the child: writeEnv for a write from stdin, nil for a
-// read (each caller says which).
+// env is the Env of the child: writeEnv for a write, nil for a read (each
+// caller says which).
 func (a *Applier) kubectlQuiet(ctx context.Context, env []string, stdin string, args ...string) int {
 	c := execx.Cmd{Name: "kubectl", Args: args, Env: env, Stdout: io.Discard, Stderr: io.Discard}
 	if stdin != "" {
@@ -660,9 +663,7 @@ func (a *Applier) healTerminating(ctx context.Context, manifest, out string, kub
 			patch = append(patch, "-n", d.namespace)
 		}
 		patch = append(patch, "--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
-		// A merge patch from the argv, not from a file or stdin: the bash
-		// twin runs it without the KUBERC=off prefix too.
-		if rc := a.kubectlQuiet(ctx, nil, "", patch...); rc != 0 {
+		if rc := a.kubectlQuiet(ctx, writeEnv, "", patch...); rc != 0 {
 			ui.WarnTo(a.Stderr, "  could not clear finalizers on %s/%s", d.kind, d.name)
 		}
 	}

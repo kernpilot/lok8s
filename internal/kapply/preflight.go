@@ -209,7 +209,7 @@ func (a *Applier) Preflight(ctx context.Context, manifest string, args ...string
 			patch = append(patch, "-n", ns)
 		}
 		patch = append(patch, "--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
-		if a.kubectlQuiet(ctx, nil, "", patch...) == 0 {
+		if a.kubectlQuiet(ctx, writeEnv, "", patch...) == 0 {
 			report = append(report, fmt.Sprintf("%s/%s patched", strings.ToLower(stuck), name))
 			report = append(report, fmt.Sprintf("cleared %s/%s%s — stuck %dm%s", kind, name, nsSuffix, elapsed/60, finsSuffix(fins)))
 		} else {
@@ -285,7 +285,7 @@ func (a *Applier) preflightCRD(ctx context.Context, name, mode, allow string, ku
 			patch = append(patch, "-n", inst.Metadata.Namespace)
 		}
 		patch = append(patch, "--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
-		if a.kubectlQuiet(ctx, nil, "", patch...) == 0 {
+		if a.kubectlQuiet(ctx, writeEnv, "", patch...) == 0 {
 			drained++
 		} else {
 			report = append(report, fmt.Sprintf("could not clear finalizers on %s/%s", name, iname))
@@ -320,7 +320,7 @@ func (a *Applier) preflightCRD(ctx context.Context, name, mode, allow string, ku
 	if mode == "force" && crdAllowed(name, allow) {
 		patch := append(append([]string{}, kubectlFlags...), "patch", "crd", name,
 			"--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
-		if a.kubectlQuiet(ctx, nil, "", patch...) == 0 {
+		if a.kubectlQuiet(ctx, writeEnv, "", patch...) == 0 {
 			report = append(report, fmt.Sprintf("customresourcedefinition/%s patched", name))
 			report = append(report, fmt.Sprintf("FORCED CustomResourceDefinition/%s finalizer off after drain (%d cleared, %d failed) — stale etcd CRs may resurrect on re-apply", name, drained, failed))
 		} else {

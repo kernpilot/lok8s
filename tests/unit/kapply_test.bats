@@ -412,6 +412,24 @@ _kapply_flags() { local m="$1"; shift; printf '%s' "${m}" | kapply::apply "$@"; 
   refute_output 0
 }
 
+# The finalizer patch of the heal is a write: KUBERC=off, also though its
+# patch comes from the argv (a kuberc default such as --dry-run=client
+# would make it report success and clear nothing). The probe keeps the
+# kuberc of the user. The Go twin:
+# TestStuckTerminatingFinalizerPatchRunsWithKubeRCOff.
+@test "heal: each finalizer patch runs with KUBERC=off" {
+  export KUBERC=/user/kuberc APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT='Error from server: object is being deleted: clusters.postgresql.cnpg.io "db" already exists'
+  export GET_OUT='2026-01-01T00:00:00Z'
+  run _kapply "${CR_MANIFEST}"
+  run grep -c '^patch KUBERC=off$' "${KENV}"
+  assert_output 1
+  run grep -c '^patch ' "${KENV}"
+  assert_output 1
+  run grep -c '^get KUBERC=/user/kuberc$' "${KENV}"
+  refute_output 0
+}
+
 @test "kuberc: a --server <url> flag in front of the verb keeps KUBERC=off on each write" {
   export APPLY_RC=1 LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 GET_OUT='2026-01-01T00:00:00Z'
   export APPLY_OUT="${BOTH_HEALS_OUT}"
@@ -953,6 +971,38 @@ _stuck_crd_fixture() {
     {"metadata":{"namespace":"kubehz-system","name":"k6-burst-1","finalizers":["kubehz.dev/cluster-cleanup"]}},
     {"metadata":{"namespace":"kubehz-system","name":"k6-burst-2","finalizers":["kubehz.dev/cluster-cleanup"]}}]}'
   export KAPPLY_CRD_WAIT=1 KAPPLY_POLL_INTERVAL=0
+}
+
+# Each finalizer patch of the preflight (a stuck object of the manifest,
+# the instances of a stuck CRD, the CRD under --crds force) is a write:
+# KUBERC=off, also though its patch comes from the argv. The reads keep the
+# kuberc of the user. The Go twin: TestPreflightFinalizerPatchesRunWithKubeRCOff.
+@test "preflight: each finalizer patch runs with KUBERC=off" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  eval "$(declare -f kubectl | sed '1s/^kubectl /_preflight_kubectl /')"
+  kubectl() { echo "${1} KUBERC=${KUBERC-<unset>}" >> "${KENV}"; _preflight_kubectl "$@"; }
+  export -f kubectl _preflight_kubectl
+  export KUBERC=/user/kuberc
+  _patches() {
+    run grep -c '^patch ' "${KENV}"
+    assert_output "${1}" || { echo "case: ${2}" >&2; return 1; }
+    run grep -c '^patch KUBERC=off$' "${KENV}"
+    assert_output "${1}" || { echo "case: ${2}" >&2; return 1; }
+    run grep -c '^get KUBERC=/user/kuberc$' "${KENV}"
+    refute_output 0 || { echo "case: ${2}" >&2; return 1; }
+    : > "${KENV}"
+    rm -f "${BATS_TEST_TMPDIR}/crd.drained"
+  }
+  export GET_OUT='{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}'
+  run _preflight "${CR_MANIFEST}"
+  _patches 1 "stuck object"
+  _stuck_crd_fixture
+  run _preflight "${CR_MANIFEST}"
+  _patches 2 "CRD drain"
+  export CRD_STAYS=1
+  run _preflight_opts "${CR_MANIFEST}" --crds force
+  _patches 3 "CRD force"
 }
 
 @test "preflight: nothing terminating → no patches, reports nothing stuck" {
