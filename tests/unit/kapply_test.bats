@@ -565,7 +565,7 @@ _private_dir() {
   export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
 }
 
-PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it'
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it'
 
 # _assert_private_refused: the pass printed the fixed refusal line and the
 # fixed failure line, never the kubectl output.
@@ -658,6 +658,59 @@ Invalid value: \"${CANARY_VALUE}\""
   run _kapply "${CFG_MANIFEST}"
   _assert_private_refused
   [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
+}
+
+# A directory above the private dir that another user can write into, and
+# that has no sticky bit, lets that user rename the dir and put a link to a
+# dir of their own at its path. kapply refuses it before it makes the file.
+@test "private: a directory above the private dir that others can write into, with no sticky bit, is refused, nothing is written" {
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  local open="${BATS_TEST_TMPDIR}/open" mode
+  mkdir "${open}"
+  for mode in 0777 0770; do
+    chmod "${mode}" "${open}"
+    KAPPLY_PRIVATE_DIR="$(mktemp -d "${open}/sched.XXXXXX")"
+    KAPPLY_PRIVATE_LOG="${KAPPLY_PRIVATE_DIR}/1.priv"
+    export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+    run _kapply "${CFG_MANIFEST}"
+    _assert_private_refused
+    [ ! -e "${KAPPLY_PRIVATE_LOG}" ] || { echo "mode ${mode}: the file was made" >&2; return 1; }
+  done
+  # With the sticky bit (as /tmp), another user cannot rename the dir.
+  chmod 1777 "${open}"
+  KAPPLY_PRIVATE_DIR="$(mktemp -d "${open}/sched.XXXXXX")"
+  KAPPLY_PRIVATE_LOG="${KAPPLY_PRIVATE_DIR}/1.priv"
+  export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+  run _kapply "${CFG_MANIFEST}"
+  refute_output --partial 'not safe to write'
+  grep -qF "Invalid value: \"${CANARY_VALUE}\"" "${KAPPLY_PRIVATE_LOG}"
+}
+
+# The first pass makes the file and keeps its descriptor; the pass after a
+# heal writes through that descriptor and checks that the path still holds
+# its file. Here the heal (the replace) renames the dir and puts a new dir
+# and a new file at the old path: the pass after it refuses, and the new
+# file gets no byte.
+@test "private: the pass after a heal writes through the descriptor of the first pass, never through a file put at the path between them" {
+  _private_dir
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: Invalid value: \"${CANARY_VALUE}\": field is immutable"
+  eval "$(declare -f kubectl | sed '1s/^kubectl /_kubectl_stub /')"
+  kubectl() {
+    if [[ " $* " == *" replace "* && ! -e "${KAPPLY_PRIVATE_DIR}.moved" ]]; then
+      mv -- "${KAPPLY_PRIVATE_DIR}" "${KAPPLY_PRIVATE_DIR}.moved"
+      mkdir -m 0700 -- "${KAPPLY_PRIVATE_DIR}"
+      ( umask 077; : > "${KAPPLY_PRIVATE_LOG}" )
+    fi
+    _kubectl_stub "$@"
+  }
+  export -f kubectl _kubectl_stub
+  run _kapply "${DEPLOY_MANIFEST}"
+  grep -q '^replace --force ' "${KENV}"
+  assert_line "${PRIVATE_REFUSED}"
+  refute_output --partial "${CANARY_VALUE}"
+  [ ! -s "${KAPPLY_PRIVATE_LOG}" ]
+  [ "$(grep -c "${CANARY_VALUE}" "${KAPPLY_PRIVATE_DIR}.moved/1.priv")" -eq 1 ]
 }
 
 @test "private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line" {

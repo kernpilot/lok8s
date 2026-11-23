@@ -296,36 +296,95 @@ kapply::_mode_is() {
   [[ "${got}" == "${1}" ]]
 }
 
+# kapply::_dir_chain <dir> <var>: whether no other user can rename or
+# replace <dir> or a directory above it. It sets <var> to the resolved path
+# of <dir> (cd -P). Each part of the resolved path, from / down to <dir>,
+# must be a directory of root or of this user, and must not be writable by
+# its group or by others unless it has the sticky bit (/tmp passes). The
+# walk goes top-down: a part that passed lets no other user rename or
+# replace an entry in it, so each part that passed stays the same up to the
+# open below it. "/" alone may also show the overflow uid (a user namespace
+# that does not map root shows the "/" of the host so). A part of this
+# user counts only while the uid of this user is not the overflow uid. The
+# rule is the rule of kubehz::space_join_tmp_dir.
+kapply::_dir_chain() {
+  # Names of their own: printf -v sets <var> of the caller, which a local
+  # of the same name would hide.
+  local _dc_real _dc_part _dc_rest _dc_ovf=""
+  _dc_real=$(cd -P -- "${1}" 2>/dev/null && pwd -P && printf x) || return 1
+  [[ "${_dc_real}" == /*$'\n'x ]] || return 1
+  _dc_real="${_dc_real%$'\n'x}"
+  while [[ "${_dc_real}" == //* ]]; do _dc_real="${_dc_real#/}"; done
+  { read -r _dc_ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || _dc_ovf=""
+  [[ "${_dc_ovf}" =~ ^[0-9]+$ ]] || _dc_ovf=65534
+  _dc_part=/ _dc_rest="${_dc_real#/}"
+  while :; do
+    kapply::_chain_part_ok "${_dc_part}" "${_dc_ovf}" || return 1
+    [[ -n "${_dc_rest}" ]] || break
+    _dc_part="${_dc_part%/}/${_dc_rest%%/*}"
+    if [[ "${_dc_rest}" == */* ]]; then _dc_rest="${_dc_rest#*/}"; else _dc_rest=""; fi
+  done
+  printf -v "${2}" '%s' "${_dc_real}"
+}
+
+# kapply::_chain_part_ok <part> <overflow uid>: one part of
+# kapply::_dir_chain. POSIX find (no follow: a link is not a directory), so
+# the same on Linux and macOS.
+kapply::_chain_part_ok() {
+  local -a own=(-user 0)
+  [[ "${EUID}" == "${2}" ]] || own+=(-o -user "${EUID}")
+  [[ "${1}" != / ]] || own+=(-o -user "${2}")
+  [[ "$(find "${1}" -prune -type d \( "${own[@]}" \) \
+    \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) -print 2>/dev/null)" == "${1}" ]]
+}
+
 # kapply::_private_ok: whether kapply::_apply_pass may append the kubectl
-# output to KAPPLY_PRIVATE_LOG. The bootstrap scheduler sets
-# KAPPLY_PRIVATE_DIR (its mktemp -d dir) and KAPPLY_PRIVATE_LOG
-# (<dir>/<seq>.priv) in its own shell, not exported. kapply writes only when:
+# output to KAPPLY_PRIVATE_LOG, through the descriptor _KAPPLY_PRIVATE_FD.
+# The bootstrap scheduler sets KAPPLY_PRIVATE_DIR (its mktemp -d dir) and
+# KAPPLY_PRIVATE_LOG (<dir>/<seq>.priv) in its own shell, not exported.
+# kapply writes only when:
 #   - lo set both (not exported: a value from the environment is refused);
 #   - the dir is an absolute path, a directory and not a link, owned by the
 #     user, with mode 0700, and the file is a plain name in it;
+#   - no other user can rename or replace the dir or a directory above it
+#     (kapply::_dir_chain);
 #   - before the first write the file is not there: kapply makes it with
-#     noclobber and umask 077 and records it (_KAPPLY_PRIVATE_MADE); a later
-#     pass needs the recorded file;
-#   - the file is a regular file and not a link, owned by the user, with
-#     mode 0600.
-# A link, a FIFO or a file that was there before, or one open to others, is
-# refused: the caller prints one fixed line and writes nothing.
+#     noclobber and umask 077 in one open, keeps that descriptor open and
+#     records it (_KAPPLY_PRIVATE_FD, _KAPPLY_PRIVATE_MADE); a later pass
+#     needs the recorded descriptor of the same file;
+#   - the file of the descriptor is a regular file of the user with mode
+#     0600, and it is the file at KAPPLY_PRIVATE_LOG (the reap reads it).
+# The write goes through the descriptor, never through the path again. A
+# link, a FIFO or a file that was there before, one open to others, or a
+# directory that another user can rename, is refused: the caller prints one
+# fixed line and writes nothing.
 kapply::_private_ok() {
-  local dir="${KAPPLY_PRIVATE_DIR-}" log="${KAPPLY_PRIVATE_LOG-}" base
+  local dir="${KAPPLY_PRIVATE_DIR-}" log="${KAPPLY_PRIVATE_LOG-}" base real fd="" mask noclobber=0
   [[ -n "${dir}" && -n "${log}" ]] || return 1
   if ! kapply::_set_by_lo KAPPLY_PRIVATE_DIR || ! kapply::_set_by_lo KAPPLY_PRIVATE_LOG; then
     return 1
   fi
   base="${log##*/}"
   [[ "${dir}" == /* && "${log%/*}" == "${dir}" && -n "${base}" && "${base}" != . && "${base}" != .. ]] || return 1
-  [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || return 1
-  kapply::_mode_is "${dir}" 700 || return 1
-  if [[ "${log}" != "${_KAPPLY_PRIVATE_MADE-}" ]] || ! kapply::_set_by_lo _KAPPLY_PRIVATE_MADE; then
+  if [[ "${log}" == "${_KAPPLY_PRIVATE_MADE-}" ]] && kapply::_set_by_lo _KAPPLY_PRIVATE_MADE \
+    && kapply::_set_by_lo _KAPPLY_PRIVATE_FD && [[ "${_KAPPLY_PRIVATE_FD}" =~ ^[0-9]+$ ]]; then
+    fd="${_KAPPLY_PRIVATE_FD}"
+  else
+    [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || return 1
+    kapply::_mode_is "${dir}" 700 || return 1
+    kapply::_dir_chain "${dir}" real || return 1
     [[ ! -e "${log}" && ! -L "${log}" ]] || return 1
-    ( set -C; umask 077; : > "${log}" ) 2>/dev/null || return 1
-    _KAPPLY_PRIVATE_MADE="${log}"
+    mask=$(umask)
+    [[ $- != *C* ]] || noclobber=1
+    umask 077
+    set -C
+    { exec {fd}>"${real}/${base}"; } 2>/dev/null || fd=""
+    (( noclobber )) || set +C
+    umask "${mask}"
+    [[ -n "${fd}" ]] || return 1
+    _KAPPLY_PRIVATE_FD="${fd}" _KAPPLY_PRIVATE_MADE="${log}"
   fi
-  [[ -f "${log}" && ! -L "${log}" && -O "${log}" ]] || return 1
+  [[ -f "/dev/fd/${fd}" && -O "/dev/fd/${fd}" && -f "${log}" && ! -L "${log}" && "/dev/fd/${fd}" -ef "${log}" ]] || return 1
   kapply::_mode_is "${log}" 600
 }
 
@@ -365,9 +424,9 @@ kapply::_apply_pass() {
   KAPPLY_LAST_OUTPUT="${out}"
   if [[ -n "${KAPPLY_PRIVATE_LOG:-}" && -n "${out}" ]]; then
     if kapply::_private_ok; then
-      printf '%s\n' "${out}" >>"${KAPPLY_PRIVATE_LOG}"
+      printf '%s\n' "${out}" >&"${_KAPPLY_PRIVATE_FD}"
     else
-      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it"
+      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it"
     fi
   fi
   n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)
