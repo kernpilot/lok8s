@@ -1,6 +1,6 @@
 package kubehz
 
-// deploy_private_test.go — each kubectl apply of the deploy keeps the
+// deploy_private_test.go: each kubectl apply of the deploy keeps the
 // kubectl output private (kapply.RunPrivate): the output of an apply can
 // quote a value of the manifest, and the bind secret holds a credential.
 // lo prints fixed lines; the kubectl text prints only under

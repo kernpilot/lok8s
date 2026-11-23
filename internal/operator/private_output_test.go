@@ -1,6 +1,6 @@
 package operator
 
-// private_output_test.go — each kubectl apply of the hooks (the CAPI
+// private_output_test.go: each kubectl apply of the hooks (the CAPI
 // manifests of capi-reconcile, the kubeconfig Secret of capi-status-sync and
 // of lo-reconcile) keeps the kubectl output private (kube.applyPrivate,
 // kapply.RunPrivate): the output of an apply can quote a value of the

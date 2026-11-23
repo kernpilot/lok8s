@@ -1,6 +1,6 @@
 package kapply
 
-// run_private_test.go — RunPrivate keeps the kubectl output of one write
+// run_private_test.go: RunPrivate keeps the kubectl output of one write
 // private (bats: the "run_private:" cases of tests/unit/kapply_test.bats).
 // The canaries are those of private_test.go.
 

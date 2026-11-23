@@ -1,6 +1,6 @@
 package capi
 
-// private_output_test.go — each kubectl apply of the capi driver (the
+// private_output_test.go: each kubectl apply of the capi driver (the
 // namespace and the resources on the management cluster, the credentials
 // Secret, the resources on the bootstrap cluster and the operator deploy
 // dir) keeps the kubectl output private (kapply.RunPrivate): the output of

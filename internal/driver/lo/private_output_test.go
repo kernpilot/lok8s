@@ -1,6 +1,6 @@
 package lo
 
-// private_output_test.go — each kubectl apply of the Lo driver (the CoreDNS
+// private_output_test.go: each kubectl apply of the Lo driver (the CoreDNS
 // files, the coredns-custom ConfigMap, the local-registry-hosting and the
 // lok8s-registries ConfigMaps) keeps the kubectl output private
 // (applyPrivate, kapply.RunPrivate): the output of an apply can quote a
