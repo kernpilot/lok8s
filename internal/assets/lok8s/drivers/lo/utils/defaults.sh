@@ -7,6 +7,11 @@ LO_DEFAULT_POD_CIDR="10.244.0.0/16"
 LO_DEFAULT_SVC_CIDR="10.96.0.0/12"
 LO_DEFAULT_BOOTSTRAP=(cilium)
 
+# The proxy image of `lo expose`: the stable nginx line on alpine, pinned by
+# tag and digest, never a floating tag. Bump the tag and the digest together.
+# The Go twin is ExposeImage in internal/driver/lo/defaults.go.
+LO_EXPOSE_IMAGE="nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
+
 LO_REGISTRY_IMAGE="registry:2.8.3"
 # Listen ports. Plain-HTTP registries serve on :80; TLS registries serve on
 # :443 so that a bare-IP `docker push <ip>/...` (which the Docker client

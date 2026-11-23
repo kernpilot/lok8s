@@ -91,12 +91,13 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 
 	// Start container with default nginx config, then overwrite it.
 	// docker cp streams file content over the Docker connection (works with
-	// DOCKER_HOST=ssh:// where -v mounts can't reach local paths).
+	// DOCKER_HOST=ssh:// where -v mounts can't reach local paths). The image
+	// is ExposeImage (defaults.go), pinned by tag and digest.
 	_ = d.runOut(ctx, out, errOut, "docker", "run", "-d", "--restart=always",
 		"--name", proxyName,
 		"--network", network,
 		"-p", "80:80", "-p", "443:443",
-		"nginx:alpine")
+		ExposeImage)
 
 	// Copy rendered config + optional TLS certs into the running container.
 	_ = d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf")

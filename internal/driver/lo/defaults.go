@@ -26,6 +26,11 @@ const (
 	DefaultPodCIDR = "10.244.0.0/16"
 	DefaultSvcCIDR = "10.96.0.0/12"
 
+	// ExposeImage is the proxy image of `lo expose` (bash: LO_EXPOSE_IMAGE):
+	// the stable nginx line on alpine, pinned by tag and digest, never a
+	// floating tag. Bump the tag and the digest together, in both twins.
+	ExposeImage = "nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
+
 	RegistryImage = "registry:2.8.3"
 	// Listen ports. Plain-HTTP registries serve on :80; TLS registries serve
 	// on :443 so that a bare-IP `docker push <ip>/...` (which the Docker
