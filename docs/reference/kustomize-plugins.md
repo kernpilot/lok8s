@@ -449,22 +449,37 @@ preserving the username/password.
 
 ### Env contract
 
-Beyond `$PATH_SECRETS` (the cache directory), two env vars shape a run. A
+Beyond `$PATH_SECRETS` (the cache directory), three env vars shape a run. A
 caller — chiefly the `lo build` pipeline — sets them on the `kustomize build`
-invocation to steer the generator without editing any Secret CRD. A third
+invocation to steer the generator without editing any Secret CRD. A fourth
 variable is internal to lo (the last row): do not set it.
 
 | Env var | Value | Effect |
 |---|---|---|
 | `LOK8S_SECRETS_DISABLE` | `1` / `true` (case-insensitive) | **Store-free OFF switch.** The plugin emits **nothing** and short-circuits before any store access: it never reads `$PATH_SECRETS`, never touches or mints the cache, and never runs a generator. Returns success with empty output — kustomize accepts a generator that yields zero resources. Any other value (incl. unset, `0`) is off. |
 | `LOK8S_SECRETS_OUTPUT` | `none` | **Run-but-suppress.** Runs the **full** pipeline — generators run, so store reads/mints and type validation still happen (side effects intact) — but suppresses the final output write, so zero resources are rendered. Use case: prime or validate the cache without rendering. An empty/unset value is a normal emit; any other non-empty value is **rejected** (fail closed) so a typo can't silently emit secrets. |
+| `LOK8S_SECRETS_NO_MINT` | `1` / `true` (case-insensitive) | **Read-only store.** The plugin generates no value into the store and writes no file (no entry, no `.sha`, no `.bash-allow`, no store directory, no CA in `CAROOT`). It reads the store as a dry run does. When the run would generate an entry (the store has neither the plaintext nor the `.enc` file) or write one (an `env:` or `update: true` value that the store does not hold), or would make the CA in `CAROOT`, the run fails after every generator of the Secret ran. The error names each entry by namespace, Secret name and key, never a value or a length, and emits nothing. A `bash:` entry that the store lacks does not run its command. An `update: true` command still runs; only its value is checked, and the command itself can write anything. When the run also stops on an error, the message quotes that error as a run without the switch prints it: it is not redacted, and a `bash:` command's stderr can be in it. When the store holds every value, the run emits the same Secret as a run without the switch. Off: unset, empty, `0`, `false`. Any other value **fails** before anything is read, so a typo cannot turn the switch off. Use it for a render that must only read an existing store: a release render, a drift check, a build in a fresh worktree. kustomize stops at the first plugin that fails, so one failed render names the entries of one Secret. |
 | `LOK8S_INTERNAL_SECRETS_KEYS_ONLY` | `1` / `true`, `0` / `false` | **Internal to lo. Do not export it.** Only [`lo build --keys-only`](../guide/deployment.md#list-the-keys-of-the-secrets-keys-only) sets it to `1`, for its own render. lo sets it to `0` on every other kustomize and plugin call, and an addon entry's `env:` cannot set it. With `1` and `LOK8S_SECRETS_DISABLE=1`, the plugin emits each Secret with its key names and empty values, plus the annotation `secrets.lok8s.dev/keys-only: "true"`. It reads only the Secret spec: it does not read, decrypt or mint the store, and it runs no generator. With `1` but without `LOK8S_SECRETS_DISABLE=1`, the run fails before it reads anything. An unknown value fails. A plugin that is older than this variable sees only `LOK8S_SECRETS_DISABLE=1` and emits nothing, and a plugin older than v0.2.0 does not know that switch either: lo checks the plugin before it sets `1` (see `--capabilities` below). |
 
+Set `LOK8S_SECRETS_NO_MINT` for one `lo build` command only
+(`LOK8S_SECRETS_NO_MINT=1 lo build ...`). Do not export it in a shell profile.
+Only `lo build` checks that the plugin has the no-mint run (see
+`--capabilities` below). Other commands that run the plugin (`lo bootstrap`,
+`lo k8s`, the registry TLS mint of `lo up`) do not check it. With a plugin
+that has the no-mint run, they fail when they would generate a value. An
+older plugin ignores the switch there and generates values. An addon entry's
+`env:` cannot set `LOK8S_SECRETS_NO_MINT` or `LOK8S_SECRETS_DISABLE`.
+
 **`--capabilities`:** `Secret --capabilities` prints the runs that the
-plugin has, one per line: `dry-run` and `keys-only`. It reads no spec and no
-store, and it writes nothing else. lo runs it before a keys-only render that
-execs the plugin, and refuses a plugin that does not print `keys-only`. lo
-runs the check so that an older plugin can do nothing with it: in an empty
+plugin has, one per line: `dry-run`, `keys-only` and `no-mint`. It reads no
+spec and no store, and it writes nothing else. A plugin that does not print
+`no-mint` ignores `LOK8S_SECRETS_NO_MINT` and generates, so a caller that
+sets the variable checks for that line first. lo runs the check before a
+keys-only render that execs the plugin, and refuses a plugin that does not
+print `keys-only`. `lo build` runs it too when `LOK8S_SECRETS_NO_MINT` holds
+a value that is not an off value (an unknown value too) and the build reads
+the store (not `--no-secrets`), and refuses a plugin that does not print
+`no-mint`. lo runs the check so that an older plugin can do nothing with it: in an empty
 temporary directory, with an empty stdin, `PATH_SECRETS` at a path that does
 not exist, `LOK8S_SECRETS_DISABLE=1` and `LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0`.
 The check is a compatibility check. It is not isolation and not
@@ -476,7 +491,13 @@ you trust.
 **Precedence:** `LOK8S_SECRETS_DISABLE` wins over `LOK8S_SECRETS_OUTPUT` — disable
 means "do nothing at all", so the store is never consulted even if
 `LOK8S_SECRETS_OUTPUT=none` is also set. The keys-only run also ignores
-`LOK8S_SECRETS_OUTPUT`.
+`LOK8S_SECRETS_OUTPUT`. `LOK8S_SECRETS_DISABLE` wins over
+`LOK8S_SECRETS_NO_MINT` too: that run reads no store and generates nothing,
+so there is nothing to refuse. An unknown `LOK8S_SECRETS_NO_MINT` value fails
+also with `LOK8S_SECRETS_DISABLE` on. With `LOK8S_SECRETS_OUTPUT=none`, a
+no-mint run that writes nothing emits nothing. `LOK8S_SECRETS_NO_MINT` wins
+over a dry run (`lo bootstrap --dry-run`): a value that the run would
+generate fails the run, it is not reported.
 
 `LOK8S_SECRETS_DISABLE=1` is what [`lo build --no-secrets`](../guide/deployment.md#ci-render-without-secrets-no-secrets)
 exports to make a CI render **store-free**: the split shaping alone leaves the

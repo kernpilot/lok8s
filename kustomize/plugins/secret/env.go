@@ -6,7 +6,7 @@ import (
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
 )
 
-// Env knobs that shape how the plugin behaves at the Run boundary. Both
+// Env knobs that shape how the plugin behaves at the Run boundary. They
 // are read from the process environment (via the env func the runner
 // threads through) so a caller — chiefly the `lo build` pipeline — can
 // steer a `kustomize build` invocation without editing any Secret CRD.
@@ -35,6 +35,41 @@ const (
 
 	// OutputNone is the sole recognized OutputEnv value.
 	OutputNone = "none"
+
+	// NoMintEnv, when on, makes the store read-only for the run: the
+	// plugin generates no value into the store and writes no file. It
+	// reads the store through the read-only overlay of the dry run
+	// (cache.NewNoMint). Each entry that the run would generate (the
+	// store has no plaintext and no .enc twin) or write (an env: or
+	// update: true value that the store does not hold), and a CA that it
+	// would create in CAROOT, is recorded. After every generator of the
+	// Secret ran, the run fails and names each one: namespace, Secret
+	// name and key, never a value or a length. A bash: entry that the
+	// store lacks does not run its command. An update: true command still
+	// runs; only its value is checked. The command itself can write
+	// anything, so the switch does not make such a command safe. With
+	// nothing to record, the run emits the same Secret as a run without
+	// the switch. kustomize stops at the first plugin that fails, so one
+	// failed run names the entries of one Secret. The error text of a run
+	// that also stopped on an error (NoMintError.Cause) is not redacted:
+	// it is the text that a run without the switch prints, and a bash:
+	// command's stderr can be in it.
+	//
+	// On = "1" or "true", the on values of DisableEnv (truthy). Off =
+	// unset, "", "0" or "false". Any other value is an error before
+	// anything is read (a value of spaces only too): a typo never turns
+	// the switch off. This differs from DisableEnv, where any other value
+	// is off: here an off typo would let the run generate values, which is
+	// the failure that the switch exists to stop. It wins over a dry run
+	// (LOK8S_BOOTSTRAP_DRYRUN): the run fails, it does not report.
+	// DisableEnv wins over it: that run reads no store and generates
+	// nothing, so there is nothing to refuse.
+	//
+	// It is no switch of the implementation (AGENTS.md: no environment
+	// variable selects the implementation): with it on, a run emits what a
+	// run without it emits, or fails, and writes nothing, so an inherited
+	// value can only make a run fail closed.
+	NoMintEnv = "LOK8S_SECRETS_NO_MINT"
 
 	// KeysOnlyEnv is an INTERNAL contract between lo and this plugin, not
 	// a user setting: lo sets it to 1 only for `lo build --keys-only` and
@@ -78,14 +113,46 @@ func keysOnly(env func(string) (string, bool)) (bool, error) {
 // "0"/"false") is off.
 func disabled(env func(string) (string, bool)) bool {
 	v, ok := env(DisableEnv)
-	if !ok {
-		return false
-	}
+	return ok && truthy(v)
+}
+
+// truthy reports whether v is an on value of DisableEnv and NoMintEnv:
+// "1" or "true", case-insensitive, with the spaces around it trimmed.
+func truthy(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true":
 		return true
 	default:
 		return false
+	}
+}
+
+// NoMintRequested reports whether env asks for the no-mint run: NoMintEnv
+// holds a value that is not an off value (unset, "", "0" or "false"). An
+// unknown value counts too: this plugin refuses it, but an older plugin
+// that does not know the variable ignores it and generates values. lo
+// checks the plugin's capabilities when this is true.
+func NoMintRequested(env func(string) (string, bool)) bool {
+	on, err := noMint(env)
+	return on || err != nil
+}
+
+// noMint reports whether NoMintEnv is on. It fails closed: a value that is
+// not an on value (truthy) and not an off value is an error, a value of
+// spaces only too (like KeysOnlyEnv).
+func noMint(env func(string) (string, bool)) (bool, error) {
+	v, ok := env(NoMintEnv)
+	if !ok || v == "" {
+		return false, nil
+	}
+	if truthy(v) {
+		return true, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false":
+		return false, nil
+	default:
+		return false, errs.New(NoMintEnv + `: unknown value ` + quote(v) + ` (want "1", "true", "0", "false" or unset)`)
 	}
 }
 
@@ -115,5 +182,7 @@ func quote(s string) string { return `"` + s + `"` }
 // store, generates a missing value in memory, writes nothing and reports
 // what it generated to LOK8S_BOOTSTRAP_DRYRUN_REPORT). "keys-only" means
 // the plugin has the keys-only run (KeysOnlyEnv with DisableEnv): `lo build
-// --keys-only` refuses a plugin without it in the exec pipeline.
-const Capabilities = "dry-run\nkeys-only"
+// --keys-only` refuses a plugin without it in the exec pipeline. "no-mint"
+// means the plugin honours NoMintEnv: an older plugin ignores the variable
+// and generates, so a caller that sets it checks for this line first.
+const Capabilities = "dry-run\nkeys-only\nno-mint"

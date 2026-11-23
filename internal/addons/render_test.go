@@ -401,7 +401,13 @@ func TestRenderPinsKeysOnlyOff(t *testing.T) {
 // An entry's env: may never set lo's own orchestration or safety
 // variables. ProtectedEnvOverride names the first one in byte order.
 func TestProtectedEnvOverride(t *testing.T) {
-	for _, ok := range []string{"LOK8S_USER_FOO", "HOME", "PATH", "XDG_CACHE_HOME", "CAROOT", "LOK8S_SPEC_X", "MY_BOOTSTRAP_X"} {
+	// The names of the Secret plugin come from its constants, one per line:
+	// a quoted name after a "secret" word reads to gitleaks as a key.
+	for _, ok := range []string{
+		"LOK8S_USER_FOO", "HOME", "PATH", "XDG_CACHE_HOME", "CAROOT", "LOK8S_SPEC_X", "MY_BOOTSTRAP_X",
+		secret.NoMintEnv + "_X",
+		secret.OutputEnv,
+	} {
 		if got := ProtectedEnvOverride(map[string]string{ok: "x"}); got != "" {
 			t.Errorf("%s reported as protected: %q", ok, got)
 		}
@@ -411,6 +417,8 @@ func TestProtectedEnvOverride(t *testing.T) {
 		"LOK8S_BOOTSTRAP_ONLY", "BOOTSTRAP_PROTECTED_ENV_NAMES", "BOOTSTRAP_PLATFORM_OWNED",
 		"bootstrap_render_dir", "bootstrap_dry_run", "PATH_SECRETS", "KUBECONFIG", "KUSTOMIZE_PLUGIN_HOME", "HELM_PLUGINS",
 		"LOK8S_INTERNAL_OTHER", secret.KeysOnlyEnv,
+		secret.DisableEnv,
+		secret.NoMintEnv,
 	} {
 		if got := ProtectedEnvOverride(map[string]string{"LOK8S_USER_FOO": "x", bad: "y"}); got != bad {
 			t.Errorf("%s: got %q", bad, got)

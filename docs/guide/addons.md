@@ -92,7 +92,8 @@ refused unless you pass `--allow-generators`, which runs it as trusted, with
 the side effects of a real run. Helm caches may be populated. An entry's
 `env:` goes only to the render and cannot set lo's own variables
 (`LOK8S_BOOTSTRAP_*`, `LOK8S_INTERNAL_*`, `BOOTSTRAP_*`, `bootstrap_*`,
-`PATH_SECRETS`, `KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`).
+`PATH_SECRETS`, `KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`,
+`LOK8S_SECRETS_DISABLE`, `LOK8S_SECRETS_NO_MINT`).
 `--render-dir` holds
 the rendered manifests and diffs, Secrets in plaintext (mode 0700).
 `--only` leaves `restore.d` out unless you add `--with-restore`. The full

@@ -342,8 +342,39 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 		return ErrHandled
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
+	switch probeCapability(ctx, o, plugin, dir, keysOnlyCapability) {
+	case capabilityFound:
+		return nil
+	case capabilityInterrupted:
+		ui.ErrorTo(stderr, "lo build --keys-only: the check of the Secret plugin %s was interrupted", rel)
+		return ErrHandled
+	}
+	return refuse()
+}
+
+// capabilityProbe is the result of probeCapability.
+type capabilityProbe int
+
+const (
+	// capabilityMissing: the plugin did not print the line, or the probe
+	// failed (an exit status of 255 too).
+	capabilityMissing capabilityProbe = iota
+	// capabilityFound: the probe succeeded and printed the line.
+	capabilityFound
+	// capabilityInterrupted: a signal (an exit status of 129 to 192) or
+	// the end of ctx stopped the probe.
+	capabilityInterrupted
+)
+
+// probeCapability runs `<plugin> --capabilities` in dir, an empty
+// temporary directory that the caller made and removes, and looks for the
+// line want (bash: build::_probe_capability). The run is the one that
+// checkKeysOnlyPlugin describes: an empty stdin, PATH_SECRETS at a path
+// in dir that does not exist, the store-free switch on and the keys-only
+// setting off, so no plugin version can do anything with it.
+func probeCapability(ctx context.Context, o *Options, plugin, dir, want string) capabilityProbe {
 	var out strings.Builder
-	err = o.runner().Run(ctx, execx.Cmd{
+	err := o.runner().Run(ctx, execx.Cmd{
 		Name: plugin,
 		Args: []string{"--capabilities"},
 		Dir:  dir,
@@ -358,16 +389,15 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 	})
 	if err == nil {
 		for line := range strings.SplitSeq(out.String(), "\n") {
-			if line == keysOnlyCapability {
-				return nil
+			if line == want {
+				return capabilityFound
 			}
 		}
 	}
 	if rc := execx.ExitCode(err); ctx.Err() != nil || (rc > 128 && rc <= 128+maxSignal) {
-		ui.ErrorTo(stderr, "lo build --keys-only: the check of the Secret plugin %s was interrupted", rel)
-		return ErrHandled
+		return capabilityInterrupted
 	}
-	return refuse()
+	return capabilityMissing
 }
 
 // KeysOnly renders the domain kustomization with the Secret plugin's

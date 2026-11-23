@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -213,4 +214,96 @@ func dirListing(t *testing.T, dir string) string {
 		b.WriteString(e.Name() + " " + info.ModTime().String() + "\n")
 	}
 	return b.String()
+}
+
+// A no-mint overlay (NewNoMint) keeps a generated or written value in
+// memory and records the write as a Refusal with names only: the Secret's
+// namespace ("default" when it has none), its name and the key, and
+// whether the run would generate the value. A later read of the value in
+// the same process finds it and records nothing. An equal Put is no write.
+// A secretRef miss is the plain error of a real run, and it is not
+// recorded. Minted records "caroot <dir>" and ignores every other line.
+// Nothing is written: no store directory, no run store, no report line.
+func TestNoMintOverlayRecordsEachWriteAndWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	store := filepath.Join(root, "store")
+	dr := NewNoMint()
+	s, err := Open(store, "ns", "app", dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := s.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("s3cret"), nil }); err != nil || string(v) != "s3cret" {
+		t.Fatalf("GetOrCreate = %q, %v", v, err)
+	}
+	if v, err := s.Get("PASSWORD"); err != nil || string(v) != "s3cret" || !s.Has("PASSWORD") {
+		t.Errorf("Get after GetOrCreate = %q, %v", v, err)
+	}
+	if err := s.Put("PASSWORD", []byte("s3cret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("FROM_ENV", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	other, err := Open(store, "", "ref", dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.GetOrCreate("TOKEN", func() ([]byte, error) { return []byte("t"), nil }); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := other.ReadByName("Secret.app.ns.PASSWORD"); err != nil || string(v) != "s3cret" {
+		t.Errorf("ReadByName of a value of this run = %q, %v", v, err)
+	}
+	_, err = other.ReadByName("Secret.app.ns.MISSING")
+	if !errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "dry run") {
+		t.Errorf("ReadByName miss = %v, want the plain not-exist error", err)
+	}
+	for _, line := range []string{"caroot /ca", "reuse caroot /ca", "secret Secret.app.ns.X", "secretRef Secret.app.ns.Y"} {
+		if err := dr.Minted(line); err != nil {
+			t.Fatalf("Minted(%q) = %v", line, err)
+		}
+	}
+	want := []Refusal{
+		{Namespace: "ns", Secret: "app", Key: "PASSWORD", Generate: true},
+		{Namespace: "ns", Secret: "app", Key: "FROM_ENV"},
+		{Namespace: "default", Secret: "ref", Key: "TOKEN", Generate: true},
+		{CARoot: "/ca", Generate: true},
+	}
+	got := dr.Refused()
+	if !slices.Equal(got, want) {
+		t.Errorf("Refused = %+v\nwant %+v", got, want)
+	}
+	got[0].Key = "CHANGED"
+	if dr.Refused()[0].Key != "PASSWORD" {
+		t.Error("Refused returns the state, not a copy")
+	}
+	if _, err := os.Stat(store); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the overlay created the store: %v", err)
+	}
+	if left := dirListing(t, root); left != "" {
+		t.Errorf("the no-mint run wrote %s", left)
+	}
+}
+
+// Outside a no-mint run nothing is recorded: a nil DryRun and a dry run
+// return no refusals, and a dry run reports the CA line as before.
+func TestRefusedIsEmptyOutsideANoMintRun(t *testing.T) {
+	var none *DryRun
+	if got := none.Refused(); got != nil {
+		t.Errorf("nil DryRun: Refused = %v", got)
+	}
+	report := filepath.Join(t.TempDir(), "report")
+	if err := os.WriteFile(report, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dr := DryRunFromEnv(dryRunEnv(report))
+	if err := dr.Minted("caroot /ca"); err != nil {
+		t.Fatal(err)
+	}
+	if got := dr.Refused(); len(got) != 0 {
+		t.Errorf("dry run: Refused = %v", got)
+	}
+	if raw, _ := os.ReadFile(report); string(raw) != "caroot /ca\n" {
+		t.Errorf("report = %q", raw)
+	}
 }

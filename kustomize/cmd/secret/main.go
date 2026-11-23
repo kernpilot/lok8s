@@ -7,13 +7,24 @@
 // Cache directory is read from $PATH_SECRETS. The cache is the source
 // of truth for stable output across runs.
 //
-// Two env knobs shape the run (see plugins/secret/env.go):
+// Three env knobs shape the run (see plugins/secret/env.go):
 //
 //   - LOK8S_SECRETS_DISABLE=1|true — store-free OFF switch: emit nothing,
 //     never read $PATH_SECRETS or run a generator (makes a render
 //     store-free; wired by `lo build --no-secrets`).
 //   - LOK8S_SECRETS_OUTPUT=none — run the full pipeline (store reads/mints
 //     and validation intact) but suppress the emit write.
+//   - LOK8S_SECRETS_NO_MINT=1|true: the store is read-only for the run;
+//     a value that the run would generate or write fails the run, after
+//     every generator of the Secret ran, with the namespace, Secret name
+//     and key of each entry (never a value or a length). Nothing is
+//     written to the store or CAROOT. On is "1" or "true" (the on values
+//     of DISABLE, case-insensitive); off is unset, "", "0" or "false"; any
+//     other value is an error. DISABLE wins over it. It does not select
+//     an implementation: with it on, a run emits what a run without it
+//     emits, or fails, so an inherited value can only make a run fail
+//     closed.
+//     `Secret --capabilities` lists "no-mint".
 //
 // One more variable is internal to lo, never a user setting:
 // LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 together with LOK8S_SECRETS_DISABLE=1
