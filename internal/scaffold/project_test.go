@@ -395,6 +395,25 @@ func TestGitignoreWorkDirsIgnoredInANestedProject(t *testing.T) {
 	checkGitIgnores(t, git, repo, ignored, []string{"infra/clusters/x/cluster.lok8s.yaml", "infra/lok8s.yaml"})
 }
 
+// git ignores the lock of .sops.yaml and the temp files of its writes (the
+// names of add-key and remove-key, and the name of init) at any depth, and
+// still tracks .sops.yaml. The list is written here, not read from
+// gitignoreEntries.
+func TestGitignoreSopsLockAndTempFilesIgnoredByGit(t *testing.T) {
+	t.Parallel()
+	git := isolatedGit(t)
+	repo := newRepo(t, git)
+	var out bytes.Buffer
+	if err := EnsureGitignore(repo, &out); err != nil {
+		t.Fatal(err)
+	}
+	var ignored []string
+	for _, p := range []string{".sops.yaml.lock", ".sops.yaml.tmp-AbC123", "..sops.yaml.tmp-1234567"} {
+		ignored = append(ignored, p, "infra/"+p)
+	}
+	checkGitIgnores(t, git, repo, ignored, []string{".sops.yaml", "infra/.sops.yaml"})
+}
+
 // git reads each line of handCases as its verdict says: before the scaffold
 // runs, git ignores the file of each line that stands for its entry, and
 // not the others. After EnsureGitignore, git ignores every file.

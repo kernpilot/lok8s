@@ -189,7 +189,13 @@ When another run wrote the file while `init`
 waited for the lock, or the path is a symlink to no file or a directory,
 `init` stops and writes nothing. Run `init` again when a file is there: it
 then checks that file. The bash implementation needs `flock` and a `mv`
-that takes `-T` for this write.
+that takes `-T` for this write: on macOS, install `flock` and GNU coreutils
+(`gmv`). The `lo` binary needs neither.
+
+The lock file and a temp file that a killed write leaves are not for git.
+`lo init project` adds `.sops.yaml.lock`, `.sops.yaml.tmp-*` and
+`..sops.yaml.tmp-*` to the `.gitignore` of the project. In a project that an
+older `lo` made, add these three lines by hand.
 
 Each store has a `.gitignore` that commits only the `.enc` files. lo writes
 its rules as a block between two marker lines:
