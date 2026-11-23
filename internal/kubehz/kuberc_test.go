@@ -7,10 +7,14 @@ package kubehz
 // on each kubectl it runs. The other kubectl children of Context.run get
 // it from execx.KubectlEnv. The bash twin is libs/kubehz/deploy (the
 // KUBERC=off prefix). The claim patch of `lo kubehz claim` is a write too:
-// it sets the override on its own Cmd (the bash twin: libs/kubehz/main).
+// it sets the override on its own Cmd (the bash twin: libs/kubehz/main). So
+// do the delete of the one-off identity bootstrap Job and the untaint of a
+// single-node handover receive (the bash twins: libs/kubehz/deploy and
+// libs/kubehz/handover).
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -61,5 +65,64 @@ func TestClaimPatchRunsWithKubeRCOff(t *testing.T) {
 	}
 	if patches != 1 {
 		t.Errorf("patches = %d, want 1:\n%v", patches, h.runner.lines())
+	}
+}
+
+// The deploy deletes the one-off identity bootstrap Job after it completed,
+// with the kubectl user defaults off: a kuberc default such as
+// --dry-run=client would keep the Job.
+func TestIdentityBootstrapJobDeleteRunsWithKubeRCOff(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	// Empty before the bootstrap, filled once the one-off Job completed.
+	completed := false
+	kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
+			completed = true
+			return false, nil
+		}
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") && !completed {
+			return true, nil
+		}
+		return false, nil
+	})
+	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
+	deletes := 0
+	for _, c := range h.runner.calls {
+		if c.Name != "kubectl" || !slices.Contains(c.Args, "delete") {
+			continue
+		}
+		if !slices.ContainsFunc(c.Args, func(a string) bool { return strings.HasPrefix(a, "kubehz-heartbeat-bootstrap-") }) {
+			continue
+		}
+		deletes++
+		if !slices.Contains(c.Env, execx.KubeRCOff) {
+			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
+		}
+	}
+	if deletes != 1 {
+		t.Errorf("deletes of the bootstrap Job = %d, want 1:\n%v", deletes, h.runner.lines())
+	}
+}
+
+// A single-node handover receive removes the control-plane taint, with the
+// kubectl user defaults off.
+func TestHandoverUntaintRunsWithKubeRCOff(t *testing.T) {
+	ho := newHandover(t)
+	taints := 0
+	ho.mockNodeBinaries(map[string]func(c execx.Cmd) error{
+		"kubectl": func(c execx.Cmd) error {
+			if slices.Contains(c.Args, "taint") {
+				taints++
+				if !slices.Contains(c.Env, execx.KubeRCOff) {
+					t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
+				}
+			}
+			return nil
+		},
+	})
+	mustOK(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot, SingleNode: true}), ho.output())
+	if taints != 1 {
+		t.Errorf("taints = %d, want 1:\n%s", taints, strings.Join(ho.calls, "\n"))
 	}
 }

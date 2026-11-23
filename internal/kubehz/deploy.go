@@ -819,7 +819,12 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 		c.errorf("kubehz: the identity bootstrap (job/%s) completed but left no agent-token in Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/%s. The live agent was NOT applied.", job, job)
 		return ErrHandled
 	}
-	_ = c.runQuiet(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
+	// The delete is a write: it runs with the kubectl user defaults off.
+	_ = c.Runner.Run(ctx, execx.Cmd{
+		Name: "kubectl", Args: []string{"-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true"},
+		Env:    []string{execx.KubeRCOff},
+		Stdout: io.Discard, Stderr: io.Discard,
+	})
 	return nil
 }
 

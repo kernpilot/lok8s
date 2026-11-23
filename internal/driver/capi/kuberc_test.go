@@ -1,9 +1,9 @@
 package capi
 
-// kuberc_test.go — every kubectl apply of the capi driver runs with the
-// kubectl user defaults off (execx.KubeRCOff): a kuberc of the operator
-// cannot change the apply. The bash twin is drivers/capi/{main,generate}
-// (the KUBERC=off prefix).
+// kuberc_test.go — every kubectl apply of the capi driver, and the delete
+// of the workload Cluster, runs with the kubectl user defaults off
+// (execx.KubeRCOff): a kuberc of the operator cannot change the write. The
+// bash twin is drivers/capi/{main,generate} (the KUBERC=off prefix).
 
 import (
 	"slices"
@@ -72,5 +72,28 @@ func TestKubectlApplyRunsWithKubeRCOff(t *testing.T) {
 				t.Errorf("%s runs without %s", argv, execx.KubeRCOff)
 			}
 		})
+	}
+}
+
+// The destroy deletes the workload Cluster with the kubectl user defaults
+// off: a kuberc default such as --dry-run=client would report the delete
+// and keep the Hetzner servers.
+func TestDestroyDeleteRunsWithKubeRCOff(t *testing.T) {
+	d, runner, _ := destroySetup(t, "false")
+	if err := d.Destroy(t.Context(), "test.dev"); err != nil {
+		t.Fatal(err)
+	}
+	deletes := 0
+	for _, c := range runner.calls {
+		if c.Name != "kubectl" || !slices.Contains(c.Args, "delete") {
+			continue
+		}
+		deletes++
+		if !slices.Contains(c.Env, execx.KubeRCOff) {
+			t.Errorf("%s runs without %s", argvLine(c), execx.KubeRCOff)
+		}
+	}
+	if deletes != 1 {
+		t.Errorf("kubectl deletes = %d, want 1:\n%s", deletes, callDump(runner))
 	}
 }

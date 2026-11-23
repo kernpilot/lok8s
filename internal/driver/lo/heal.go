@@ -163,10 +163,11 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 	// and every peer's tunnel map), so a repaired node keeps routing to the
 	// dead IP until its agent re-registers. Best-effort: on a first
 	// provision there is no CNI yet, and bootstrap installs a fresh one
-	// moments later either way.
+	// moments later either way. The delete runs with the kubectl user
+	// defaults off (cmdWith).
 	for _, node := range healed {
-		_ = d.runQuiet(ctx, "kubectl", "--kubeconfig", kubeconfig, "-n", "kube-system", "delete", "pod",
-			"-l", "k8s-app=cilium", "--field-selector", "spec.nodeName="+node)
+		_ = d.deps.Runner.Run(ctx, cmdWith("kubectl", []string{"--kubeconfig", kubeconfig, "-n", "kube-system", "delete", "pod",
+			"-l", "k8s-app=cilium", "--field-selector", "spec.nodeName=" + node}, io.Discard, io.Discard))
 	}
 	return nil
 }

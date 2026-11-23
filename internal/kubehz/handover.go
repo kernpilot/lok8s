@@ -901,9 +901,14 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	}
 
 	if o.SingleNode {
-		if err := c.runQuiet(ctx, "kubectl", "--kubeconfig", filepath.Join(k8sDir, "admin.conf"),
-			"--server", "https://127.0.0.1:6443", "--tls-server-name", endpoint,
-			"taint", "nodes", "--all", "node-role.kubernetes.io/control-plane-"); err != nil {
+		// The taint is a write: it runs with the kubectl user defaults off.
+		if err := c.Runner.Run(ctx, execx.Cmd{
+			Name: "kubectl", Args: []string{"--kubeconfig", filepath.Join(k8sDir, "admin.conf"),
+				"--server", "https://127.0.0.1:6443", "--tls-server-name", endpoint,
+				"taint", "nodes", "--all", "node-role.kubernetes.io/control-plane-"},
+			Env:    []string{execx.KubeRCOff},
+			Stdout: io.Discard, Stderr: io.Discard,
+		}); err != nil {
 			c.warnf("handover: could not untaint the control-plane node — run: kubectl --server https://127.0.0.1:6443 --tls-server-name %s taint nodes --all node-role.kubernetes.io/control-plane-", endpoint)
 		}
 	}

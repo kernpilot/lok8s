@@ -4,12 +4,12 @@ package lo
 // runOut (cmdWith: the CoreDNS annotate and the CoreDNS rollout) run with
 // the kubectl user defaults off (execx.KubeRCOff), whatever their
 // arguments. Any other tool keeps the environment of lo. The CoreDNS patch
-// from a file sets the override on its own Cmd. The applies of the driver
-// (the registry ConfigMaps, the CoreDNS files and the coredns-custom
-// ConfigMap) run through applyPrivate: kapply.RunPrivate sets the override
-// on each kubectl it runs. The bash twin is
-// drivers/lo/utils/{registries,services}.sh (the KUBERC=off prefix; the bash
-// annotate has none yet).
+// from a file sets the override on its own Cmd, and the heal deletes the
+// Cilium pods through cmdWith. The applies of the driver (the registry
+// ConfigMaps, the CoreDNS files and the coredns-custom ConfigMap) run
+// through applyPrivate: kapply.RunPrivate sets the override on each kubectl
+// it runs. The bash twin is drivers/lo/utils/{registries,services,network}.sh
+// (the KUBERC=off prefix).
 
 import (
 	"io"
@@ -95,5 +95,31 @@ func TestCorednsRolloutRunsWithKubeRCOff(t *testing.T) {
 	}
 	if !slices.Contains(rolloutEnv, execx.KubeRCOff) {
 		t.Errorf("coredns rollout Env = %q, want %s", rolloutEnv, execx.KubeRCOff)
+	}
+}
+
+// After a repair, the heal deletes the Cilium pods of the node. The delete
+// is a write: it runs with the kubectl user defaults off (bash:
+// drivers/lo/utils/network.sh, `KUBERC=off kubectl … delete pod`). The
+// reads (the node address, /readyz) keep the kuberc of the user.
+func TestHealCiliumDeleteRunsWithKubeRCOff(t *testing.T) {
+	h := newHealFixture(t)
+	inner := h.runner.handler
+	deletes := 0
+	h.runner.handler = func(c execx.Cmd) error {
+		if c.Name == "kubectl" {
+			write := slices.Contains(c.Args, "delete")
+			if write {
+				deletes++
+			}
+			if got := slices.Contains(c.Env, execx.KubeRCOff); got != write {
+				t.Errorf("%s: %s in Env = %v, want %v", strings.Join(c.Args, " "), execx.KubeRCOff, got, write)
+			}
+		}
+		return inner(c)
+	}
+	h.heal()
+	if deletes != 1 {
+		t.Fatalf("Cilium pod deletes = %d, want 1: %q", deletes, h.calls)
 	}
 }

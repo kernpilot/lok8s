@@ -337,7 +337,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// Delete the workload Cluster and BLOCK until CAPH has deprovisioned
 	// the Hetzner servers + load balancer (finalizers complete). Deleting
 	// the management cluster before this finishes would orphan billed
-	// infrastructure.
+	// infrastructure. The delete runs with the kubectl user defaults off.
 	var delErr error
 	if fsutil.FileExists(mgmtKubeconfig) {
 		d.infoLine("deleting workload cluster %s — waiting for Hetzner teardown (up to 10m)", clusterName)
@@ -350,6 +350,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 				"--ignore-not-found=true",
 				"--wait=true", "--timeout=600s",
 			},
+			Env:    []string{execx.KubeRCOff},
 			Stdout: stderr, // bash: >&2
 		})
 	}
