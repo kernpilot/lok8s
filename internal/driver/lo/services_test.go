@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -219,8 +221,9 @@ func TestExposeTLSCertDefectPreserved(t *testing.T) {
 
 // The proxy container runs the pinned nginx image: the tag of one version
 // and its digest, never a floating tag. The literal is the value of
-// ExposeImage and of LO_EXPOSE_IMAGE (the bash twin). bats: "expose: the
-// proxy runs the pinned nginx image, by tag and digest"
+// ExposeImage and of LO_EXPOSE_IMAGE (the bash twin). No other docker call
+// names an nginx image, so a pull of another tag fails the test too. bats:
+// "expose: the proxy runs the pinned nginx image, by tag and digest"
 // (tests/unit/lo_expose_test.bats).
 func TestExposeRunsThePinnedImage(t *testing.T) {
 	d, runner, _, cy := exposeFixture(t)
@@ -232,6 +235,46 @@ func TestExposeRunsThePinnedImage(t *testing.T) {
 		"nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
 	if got := runner.callsMatching("docker run"); len(got) != 1 || got[0] != want {
 		t.Fatalf("docker run calls = %q, want exactly one: %s", got, want)
+	}
+	if got := dockerCallsNamingNginx(runner.calls); len(got) != 1 || got[0] != want {
+		t.Fatalf("docker calls that name an nginx image = %q, want only: %s", got, want)
+	}
+}
+
+// nginxImageRe matches a word that names an nginx image: nginx, or a
+// registry path that ends in /nginx, with an optional tag or digest. A path
+// in a container (test-dns-proxy:/etc/nginx/nginx.conf) does not match.
+var nginxImageRe = regexp.MustCompile(`^(\S*/)?nginx([:@]\S*)?$`)
+
+// dockerCallsNamingNginx returns each docker call that has a word that names
+// an nginx image. A docker exec names a container, not an image: its nginx
+// is the command in the container (nginx -s reload). The bash twin is the
+// same loop in tests/unit/lo_expose_test.bats.
+func dockerCallsNamingNginx(calls []string) []string {
+	var named []string
+	for _, c := range calls {
+		w := strings.Fields(c)
+		if len(w) < 2 || w[0] != "docker" || w[1] == "exec" {
+			continue
+		}
+		if slices.ContainsFunc(w[1:], nginxImageRe.MatchString) {
+			named = append(named, c)
+		}
+	}
+	return named
+}
+
+// The two twins pin the same image: the value of LO_EXPOSE_IMAGE in the
+// bash defaults is ExposeImage, byte for byte. A bump of one twin only
+// fails here.
+func TestExposeImageMatchesTheBashDefault(t *testing.T) {
+	src := readFileT(t, filepath.Join(testutil.RepoRoot(t), ".lok8s", "drivers", "lo", "utils", "defaults.sh"))
+	m := regexp.MustCompile(`(?m)^LO_EXPOSE_IMAGE="([^"]*)"$`).FindAllStringSubmatch(src, -1)
+	if len(m) != 1 {
+		t.Fatalf("defaults.sh has %d lines LO_EXPOSE_IMAGE=\"…\", want exactly 1", len(m))
+	}
+	if m[0][1] != ExposeImage {
+		t.Errorf("the twins differ: LO_EXPOSE_IMAGE in defaults.sh is %q, ExposeImage is %q", m[0][1], ExposeImage)
 	}
 }
 

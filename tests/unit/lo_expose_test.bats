@@ -30,7 +30,12 @@ teardown() {
 }
 
 # The literal is the value of LO_EXPOSE_IMAGE and of ExposeImage (the Go
-# twin): the tag of one version and its digest, never a floating tag.
+# twin): the tag of one version and its digest, never a floating tag. No
+# other docker call names an nginx image, so a pull of another tag fails the
+# test too. A word names an nginx image when it is nginx, or a registry path
+# that ends in /nginx, with an optional tag or digest. A docker exec names a
+# container, not an image: its nginx is the command in the container. The Go
+# twin of the loop is dockerCallsNamingNginx.
 @test "expose: the proxy runs the pinned nginx image, by tag and digest" {
   local log="${BATS_TEST_TMPDIR}/docker.log"
   docker() { printf '%s\n' "$*" >> "${log}"; }
@@ -42,4 +47,19 @@ teardown() {
   local want="run -d --restart=always --name test-dns-proxy --network lok8s -p 80:80 -p 443:443 nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
   [ "$(grep -c '^run ' "${log}")" -eq 1 ] || { cat "${log}"; return 1; }
   grep -qxF "${want}" "${log}" || { cat "${log}"; return 1; }
+  local line w named=()
+  local -a words
+  while IFS= read -r line; do
+    read -ra words <<< "${line}"
+    [[ "${words[0]:-}" == exec ]] && continue
+    for w in "${words[@]}"; do
+      if [[ "${w}" =~ ^([^[:space:]]*/)?nginx([:@][^[:space:]]*)?$ ]]; then
+        named+=("${line}")
+        break
+      fi
+    done
+  done < "${log}"
+  [ "${#named[@]}" -eq 1 ] && [ "${named[0]}" == "${want}" ] || {
+    echo "docker calls that name an nginx image:"; printf '%s\n' "${named[@]}"; cat "${log}"; return 1
+  }
 }
