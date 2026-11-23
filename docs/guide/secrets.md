@@ -207,7 +207,9 @@ The `lo` binary needs neither.
 The lock file and a temp file that a killed write leaves are not for git.
 `lo init project` adds `.sops.yaml.lock`, `.sops.yaml.tmp-*` and
 `..sops.yaml.tmp-*` to the `.gitignore` of the project. In a project that an
-older `lo` made, add these three lines by hand.
+older `lo` made, `lo toolchain install` and a rerun of `lo init project` add
+the entries that are missing, and do not add a line twice. A project that
+runs neither command gets the three lines by hand.
 
 Each store has a `.gitignore` that commits only the `.enc` files. lo writes
 its rules as a block between two marker lines:

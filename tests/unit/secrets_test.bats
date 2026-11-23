@@ -314,13 +314,11 @@ _gitignore_refused() { # <link|dir>
 
 # The .gitignore plan reads the whole file as git does (Go twin:
 # TestPlanGitignore). A file with comments only is not current (the old
-# check found the allow line in a comment): it gets the block on top, and
-# its bytes follow the block.
+# check found the allow line in a comment): the write gives it the block on
+# top, and its bytes follow the block.
 @test "secrets: a .gitignore with comments only gets the block on top" {
   local ignore="${PATH_SECRETS}/.gitignore"
   printf '# *\n# !Secret.*.enc\n' > "${ignore}"
-  run secrets::_gitignore_current "${PATH_SECRETS}"
-  [ "$status" -eq 1 ] || { echo "a file with comments only is current" >&2; return 1; }
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(_block; printf '# *\n# !Secret.*.enc\n') || { cat "${ignore}" >&2; return 1; }
@@ -363,8 +361,6 @@ _gitignore_refused() { # <link|dir>
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(printf 'above\r\n'; _block; printf 'below\n\n# note\nlast') || { cat -A "${ignore}" >&2; return 1; }
   inode="$(stat -c %i "${ignore}")"
-  run secrets::_gitignore_current "${PATH_SECRETS}"
-  [ "$status" -eq 0 ] || { echo "the plan is not current" >&2; return 1; }
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "the second run: status $status: $output" >&2; return 1; }
   [ "$(stat -c %i "${ignore}")" = "${inode}" ] || { echo "the second run wrote the file" >&2; return 1; }
@@ -542,8 +538,13 @@ ${final}" ] || { echo "$output" >&2; return 1; }
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
   [ "$status" -eq 0 ] || { echo "no block: status $status: $output" >&2; return 1; }
   cmp -s "${ignore}" <(printf '%s' "${bom}"; _block; printf 'mine\n') || { od -c "${ignore}" | head -3 >&2; return 1; }
-  run secrets::_gitignore_current "${PATH_SECRETS}"
-  [ "$status" -eq 0 ] || { echo "a BOM before BEGIN: the block is not current" >&2; return 1; }
+  # A BOM before BEGIN: the block is current, so a second run writes
+  # nothing and the file keeps its inode.
+  local inode
+  inode="$(stat -c %i "${ignore}")"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
+  [ "$status" -eq 0 ] || { echo "a BOM before BEGIN: status $status: $output" >&2; return 1; }
+  [ "$(stat -c %i "${ignore}")" = "${inode}" ] || { echo "a BOM before BEGIN: the block is not current" >&2; return 1; }
 
   { printf '%s' "${bom}"; _block | head -n 1; printf '*\n# END lok8s secrets\n'; } > "${ignore}"
   run secrets::_ensure_gitignore "${PATH_SECRETS}" "the plaintext write"
