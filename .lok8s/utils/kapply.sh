@@ -428,7 +428,7 @@ kapply::_apply_pass() {
     if kapply::_private_ok; then
       printf '%s\n' "${out}" >&"${_KAPPLY_PRIVATE_FD}"
     else
-      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it"
+      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it, so the bootstrap cannot park an immutable or terminating conflict of this entry: the entry fails. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the bootstrap parks the conflict again"
     fi
   fi
   n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)

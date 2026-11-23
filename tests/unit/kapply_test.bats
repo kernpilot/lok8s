@@ -583,7 +583,7 @@ _private_dir() {
   export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
 }
 
-PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it'
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it, so the bootstrap cannot park an immutable or terminating conflict of this entry: the entry fails. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the bootstrap parks the conflict again'
 
 # _assert_private_refused: the pass printed the fixed refusal line and the
 # fixed failure line, never the kubectl output.

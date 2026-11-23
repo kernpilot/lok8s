@@ -2779,6 +2779,31 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
   done
 }
 
+# A TMPDIR that the group of this user can write into, with no sticky bit:
+# kapply refuses the private file of the scheduler. The kubectl output then
+# reaches no file, so the reap cannot see an immutable conflict: the entry
+# fails, and the [warn] line says so. Under LO_SHOW_SENSITIVE_OUTPUT=1 the
+# printed buffer holds the output, and the entry parks again.
+@test "bootstrap::apply: a refused private file names the effect, and an immutable conflict fails the entry with no park" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
+  local refused='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it, so the bootstrap cannot park an immutable or terminating conflict of this entry: the entry fails. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the bootstrap parks the conflict again'
+  export TMPDIR="${BATS_TEST_TMPDIR}/open"
+  mkdir -m 0770 "${TMPDIR}"
+  _private_kubectl_stub "Error from server (Invalid): ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\": field is immutable" 1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "${refused}"
+  assert_output --partial '[error] bootstrap: testcni apply failed (rc=1)'
+  refute_output --partial 'will confirm at the end'
+  refute_output --partial 'needs recreate'
+  refute_output --partial "${CANARY_VALUE}"
+  LO_SHOW_SENSITIVE_OUTPUT=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "${refused}"
+  assert_output --partial 'will confirm at the end'
+}
+
 @test "bootstrap::apply: a terminating-namespace 403 in the private output reaches the prompt" {
   local p="${BATS_TEST_TMPDIR}/prompt.txt"
   write_cluster_spec "testcni"
