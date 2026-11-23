@@ -89,25 +89,29 @@ on a terminal opens a select over the domains (see [`lo use`](#lo-use)).
 The output of `kubectl apply` and the diff text of a bootstrap dry run can
 quote a value of the manifest, also of a Secret (a field error prints
 `Invalid value: <value>`). `lo` keeps this output out of the log at each
-level on two paths:
+level:
 
-- the applies of the bootstrap entries (`lo up`, `lo provision`,
-  `lo bootstrap`) and of `lo deploy`. An apply prints
-  `✓ <name> · N resources`, and a failed apply prints
+- each `kubectl apply` that `lo` runs. These are the applies of the
+  bootstrap entries (`lo up`, `lo provision`, `lo bootstrap`), of
+  `lo deploy` and of the deploy of the kubehz agent (`lo kubehz deploy`).
+  They are also the applies of the capi driver (the namespace, the
+  credentials Secret, the CAPI resources and the operator), of the Lo
+  driver (the CoreDNS setup and the registry ConfigMaps) and of the
+  operator hooks (the CAPI resources and the kubeconfig Secrets). An apply
+  prints `✓ <name> · N resources`, and a failed apply prints
   `[error] kapply: kubectl apply failed for <name> (rc=<code>)` with how to
-  see the output. This holds for the stdout and the stderr of kubectl;
+  see the output. This holds for the stdout and the stderr of kubectl. The
+  restore applies of a bootstrap entry and the ClusterInventory publish
+  print no kubectl output at all;
 - the diff of a bootstrap dry run. At debug, a dry run prints the objects
   of the manifest that differ and where the diff text is (see
   [the dry run](../guide/deployment.md)), not the text.
 
-Other applies print the kubectl output as before: the deploy of the kubehz
-agent (`lo kubehz deploy`), the capi and Lo drivers (for example the CoreDNS
-setup of a Lo cluster) and the operator hooks. These are not yet covered.
-
-Set `LO_SHOW_SENSITIVE_OUTPUT=1` to print the output of the two paths as `lo`
-printed it before: the full kubectl output of an apply off a terminal (its
-error lines on a terminal), and at debug the diff text. `lo` prints a
-`[warn]` line before it. Use it only where the log stays with you.
+Set `LO_SHOW_SENSITIVE_OUTPUT=1` to print this output: the kubectl output
+of an apply, and at debug the diff text. For the bootstrap entries and
+`lo deploy`, the output prints in full off a terminal and as its error
+lines on a terminal, as `lo` printed it before. `lo` prints a `[warn]` line
+before it. Use it only where the log stays with you.
 
 Each `kubectl apply` and `kubectl diff` that `lo` runs has the kubectl user
 defaults off (`KUBERC=off` for that kubectl only), so a kuberc file (the

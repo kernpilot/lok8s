@@ -791,8 +791,8 @@ Without `--render-dir` the second line tells you to do the dry run again
 with `--render-dir <dir>` to keep the text in a file. `LO_SHOW_SENSITIVE_OUTPUT=1`
 prints the diff text at debug, after a `[warn]` line. The kubectl diff runs
 with the kubectl user defaults off (`KUBERC=off`), so a kuberc cannot turn
-on `--show-secrets` for it. The same privacy holds for the applies of the
-bootstrap entries; the other applies of lo are not yet covered (see
+on `--show-secrets` for it. The same privacy holds for each kubectl apply
+of lo (see
 [Output that can quote a value](../reference/cli.md#output-that-can-quote-a-value)).
 
 `--render-dir <dir>` keeps the rendered manifests (`NN-<entry>.yaml`) and
