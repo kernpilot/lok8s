@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -162,7 +161,7 @@ func TestPreflightFinalizerPatchesRunWithKubeRCOff(t *testing.T) {
 				if len(fields) < 2 {
 					continue
 				}
-				off := slices.Contains(f.envs[i], execx.KubeRCOff)
+				off := execx.KubeRCIsOff(f.envs[i])
 				switch fields[1] {
 				case "patch":
 					patches++

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -77,7 +76,7 @@ func TestApplyPassRunsWithKubeRCOff(t *testing.T) {
 			continue
 		}
 		applies++
-		if !slices.Contains(f.envs[i], execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(f.envs[i]) {
 			t.Errorf("%s ran with Env %q, want %s", call, f.envs[i], execx.KubeRCOff)
 		}
 	}

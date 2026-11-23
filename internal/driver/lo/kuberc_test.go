@@ -4,12 +4,12 @@ package lo
 // runOut (cmdWith: the CoreDNS annotate and the CoreDNS rollout) run with
 // the kubectl user defaults off (execx.KubeRCOff), whatever their
 // arguments. Any other tool keeps the environment of lo. The CoreDNS patch
-// from a file sets the override on its own Cmd. The applies of the driver
-// (the registry ConfigMaps, the CoreDNS files and the coredns-custom
-// ConfigMap) run through applyPrivate: kapply.RunPrivate sets the override
-// on each kubectl it runs. The bash twin is
-// drivers/lo/utils/{registries,services}.sh (the KUBERC=off prefix; the bash
-// annotate has none yet).
+// from a file sets the override on its own Cmd, and the heal deletes the
+// Cilium pods through cmdWith. The applies of the driver (the registry
+// ConfigMaps, the CoreDNS files and the coredns-custom ConfigMap) run
+// through applyPrivate: kapply.RunPrivate sets the override on each kubectl
+// it runs. The bash twin is drivers/lo/utils/{registries,services,network}.sh
+// (the KUBERC=off prefix).
 
 import (
 	"io"
@@ -43,7 +43,7 @@ func TestRunOutRunsKubectlWithKubeRCOff(t *testing.T) {
 			t.Errorf("%s did not run", argv)
 			continue
 		}
-		if got := slices.Contains(env, execx.KubeRCOff); got != want {
+		if got := execx.KubeRCIsOff(env); got != want {
 			t.Errorf("%s: %s in Env = %v, want %v (Env %q)", argv, execx.KubeRCOff, got, want, env)
 		}
 	}
@@ -68,7 +68,7 @@ func TestCorednsPatchRunsWithKubeRCOff(t *testing.T) {
 	if !patched {
 		t.Fatalf("the coredns patch did not run:\n%s", strings.Join(runner.calls, "\n"))
 	}
-	if !slices.Contains(patchEnv, execx.KubeRCOff) {
+	if !execx.KubeRCIsOff(patchEnv) {
 		t.Errorf("coredns patch Env = %q, want %s", patchEnv, execx.KubeRCOff)
 	}
 }
@@ -93,7 +93,78 @@ func TestCorednsRolloutRunsWithKubeRCOff(t *testing.T) {
 	if !rolled {
 		t.Fatalf("the coredns rollout did not run:\n%s", strings.Join(runner.calls, "\n"))
 	}
-	if !slices.Contains(rolloutEnv, execx.KubeRCOff) {
+	if !execx.KubeRCIsOff(rolloutEnv) {
 		t.Errorf("coredns rollout Env = %q, want %s", rolloutEnv, execx.KubeRCOff)
+	}
+}
+
+// The coredns-custom render (create configmap --dry-run=client) feeds the
+// apply, so it runs with the kubectl user defaults off too: a kuberc default
+// such as --append-hash would rename the ConfigMap (bash: lo::coredns_custom,
+// `KUBERC=off kubectl create configmap …`).
+func TestCorednsCustomRenderRunsWithKubeRCOff(t *testing.T) {
+	d, runner, _ := corednsFixture(t, `  coredns:
+    hosts:
+      - name: kubehz.dev
+        target: gateway
+`)
+	const manifest = "apiVersion: v1\nkind: ConfigMap\n"
+	var renderEnv []string
+	rendered, applied := false, "(no apply after the render)"
+	runner.handler = func(c execx.Cmd) error {
+		args := strings.Join(c.Args, " ")
+		if c.Name == "kubectl" && strings.Contains(args, "create configmap coredns-custom") {
+			renderEnv, rendered = c.Env, true
+			writeOut(c, manifest)
+			return nil
+		}
+		// The first apply after the render is the apply of its output.
+		if rendered && applied == "(no apply after the render)" && c.Name == "kubectl" && strings.HasPrefix(args, "apply ") && c.Stdin != nil {
+			raw, err := io.ReadAll(c.Stdin)
+			if err != nil {
+				return err
+			}
+			applied = string(raw)
+		}
+		return nil
+	}
+	if err := d.coredns(t.Context(), io.Discard, io.Discard, "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !rendered {
+		t.Fatalf("the coredns-custom render did not run:\n%s", strings.Join(runner.calls, "\n"))
+	}
+	if !execx.KubeRCIsOff(renderEnv) {
+		t.Errorf("coredns-custom render Env = %q, want %s as the last KUBERC entry", renderEnv, execx.KubeRCOff)
+	}
+	// The stdout of the render is the stdin of the apply.
+	if applied != manifest {
+		t.Errorf("the apply read %q on stdin, want the render output %q", applied, manifest)
+	}
+}
+
+// After a repair, the heal deletes the Cilium pods of the node. The delete
+// is a write: it runs with the kubectl user defaults off (bash:
+// drivers/lo/utils/network.sh, `KUBERC=off kubectl … delete pod`). The
+// reads (the node address, /readyz) keep the kuberc of the user.
+func TestHealCiliumDeleteRunsWithKubeRCOff(t *testing.T) {
+	h := newHealFixture(t)
+	inner := h.runner.handler
+	deletes := 0
+	h.runner.handler = func(c execx.Cmd) error {
+		if c.Name == "kubectl" {
+			write := slices.Contains(c.Args, "delete")
+			if write {
+				deletes++
+			}
+			if got := execx.KubeRCIsOff(c.Env); got != write {
+				t.Errorf("%s: %s in Env = %v, want %v", strings.Join(c.Args, " "), execx.KubeRCOff, got, write)
+			}
+		}
+		return inner(c)
+	}
+	h.heal()
+	if deletes != 1 {
+		t.Fatalf("Cilium pod deletes = %d, want 1: %q", deletes, h.calls)
 	}
 }

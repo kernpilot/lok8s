@@ -337,7 +337,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	// Delete the workload Cluster and BLOCK until CAPH has deprovisioned
 	// the Hetzner servers + load balancer (finalizers complete). Deleting
 	// the management cluster before this finishes would orphan billed
-	// infrastructure.
+	// infrastructure. The delete runs with the kubectl user defaults off.
 	var delErr error
 	if fsutil.FileExists(mgmtKubeconfig) {
 		d.infoLine("deleting workload cluster %s — waiting for Hetzner teardown (up to 10m)", clusterName)
@@ -350,6 +350,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 				"--ignore-not-found=true",
 				"--wait=true", "--timeout=600s",
 			},
+			Env:    []string{execx.KubeRCOff},
 			Stdout: stderr, // bash: >&2
 		})
 	}
@@ -528,6 +529,9 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 		return ui.Handled(fmt.Errorf("capi: could not detect the infrastructure provider from %s", cy))
 	}
 
+	// The render feeds the apply below, so it runs with the kubectl user
+	// defaults off too: a kuberc default can change the object that lo
+	// applies.
 	var nsManifest strings.Builder
 	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl",
@@ -535,6 +539,7 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 			"--kubeconfig", mgmtKubeconfig, "create", "namespace", namespace,
 			"--dry-run=client", "-o", "yaml",
 		},
+		Env:    []string{execx.KubeRCOff},
 		Stdout: &nsManifest,
 	}); err != nil {
 		return err

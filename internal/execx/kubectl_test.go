@@ -40,3 +40,27 @@ func TestKubectlEnv(t *testing.T) {
 		t.Errorf("KubeRCOff = %q: kubectl reads KUBERC, and off loads no file", KubeRCOff)
 	}
 }
+
+// The last KUBERC entry decides, as in os/exec: an earlier KUBERC=off does
+// not count when another KUBERC entry follows it.
+func TestKubeRCIsOffReadsTheLastEntry(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		env  []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"KUBECONFIG=/k"}, false},
+		{[]string{"KUBERC=off"}, true},
+		{[]string{"KUBECONFIG=/k", "KUBERC=off", "A=1"}, true},
+		{[]string{"KUBERC=/x", "KUBERC=off"}, true},
+		{[]string{"KUBERC=off", "KUBERC=/x"}, false},
+		{[]string{"KUBERC=off", "KUBERC="}, false},
+		{[]string{"KUBERC=offline"}, false},
+		{[]string{"XKUBERC=off"}, false},
+	} {
+		if got := KubeRCIsOff(tc.env); got != tc.want {
+			t.Errorf("KubeRCIsOff(%q) = %v, want %v", tc.env, got, tc.want)
+		}
+	}
+}

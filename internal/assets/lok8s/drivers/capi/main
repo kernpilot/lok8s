@@ -112,8 +112,9 @@ driver::provision() {
     return 1
   }
 
+  # The render feeds the apply, so it runs with the kubectl user defaults off too.
   local ns_manifest
-  ns_manifest=$(kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
+  ns_manifest=$(KUBERC=off kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
     --dry-run=client -o yaml) || return 1
   printf '%s\n' "${ns_manifest}" \
     | kapply::run_private "the CAPI namespace" --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2 || return 1
@@ -291,7 +292,8 @@ driver::destroy() {
   local del_rc=0
   if [[ -f "${mgmt_kubeconfig}" ]]; then
     echo "info: deleting workload cluster ${cluster_name} — waiting for Hetzner teardown (up to 10m)" >&2
-    kubectl delete cluster "${cluster_name}" \
+    # A write: it runs with the kubectl user defaults off.
+    KUBERC=off kubectl delete cluster "${cluster_name}" \
       --namespace "${namespace}" \
       --kubeconfig "${mgmt_kubeconfig}" \
       --ignore-not-found=true \

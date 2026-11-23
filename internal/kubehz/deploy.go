@@ -723,12 +723,15 @@ func (c *Context) applyBindSecret(ctx context.Context, workdir, secret string) e
 // for the preflight (proveBindSecret), so the two cannot drift: the dry-run
 // create renders the manifest from the bytes on its stdin, and the
 // server-side apply sends it. extra goes before "-f -" (the preflight passes
-// --dry-run=server).
+// --dry-run=server). The render runs with the kubectl user defaults off too:
+// a kuberc default such as --append-hash would rename the Secret that the
+// apply sends.
 func (c *Context) bindSecretUpsert(ctx context.Context, secret string, extra ...string) error {
 	var manifest bytes.Buffer
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
 			"--from-file=bind-secret=/dev/stdin", "--dry-run=client", "-o", "yaml"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(secret), Stdout: &manifest, Stderr: c.errOut(),
 	}); err != nil {
 		return err
@@ -819,7 +822,12 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 		c.errorf("kubehz: the identity bootstrap (job/%s) completed but left no agent-token in Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/%s. The live agent was NOT applied.", job, job)
 		return ErrHandled
 	}
-	_ = c.runQuiet(ctx, "kubectl", "-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true")
+	// The delete is a write: it runs with the kubectl user defaults off.
+	_ = c.Runner.Run(ctx, execx.Cmd{
+		Name: "kubectl", Args: []string{"-n", "kubehz-system", "delete", "job", job, "--ignore-not-found=true"},
+		Env:    []string{execx.KubeRCOff},
+		Stdout: io.Discard, Stderr: io.Discard,
+	})
 	return nil
 }
 

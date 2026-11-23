@@ -211,11 +211,14 @@ capi::ensure_credentials() {
 
   credentials::require "${provider}" || return 1
 
+  # Each render feeds the apply after it, so it runs with the kubectl user
+  # defaults off too: a kuberc default such as --append-hash would rename the
+  # Secret that lo applies.
   case "${provider}" in
     hetzner)
       env_file=$(capi::_credential_env_file \
         hcloud-token HCLOUD_TOKEN robot-user HROBOT_USER robot-password HROBOT_PASSWORD) || return 1
-      printf '%s\n' "${env_file}" | kubectl create secret generic "${secret_name}" \
+      printf '%s\n' "${env_file}" | KUBERC=off kubectl create secret generic "${secret_name}" \
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
         --from-env-file=/dev/stdin \
@@ -225,7 +228,7 @@ capi::ensure_credentials() {
       : "${AWS_REGION:?AWS_REGION required for AWS provider}"
       env_file=$(capi::_credential_env_file \
         access-key-id AWS_ACCESS_KEY_ID secret-access-key AWS_SECRET_ACCESS_KEY region AWS_REGION) || return 1
-      printf '%s\n' "${env_file}" | kubectl create secret generic "${secret_name}" \
+      printf '%s\n' "${env_file}" | KUBERC=off kubectl create secret generic "${secret_name}" \
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
         --from-env-file=/dev/stdin \

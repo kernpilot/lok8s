@@ -16,7 +16,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -100,7 +99,7 @@ func assertKubeRCOff(t *testing.T, envs [][]string) {
 		t.Fatal("no kubectl call was recorded")
 	}
 	for i, env := range envs {
-		if !slices.Contains(env, execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(env) {
 			t.Errorf("call %d ran with Env %q, want %s", i, env, execx.KubeRCOff)
 		}
 	}

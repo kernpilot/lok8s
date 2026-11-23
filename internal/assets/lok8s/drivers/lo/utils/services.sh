@@ -25,7 +25,8 @@ lo::coredns() {
   local pool
   pool=$(yq -r '.spec.loadBalancer.pool // ""' "${cluster_yaml}")
   if [[ "${pool}" == *-* ]]; then
-    kubectl annotate svc coredns-external -n kube-system --kubeconfig "${kubeconfig}" \
+    # A write: it runs with the kubectl user defaults off (the Go twin).
+    KUBERC=off kubectl annotate svc coredns-external -n kube-system --kubeconfig "${kubeconfig}" \
       "metallb.universe.tf/loadBalancerIPs=${pool##*-}" --overwrite
   fi
 
@@ -113,7 +114,9 @@ EOF
   fi
 
   if compgen -G "${tmp}/*" >/dev/null 2>&1; then
-    kubectl create configmap coredns-custom -n kube-system --kubeconfig "${kubeconfig}" \
+    # The render feeds the apply, so it runs with the kubectl user defaults off
+    # too: a kuberc default such as --append-hash would rename the ConfigMap.
+    KUBERC=off kubectl create configmap coredns-custom -n kube-system --kubeconfig "${kubeconfig}" \
       --from-file="${tmp}" --dry-run=client -o yaml \
       | kapply::run_private "the CoreDNS custom ConfigMap" apply --kubeconfig "${kubeconfig}" -f -
   fi

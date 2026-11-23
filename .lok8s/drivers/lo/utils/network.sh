@@ -684,9 +684,10 @@ lo::heal_node_ips() {
   # every peer's tunnel map), so a repaired node keeps routing to the dead IP
   # until its agent re-registers. Best-effort: on a first provision there is no
   # CNI yet, and bootstrap installs a fresh one moments later either way.
+  # The delete is a write: it runs with the kubectl user defaults off.
   (( ${#healed[@]} )) || return 0
   for node in "${healed[@]}"; do
-    kubectl --kubeconfig "${kubeconfig}" -n kube-system delete pod \
+    KUBERC=off kubectl --kubeconfig "${kubeconfig}" -n kube-system delete pod \
       -l k8s-app=cilium --field-selector "spec.nodeName=${node}" 2>/dev/null || true
   done
 }

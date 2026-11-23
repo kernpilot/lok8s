@@ -840,8 +840,9 @@ handover::receive() {
     # Pinned to the LOCAL apiserver for the same reason verify is: admin.conf's
     # endpoint DNS still resolves to the PLATFORM until cutover, and its CA is
     # the same identity — an unpinned call could untaint the WRONG cluster's
-    # nodes and report success.
-    kubectl --kubeconfig "${k8s_dir}/admin.conf" \
+    # nodes and report success. The taint is a write: it runs with the
+    # kubectl user defaults off.
+    KUBERC=off kubectl --kubeconfig "${k8s_dir}/admin.conf" \
       --server "https://127.0.0.1:6443" --tls-server-name "${endpoint_dns}" \
       taint nodes --all node-role.kubernetes.io/control-plane- >/dev/null 2>&1 \
       || warn "handover: could not untaint the control-plane node — run: kubectl --server https://127.0.0.1:6443 --tls-server-name ${endpoint_dns} taint nodes --all node-role.kubernetes.io/control-plane-"

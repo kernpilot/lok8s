@@ -375,11 +375,13 @@ func (c *Context) Recreate(ctx context.Context, selector string) error {
 	// chained so a real delete error stops before apply, and an apply
 	// failure surfaces, making a half-done recreate visible rather than
 	// silently destructive. True one-shot atomicity isn't possible for an
-	// immutable Job.
+	// immutable Job. The delete runs with the kubectl user defaults off
+	// (kapply sets them off for the apply).
 	c.preserveImages(ctx, docs)
 	applied := marshalDocs(docs)
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"delete", "--ignore-not-found", "-f", "-"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(objs), Stdout: c.Out, Stderr: c.ErrOut,
 	}); err != nil {
 		return ErrHandled
@@ -421,7 +423,7 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 		return nil
 	}
 	// Rollout-restart each matched Deployment/StatefulSet/DaemonSet by
-	// kind/name+ns.
+	// kind/name+ns. A write: it runs with the kubectl user defaults off.
 	n := 0
 	for _, d := range docs {
 		kind := d.scalar("kind")
@@ -439,6 +441,7 @@ func (c *Context) Restart(ctx context.Context, selector string) error {
 		ui.DebugTo(c.ErrOut, "rollout restart %s/%s -n %s", kind, name, ns)
 		err := c.Runner.Run(ctx, execx.Cmd{
 			Name: "kubectl", Args: []string{"-n", ns, "rollout", "restart", strings.ToLower(kind) + "/" + name},
+			Env:    []string{execx.KubeRCOff},
 			Stdout: c.Out, Stderr: io.Discard,
 		})
 		if err == nil {

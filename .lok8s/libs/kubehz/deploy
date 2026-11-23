@@ -82,6 +82,13 @@
 # live agent starts (kubehz::wait_heartbeat_idle). Its worst case is one last
 # schema-1 beat that the live agent overwrites within a minute — not a standing
 # second producer — so it warns and continues instead of blocking a deploy.
+#
+# Each kubectl write of the deploy runs with the kubectl user defaults off:
+# `KUBERC=off kubectl …`, or kapply::run_private. A kuberc default such as
+# --dry-run=client would make a write report success and change nothing. A
+# read keeps the kuberc of the user. The Go twin sets execx.KubeRCOff on each
+# write: through Context.run (execx.KubectlEnv), applyPrivate, or the Env of
+# its Cmd. tests/unit/kuberc_test.bats checks each write.
 
 import ^utils/verbose
 import ^utils/http
@@ -369,6 +376,8 @@ kubehz::live_agent_overlay() {
 # because the apply below is `kubectl apply -k` — the same embedded kustomize,
 # at the same version. A dry run whose renderer can differ from the applier's
 # is a dry run you cannot trust for exactly the cases you would use it for.
+# For the same reason both renders run with KUBERC=off, as the apply does: a
+# kuberc default of the user must not make the print differ from the apply.
 # Comment lines name the steps around the CronJob agent: the Job delete and
 # the wait, the bind Secret (its line names the file and never prints the
 # value), and the patch that ends the suspend. The check reads a private copy
@@ -381,7 +390,7 @@ kubehz::deploy_print() (
   kubehz::own_private_copy "${copy}"
 
   echo "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: ${owner} ---"
-  kubectl kustomize "${workdir}/agent" || return 1
+  KUBERC=off kubectl kustomize "${workdir}/agent" || return 1
   echo "---"
   echo "# The CronJob agent is applied suspended. The deploy then deletes its Jobs (-l ${_KUBEHZ_AGENT_JOBS_SELECTOR}) and waits until their pods have ended."
   kubehz::bind_secret_snapshot "${PATH_CLUSTERS}/${domain}/.kubehz-bind" "${copy}" && bound=1
@@ -395,7 +404,7 @@ kubehz::deploy_print() (
   if [[ "${owner}" == "operator" ]]; then
     echo "---"
     echo "# --- Live agent (kubehz-live-agent) — ${access} tier RBAC ---"
-    kubectl kustomize "$(kubehz::live_agent_overlay "${workdir}" "${access}")" || return 1
+    KUBERC=off kubectl kustomize "$(kubehz::live_agent_overlay "${workdir}" "${access}")" || return 1
   else
     echo "---"
     echo "# The live agent is NOT deployed in cronjob mode; a previous install would be removed."
@@ -492,7 +501,7 @@ kubehz::deploy_apply() (
   # apiserver unreachable, a broken kustomization. Swallowing it and running the
   # apply below would re-arm the CronJob's beat next to a live agent that is
   # still beating: the double-producer state this command exists to prevent.
-  kubectl delete -k "${workdir}/live-agent/managed" --ignore-not-found=true || {
+  KUBERC=off kubectl delete -k "${workdir}/live-agent/managed" --ignore-not-found=true || {
     error "kubehz: could not remove the live agent. The delete can have removed part of the live agent objects. The deploy did not apply the CronJob agent, so ${_KUBEHZ_HEARTBEATS_CAN_STOP}. Usual causes: the kubeconfig lacks delete permission in kubehz-system, or the apiserver is unreachable. Fix that and run 'lo kubehz deploy' again."
     return 1
   }
@@ -502,7 +511,7 @@ kubehz::deploy_apply() (
   # which survives a rename. (Stray SA/RBAC/ConfigMap from such an install are
   # inert: they grant permissions to a pod that no longer exists. Removing them
   # is 'kubectl delete namespace kubehz-system' — see the guide's revocation.)
-  kubectl -n kubehz-system delete deployment \
+  KUBERC=off kubectl -n kubehz-system delete deployment \
     -l app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view \
     --ignore-not-found=true || {
     error "kubehz: could not sweep live-agent Deployments by label. The live agent delete before it passed, and the sweep can have removed some Deployments. The deploy did not apply the CronJob agent, so ${_KUBEHZ_HEARTBEATS_CAN_STOP}. Fix the delete and run 'lo kubehz deploy' again."
@@ -595,7 +604,7 @@ kubehz::settle_cron_agent() {
 # Delete the Jobs of the CronJob agent by their labels, and wait until their
 # pods have ended (kubehz::wait_agent_jobs_gone).
 kubehz::quiesce_agent_jobs() {
-  kubectl -n kubehz-system delete job -l "${_KUBEHZ_AGENT_JOBS_SELECTOR}" --ignore-not-found=true || {
+  KUBERC=off kubectl -n kubehz-system delete job -l "${_KUBEHZ_AGENT_JOBS_SELECTOR}" --ignore-not-found=true || {
     error "kubehz: could not delete the Jobs of the CronJob agent (-l ${_KUBEHZ_AGENT_JOBS_SELECTOR}). The delete can have removed some of them. ${_KUBEHZ_AGENT_STAYS_SUSPENDED} The kubeconfig needs list and delete on Jobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again."
     return 1
   }
@@ -605,7 +614,7 @@ kubehz::quiesce_agent_jobs() {
 # Set spec.suspend to false, after the stage. The deploy owns the field: the
 # next CronJob agent apply sets it to true again.
 kubehz::resume_cron_agent() {
-  kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p "${_KUBEHZ_AGENT_RESUME_PATCH}" || {
+  KUBERC=off kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p "${_KUBEHZ_AGENT_RESUME_PATCH}" || {
     error "kubehz: could not set spec.suspend to false on cronjob/kubehz-heartbeat. The CronJob agent can stay suspended, so ${_KUBEHZ_HEARTBEATS_CAN_STOP}. The kubeconfig needs patch on CronJobs in kubehz-system. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. The deploy sets it with: kubectl -n kubehz-system patch cronjob kubehz-heartbeat --type=merge -p '${_KUBEHZ_AGENT_RESUME_PATCH}'."
     return 1
   }
@@ -801,12 +810,14 @@ kubehz::apply_bind_secret() {
 # preflight (kubehz::prove_bind_secret), so the two cannot drift: the dry-run
 # create renders the manifest from the bytes of <copy> on its stdin, and the
 # server-side apply sends it. The other arguments go before "-f -" (the
-# preflight passes --dry-run=server).
+# preflight passes --dry-run=server). The render runs with the kubectl user
+# defaults off too: a kuberc default such as --append-hash would rename the
+# Secret that the apply sends.
 # Usage: kubehz::bind_secret_upsert <copy> [<apply args>...]
 kubehz::bind_secret_upsert() {
   local copy="${1}" manifest
   shift
-  manifest=$(kubectl -n kubehz-system create secret generic kubehz-agent-bind \
+  manifest=$(KUBERC=off kubectl -n kubehz-system create secret generic kubehz-agent-bind \
     --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml < "${copy}") || return 1
   printf '%s\n' "${manifest}" | kapply::run_private "the bind secret" apply --server-side --force-conflicts "$@" -f -
 }
@@ -857,7 +868,7 @@ kubehz::ensure_identity_secret() {
   local job
   job="kubehz-heartbeat-bootstrap-$(date +%s)-$(printf '%04x' "${RANDOM}")"
   echo "kubehz: the identity Secret holds no agent-token yet — running the CronJob's bootstrap once (job/${job})…"
-  kubectl -n kubehz-system create job "${job}" --from=cronjob/kubehz-heartbeat || {
+  KUBERC=off kubectl -n kubehz-system create job "${job}" --from=cronjob/kubehz-heartbeat || {
     error "kubehz: could not start the identity bootstrap (job/${job}). The CronJob agent is applied with the live owner: it bootstraps the identity on its next tick but does not beat, and this deploy did not apply the live agent, so ${_KUBEHZ_HEARTBEATS_CAN_STOP}. Run 'lo kubehz deploy' again after that tick, or after a job by hand: kubectl -n kubehz-system create job kubehz-heartbeat-bootstrap-\$(date +%s) --from=cronjob/kubehz-heartbeat."
     return 1
   }
@@ -871,7 +882,7 @@ kubehz::ensure_identity_secret() {
     error "kubehz: the identity bootstrap (job/${job}) completed but left no agent-token in Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/${job}. The live agent was NOT applied."
     return 1
   fi
-  kubectl -n kubehz-system delete job "${job}" --ignore-not-found=true >/dev/null 2>&1 || true
+  KUBERC=off kubectl -n kubehz-system delete job "${job}" --ignore-not-found=true >/dev/null 2>&1 || true
   return 0
 }
 

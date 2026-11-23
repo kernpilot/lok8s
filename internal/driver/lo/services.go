@@ -171,12 +171,16 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	}
 
 	// kubectl create configmap … --dry-run=client -o yaml | kubectl apply -f -
-	rendered, err := d.output(ctx, "kubectl", "create", "configmap", "coredns-custom",
+	// The render feeds the apply, so it runs with the kubectl user defaults
+	// off too (cmdWith): a kuberc default such as --append-hash would rename
+	// the ConfigMap. The output keeps no trailing new line (bash: $(…)).
+	var buf strings.Builder
+	if err := d.deps.Runner.Run(ctx, cmdWith("kubectl", []string{"create", "configmap", "coredns-custom",
 		"-n", "kube-system", "--kubeconfig", kubeconfig,
-		"--from-file="+tmp, "--dry-run=client", "-o", "yaml")
-	if err != nil {
+		"--from-file=" + tmp, "--dry-run=client", "-o", "yaml"}, &buf, io.Discard)); err != nil {
 		return
 	}
+	rendered := strings.TrimRight(buf.String(), "\n")
 	_ = d.applyPrivate(ctx, "the CoreDNS custom ConfigMap", rendered+"\n", out, errOut, "apply", "--kubeconfig", kubeconfig, "-f", "-")
 }
 
