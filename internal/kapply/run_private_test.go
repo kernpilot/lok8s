@@ -77,18 +77,23 @@ func TestRunPrivateSuccessPrintsTheSummaryOnly(t *testing.T) {
 
 // The child runs with the kubectl user defaults off, keeps the Env of the
 // caller and gets the stdin of the caller. bats: "run_private: the KUBERC of
-// the caller does not reach kubectl".
+// the caller does not reach kubectl". KUBERC=off is the last KUBERC entry,
+// also when the Env of the caller has another KUBERC entry after one, and
+// it is not added again when it is the last one already.
 func TestRunPrivateRunsWithKubeRCOff(t *testing.T) {
 	setUI(t, false, false)
 	t.Setenv("KUBERC", "/user/kuberc")
-	for _, env := range [][]string{nil, {"A=1"}, {execx.KubeRCOff}} {
+	for _, env := range [][]string{nil, {"A=1"}, {execx.KubeRCOff}, {execx.KubeRCOff, "KUBERC=/x"}} {
 		f := &stdinKubectl{}
 		c := execx.Cmd{Name: "kubectl", Args: []string{"apply", "-f", "-"}, Env: slices.Clone(env), Stdin: strings.NewReader(cfgManifest)}
 		if _, _, err := runPrivate(t, f, c); err != nil {
 			t.Fatal(err)
 		}
-		if n := strings.Count(strings.Join(f.env, " "), execx.KubeRCOff); n != 1 {
-			t.Errorf("Env %q: the child ran with Env %q, want %s once", env, f.env, execx.KubeRCOff)
+		if !execx.KubeRCIsOff(f.env) {
+			t.Errorf("Env %q: the child ran with Env %q, want %s as the last KUBERC entry", env, f.env, execx.KubeRCOff)
+		}
+		if execx.KubeRCIsOff(env) && len(f.env) != len(env) {
+			t.Errorf("Env %q: the child ran with Env %q, want no second %s", env, f.env, execx.KubeRCOff)
 		}
 		for _, e := range env {
 			if !slices.Contains(f.env, e) {

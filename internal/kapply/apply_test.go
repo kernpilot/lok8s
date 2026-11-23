@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -343,7 +342,7 @@ func TestStuckTerminatingFinalizerPatchRunsWithKubeRCOff(t *testing.T) {
 		if len(args) == 0 {
 			continue
 		}
-		off := slices.Contains(f.envs[i], execx.KubeRCOff)
+		off := execx.KubeRCIsOff(f.envs[i])
 		switch args[0] {
 		case "patch":
 			patches++
@@ -391,7 +390,7 @@ func TestApplyWritesRunWithKubeRCOffAfterAServerFlag(t *testing.T) {
 					verb += " " + args[1]
 				}
 				seen[verb]++
-				off := slices.Contains(f.envs[i], execx.KubeRCOff)
+				off := execx.KubeRCIsOff(f.envs[i])
 				switch verb {
 				case "apply", "replace --force", "replace --raw":
 					if !off {

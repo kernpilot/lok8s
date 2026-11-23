@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -31,7 +30,7 @@ func TestPublishAppliesRunWithKubeRCOff(t *testing.T) {
 		t.Fatalf("calls = %d, want 3:\n%s", len(f.calls), strings.Join(f.calls, "\n"))
 	}
 	for i, call := range f.calls {
-		if !slices.Contains(f.envs[i], execx.KubeRCOff) {
+		if !execx.KubeRCIsOff(f.envs[i]) {
 			t.Errorf("%s runs without %s (Env %q)", call, execx.KubeRCOff, f.envs[i])
 		}
 	}

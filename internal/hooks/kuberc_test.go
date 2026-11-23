@@ -29,12 +29,12 @@ func TestRecreateDeleteRunsWithKubeRCOff(t *testing.T) {
 		}
 		switch cmd.Args[0] {
 		case "get":
-			if slices.Contains(cmd.Env, execx.KubeRCOff) {
+			if execx.KubeRCIsOff(cmd.Env) {
 				t.Errorf("the read %s runs with %s", strings.Join(cmd.Args, " "), execx.KubeRCOff)
 			}
 		case "delete":
 			deletes++
-			if !slices.Contains(cmd.Env, execx.KubeRCOff) {
+			if !execx.KubeRCIsOff(cmd.Env) {
 				t.Errorf("%s runs without %s", strings.Join(cmd.Args, " "), execx.KubeRCOff)
 			}
 		}
@@ -60,7 +60,7 @@ metadata:
 	runner.handler = func(cmd execx.Cmd, _ string) error {
 		if cmd.Name == "kubectl" && slices.Contains(cmd.Args, "rollout") {
 			restarts++
-			if !slices.Contains(cmd.Env, execx.KubeRCOff) {
+			if !execx.KubeRCIsOff(cmd.Env) {
 				t.Errorf("%s runs without %s", strings.Join(cmd.Args, " "), execx.KubeRCOff)
 			}
 		}

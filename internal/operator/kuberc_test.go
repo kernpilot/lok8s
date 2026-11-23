@@ -7,7 +7,6 @@ package operator
 
 import (
 	"io"
-	"slices"
 	"strings"
 	"testing"
 
@@ -35,7 +34,7 @@ func TestKubeApplyRunsWithKubeRCOff(t *testing.T) {
 			t.Errorf("%s did not run", line)
 			continue
 		}
-		if got := slices.Contains(env, execx.KubeRCOff); got != want {
+		if got := execx.KubeRCIsOff(env); got != want {
 			t.Errorf("%s: %s in Env = %v, want %v", line, execx.KubeRCOff, got, want)
 		}
 	}

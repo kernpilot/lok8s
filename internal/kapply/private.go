@@ -63,7 +63,9 @@ func ShowSensitiveText(what string) string {
 func RunPrivate(ctx context.Context, r execx.Runner, c execx.Cmd, label string, stdout, stderr io.Writer) error {
 	var buf strings.Builder
 	c.Stdout, c.Stderr = &buf, &buf
-	if !slices.Contains(c.Env, execx.KubeRCOff) {
+	// KubeRCOff must be the last KUBERC entry: os/exec keeps the last entry
+	// of a name, so a KUBERC entry of the caller after it would win.
+	if !execx.KubeRCIsOff(c.Env) {
 		c.Env = append(slices.Clip(c.Env), execx.KubeRCOff)
 	}
 	err := r.Run(ctx, c)
