@@ -28,6 +28,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,8 +37,10 @@ import (
 // orchestration and safety variables: LOK8S_BOOTSTRAP_*, BOOTSTRAP_*,
 // bootstrap_* (the bash engine's own names), LOK8S_INTERNAL_* (lo's
 // internal contracts with its plugins, such as the Secret plugin's
-// keys-only setting), PATH_SECRETS, KUBECONFIG, KUSTOMIZE_PLUGIN_HOME and
-// HELM_PLUGINS. An entry that names one is an
+// keys-only setting), PATH_SECRETS, KUBECONFIG, KUSTOMIZE_PLUGIN_HOME,
+// HELM_PLUGINS, and the Secret plugin's switches LOK8S_SECRETS_DISABLE and
+// LOK8S_SECRETS_NO_MINT (an entry must not turn the store-free switch or
+// the no-mint switch off for its render). An entry that names one is an
 // entry error on a real run and on a dry run alike (bash:
 // bootstrap::_reserved_env_name).
 func ProtectedEnvOverride(env map[string]string) string {
@@ -62,7 +65,7 @@ func IsProtectedEnv(name string) bool {
 		}
 	}
 	switch name {
-	case "PATH_SECRETS", "KUBECONFIG", KustomizePluginHomeEnv, HelmPluginsEnv:
+	case "PATH_SECRETS", "KUBECONFIG", KustomizePluginHomeEnv, HelmPluginsEnv, secret.DisableEnv, secret.NoMintEnv:
 		return true
 	}
 	return false

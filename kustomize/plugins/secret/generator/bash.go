@@ -134,6 +134,11 @@ func (g *Bash) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 			}
 		} else {
 			val, err = ctx.Cache.GetOrCreate(k, func() ([]byte, error) {
+				// The store lacks the entry, so a no-mint run fails on
+				// it (the overlay records it): the command does not run.
+				if ctx.NoMint {
+					return nil, nil
+				}
 				return runBash(entry, ctx)
 			})
 		}

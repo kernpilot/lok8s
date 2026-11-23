@@ -46,9 +46,10 @@ type Options struct {
 	// Runner runs the split's yq and sops subprocesses. nil =
 	// execx.NewRunner(Paths); tests install a fake.
 	Runner execx.Runner
-	// pluginHome is the plugin home that checkKeysOnlyPlugin checked (the
-	// keys-only exec render only). runKustomize gives it to kustomize as
-	// KUSTOMIZE_PLUGIN_HOME.
+	// pluginHome is the plugin home that checkKeysOnlyPlugin (the keys-only
+	// exec render) or checkNoMintPlugin (an exec render with
+	// LOK8S_SECRETS_NO_MINT set) checked. runKustomize gives it to
+	// kustomize as KUSTOMIZE_PLUGIN_HOME.
 	pluginHome string
 }
 
@@ -104,8 +105,13 @@ func Artifacts(ctx context.Context, o Options) error {
 	// store in a project that keeps one per domain stops here: the flat
 	// store would read and generate values in the wrong place. A
 	// --no-secrets render never reads the store, so it does not stop.
+	// With LOK8S_SECRETS_NO_MINT set, a build that reads the store needs a
+	// Secret plugin that has the no-mint run (checkNoMintPlugin).
 	if !o.NoSecrets {
 		if err := domain.CheckSecretsStore(o.Paths.Clusters, o.Domain, config.FlatSecretsStore(o.Paths), stderr); err != nil {
+			return err
+		}
+		if err := checkNoMintPlugin(ctx, &o, stderr); err != nil {
 			return err
 		}
 	}

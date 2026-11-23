@@ -141,7 +141,7 @@ cert:
 // refuses an exec plugin without it.
 func TestCapabilitiesListKeysOnly(t *testing.T) {
 	got := strings.Split(Capabilities, "\n")
-	if !reflect.DeepEqual(got, []string{"dry-run", "keys-only"}) {
-		t.Errorf("Capabilities = %q, want the lines dry-run and keys-only", Capabilities)
+	if !reflect.DeepEqual(got, []string{"dry-run", "keys-only", "no-mint"}) {
+		t.Errorf("Capabilities = %q, want the lines dry-run, keys-only and no-mint", Capabilities)
 	}
 }

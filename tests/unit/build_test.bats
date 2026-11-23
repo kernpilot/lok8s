@@ -705,6 +705,140 @@ YAML
   assert_output ""
 }
 
+# With LOK8S_SECRETS_NO_MINT set (an on value or an unknown value), a build
+# that reads the store refuses a Secret plugin that does not print
+# "no-mint" before the render: the plugin of the keys-only run, one that
+# prints nothing, one that fails, one that prints the line but fails, one
+# with a longer line. An older plugin ignores the variable and generates
+# values. artifacts.yaml stays, and the probe leaves nothing in TMPDIR. Go:
+# TestNoMintRefusesAPluginWithoutTheNoMintRun.
+@test "build::artifacts refuses a Secret plugin without the no-mint run" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "ran" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev" value tc caps rc
+  echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
+  for value in 1 true yes; do
+    for tc in 'dry-run\nkeys-only\n|0' '|0' '|1' 'no-mint\n|1' 'no-mint-not\nkeys-only\n|0'; do
+      caps="${tc%|*}" rc="${tc#*|}"
+      _secret_plugin "${caps}" "${rc}"
+      rm -f "${KENV}" "${PROBE_LOG}"
+      LOK8S_SECRETS_NO_MINT="${value}" run build::artifacts "test.lok8s.dev"
+      assert_failure
+      assert_output "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+      [ -e "${PROBE_LOG}" ] || { echo "the probe did not run for '${value}' '${tc}'"; return 1; }
+      [ ! -e "${KENV}" ] || { echo "kustomize ran for '${value}' '${tc}'"; return 1; }
+      [ "$(cat "${domain_dir}/artifacts.yaml")" = "kind: Prior" ]
+    done
+  done
+  run ls -A "${TMPDIR}"
+  assert_output ""
+}
+
+# A plugin that prints "no-mint" renders. The probe runs in a new
+# lok8s-no-mint-* dir in TMPDIR with the sandbox of the keys-only probe.
+# kustomize gets the plugin home that lo checked in its environment
+# (printenv: the stub is a shell function, which would also see a variable
+# that is not exported), and the caller's shell does not keep it. Go:
+# TestNoMintAcceptsAPluginWithTheNoMintRun.
+@test "build::artifacts with no-mint probes the plugin and gives kustomize the checked home" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "home=$(printenv KUSTOMIZE_PLUGIN_HOME || echo '<unset>')" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  _secret_plugin 'dry-run\nkeys-only\nno-mint\n'
+
+  LOK8S_SECRETS_NO_MINT=1 build::artifacts "test.lok8s.dev"
+
+  [ "$(cat "${KENV}")" = "home=${BATS_TEST_TMPDIR}/.kustomize" ]
+  [ -z "${KUSTOMIZE_PLUGIN_HOME+x}" ] || { echo "the caller keeps KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME}"; return 1; }
+  run cat "${PROBE_LOG}"
+  [ "${#lines[@]}" -eq 7 ] || { echo "want one probe (7 lines), got: ${output}"; return 1; }
+  local cwd="${lines[1]#cwd=}"
+  [[ "${cwd}" == "${TMPDIR}/lok8s-no-mint-"* ]] || { echo "probe cwd ${cwd}"; return 1; }
+  assert_line --index 0 "args=--capabilities"
+  assert_line --index 2 "entries="
+  assert_line --index 3 "secrets=${cwd}/store"
+  assert_line --index 4 "disable=1"
+  assert_line --index 5 "keys-only=0"
+  assert_line --index 6 "stdin="
+  run ls -A "${TMPDIR}"
+  assert_output ""
+}
+
+# With the switch off (unset, or an off value), and in a --no-secrets
+# build with the switch on, the plugin is not probed: a plugin without the
+# no-mint run renders as before. Go: TestNoMintOffOrNoSecretsDoesNotProbe.
+@test "build::artifacts does not probe when no-mint is off or the build is --no-secrets" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "ran" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  unset LOK8S_SECRETS_NO_MINT
+  _secret_plugin 'dry-run\nkeys-only\n'
+  local value
+  for value in '<unset>' '' 0 false ' FALSE '; do
+    rm -f "${PROBE_LOG}" "${KENV}"
+    if [[ "${value}" == '<unset>' ]]; then
+      run build::artifacts "test.lok8s.dev"
+    else
+      LOK8S_SECRETS_NO_MINT="${value}" run build::artifacts "test.lok8s.dev"
+    fi
+    assert_success
+    [ ! -e "${PROBE_LOG}" ] || { echo "the plugin was probed for '${value}'"; return 1; }
+    [ -e "${KENV}" ] || { echo "the render did not run for '${value}'"; return 1; }
+  done
+  rm -f "${PROBE_LOG}" "${KENV}"
+  LOK8S_SECRETS_NO_MINT=1 LOK8S_BUILD_NO_SECRETS=1 run build::artifacts "test.lok8s.dev"
+  assert_success
+  [ ! -e "${PROBE_LOG}" ] || { echo "the plugin was probed for --no-secrets"; return 1; }
+  [ -e "${KENV}" ]
+}
+
+# A probe that a signal stops, a probe that cannot make its dir, a home
+# without the Secret executable and an absent home each have their own
+# line, and the render does not run. With an absent home, kustomize would
+# load the old plugin in XDG_CONFIG_HOME (it writes a canary). Go:
+# TestNoMintCheckFailures.
+@test "build::artifacts with no-mint names each failed check of the plugin" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "ran" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  export LOK8S_SECRETS_NO_MINT=1 TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local plugin=".kustomize/secrets.lok8s.dev/v1/secret/Secret"
+
+  printf '#!/usr/bin/env bash\nkill -TERM $$\n' > "${BATS_TEST_TMPDIR}/${plugin}"
+  run build::artifacts "test.lok8s.dev"
+  assert_failure
+  assert_output "[error] lo build: the check of the Secret plugin ${plugin} was interrupted"
+
+  _secret_plugin 'no-mint\n'
+  TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir" run build::artifacts "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] lo build: cannot make a temporary directory for the check of the Secret plugin ${plugin}"
+  refute_output --partial "does not have the no-mint run"
+
+  rm -f "${BATS_TEST_TMPDIR}/${plugin}"
+  echo "a Go plugin" > "${BATS_TEST_TMPDIR}/${plugin}.so"
+  run build::artifacts "test.lok8s.dev"
+  assert_failure
+  assert_output "[error] lo build: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin ${plugin} does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+
+  rm -rf "${BATS_TEST_TMPDIR}/.kustomize"
+  export XDG_CONFIG_HOME="${BATS_TEST_TMPDIR}/xdg"
+  local old="${XDG_CONFIG_HOME}/kustomize/plugin/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${old%/*}"
+  printf '#!/usr/bin/env bash\ntouch "%s"\necho no-mint\n' "${BATS_TEST_TMPDIR}/old-plugin-ran" > "${old}"
+  chmod +x "${old}"
+  run build::artifacts "test.lok8s.dev"
+  assert_failure
+  assert_output "[error] lo build: LOK8S_SECRETS_NO_MINT is set, but the kustomize plugin home .kustomize does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+  [[ ! -e "${KENV}" && ! -e "${BATS_TEST_TMPDIR}/old-plugin-ran" ]] || { echo "the render or the old plugin ran"; return 1; }
+}
+
 # The output guard: a render that holds an object with the keys-only marker
 # is never written into the domain's artifacts (Go: hasKeysOnlyMarker). The
 # prior artifacts.yaml stays, no split is made, no temp file is left.

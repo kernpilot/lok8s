@@ -9,8 +9,8 @@ import (
 
 // Run is the secret plugin's entrypoint, wrapping the generic
 // plugin.RunEnv runner with the store-shaping env knobs
-// (LOK8S_SECRETS_DISABLE / LOK8S_SECRETS_OUTPUT, and lo's internal
-// LOK8S_INTERNAL_SECRETS_KEYS_ONLY). cmd/secret/main.go
+// (LOK8S_SECRETS_DISABLE / LOK8S_SECRETS_OUTPUT / LOK8S_SECRETS_NO_MINT,
+// and lo's internal LOK8S_INTERNAL_SECRETS_KEYS_ONLY). cmd/secret/main.go
 // calls this instead of plugin.Run directly so the knobs are honored on
 // every kustomize invocation.
 //
@@ -29,7 +29,12 @@ import (
 //     key with an empty value. lo sets it for `lo build --keys-only` only.
 //   - KEYS_ONLY on without DISABLE on, or a KEYS_ONLY value that is not
 //     known: an error before anything is read, never a run that reads
-//     the store.
+//     the store. A NO_MINT value that is not known is an error at the
+//     same point, also with DISABLE on.
+//   - NO_MINT on (and DISABLE off): the store is read-only for the run.
+//     A value that the run would generate or write fails the run after
+//     every generator ran, with the names of the entries, and nothing is
+//     emitted. With OUTPUT=none too, the output stays suppressed.
 //   - OUTPUT=none: run the FULL pipeline (store reads/mints + validation
 //     intact) but discard the emit write, so zero resources are rendered.
 //   - otherwise: normal emit.
@@ -37,6 +42,10 @@ import (
 // A plugin older than KEYS_ONLY sees DISABLE only and emits nothing.
 func Run(argv []string, stdin io.Reader, stdout io.Writer, env func(string) (string, bool)) error {
 	keys, err := keysOnly(env)
+	if err != nil {
+		return err
+	}
+	readOnly, err := noMint(env)
 	if err != nil {
 		return err
 	}
@@ -63,5 +72,14 @@ func Run(argv []string, stdin io.Reader, stdout io.Writer, env func(string) (str
 		out = io.Discard
 	}
 
-	return plugin.RunEnv(argv, stdin, out, env, New())
+	p := New()
+	p.noMint = readOnly
+	err = plugin.RunEnv(argv, stdin, out, env, p)
+	if err != nil && p.noMint {
+		// A run that stopped after a refusal names the refusals too.
+		if nerr := p.noMintErr(err); nerr != nil {
+			return nerr
+		}
+	}
+	return err
 }

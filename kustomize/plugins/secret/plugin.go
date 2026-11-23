@@ -41,6 +41,10 @@ type Plugin struct {
 	spec *specpkg.Secret
 	// keysOnly marks the keys-only run: Emit adds KeysOnlyAnnotation.
 	keysOnly bool
+	// noMint marks a no-mint run (NoMintEnv). Build then sets noMintRun,
+	// the state that records each value the run would write.
+	noMint    bool
+	noMintRun *cache.DryRun
 }
 
 // New returns a new Plugin instance.
@@ -72,6 +76,12 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	// memory, writes nothing and reports what it generated.
 	pathSecrets, _ := env(PathSecretsEnv)
 	dr := cache.DryRunFromEnv(env)
+	if p.noMint {
+		// A no-mint run uses the overlay too, and wins over a dry run: it
+		// records a write and fails, it does not report one.
+		dr = cache.NewNoMint()
+		p.noMintRun = dr
+	}
 	var c plugin.CacheStore
 	var open func(namespace, name string) (plugin.CacheStore, error)
 	if pathSecrets != "" {
@@ -99,6 +109,7 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	}
 	if dr != nil {
 		ctx.DryRun = true
+		ctx.NoMint = p.noMint
 		ctx.Minted = dr.Minted
 		ctx.RunLoad = dr.Load
 		ctx.RunSave = dr.Save
@@ -220,6 +231,10 @@ func sortedKeys[V any](m map[string]V) []string {
 func (p *Plugin) Emit(entries []plugin.Entry, w io.Writer) error {
 	if p.spec == nil {
 		return errs.New("secret plugin: Emit called before Decode")
+	}
+	// A no-mint run that would write a value emits nothing.
+	if err := p.noMintErr(nil); err != nil {
+		return err
 	}
 	b := kresource.NewSecret(p.spec.Metadata.Name, p.spec.Metadata.Namespace, p.spec.Type)
 	if len(p.spec.Metadata.Labels) > 0 {

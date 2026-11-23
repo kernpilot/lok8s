@@ -770,7 +770,8 @@ refuses it (`lo toolchain install` installs the plugin of your `lo`).
 An entry's `env:` goes only to the render (kustomize and envsubst), never to
 lo itself. It cannot set lo's own variables (`LOK8S_BOOTSTRAP_*`,
 `LOK8S_INTERNAL_*`, `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`,
-`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). Such an entry is an error, on a dry
+`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`, `LOK8S_SECRETS_DISABLE`,
+`LOK8S_SECRETS_NO_MINT`). Such an entry is an error, on a dry
 run and on a real run, and lo names the variable. lo does this check after
 the skips of the real run: an entry that the run skips is `skipped`, not an
 error.

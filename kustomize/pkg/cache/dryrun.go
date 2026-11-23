@@ -16,6 +16,13 @@ package cache
 // It cannot tell that a real write will fail (a full disk), and an env:
 // or update: true entry computes its value before the check, as in the
 // real run.
+//
+// A no-mint run (NewNoMint, the plugin's LOK8S_SECRETS_NO_MINT) uses the
+// same overlay, with no run store and no report file. A value that the run
+// would generate, or would write over what the store holds, is kept in
+// memory for the rest of the process and recorded as a Refusal, by its
+// name only. The plugin then fails the run with the list of refusals.
+// Nothing is written.
 
 import (
 	"bytes"
@@ -26,6 +33,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -64,6 +72,47 @@ type DryRun struct {
 	mem    map[string][]byte
 	store  string
 	report string
+	// noMint marks a no-mint run (NewNoMint): a write is recorded in
+	// refused, not reported.
+	noMint  bool
+	refused []Refusal
+}
+
+// Refusal is one write that a no-mint run refused. It holds names only,
+// never a value or a length. For a store entry, Namespace, Secret and Key
+// name it. For the CA in CAROOT, CARoot is its directory. Generate is true
+// for a value that the run would generate because the store has none, and
+// false for a value that the run would write and the store does not hold.
+type Refusal struct {
+	Namespace, Secret, Key string
+	CARoot                 string
+	Generate               bool
+}
+
+// NewNoMint returns the state of a no-mint run: the overlay keeps every
+// value in memory and records each write as a Refusal.
+func NewNoMint() *DryRun {
+	return &DryRun{mem: map[string][]byte{}, noMint: true}
+}
+
+// refuse records r. The overlay keeps the value of a recorded write in
+// memory, so a later read of the entry in this process finds it and
+// records nothing.
+func (d *DryRun) refuse(r Refusal) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.refused = append(d.refused, r)
+}
+
+// Refused returns the writes that a no-mint run refused, in the order the
+// run found them. It is empty outside a no-mint run.
+func (d *DryRun) Refused() []Refusal {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.refused)
 }
 
 // DryRunFromEnv returns the dry-run state when env carries
@@ -119,9 +168,21 @@ func (d *DryRun) Save(key string, v []byte) error {
 // an entry renders, and the renders of a dry run run one after the other).
 // A report file that cannot be opened or read is an error: lo must not
 // show an entry as repeatable when it is not. Without a report file (a dry
-// run that lo did not start) it does nothing.
+// run that lo did not start) it does nothing. In a no-mint run it records
+// a CA that the run would create in CAROOT ("caroot <dir>") as a Refusal,
+// and ignores every other line: the overlay records the store writes
+// itself, and a "reuse" line follows a write that it recorded.
 func (d *DryRun) Minted(what string) error {
-	if d == nil || d.report == "" {
+	if d == nil {
+		return nil
+	}
+	if d.noMint {
+		if dir, ok := strings.CutPrefix(what, "caroot "); ok {
+			d.refuse(Refusal{CARoot: dir, Generate: true})
+		}
+		return nil
+	}
+	if d.report == "" {
 		return nil
 	}
 	d.mu.Lock()
@@ -181,6 +242,22 @@ func (o *overlay) runPut(name string, v []byte) error {
 	return o.dr.Save(o.dr.runKey(o.disk.dir, name), v)
 }
 
+// wrote reports a value that the run would write to the entry of key:
+// kind "secret" for a generated value, "update" for a value the store does
+// not hold. A no-mint run records it as a Refusal instead.
+func (o *overlay) wrote(kind, key string) error {
+	if o.dr.noMint {
+		o.dr.refuse(Refusal{
+			Namespace: defaultNamespace(o.disk.namespace),
+			Secret:    o.disk.name,
+			Key:       key,
+			Generate:  kind == "secret",
+		})
+		return nil
+	}
+	return o.dr.Minted(kind + " " + FormatName(o.disk.name, o.disk.namespace, key))
+}
+
 // runRead reads a value from the run store. A hit is a value a render of
 // this run generated or updated, which the store does not hold: a real run
 // reads the value that run writes, with other bytes. The reading render is
@@ -223,7 +300,7 @@ func (o *overlay) Put(key string, value []byte) error {
 	if cur, err := o.Get(key); err == nil && bytes.Equal(cur, value) {
 		return nil
 	}
-	if err := o.dr.Minted("update " + name); err != nil {
+	if err := o.wrote("update", key); err != nil {
 		return err
 	}
 	return o.runPut(name, value)
@@ -245,11 +322,10 @@ func (o *overlay) GetOrCreate(key string, gen func() ([]byte, error)) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	name := FormatName(o.disk.name, o.disk.namespace, key)
-	if err := o.dr.Minted("secret " + name); err != nil {
+	if err := o.wrote("secret", key); err != nil {
 		return nil, err
 	}
-	if err := o.runPut(name, v); err != nil {
+	if err := o.runPut(FormatName(o.disk.name, o.disk.namespace, key), v); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -257,7 +333,8 @@ func (o *overlay) GetOrCreate(key string, gen func() ([]byte, error)) ([]byte, e
 
 // ReadByName reads another Secret's entry (secretRef): the run store first
 // (a value an earlier Secret of this run generated), then the store. A miss
-// is reported too: the dry run cannot predict that value.
+// is reported too: the dry run cannot predict that value. In a no-mint run a
+// miss is the error of a real run: a secretRef never generates a value.
 func (o *overlay) ReadByName(filename string) ([]byte, error) {
 	if _, err := o.disk.checkName(filename); err != nil {
 		return nil, err
@@ -266,7 +343,7 @@ func (o *overlay) ReadByName(filename string) ([]byte, error) {
 		return v, err
 	}
 	v, err := o.disk.ReadByName(filename)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && !o.dr.noMint {
 		if rerr := o.dr.Minted("secretRef " + filename); rerr != nil {
 			return nil, rerr
 		}

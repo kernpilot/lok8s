@@ -38,10 +38,16 @@ type Context struct {
 	// Rand is the source of randomness. Defaults to crypto/rand.Reader.
 	// Tests inject deterministic readers.
 	Rand io.Reader
-	// DryRun marks a read-only render (lo bootstrap --dry-run): Cache is
-	// then the read-only overlay, and a generator writes no file of its
-	// own either (no .sha, no .bash-allow, no CAROOT).
+	// DryRun marks a read-only render (lo bootstrap --dry-run, or a
+	// no-mint run): Cache is then the read-only overlay, and a generator
+	// writes no file of its own either (no .sha, no .bash-allow, no
+	// CAROOT).
 	DryRun bool
+	// NoMint marks a no-mint run (LOK8S_SECRETS_NO_MINT): DryRun is set
+	// too, the overlay records each value that the run would write, and
+	// the run fails with that list. A generator does not run a command
+	// for a value that the store lacks (bash:).
+	NoMint bool
 	// Minted reports material a dry run generated in memory (a CA, an
 	// entry the store lacks), so lo marks the entry non-repeatable. nil
 	// outside a dry run.
