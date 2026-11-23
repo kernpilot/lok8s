@@ -179,11 +179,16 @@ lo::remote_ci() {
     debug "Tilt started on ${remote} (log: /tmp/lok8s-tilt.log)"
   fi
 
-  # Expose if enabled
+  # Expose if enabled. A failed expose does not stop the run here: the
+  # cluster runs, so the kubeconfig and the tunnel still follow. The run
+  # fails at the end, and the summary shows the proxy URL only when the
+  # proxy runs (lo::expose sets LO_EXPOSE_STARTED).
+  local expose_rc=0
+  LO_EXPOSE_STARTED=false
   if [[ "${LOK8S_REMOTE_EXPOSE}" == "true" ]]; then
     lo::read_network_config "${cluster_yaml}"
     lo::read_lb_config "${cluster_yaml}"
-    DOCKER_HOST="ssh://${remote}" lo::expose "${cluster_name}" "${cluster_yaml}"
+    DOCKER_HOST="ssh://${remote}" lo::expose "${cluster_name}" "${cluster_yaml}" || expose_rc=$?
   fi
 
   # Set up kubeconfig + SSH tunnel
@@ -203,11 +208,15 @@ lo::remote_ci() {
   echo "   VM:         ${access_ip}"
   echo "   SSH:        ssh ${remote}"
   echo "   kubectl:    KUBECONFIG=${kubeconfig_path} kubectl get nodes"
-  if [[ "${LOK8S_REMOTE_EXPOSE}" == "true" ]]; then
+  if [[ "${LO_EXPOSE_STARTED}" == "true" ]]; then
     echo "   URL:        https://*.${domain} (via ${access_ip}:443)"
   fi
   if [[ "${LOK8S_REMOTE_TILT}" == "true" ]]; then
     echo "   Tilt log:   ssh ${remote} tail -f /tmp/lok8s-tilt.log"
   fi
   echo "   Sync:       rsync -az ${sync_src} ${remote}:${dest}/"
+  if (( expose_rc != 0 )); then
+    error "remote CI: the cluster runs, but expose failed (its error is above), so the run fails."
+    return 1
+  fi
 }

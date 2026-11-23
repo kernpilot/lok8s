@@ -648,7 +648,7 @@ harness updated.
 |---|---|---|
 | Q1 | `yq -r '.path // "alt"'` semantics: the default fires on a missing key, `null` **and a boolean `false`** (jq's `//`). So `.spec.registries.tls // true` reads `true` for `tls: false`; the run header, `lo env`, the kubehz and driver spec readers all inherit it. A bare `yq -r '.path'` prints the literal word `null` for a missing key. | `internal/cli/specyq.go`, `internal/env`, `internal/kubehz/{jsonx,yamlspec}.go`, `internal/driver/*/yamlspec.go`, `internal/tilt`, `internal/addons` |
 | Q2 | A mirror with no `name:` reads as `"null"`, which passes the name regex; the failure comes later on the URL check. | `internal/driver/lo/configregistry.go` |
-| Q3 | `lo::coredns` and `lo::expose` ran under a caller's `\|\| return 1`, which disables errexit for the whole body: intermediate `kubectl`/`docker` failures do not abort, the status is the last command's. | `internal/driver/lo/services.go`, `expose.go` |
+| Q3 | `lo::coredns` runs under a caller's `\|\| return 1`, which disables errexit for the whole body: intermediate `kubectl` failures do not abort, the status is the last command's. `lo::expose` runs in the same context, but it checks each docker step itself: a failed step fails the command in both implementations, and the error names the step. | `internal/driver/lo/services.go`, `expose.go` |
 | Q4 | `lo secrets` single-match lookups: zero matches also takes the "more than one" branch and prints an empty `Multiple matches found:` list. | `internal/secrets/readops.go` |
 | Q5 | `lo secrets init` against an existing `.sops.yaml` with an empty derivation: `grep -qF ""` matches any non-empty file. | `internal/secrets/ops.go` (`grepQF`) |
 | Q6 | `lo lint` label check: yq emits one count per document and aborts at the first non-map `.metadata.labels`; a multi-document manifest whose first document carries the label never warns, an unparsable file always does. `labels` and `secrets` findings are advisory and never change the verdict. | `internal/lint/lint.go` |
@@ -666,18 +666,19 @@ harness updated.
 
 Defects found while porting. Which implementation still has each one:
 
-- B1 and B2 are in both implementations. The binary reproduces each one,
-  and the Go source carries a `KNOWN DEFECT, PRESERVED ON PURPOSE` comment
-  at the spot. A fix is a user-visible behaviour change that needs its own
-  change and coordination with in-cluster consumers. Fix them in both trees
+- B2 is in both implementations. The binary reproduces it, and the Go
+  source carries a `KNOWN DEFECT, PRESERVED ON PURPOSE` comment at the
+  spot. A fix is a user-visible behaviour change that needs its own change
+  and coordination with in-cluster consumers. Fix it in both trees
   together, and update the parity harness in the same change.
+- B1 is fixed in both implementations. The row stays for its links.
 - B3 and B4 are in the bash implementation only. The binary fixes them (D9,
   D6).
 - B5 is fixed since #269. The row stays for its links.
 
 | # | Defect | Where |
 |---|---|---|
-| B1 | **Remote-expose nginx TLS path mismatch.** The shipped `nginx.conf` references `/tls.cert` (with an E) while the copy lands the file at `/tls.crt`, so the proxy's HTTPS server block cannot find its certificate and the reload fails on TLS. Shipped since the template landed. | `internal/driver/lo/expose.go`, `.lok8s/drivers/lo/utils/expose.sh` |
+| B1 | **Fixed: remote-expose nginx TLS path mismatch.** The shipped `nginx.conf` referenced `/tls.cert` (with an E), but the copy lands the file at `/tls.crt`. Thus the HTTPS server block of the proxy could not find its certificate, and the reload failed on TLS. Now `nginx.conf` reads `/tls.crt`. A test in each implementation compares the `ssl_certificate` and `ssl_certificate_key` paths of `nginx.conf` with the targets of the two copies. | `internal/driver/lo/expose.go`, `.lok8s/drivers/lo/utils/expose.sh`, `.lok8s/drivers/lo/cluster/expose/nginx.conf` |
 | B2 | **Registry ConfigMap port is hardcoded `5000`.** The registries listen on 80/443 (TLS-mode dependent). In-cluster consumers may compensate; correcting it is a coordinated change. | `internal/driver/lo/registries.go` |
 | B3 | **`lo kubehz register` / `join` read `LOK8S_SPEC_FILE` before it is set.** `validate_config` reads a variable only `provision::resolve_spec` sets, and `register` calls it after `validate`, so bash prints a spurious `unbound variable` line and the per-kind validation rules are dead on those two verbs (kind reads as `""`). The binary passes the spec path (D9); the kind rules are exercised through `deploy`, where the bash sets the variable itself. | `hack/parity-kubehz.sh`, `.lok8s/libs/kubehz/` |
 | B4 | **`lo kubehz node … --cluster` guard is dead on dispatch** in bash (D6). | `hack/parity-kubehz.sh` |

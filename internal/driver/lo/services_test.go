@@ -7,6 +7,7 @@ package lo
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 func corednsFixture(t *testing.T, corednsSpec string) (*Driver, *fakeRunner, *config.Paths) {
@@ -147,12 +149,15 @@ func exposeFixture(t *testing.T) (*Driver, *fakeRunner, *config.Paths, string) {
 	d, runner, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
 	testutil.WriteFile(t, cy, "spec:\n  cluster:\n    domain: test.lok8s.dev\n")
-	// The REAL shipped nginx template — the envsubst whitelist + the
-	// /tls.cert defect are properties of this exact file.
+	// The REAL shipped nginx template: the envsubst whitelist and the TLS
+	// paths are properties of this exact file.
 	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"),
 		readFileT(t, filepath.Join(testutil.RepoRoot(t), ".lok8s", "drivers", "lo", "cluster", "expose", "nginx.conf")))
 	t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
 	t.Setenv("LOK8S_LB_POOL", "10.125.50.125-10.125.50.150")
+	// The proxy starts only with its TLS certificate and key.
+	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
+	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
 	return d, runner, p, cy
 }
 
@@ -168,8 +173,8 @@ func TestExposeEnvsubstTwoVarWhitelist(t *testing.T) {
 	}
 
 	var out, errBuf bytes.Buffer
-	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
-		t.Fatal(err)
+	if started, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil || !started {
+		t.Fatalf("expose: started %v, err %v", started, err)
 	}
 	if rendered == "" {
 		t.Fatal("rendered nginx.conf never copied")
@@ -189,33 +194,165 @@ func TestExposeEnvsubstTwoVarWhitelist(t *testing.T) {
 	}
 }
 
-func TestExposeTLSCertDefectPreserved(t *testing.T) {
-	// KNOWN DEFECT preserved: the template references /tls.cert, the copy
-	// lands /tls.crt. This test FAILS if either side is "fixed" in
-	// isolation — the fix is a coordinated change with its own test.
+// The two TLS copies land at the paths that nginx.conf reads: the
+// ssl_certificate and ssl_certificate_key paths of the shipped template are
+// the targets of the docker cp of tls.crt and of tls.key. The test reads
+// both sides, from the template and from the docker argv. bats: "expose:
+// the TLS copies land at the paths that nginx.conf reads"
+// (tests/unit/lo_expose_test.bats).
+func TestExposeTLSCopiesLandAtTheConfPaths(t *testing.T) {
 	d, runner, p, cy := exposeFixture(t)
-	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
-	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
+	certPath := filepath.Join(p.Base, ".secrets", "tls", "tls.crt")
+	keyPath := filepath.Join(p.Base, ".secrets", "tls", "tls.key")
 
 	var out, errBuf bytes.Buffer
-	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
-		t.Fatal(err)
+	if started, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil || !started {
+		t.Fatalf("expose: started %v, err %v", started, err)
 	}
-	copiedCrt := false
-	for _, call := range runner.callsMatching("docker cp") {
-		if strings.HasSuffix(call, "test-dns-proxy:/tls.crt") {
-			copiedCrt = true
+	conf := readFileT(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
+	for _, tc := range []struct{ directive, src string }{
+		{"ssl_certificate", certPath},
+		{"ssl_certificate_key", keyPath},
+	} {
+		m := regexp.MustCompile(`(?m)^\s*`+tc.directive+`\s+(\S+);$`).FindAllStringSubmatch(conf, -1)
+		if len(m) != 1 {
+			t.Fatalf("nginx.conf has %d %s lines, want 1:\n%s", len(m), tc.directive, conf)
 		}
-		if strings.HasSuffix(call, "test-dns-proxy:/tls.cert") {
-			t.Fatal("the copy target was 'fixed' to /tls.cert — that silently changes the proxy's TLS behavior; coordinate with the template")
+		prefix := "docker cp " + tc.src + " test-dns-proxy:"
+		var targets []string
+		for _, call := range runner.calls {
+			if target, ok := strings.CutPrefix(call, prefix); ok {
+				targets = append(targets, target)
+			}
+		}
+		if len(targets) != 1 || targets[0] != m[0][1] {
+			t.Errorf("%s reads %s, but the copies of %s land at %q:\n%s", tc.directive, m[0][1], tc.src, targets, strings.Join(runner.calls, "\n"))
 		}
 	}
-	if !copiedCrt {
-		t.Fatal("tls.crt never copied")
+}
+
+// Each docker step of expose must succeed. A failed step fails expose: the
+// error names the step and the container, once, and the returned error is
+// handled (the caller does not print it again). After the failed step,
+// expose only removes the proxy container, so that no container with a
+// config that is not complete stays. expose does not print "cluster
+// exposed". bats: "expose: a failed docker step fails the command and
+// names the step" (tests/unit/lo_expose_test.bats).
+func TestExposeFailedDockerStepFailsTheCommand(t *testing.T) {
+	for _, tc := range []struct{ name, call, step string }{
+		{"run", "docker run ", "docker run of the proxy container test-dns-proxy"},
+		{"config", " test-dns-proxy:/etc/nginx/nginx.conf", "docker cp of the nginx config to test-dns-proxy:/etc/nginx/nginx.conf"},
+		{"cert", " test-dns-proxy:/tls.crt", "docker cp of the TLS certificate to test-dns-proxy:/tls.crt"},
+		{"key", " test-dns-proxy:/tls.key", "docker cp of the TLS key to test-dns-proxy:/tls.key"},
+		{"reload", "docker exec test-dns-proxy nginx -s reload", "docker exec test-dns-proxy nginx -s reload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, runner, _, cy := exposeFixture(t)
+			failed := 0
+			runner.handler = func(c execx.Cmd) error {
+				if strings.Contains(c.Name+" "+strings.Join(c.Args, " "), tc.call) {
+					failed++
+					return gwExit{code: 3, msg: "exit status 3"}
+				}
+				return nil
+			}
+			var out, errBuf bytes.Buffer
+			started, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf)
+			if failed != 1 {
+				t.Fatalf("the step ran %d times, want 1:\n%s", failed, strings.Join(runner.calls, "\n"))
+			}
+			if err == nil || started {
+				t.Fatalf("expose after a failed docker step: started %v, err %v", started, err)
+			}
+			if !errors.Is(err, ui.ErrHandled) {
+				t.Errorf("the error is not handled, so the caller prints it again: %v", err)
+			}
+			want := "expose: " + tc.step + " failed (exit status 3), so the proxy does not run. " +
+				"Fix the cause in the docker message above, then run the command again."
+			if n := strings.Count(errBuf.String(), want); n != 1 {
+				t.Errorf("stderr has %d lines %q, want 1:\n%s", n, want, errBuf.String())
+			}
+			if strings.Contains(out.String(), "cluster exposed") {
+				t.Errorf("expose printed success after a failed step:\n%s", out.String())
+			}
+			i := slices.IndexFunc(runner.calls, func(c string) bool { return strings.Contains(c, tc.call) })
+			if after := runner.calls[i+1:]; !slices.Equal(after, []string{"docker rm -f test-dns-proxy"}) {
+				t.Errorf("the calls after the failed step are %q, want only the removal of the proxy container", after)
+			}
+		})
 	}
-	tmpl := readFileT(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
-	if !strings.Contains(tmpl, "ssl_certificate /tls.cert;") {
-		t.Fatal("the shipped template no longer says /tls.cert — the preserved defect changed shape; revisit this pin")
+}
+
+// Without the TLS certificate or key, expose does not start the proxy:
+// nginx.conf serves HTTPS only. It removes the proxy of an earlier run,
+// warns once and returns false with no error. It runs no other docker
+// step and does not print "cluster exposed". bats: "expose: without the
+// TLS certificate or key, the proxy does not start".
+func TestExposeWithoutTLSFilesDoesNotStartTheProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove []string
+	}{
+		{"none", []string{"tls.crt", "tls.key"}},
+		{"no key", []string{"tls.key"}},
+		{"no cert", []string{"tls.crt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, runner, p, cy := exposeFixture(t)
+			for _, f := range tc.remove {
+				if err := os.Remove(filepath.Join(p.Base, ".secrets", "tls", f)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out, errBuf bytes.Buffer
+			started, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf)
+			if err != nil || started {
+				t.Fatalf("expose: started %v, err %v, want false and no error", started, err)
+			}
+			if got := runner.callsMatching("docker "); !slices.Equal(got, []string{"docker rm -f test-dns-proxy"}) {
+				t.Errorf("docker calls = %q, want only the removal of the proxy container", got)
+			}
+			want := "expose: no TLS certificate and key at " + filepath.Join(p.Base, ".secrets", "tls", "tls.crt") +
+				" and " + filepath.Join(p.Base, ".secrets", "tls", "tls.key") + ", so the proxy is not started. " +
+				"Add both files, or set spec.remote.expose: false."
+			if n := strings.Count(errBuf.String(), want); n != 1 {
+				t.Errorf("stderr has %d warnings %q, want 1:\n%s", n, want, errBuf.String())
+			}
+			if strings.Contains(out.String(), "cluster exposed") {
+				t.Errorf("expose printed success with no proxy:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// The docker steps of expose run in this order: the removal of the proxy
+// of an earlier run, the run, the copies of the config, the certificate
+// and the key, and the reload. bats: "expose: the docker steps run in
+// order".
+func TestExposeRunsTheStepsInOrder(t *testing.T) {
+	d, runner, p, cy := exposeFixture(t)
+	var out, errBuf bytes.Buffer
+	if started, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil || !started {
+		t.Fatalf("expose: started %v, err %v", started, err)
+	}
+	conf := regexp.MustCompile(`^docker cp \S*lok8s-nginx\.[^ ]*\.conf `)
+	var got []string
+	for _, c := range runner.callsMatching("docker ") {
+		got = append(got, conf.ReplaceAllString(c, "docker cp <conf> "))
+	}
+	want := []string{
+		"docker rm -f test-dns-proxy",
+		"docker run -d --restart=always --name test-dns-proxy --network lok8s -p 80:80 -p 443:443 " + ExposeImage,
+		"docker cp <conf> test-dns-proxy:/etc/nginx/nginx.conf",
+		"docker cp " + filepath.Join(p.Base, ".secrets", "tls", "tls.crt") + " test-dns-proxy:/tls.crt",
+		"docker cp " + filepath.Join(p.Base, ".secrets", "tls", "tls.key") + " test-dns-proxy:/tls.key",
+		"docker exec test-dns-proxy nginx -s reload",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("docker calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if !strings.Contains(out.String(), ":: cluster exposed at https://*.test.lok8s.dev") {
+		t.Errorf("no success line:\n%s", out.String())
 	}
 }
 
@@ -228,8 +365,8 @@ func TestExposeTLSCertDefectPreserved(t *testing.T) {
 func TestExposeRunsThePinnedImage(t *testing.T) {
 	d, runner, _, cy := exposeFixture(t)
 	var out, errBuf bytes.Buffer
-	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
-		t.Fatal(err)
+	if started, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil || !started {
+		t.Fatalf("expose: started %v, err %v", started, err)
 	}
 	const want = "docker run -d --restart=always --name test-dns-proxy --network lok8s -p 80:80 -p 443:443 " +
 		"nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
@@ -282,7 +419,7 @@ func TestExposeMissingTemplateFails(t *testing.T) {
 	d, _, p, cy := exposeFixture(t)
 	os.Remove(filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
 	var out, errBuf bytes.Buffer
-	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err == nil {
+	if _, err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err == nil {
 		t.Fatal("missing template accepted")
 	}
 	if !strings.Contains(errBuf.String(), "expose: nginx template not found") {

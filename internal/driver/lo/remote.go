@@ -253,7 +253,12 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 
 	// Expose if enabled. The config reads are best-effort here like the
 	// bash (suppressed-errexit context): a failed read still proceeds into
-	// expose with whatever env is set.
+	// expose with whatever env is set. A failed expose does not stop the
+	// run here: the cluster runs, so the kubeconfig and the tunnel still
+	// follow. The run fails at the end, and the summary shows the proxy URL
+	// only when the proxy runs.
+	exposed := false
+	var exposeErr error
 	if getenv("LOK8S_REMOTE_EXPOSE") == "true" {
 		_ = readNetworkConfig(clusterYAML, errOut)
 		readLBConfig(clusterYAML)
@@ -261,7 +266,7 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		// prefix on a function — temporary in default bash mode).
 		prev, had := os.LookupEnv("DOCKER_HOST")
 		os.Setenv("DOCKER_HOST", "ssh://"+remote)
-		_ = d.expose(ctx, clusterName, clusterYAML, out, errOut)
+		exposed, exposeErr = d.expose(ctx, clusterName, clusterYAML, out, errOut)
 		if had {
 			os.Setenv("DOCKER_HOST", prev)
 		} else {
@@ -285,13 +290,17 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 	fmt.Fprintf(out, "   VM:         %s\n", accessIP)
 	fmt.Fprintf(out, "   SSH:        ssh %s\n", remote)
 	fmt.Fprintf(out, "   kubectl:    KUBECONFIG=%s kubectl get nodes\n", kubeconfigPath)
-	if getenv("LOK8S_REMOTE_EXPOSE") == "true" {
+	if exposed {
 		fmt.Fprintf(out, "   URL:        https://*.%s (via %s:443)\n", domain, accessIP)
 	}
 	if getenv("LOK8S_REMOTE_TILT") == "true" {
 		fmt.Fprintf(out, "   Tilt log:   ssh %s tail -f /tmp/lok8s-tilt.log\n", remote)
 	}
 	fmt.Fprintf(out, "   Sync:       rsync -az %s %s:%s/\n", syncSrc, remote, dest)
+	if exposeErr != nil {
+		ui.ErrorTo(errOut, "remote CI: the cluster runs, but expose failed (its error is above), so the run fails.")
+		return exposeErr
+	}
 	return nil
 }
 

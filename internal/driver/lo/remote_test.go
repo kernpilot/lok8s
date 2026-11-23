@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/provider/bridge"
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -126,6 +127,109 @@ func TestProvisionRemoteHappyPathSetsDockerHost(t *testing.T) {
 		t.Fatalf("DOCKER_HOST = %q", os.Getenv("DOCKER_HOST"))
 	}
 	t.Cleanup(func() { os.Unsetenv("DOCKER_HOST") })
+}
+
+// remoteCIExposeFixture is a remote CI run with the expose on: the shipped
+// nginx template, and a scp that writes the kubeconfig of the VM, so that
+// the tunnel step runs. dockerHosts records DOCKER_HOST for each docker
+// call.
+func remoteCIExposeFixture(t *testing.T, failDocker string) (*Driver, *fakeRunner, *config.Paths, *[]string) {
+	t.Helper()
+	d, runner, _, p := testDriver(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"),
+		readFileT(t, filepath.Join(testutil.RepoRoot(t), ".lok8s", "drivers", "lo", "cluster", "expose", "nginx.conf")))
+	t.Setenv("LOK8S_REMOTE_IP", "203.0.113.7")
+	t.Setenv("LOK8S_REMOTE_USER", "root")
+	t.Setenv("LOK8S_REMOTE_SYNC_DEST", "/workspace")
+	t.Setenv("LOK8S_REMOTE_SYNC_PATH", ".")
+	t.Setenv("LOK8S_REMOTE_SYNC_EXCLUDE", ".git")
+	t.Setenv("LOK8S_REMOTE_TILT", "false")
+	t.Setenv("LOK8S_REMOTE_EXPOSE", "true")
+	t.Setenv("DOCKER_HOST", "unix:///before.sock")
+	var dockerHosts []string
+	runner.handler = func(c execx.Cmd) error {
+		switch c.Name {
+		case "git":
+			writeOut(c, p.Base+"\n")
+		case "scp":
+			testutil.WriteFile(t, c.Args[len(c.Args)-1],
+				"apiVersion: v1\nclusters:\n- cluster:\n    server: https://10.0.0.1:6443\n  name: vm\n")
+		case "docker":
+			dockerHosts = append(dockerHosts, os.Getenv("DOCKER_HOST"))
+			if len(c.Args) > 0 && c.Args[0] == failDocker {
+				return gwExit{code: 3, msg: "exit status 3"}
+			}
+		}
+		return nil
+	}
+	return d, runner, p, &dockerHosts
+}
+
+// A failed expose does not stop the remote CI run before the kubeconfig
+// fetch and the tunnel: the cluster runs. The run fails at the end, and
+// the summary shows no proxy URL. The expose runs with DOCKER_HOST set to
+// the VM, and DOCKER_HOST is back to its value from before. bats: "remote
+// CI: a failed expose still sets up the kubeconfig, then fails the run"
+// (tests/unit/lo_expose_test.bats).
+func TestRemoteCIFailedExposeFailsTheRun(t *testing.T) {
+	d, runner, p, dockerHosts := remoteCIExposeFixture(t, "run")
+	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
+	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
+
+	var out, errBuf bytes.Buffer
+	if err := d.remoteCI(t.Context(), "test.lok8s.dev", d.clusterYAML("test.lok8s.dev"), &out, &errBuf); err == nil {
+		t.Fatalf("remoteCI succeeded after a failed expose:\n%s", out.String())
+	}
+	if want := "expose: docker run of the proxy container test-lifecycle-proxy failed (exit status 3)"; !strings.Contains(errBuf.String(), want) {
+		t.Errorf("stderr does not name the failed step, want %q:\n%s", want, errBuf.String())
+	}
+	if len(*dockerHosts) == 0 {
+		t.Fatal("expose ran no docker call")
+	}
+	for _, h := range *dockerHosts {
+		if h != "ssh://root@203.0.113.7" {
+			t.Errorf("a docker call of the expose ran with DOCKER_HOST %q, want ssh://root@203.0.113.7", h)
+		}
+	}
+	if got := runner.callsMatching("scp root@203.0.113.7:/workspace/.kubeconfig/test-lifecycle.yaml"); len(got) != 1 {
+		t.Errorf("the kubeconfig fetch ran %d times, want 1:\n%s", len(got), strings.Join(runner.calls, "\n"))
+	}
+	if got := runner.callsMatching("ssh -fN"); len(got) != 1 {
+		t.Errorf("the API tunnel ran %d times, want 1:\n%s", len(got), strings.Join(runner.calls, "\n"))
+	}
+	if !strings.Contains(out.String(), ":: remote CI cluster ready") || strings.Contains(out.String(), "URL:") {
+		t.Errorf("want the summary with no proxy URL:\n%s", out.String())
+	}
+	if want := "remote CI: the cluster runs, but expose failed (its error is above), so the run fails."; !strings.Contains(errBuf.String(), want) {
+		t.Errorf("no final error line %q:\n%s", want, errBuf.String())
+	}
+	if got := os.Getenv("DOCKER_HOST"); got != "unix:///before.sock" {
+		t.Errorf("DOCKER_HOST = %q after the failed expose, want the value from before", got)
+	}
+}
+
+// Without the TLS files, the expose of a remote CI run starts no proxy and
+// the run succeeds, but the summary shows no proxy URL. With the files, it
+// shows the URL. bats: "remote CI: the summary shows the proxy URL only
+// when the proxy runs".
+func TestRemoteCISummaryShowsTheProxyURLOnlyWhenTheProxyRuns(t *testing.T) {
+	for _, tls := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tls=%v", tls), func(t *testing.T) {
+			d, _, p, _ := remoteCIExposeFixture(t, "")
+			if tls {
+				testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
+				testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
+			}
+			var out, errBuf bytes.Buffer
+			if err := d.remoteCI(t.Context(), "test.lok8s.dev", d.clusterYAML("test.lok8s.dev"), &out, &errBuf); err != nil {
+				t.Fatalf("remoteCI: %v\n%s", err, errBuf.String())
+			}
+			if got := strings.Contains(out.String(), "   URL:        https://*.test.lok8s.dev (via 203.0.113.7:443)"); got != tls {
+				t.Errorf("URL line in the summary = %v, want %v:\n%s", got, tls, out.String())
+			}
+		})
+	}
 }
 
 func TestRemoteCICommandLinesAndSummary(t *testing.T) {
