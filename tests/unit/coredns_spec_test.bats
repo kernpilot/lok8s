@@ -113,6 +113,18 @@ YAML
   ! grep -q $'^KUBERC=/user/kuberc\trollout ' "${KUBECTL_PATH_LOG}" || { cat "${KUBECTL_PATH_LOG}"; return 1; }
 }
 
+# The annotate of coredns-external is a write too: it runs with KUBERC=off,
+# as in the Go twin (TestRunOutRunsKubectlWithKubeRCOff in
+# internal/driver/lo).
+@test "coredns: the coredns-external annotate runs with the kubectl user defaults off (KUBERC=off)" {
+  kubectl_path_stub
+  export KUBERC=/user/kuberc
+  run lo::coredns "x.dev"
+  assert_success
+  grep -q $'^KUBERC=off\tannotate svc coredns-external -n kube-system --kubeconfig ' "${KUBECTL_PATH_LOG}" || { cat "${KUBECTL_PATH_LOG}"; return 1; }
+  ! grep -q $'^KUBERC=/user/kuberc\tannotate ' "${KUBECTL_PATH_LOG}" || { cat "${KUBECTL_PATH_LOG}"; return 1; }
+}
+
 @test "coredns: pins coredns-external to the LAST pool IP (avoids gateway pool[0] race)" {
   # lo::coredns reads metadata.name -> kubeconfig path; kubectl is stubbed.
   lo::coredns "x.dev"

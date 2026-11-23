@@ -25,7 +25,8 @@ lo::coredns() {
   local pool
   pool=$(yq -r '.spec.loadBalancer.pool // ""' "${cluster_yaml}")
   if [[ "${pool}" == *-* ]]; then
-    kubectl annotate svc coredns-external -n kube-system --kubeconfig "${kubeconfig}" \
+    # A write: it runs with the kubectl user defaults off (the Go twin).
+    KUBERC=off kubectl annotate svc coredns-external -n kube-system --kubeconfig "${kubeconfig}" \
       "metallb.universe.tf/loadBalancerIPs=${pool##*-}" --overwrite
   fi
 

@@ -230,9 +230,11 @@ hooks::recreate() {
 
   # No Tilt session (or it does not own these objects): fall back to delete +
   # apply, carrying over the live image refs where an object is still running.
+  # The delete runs with the kubectl user defaults off (kapply::apply sets
+  # them off for the apply).
   local applied; applied="$(printf '%s' "${objs}" | hooks::_preserve_images && printf .)"
   applied="${applied%.}"
-  printf '%s' "${objs}" | kubectl delete --ignore-not-found -f - \
+  printf '%s' "${objs}" | KUBERC=off kubectl delete --ignore-not-found -f - \
     && printf '%s' "${applied}" | kapply::apply --label "hook recreate ${selector}"
   debug "hooks: recreated objects matching '${selector}'"
 }
@@ -272,11 +274,12 @@ hooks::restart() {
     warn "hooks restart: no workloads match '${selector}'"; return 0
   fi
   # Rollout-restart each matched Deployment/StatefulSet/DaemonSet by kind/name+ns.
+  # A write: it runs with the kubectl user defaults off.
   local kind name ns n=0
   while IFS=$'\t' read -r kind name ns; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
     debug "rollout restart ${kind}/${name} -n ${ns:-default}"
-    if kubectl -n "${ns:-default}" rollout restart "${kind,,}/${name}" 2>/dev/null; then
+    if KUBERC=off kubectl -n "${ns:-default}" rollout restart "${kind,,}/${name}" 2>/dev/null; then
       n=$(( n + 1 ))
     else
       warn "hooks restart: ${kind}/${name} (-n ${ns:-default}) failed"
