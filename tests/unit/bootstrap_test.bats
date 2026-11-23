@@ -2779,21 +2779,24 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
   done
 }
 
+# PRIVATE_REFUSED: the fixed [warn] line of kapply when it refuses the
+# private file of the scheduler (kapply_test.bats pins it too).
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename). lo does not write the kubectl output to it. If this apply hits an immutable or terminating conflict without --force-recreate, the entry fails and does not wait for the recreate confirmation at the end. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the entry then waits for that confirmation.'
+
 # A TMPDIR that the group of this user can write into, with no sticky bit:
 # kapply refuses the private file of the scheduler. The kubectl output then
 # reaches no file, so the reap cannot see an immutable conflict: the entry
 # fails, and the [warn] line says so. Under LO_SHOW_SENSITIVE_OUTPUT=1 the
-# printed buffer holds the output, and the entry parks again.
+# printed buffer holds the output, and the entry parks.
 @test "bootstrap::apply: a refused private file names the effect, and an immutable conflict fails the entry with no park" {
   write_cluster_spec "testcni"
   unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
-  local refused='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename): lo does not write the kubectl output to it, so the bootstrap cannot park an immutable or terminating conflict of this entry: the entry fails. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the bootstrap parks the conflict again'
   export TMPDIR="${BATS_TEST_TMPDIR}/open"
   mkdir -m 0770 "${TMPDIR}"
   _private_kubectl_stub "Error from server (Invalid): ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\": field is immutable" 1
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_failure
-  assert_output --partial "${refused}"
+  assert_output --partial "${PRIVATE_REFUSED}"
   assert_line '✗ testcni'
   assert_output --partial '[error] bootstrap: testcni has objects blocked by an immutable/terminating conflict'
   refute_output --partial 'will confirm at the end'
@@ -2801,8 +2804,26 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
   refute_output --partial "${CANARY_VALUE}"
   LO_SHOW_SENSITIVE_OUTPUT=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_failure
-  assert_output --partial "${refused}"
+  assert_output --partial "${PRIVATE_REFUSED}"
   assert_output --partial 'will confirm at the end'
+}
+
+# The same refusal on a clean apply: the [warn] line prints, the entry is
+# ok, and nothing parks. The line names the conflict only as a condition,
+# so it says nothing false here.
+@test "bootstrap::apply: a refused private file on a clean apply prints the warn line, and the entry is ok" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
+  export TMPDIR="${BATS_TEST_TMPDIR}/open"
+  mkdir -m 0770 "${TMPDIR}"
+  _private_kubectl_stub "configmap/testcni serverside-applied" 0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "${PRIVATE_REFUSED}"
+  assert_line '✓ testcni'
+  refute_output --partial '[error]'
+  refute_output --partial 'will confirm at the end'
+  refute_output --partial 'needs recreate'
 }
 
 @test "bootstrap::apply: a terminating-namespace 403 in the private output reaches the prompt" {
