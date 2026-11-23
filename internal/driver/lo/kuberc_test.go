@@ -108,12 +108,23 @@ func TestCorednsCustomRenderRunsWithKubeRCOff(t *testing.T) {
       - name: kubehz.dev
         target: gateway
 `)
+	const manifest = "apiVersion: v1\nkind: ConfigMap\n"
 	var renderEnv []string
-	rendered := false
+	rendered, applied := false, "(no apply after the render)"
 	runner.handler = func(c execx.Cmd) error {
-		if c.Name == "kubectl" && strings.Contains(strings.Join(c.Args, " "), "create configmap coredns-custom") {
+		args := strings.Join(c.Args, " ")
+		if c.Name == "kubectl" && strings.Contains(args, "create configmap coredns-custom") {
 			renderEnv, rendered = c.Env, true
-			writeOut(c, "apiVersion: v1\nkind: ConfigMap\n")
+			writeOut(c, manifest)
+			return nil
+		}
+		// The first apply after the render is the apply of its output.
+		if rendered && applied == "(no apply after the render)" && c.Name == "kubectl" && strings.HasPrefix(args, "apply ") && c.Stdin != nil {
+			raw, err := io.ReadAll(c.Stdin)
+			if err != nil {
+				return err
+			}
+			applied = string(raw)
 		}
 		return nil
 	}
@@ -125,6 +136,10 @@ func TestCorednsCustomRenderRunsWithKubeRCOff(t *testing.T) {
 	}
 	if !execx.KubeRCIsOff(renderEnv) {
 		t.Errorf("coredns-custom render Env = %q, want %s as the last KUBERC entry", renderEnv, execx.KubeRCOff)
+	}
+	// The stdout of the render is the stdin of the apply.
+	if applied != manifest {
+		t.Errorf("the apply read %q on stdin, want the render output %q", applied, manifest)
 	}
 }
 
