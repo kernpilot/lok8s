@@ -178,6 +178,19 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
 
+`init` writes `.sops.yaml` only when no file is at that path. A key that is
+not ed25519 gives no age recipient: `init` stops and writes nothing. The
+write takes the lock of `add-key` and `remove-key` (see below), checks again
+that no entry is at the path, and writes a temp file (`..sops.yaml.tmp-*`)
+that a rename puts in place. Thus a run that stops, or a full disk, leaves
+no part of a `.sops.yaml`.
+
+When another run wrote the file while `init`
+waited for the lock, or the path is a symlink to no file or a directory,
+`init` stops and writes nothing. Run `init` again when a file is there: it
+then checks that file. The bash implementation needs `flock` and a `mv`
+that takes `-T` for this write.
+
 Each store has a `.gitignore` that commits only the `.enc` files. lo writes
 its rules as a block between two marker lines:
 
@@ -584,6 +597,8 @@ re-keyed. Commit the `.enc` files together with `.sops.yaml`.
 
 `add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
 `.sops.yaml`, for the whole run, so that two runs do not undo each other.
+`init` holds the same lock from its write of `.sops.yaml` to the end of
+its run.
 When `.sops.yaml` is a symlink, the lock is next to the file at the end of
 its links, so two links to one file use one lock. The command finds that
 file once, at the start: the lock and the edit of `.sops.yaml` (its read

@@ -130,6 +130,13 @@ sec_state clusters/beta.dev/secrets/Secret.app.default.TOKEN
 sec_check secrets set -n app JWT_SECRET s3cr3t
 sec_check secrets set --domain alpha.dev -n app -s myns TOKEN dom-secret
 sec_check secrets encrypt              # no .sops.yaml yet → error
+# An RSA key derives no age recipient (ssh-to-age skips it): both refuse
+# with the same lines and status, and write no .sops.yaml.
+ssh-keygen -t rsa -b 2048 -N '' -C parity -f "${WORK}/home/rsa" -q
+sec_check secrets init --ssh-key "${WORK}/home/rsa.pub"
+for impl in go bash; do
+  [[ ! -e "${WORK}/sec-${impl}/.sops.yaml" ]] || fail "init (${impl}) with an RSA key wrote .sops.yaml"
+done
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"   # idempotent branch
 sec_state .sops.yaml

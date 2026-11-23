@@ -84,6 +84,20 @@ func (c *Context) Init(sshKey string) error {
 		return ErrHandled
 	}
 
+	// The write runs under the lock that add-key and remove-key hold for
+	// .sops.yaml (lock.go), so another init, add-key or remove-key cannot
+	// change the file between the check below and the rename. No regular
+	// file is at the path (the check above), so the lock is beside the path
+	// itself, where add-key takes it for a .sops.yaml that is not a link.
+	unlock, err := c.lockSopsConfig(sopsConfig)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if !c.initConfigFree(sopsConfig) {
+		return ErrHandled
+	}
+
 	content := `# SOPS encryption config for lok8s secret cache files.
 # Recipients are age public keys derived from SSH keys via ssh-to-age.
 # Add team members with: lo secrets add-key <ssh-pubkey-path|age1…>
@@ -91,8 +105,20 @@ creation_rules:
   - path_regex: 'Secret\..*'
     age: '` + agePubkey + `'
 `
-	if err := os.WriteFile(sopsConfig, []byte(content), 0o644); err != nil { // #nosec G306 -- .sops.yaml holds public age recipients only
-		return err
+	// Through a temp file in the same directory and a rename
+	// (writeReplacing): a run that stops, or a full disk, leaves no part of
+	// a config at the path, and the temp file (..sops.yaml.tmp-*) is never
+	// read as the config. The temp file gets mode 0644 before the write:
+	// .sops.yaml holds public age recipients only, and it is committed.
+	if err := writeReplacing(sopsConfig, 0o644, func(w io.Writer) error {
+		return writeInitConfig(w, []byte(content))
+	}); err != nil {
+		var left *tempLeftError
+		if errors.As(err, &left) {
+			ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", c.rel(left.Name))
+		}
+		ui.ErrorTo(c.ErrOut, "cannot write %s: no config was written", sopsConfig)
+		return ErrHandled
 	}
 
 	fmt.Fprintf(c.Out, "Created %s\n", sopsConfig)
@@ -112,6 +138,32 @@ creation_rules:
 		return err
 	}
 	return c.ensureGitignore(dir, stepGitignoreWrite)
+}
+
+// writeInitConfig fills the temp file of the .sops.yaml write of Init with
+// content (a seam: a test makes the write stop part way).
+var writeInitConfig = func(w io.Writer, content []byte) error {
+	_, err := w.Write(content)
+	return err
+}
+
+// initConfigFree reports whether the .sops.yaml path still has no entry,
+// read under the lock and without following a link (bash: the check after
+// secrets::_lock in secrets::init). Another init can have written the file
+// while this run waited for the lock. An entry that is not a regular file (a
+// link that names no file, a directory) is not replaced. Each case prints
+// its refusal.
+func (c *Context) initConfigFree(path string) bool {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return true
+	case err == nil && info.Mode().IsRegular():
+		ui.ErrorTo(c.ErrOut, "another run wrote %s after this run checked it: this run wrote nothing. Run lo secrets init again", path)
+	default:
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written. Remove it, then run lo secrets init again", path)
+	}
+	return false
 }
 
 // grepQF mirrors `grep -qF pattern file` on in-memory content: an empty

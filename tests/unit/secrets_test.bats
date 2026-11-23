@@ -991,15 +991,15 @@ _hard_link_replaced() {
   done
 }
 
-# init asks for a mv that takes -T only when it writes the .gitignore. A
-# first run that writes it refuses before the config, with a line that names
-# that write. A first run with a .gitignore that has the bytes of the plan
-# needs no mv. A rerun with the key in the config writes the .gitignore when
-# the store has none, so it asks for the mv too, and with a current
-# .gitignore it needs none. Here the mv has no -T (secrets::_mv_has_t is a
-# function), and ssh-to-age and sops are functions: no crypto tools. The Go
-# binary needs no mv.
-@test "secrets init: a mv without -T is refused only when init writes the .gitignore" {
+# init needs a mv that takes -T: a first run renames its temp file onto
+# .sops.yaml, so it refuses before its first write (the lock file), with a
+# line that names that write, also with a .gitignore that has the bytes of
+# the plan. A rerun writes no config: with the key in the config it writes
+# the .gitignore when the store has none, so it asks for the mv too, and
+# with a current .gitignore it needs none. Here the mv has no -T
+# (secrets::_mv_has_t is a function), and ssh-to-age and sops are
+# functions: no crypto tools. The Go binary needs no mv.
+@test "secrets init: a mv without -T is refused before the first write, and on a rerun only when it writes the .gitignore" {
   ! command -v gmv >/dev/null 2>&1 || skip "gmv is installed: init renames with it"
   ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
   sops() { :; }
@@ -1007,21 +1007,25 @@ _hard_link_replaced() {
   printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
   export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
   local cfg="${PATH_BASE}/.sops.yaml" ignore="${PATH_SECRETS}/.gitignore"
+  local refusal="[error] this mv has no -T, so the .sops.yaml write cannot rename onto .sops.yaml safely: install GNU coreutils (gmv) or use the lo binary"
 
   run secrets::init
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] this mv has no -T, so the .gitignore write cannot rename onto the .gitignore safely: install GNU coreutils (gmv) or use the lo binary" ] || {
-    echo "$output" >&2; return 1; }
+  [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
   [ ! -e "${cfg}" ] || { echo "init wrote the config" >&2; return 1; }
+  [ ! -e "${cfg}.lock" ] || { echo "init made the lock file" >&2; return 1; }
   [ ! -e "${ignore}" ]
 
   _block > "${ignore}"
   run secrets::init
-  [ "$status" -eq 0 ] || { echo "a current .gitignore: status $status: $output" >&2; return 1; }
-  grep -qF "age: 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'" "${cfg}" || { cat "${cfg}" >&2; return 1; }
-  cmp -s "${ignore}" <(_block) || { cat "${ignore}" >&2; return 1; }
+  [ "$status" -eq 1 ] || { echo "a current .gitignore: status $status: $output" >&2; return 1; }
+  [ "$output" = "${refusal}" ] || { echo "a current .gitignore: $output" >&2; return 1; }
+  [ ! -e "${cfg}" ] || { echo "a current .gitignore: init wrote the config" >&2; return 1; }
+  [ ! -e "${cfg}.lock" ] || { echo "a current .gitignore: init made the lock file" >&2; return 1; }
 
-  rm -f -- "${PATH_SECRETS}/.gitignore"
+  # A rerun: the config lists the key.
+  printf "creation_rules:\n  - path_regex: 'Secret\\\\..*'\n    age: '%s'\n" "$(ssh-to-age)" > "${cfg}"
+  rm -f -- "${ignore}"
   run secrets::init
   [ "$status" -eq 1 ] || { echo "the rerun with no .gitignore: status $status: $output" >&2; return 1; }
   [ "$output" = "[error] this mv has no -T, so the .gitignore write cannot rename onto the .gitignore safely: install GNU coreutils (gmv) or use the lo binary" ] || {
@@ -1033,6 +1037,189 @@ _hard_link_replaced() {
   [ "$status" -eq 0 ] || { echo "the rerun: status $status: $output" >&2; return 1; }
   [ "$output" = "age key already configured in .sops.yaml" ] || { echo "$output" >&2; return 1; }
   cmp -s "${ignore}" <(_block) || { cat "${ignore}" >&2; return 1; }
+}
+
+# _init_config <recipient> prints the .sops.yaml that init writes (Go twin:
+# wantInitConfig).
+_init_config() {
+  builtin printf '%s\n' \
+    '# SOPS encryption config for lok8s secret cache files.' \
+    '# Recipients are age public keys derived from SSH keys via ssh-to-age.' \
+    '# Add team members with: lo secrets add-key <ssh-pubkey-path|age1…>' \
+    'creation_rules:' \
+    "  - path_regex: 'Secret\\..*'" \
+    "    age: '${1}'"
+}
+
+# _init_fakes makes ssh-to-age print the age key of the tests and sops do
+# nothing (no crypto tools), and points LOK8S_SSH_KEY at a public key file.
+_init_fakes() {
+  ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  sops() { :; }
+  printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+}
+
+# A key that derives no age recipient (ssh-to-age skips a key that is not
+# ed25519: it prints a note and exits 0) is refused with the line of the Go
+# twin and status 1, and nothing is written: no .sops.yaml and no lock file
+# (Go twin: TestInitRefusesAKeyThatDerivesNoRecipient). ssh-to-age and sops
+# are functions: no crypto tools.
+@test "secrets init: a key that derives no age recipient is refused, and nothing is written" {
+  ssh-to-age() { echo 'skipped key: got ssh-rsa key type, but only ed25519 keys are supported' >&2; }
+  sops() { :; }
+  printf 'ssh-rsa AAAA test\n' > "${BATS_TEST_TMPDIR}/id_rsa.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id_rsa.pub"
+  local before
+  before="$(_store_state "${PATH_BASE}")"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "skipped key: got ssh-rsa key type, but only ed25519 keys are supported
+[error] no age recipient derived from ${LOK8S_SSH_KEY} (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "init wrote a file" >&2; return 1; }
+}
+
+# The same with the real ssh-to-age and an RSA key of the test. :args is a
+# stub here, so the key goes in LOK8S_SSH_KEY (its default names the
+# developer's private key).
+# bats test_tags=real-sops
+@test "secrets init: a real RSA key derives no age recipient, and nothing is written" {
+  require_tools
+  ssh-keygen -t rsa -b 2048 -N '' -C test -f "${BATS_TEST_TMPDIR}/id_rsa" -q
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id_rsa.pub"
+  local before
+  before="$(_store_state "${PATH_BASE}")"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] no age recipient derived from ${BATS_TEST_TMPDIR}/id_rsa.pub (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "init wrote a file" >&2; return 1; }
+}
+
+# While another run holds the lock of .sops.yaml, init refuses with the line
+# of add-key and remove-key and writes nothing. After the release, init
+# writes the config (Go twin: TestInitRefusesWhileTheLockIsHeld).
+@test "secrets init: while another run holds the lock, init refuses and writes nothing" {
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" fd before
+  exec {fd}>"${cfg}.lock"
+  flock -n "${fd}"
+  before="$(_store_state "${PATH_BASE}")"
+  LO_SECRETS_LOCK_WAIT=0 run secrets::init
+  exec {fd}>&-
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${cfg}.lock is held by another lo secrets init, add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "init wrote a file" >&2; return 1; }
+
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "after the release: status $status: $output" >&2; return 1; }
+  cmp -s "${cfg}" <(_init_config 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7') || { cat "${cfg}" >&2; return 1; }
+}
+
+# Under the lock, init checks the path again without following a link (Go
+# twin: TestInitChecksThePathAgainUnderTheLock). A file that another run
+# wrote while this run waited keeps its bytes: flock is a function here that
+# writes the file, then takes the lock. A link that names no file and a
+# directory are not replaced, and the file that the link names is not
+# made. Each case prints its refusal with status 1, and no temp file stays.
+@test "secrets init: the path is checked again under the lock" {
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" other='# written by another run' kind before
+  flock() { builtin printf '%s\n' "${other}" > "${cfg}"; command flock "$@"; }
+  run secrets::init
+  unset -f flock
+  [ "$status" -eq 1 ] || { echo "another run: status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] another run wrote ${cfg} after this run checked it: this run wrote nothing. Run lo secrets init again" ] || {
+    echo "another run: $output" >&2; return 1; }
+  [ "$(cat "${cfg}")" = "${other}" ] || { echo "the file of the other run changed: $(cat "${cfg}")" >&2; return 1; }
+  [ -z "$(find "${PATH_BASE}" -maxdepth 1 -name '..sops.yaml.tmp-*')" ] || { echo "a temp file stays" >&2; return 1; }
+
+  for kind in link directory; do
+    rm -f -- "${cfg}"
+    if [[ "${kind}" == link ]]; then
+      # The directory of the target exists: a write through the link would
+      # make the file.
+      mkdir -p -- "${PATH_BASE}/elsewhere"
+      ln -s -- "${PATH_BASE}/elsewhere/sops.yaml" "${cfg}"
+    else
+      mkdir -- "${cfg}"
+    fi
+    before="$(_store_state "${PATH_BASE}")"
+    run secrets::init
+    [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${cfg}${_not_regular}nothing was written. Remove it, then run lo secrets init again" ] || {
+      echo "${kind}: $output" >&2; return 1; }
+    [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${kind}: init changed a file" >&2; return 1; }
+    rm -rf -- "${cfg}"
+  done
+}
+
+# A .sops.yaml write that stops part way leaves no part of a config and no
+# temp file, and prints one line that names the file, with status 1.
+# printf is a function here: for the config it writes the first half and a
+# call marker, then fails, as on a full disk. The next init then runs as a
+# first run, not as a rerun: it writes the whole config, mode 0644 (Go twin:
+# TestInitLeavesNoPartOfAConfigOnAPartialWrite).
+@test "secrets init: a config write that stops part way leaves no config and no temp file" {
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" marker="${BATS_TEST_TMPDIR}/printf.ran"
+  printf() {
+    [[ "${*}" == *'creation_rules:'* ]] || { builtin printf "${@}"; return; }
+    builtin printf '%s' "${2:0:${#2}/2}"
+    : >> "${marker}"
+    return 1
+  }
+  run secrets::init
+  unset -f printf
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -e "${marker}" ] || { echo "fixture: the config write did not run" >&2; return 1; }
+  [ "$output" = "[error] cannot write ${cfg}: no config was written" ] || { echo "$output" >&2; return 1; }
+  [[ ! -e "${cfg}" && ! -L "${cfg}" ]] || { echo "an entry is at the path: $(cat "${cfg}")" >&2; return 1; }
+  [ -z "$(find "${PATH_BASE}" -maxdepth 1 -name '..sops.yaml.tmp-*')" ] || { echo "a temp file stays" >&2; return 1; }
+
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "the next init: status $status: $output" >&2; return 1; }
+  [ "${output%%$'\n'*}" = "Created ${cfg}" ] || { echo "the next init: $output" >&2; return 1; }
+  cmp -s "${cfg}" <(_init_config 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7') || { cat "${cfg}" >&2; return 1; }
+  [ "$(stat -c %a -- "${cfg}")" = 644 ] || { echo "mode $(stat -c %a -- "${cfg}")" >&2; return 1; }
+  [ -z "$(find "${PATH_BASE}" -maxdepth 1 -name '..sops.yaml.tmp-*')" ] || { echo "the next init left a temp file" >&2; return 1; }
+}
+
+# A temp file that a stopped run left (..sops.yaml.tmp-*) is not the config:
+# init writes .sops.yaml as a first run does, and the temp file keeps its
+# bytes (Go twin: TestInitDoesNotTakeALeftTempFileForTheConfig).
+@test "secrets init: a temp file that a stopped run left is not the config" {
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" left="${PATH_BASE}/..sops.yaml.tmp-AbC123"
+  local part="# SOPS encryption config for lok8s secret cache files.
+creation_rules:
+  - path_regex: 'Sec"
+  builtin printf '%s' "${part}" > "${left}"
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output%%$'\n'*}" = "Created ${cfg}" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${cfg}" <(_init_config 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7') || { cat "${cfg}" >&2; return 1; }
+  [ "$(cat "${left}")" = "${part}" ] || { echo "the left temp file changed" >&2; return 1; }
+}
+
+# A config write that fails and whose temp file cannot be removed names the
+# temp file, then the file that it did not write (Go twin:
+# TestInitNamesATempFileThatItCannotRemove). chmod and rm fail for a temp
+# file only, so the teardown removes the rest.
+@test "secrets init: a temp file that a failed config write cannot remove is named" {
+  _init_fakes
+  rm() { case "${*: -1}" in *.tmp-*) echo "rm: cannot remove '${*: -1}'" >&2; return 1 ;; esac; command rm "$@"; }
+  chmod() { case "${*: -1}" in *.tmp-*) return 1 ;; esac; command chmod "$@"; }
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE '\[error\] cannot remove the temp file \.\.sops\.yaml\.tmp-[[:alnum:]]{6}: remove it by hand' <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write ${PATH_BASE}/.sops.yaml: no config was written" ] || { echo "$output" >&2; return 1; }
+  [[ "${output}" != *'rm: '* ]] || { echo "the message of rm is printed: $output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote the config" >&2; return 1; }
 }
 
 # A write that fails and whose temp file cannot be removed names the temp
