@@ -8,8 +8,18 @@ LO_DEFAULT_SVC_CIDR="10.96.0.0/12"
 LO_DEFAULT_BOOTSTRAP=(cilium)
 
 # The proxy image of `lo expose`: the stable nginx line on alpine, pinned by
-# tag and digest, never a floating tag. Bump the tag and the digest together.
-# The Go twin is ExposeImage in internal/driver/lo/defaults.go.
+# tag and digest, never a floating tag. The Go twin is ExposeImage in
+# internal/driver/lo/defaults.go. No bot bumps this pin. To bump it:
+#   1. Run `docker buildx imagetools inspect nginx:stable-alpine`. Its
+#      MediaType must be an image index, and its Manifests must list
+#      linux/amd64 and linux/arm64. Its Digest line is the new digest.
+#   2. Find the <version>-alpine<release> tag that has the same digest
+#      (inspect it the same way). That is the new tag.
+#   3. Set the tag and the digest together, in this line, in ExposeImage,
+#      and in the two tests that hold the literal:
+#      TestExposeRunsThePinnedImage (internal/driver/lo/services_test.go)
+#      and tests/unit/lo_expose_test.bats.
+# TestExposeImageMatchesTheBashDefault fails when the twins differ.
 LO_EXPOSE_IMAGE="nginx:1.30.7-alpine3.24@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3"
 
 LO_REGISTRY_IMAGE="registry:2.8.3"
