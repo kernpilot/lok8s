@@ -263,9 +263,9 @@ _gitignore_refused() { # <link|dir>
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
 }
 
-# init returns the status of its .gitignore write (Go twin:
-# TestInitReturnsAGitignoreWriteThatFails). ssh-to-age and sops are
-# functions: no crypto tools.
+# init returns the status of its .gitignore write, and writes no .sops.yaml:
+# the .gitignore comes first (Go twin: TestInitReturnsAGitignoreWriteThatFails).
+# ssh-to-age and sops are functions: no crypto tools.
 @test "secrets init: a .gitignore write that fails gives status 1" {
   [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
   ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
@@ -277,8 +277,9 @@ _gitignore_refused() { # <link|dir>
   run secrets::init
   chmod 755 "${PATH_SECRETS}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "$output" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml before its .gitignore" >&2; return 1; }
 }
 
 # A .gitignore write that stops part way (the payload write ends after half
@@ -1062,22 +1063,29 @@ _init_fakes() {
 
 # A key that derives no age recipient (ssh-to-age skips a key that is not
 # ed25519: it prints a note and exits 0) is refused with the line of the Go
-# twin and status 1, and nothing is written: no .sops.yaml and no lock file
-# (Go twin: TestInitRefusesAKeyThatDerivesNoRecipient). ssh-to-age and sops
-# are functions: no crypto tools.
+# twin and status 1, and nothing is written: no .sops.yaml and no lock file.
+# A rerun (a .sops.yaml is there) refuses the key the same way: grep -qF with
+# an empty pattern matches every config, so a rerun took it for a key that
+# is configured (Go twin: TestInitRefusesAKeyThatDerivesNoRecipient).
+# ssh-to-age and sops are functions: no crypto tools.
 @test "secrets init: a key that derives no age recipient is refused, and nothing is written" {
   ssh-to-age() { echo 'skipped key: got ssh-rsa key type, but only ed25519 keys are supported' >&2; }
   sops() { :; }
   printf 'ssh-rsa AAAA test\n' > "${BATS_TEST_TMPDIR}/id_rsa.pub"
   export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id_rsa.pub"
-  local before
-  before="$(_store_state "${PATH_BASE}")"
-  run secrets::init
-  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "skipped key: got ssh-rsa key type, but only ed25519 keys are supported
+  local before run_kind
+  for run_kind in first rerun; do
+    if [[ "${run_kind}" == rerun ]]; then
+      _init_config 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7' > "${PATH_BASE}/.sops.yaml"
+    fi
+    before="$(_store_state "${PATH_BASE}")"
+    run secrets::init
+    [ "$status" -eq 1 ] || { echo "${run_kind}: status $status: $output" >&2; return 1; }
+    [ "$output" = "skipped key: got ssh-rsa key type, but only ed25519 keys are supported
 [error] no age recipient derived from ${LOK8S_SSH_KEY} (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
-    echo "$output" >&2; return 1; }
-  [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "init wrote a file" >&2; return 1; }
+      echo "${run_kind}: $output" >&2; return 1; }
+    [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${run_kind}: init wrote a file" >&2; return 1; }
+  done
 }
 
 # The same with the real ssh-to-age and an RSA key of the test. :args is a
@@ -1119,13 +1127,14 @@ _init_fakes() {
   cmp -s "${cfg}" <(_init_config 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7') || { cat "${cfg}" >&2; return 1; }
 }
 
-# Under the lock, init checks the path again without following a link (Go
-# twin: TestInitChecksThePathAgainUnderTheLock). A file that another run
-# wrote while this run waited keeps its bytes: flock is a function here that
-# writes the file, then takes the lock. A link that names no file and a
-# directory are not replaced, and the file that the link names is not
+# init checks the path without following a link, before the lock and again
+# under it (Go twin: TestInitChecksThePathBeforeAndUnderTheLock). A file that
+# another run wrote while this run waited keeps its bytes: flock is a
+# function here that writes the file, then takes the lock. A link that names
+# no file and a directory are refused before the lock: they are not
+# replaced, the file that the link names is not made, and no lock file is
 # made. Each case prints its refusal with status 1, and no temp file stays.
-@test "secrets init: the path is checked again under the lock" {
+@test "secrets init: the path is checked before the lock and again under it" {
   command -v flock >/dev/null 2>&1 || skip "flock not installed"
   _init_fakes
   local cfg="${PATH_BASE}/.sops.yaml" other='# written by another run' kind before
@@ -1138,6 +1147,8 @@ _init_fakes() {
   [ "$(cat "${cfg}")" = "${other}" ] || { echo "the file of the other run changed: $(cat "${cfg}")" >&2; return 1; }
   [ -z "$(find "${PATH_BASE}" -maxdepth 1 -name '..sops.yaml.tmp-*')" ] || { echo "a temp file stays" >&2; return 1; }
 
+  # The first case took the lock and made the lock file.
+  rm -f -- "${cfg}.lock"
   for kind in link directory; do
     rm -f -- "${cfg}"
     if [[ "${kind}" == link ]]; then
@@ -1153,6 +1164,7 @@ _init_fakes() {
     [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
     [ "$output" = "[error] ${cfg}${_not_regular}nothing was written. Remove it, then run lo secrets init again" ] || {
       echo "${kind}: $output" >&2; return 1; }
+    [ ! -e "${cfg}.lock" ] || { echo "${kind}: the refusal made the lock file" >&2; return 1; }
     [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${kind}: init changed a file" >&2; return 1; }
     rm -rf -- "${cfg}"
   done
@@ -1212,6 +1224,9 @@ creation_rules:
 # file only, so the teardown removes the rest.
 @test "secrets init: a temp file that a failed config write cannot remove is named" {
   _init_fakes
+  # A current .gitignore: init does not write it, so the functions below
+  # touch the temp file of the config only.
+  _block > "${PATH_SECRETS}/.gitignore"
   rm() { case "${*: -1}" in *.tmp-*) echo "rm: cannot remove '${*: -1}'" >&2; return 1 ;; esac; command rm "$@"; }
   chmod() { case "${*: -1}" in *.tmp-*) return 1 ;; esac; command chmod "$@"; }
   run secrets::init
@@ -1220,6 +1235,87 @@ creation_rules:
   [ "${output##*$'\n'}" = "[error] cannot write ${PATH_BASE}/.sops.yaml: no config was written" ] || { echo "$output" >&2; return 1; }
   [[ "${output}" != *'rm: '* ]] || { echo "the message of rm is printed: $output" >&2; return 1; }
   [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote the config" >&2; return 1; }
+}
+
+# init makes the store and its .gitignore before .sops.yaml (Go twin:
+# TestInitLeavesNoConfigWhenAStoreStepFails). A store step that fails leaves
+# no .sops.yaml and no temp file, so the next init runs as a first run and
+# writes the config. printf is a function here that fails for the block of
+# the .gitignore; mkdir is one that fails for the store of the domain.
+@test "secrets init: a store step that fails leaves no config" {
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" want_cfg
+  want_cfg="$(_init_config 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7')"
+  printf() { [[ "${*}" != *'!Secret.*.enc'* ]] || return 1; builtin printf "${@}"; }
+  run secrets::init
+  unset -f printf
+  [ "$status" -eq 1 ] || { echo "the .gitignore: status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "the .gitignore: $output" >&2; return 1; }
+  [[ ! -e "${cfg}" && ! -L "${cfg}" ]] || { echo "the .gitignore: init wrote .sops.yaml" >&2; return 1; }
+  [ -z "$(find "${PATH_BASE}" -maxdepth 1 -name '..sops.yaml.tmp-*')" ] || { echo "a temp file stays" >&2; return 1; }
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "the next init: status $status: $output" >&2; return 1; }
+  [ "$(cat "${cfg}")" = "${want_cfg}" ] || { cat "${cfg}" >&2; return 1; }
+
+  rm -f -- "${cfg}"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  command mkdir -p -- "${PATH_CLUSTERS}/alpha.dev"
+  domain=alpha.dev
+  mkdir() {
+    [[ "${*: -1}" != */alpha.dev/secrets ]] || { echo "mkdir: cannot create directory '${*: -1}': Permission denied" >&2; return 1; }
+    command mkdir "$@"
+  }
+  run secrets::init
+  unset -f mkdir
+  [ "$status" -eq 1 ] || { echo "the store: status $status: $output" >&2; return 1; }
+  [[ "$output" != *Created* ]] || { echo "the store: $output" >&2; return 1; }
+  [[ ! -e "${cfg}" && ! -L "${cfg}" ]] || { echo "the store: init wrote .sops.yaml" >&2; return 1; }
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "the next init with the store: status $status: $output" >&2; return 1; }
+  [ "$(cat "${cfg}")" = "${want_cfg}" ] || { cat "${cfg}" >&2; return 1; }
+  cmp -s "${PATH_CLUSTERS}/alpha.dev/secrets/.gitignore" <(_block) || { echo "the store has no .gitignore" >&2; return 1; }
+}
+
+# init holds the lock of .sops.yaml during the write of the temp file and
+# after the rename (Go twin: TestInitHoldsTheLockAcrossTheRename). printf is
+# a function here that tests the lock before it writes the config, and the
+# rename is wrapped: after each rename (the .gitignore, then the config), a
+# flock -n on the lock file must fail. After the run, the lock is free.
+@test "secrets init: holds the lock across the rename" {
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" marker="${BATS_TEST_TMPDIR}/lock.probe"
+  _probe() {
+    if command flock -n "${cfg}.lock" true; then echo "${1}: free"; else echo "${1}: held"; fi >> "${marker}"
+  }
+  printf() {
+    [[ "${*}" != *'creation_rules:'* ]] || _probe write
+    builtin printf "${@}"
+  }
+  eval "_real_rename_onto() $(declare -f secrets::_rename_onto | tail -n +2)"
+  secrets::_rename_onto() { _real_rename_onto "$@" || return; _probe "rename ${3##*/}"; }
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${marker}")" = "rename .gitignore: held
+write: held
+rename .sops.yaml: held" ] || { cat "${marker}" >&2; return 1; }
+  command flock -n "${cfg}.lock" true || { echo "the lock is held after the run" >&2; return 1; }
+}
+
+# The mode of .sops.yaml is 644 under each umask: the temp file gets the mode
+# with a chmod, which the umask does not change (Go twin:
+# TestInitConfigModeIsTheSameUnderEachUmask).
+@test "secrets init: the config mode is 644 under each umask" {
+  _init_fakes
+  local cfg="${PATH_BASE}/.sops.yaml" mask
+  for mask in 077 000; do
+    rm -f -- "${cfg}"
+    umask "${mask}"
+    run secrets::init
+    umask 022
+    [ "$status" -eq 0 ] || { echo "umask ${mask}: status $status: $output" >&2; return 1; }
+    [ "$(stat -c %a -- "${cfg}")" = 644 ] || { echo "umask ${mask}: mode $(stat -c %a -- "${cfg}")" >&2; return 1; }
+  done
 }
 
 # A write that fails and whose temp file cannot be removed names the temp

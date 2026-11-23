@@ -2,14 +2,16 @@ package secrets
 
 // init_write_test.go: the .sops.yaml write of Init (bash: the init tests of
 // tests/unit/secrets_test.bats). Init refuses a key that derives no age
-// recipient before any write, takes the lock of .sops.yaml, checks the path
-// again under the lock, and writes the file through a temp file and a
-// rename.
+// recipient before any other step, checks the path, takes the lock of
+// .sops.yaml, checks the path again under the lock, makes the store and its
+// .gitignore, and writes the file through a temp file and a rename.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -65,27 +67,37 @@ func wantInitConfig(t *testing.T, pub string) string {
 		"creation_rules:\n  - path_regex: 'Secret\\..*'\n    age: '" + agePubkey + "'\n"
 }
 
-// An RSA key derives no recipient. Init prints the skip note
-// of ssh-to-age and the refusal, and writes nothing: no .sops.yaml, no lock
-// file and no store (bash: the same lines and status 1).
+// An RSA key derives no recipient. Init prints the skip note of ssh-to-age
+// and the refusal, and writes nothing: no .sops.yaml, no lock file and no
+// store. A rerun (a .sops.yaml is there) refuses the key the same way: the
+// empty recipient is in every config, so a rerun took it for a key that is
+// configured (bash: the same lines and status 1).
 func TestInitRefusesAKeyThatDerivesNoRecipient(t *testing.T) {
-	c, out, errOut := testEnv(t)
-	pub := testRSAPublicKey(t)
-	_, note, err := deriveAgePublicKey(pub)
-	if !errors.Is(err, errUnsupportedKey) || note == "" {
-		t.Fatalf("fixture: want a key that derives nothing, with a skip note, got %v %q", err, note)
-	}
-	before := fileStates(t, c.Paths.Base)
+	for _, rerun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rerun=%v", rerun), func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			pub := testRSAPublicKey(t)
+			_, note, err := deriveAgePublicKey(pub)
+			if !errors.Is(err, errUnsupportedKey) || note == "" {
+				t.Fatalf("fixture: want a key that derives nothing, with a skip note, got %v %q", err, note)
+			}
+			if rerun {
+				_, ed := testSSHKeypair(t, t.TempDir())
+				write(t, c.sopsConfigPath(), wantInitConfig(t, ed))
+			}
+			before := fileStates(t, c.Paths.Base)
 
-	if err := c.Init(pub); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
+			if err := c.Init(pub); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\nstdout %q", err, out.String())
+			}
+			want := note + "\n[error] no age recipient derived from " + pub +
+				" (ed25519 SSH keys only) — nothing written to " + c.sopsConfigPath() + "\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, c.Paths.Base))
+		})
 	}
-	want := note + "\n[error] no age recipient derived from " + pub +
-		" (ed25519 SSH keys only) — nothing written to " + c.sopsConfigPath() + "\n"
-	if errOut.String() != want || out.String() != "" {
-		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
-	}
-	sameStates(t, before, fileStates(t, c.Paths.Base))
 }
 
 // While another run holds the lock of .sops.yaml, init refuses with the line
@@ -128,12 +140,14 @@ func TestInitRefusesWhileTheLockIsHeld(t *testing.T) {
 	}
 }
 
-// Under the lock, init checks the path again without following a link
-// (initConfigFree). A file that another run wrote while this run waited
-// keeps its bytes. A link that names no file and a directory are not
-// replaced, and the file that the link names is not made. Each case prints
-// its refusal, and no temp file stays (bash: the same lines and status 1).
-func TestInitChecksThePathAgainUnderTheLock(t *testing.T) {
+// Init checks the path without following a link (initConfigFree), before
+// the lock and again under it. A file that another run wrote while this run
+// waited for the lock keeps its bytes. A link that names no file and a
+// directory are refused before the lock: they are not replaced, the file
+// that the link names is not made, and no lock file is made. Each case
+// prints its refusal, and no temp file stays (bash: the same lines and
+// status 1).
+func TestInitChecksThePathBeforeAndUnderTheLock(t *testing.T) {
 	notRegular := " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was written. Remove it, then run lo secrets init again\n"
 
 	t.Run("another run wrote it", func(t *testing.T) {
@@ -182,8 +196,6 @@ func TestInitChecksThePathAgainUnderTheLock(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// The lock file exists, so the open of the run adds no entry.
-			write(t, cfg+".lock", "")
 			before := fileStates(t, c.Paths.Base)
 
 			if err := c.Init(pub); !errors.Is(err, ErrHandled) {
@@ -192,6 +204,9 @@ func TestInitChecksThePathAgainUnderTheLock(t *testing.T) {
 			want := "[error] " + cfg + notRegular
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			if _, err := os.Lstat(cfg + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the refusal made the lock file: %v", err)
 			}
 			sameStates(t, before, fileStates(t, c.Paths.Base))
 		})
@@ -315,4 +330,171 @@ func TestInitNamesATempFileThatItCannotRemove(t *testing.T) {
 	if errOut.String() != want || out.String() != "" {
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 	}
+}
+
+// heldElsewhere reports whether another open file description holds the
+// flock of path: a flock with LOCK_NB on a new descriptor fails with
+// EWOULDBLOCK. A lock that it gets is released at once.
+func heldElsewhere(t *testing.T, path string) bool {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false
+	}
+	if !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatal(err)
+	}
+	return true
+}
+
+// probeWriter passes each write to w, and calls probe with it first.
+type probeWriter struct {
+	w     io.Writer
+	probe func(p []byte)
+}
+
+func (p probeWriter) Write(b []byte) (int, error) {
+	p.probe(b)
+	return p.w.Write(b)
+}
+
+// Init holds the lock of .sops.yaml during the write of the temp file and
+// after the rename: a flock with LOCK_NB on the lock file fails in the
+// writeInitConfig seam and when Init prints "Created", which is after the
+// rename (bash: the same test with a printf and a rename wrapper).
+func TestInitHoldsTheLockAcrossTheRename(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	_, pub := testSSHKeypair(t, t.TempDir())
+	cfg := c.sopsConfigPath()
+	orig := writeInitConfig
+	t.Cleanup(func() { writeInitConfig = orig })
+	var inWrite, afterRename []bool
+	writeInitConfig = func(w io.Writer, content []byte) error {
+		inWrite = append(inWrite, heldElsewhere(t, cfg+".lock"))
+		return orig(w, content)
+	}
+	c.Out = probeWriter{w: out, probe: func(b []byte) {
+		if bytes.HasPrefix(b, []byte("Created ")) {
+			if _, err := os.Lstat(cfg); err != nil {
+				t.Errorf("Init printed Created before the rename: %v", err)
+			}
+			afterRename = append(afterRename, heldElsewhere(t, cfg+".lock"))
+		}
+	}}
+
+	if err := c.Init(pub); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if fmt.Sprint(inWrite) != "[true]" || fmt.Sprint(afterRename) != "[true]" {
+		t.Errorf("the lock was held: in the write %v, after the rename %v; want [true] each", inWrite, afterRename)
+	}
+	if heldElsewhere(t, cfg+".lock") {
+		t.Error("the lock is still held after Init returned")
+	}
+}
+
+// The mode of .sops.yaml is 0644 under each umask: the temp file gets the
+// mode with a chmod, which the umask does not change. Not parallel: the
+// umask is of the process.
+func TestInitConfigModeIsTheSameUnderEachUmask(t *testing.T) {
+	for _, mask := range []int{0o077, 0o000} {
+		t.Run(fmt.Sprintf("umask %03o", mask), func(t *testing.T) {
+			old := syscall.Umask(mask)
+			t.Cleanup(func() { syscall.Umask(old) })
+			c, _, errOut := testEnv(t)
+			_, pub := testSSHKeypair(t, t.TempDir())
+			if err := c.Init(pub); err != nil {
+				t.Fatalf("%v\n%s", err, errOut.String())
+			}
+			info, err := os.Lstat(c.sopsConfigPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode() != 0o644 {
+				t.Errorf(".sops.yaml mode %v under umask %03o, want -rw-r--r--", info.Mode(), mask)
+			}
+		})
+	}
+}
+
+// Init makes the store and its .gitignore before .sops.yaml. A store step
+// that fails leaves no .sops.yaml and no temp file, so the next init runs as
+// a first run and writes the config (bash: the same cases).
+func TestInitLeavesNoConfigWhenAStoreStepFails(t *testing.T) {
+	t.Run("the .gitignore write", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		_, pub := testSSHKeypair(t, t.TempDir())
+		cfg := c.sopsConfigPath()
+		orig := writeGitignore
+		t.Cleanup(func() { writeGitignore = orig })
+		writeGitignore = func(io.Writer, []byte) error { return errors.New("no space left on device") }
+
+		if err := c.Init(pub); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		want := "[error] cannot write .secrets/.gitignore: it was not changed\n"
+		if errOut.String() != want || out.String() != "" {
+			t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+		}
+		if _, err := os.Lstat(cfg); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("an entry is at %s after the failed .gitignore write: %v", cfg, err)
+		}
+		if left := initConfigTemps(t, c.Paths.Base); len(left) != 0 {
+			t.Errorf("temp files stay: %q", left)
+		}
+
+		writeGitignore = orig
+		out.Reset()
+		errOut.Reset()
+		if err := c.Init(pub); err != nil {
+			t.Fatalf("the next init: %v\n%s", err, errOut.String())
+		}
+		if got := readFile(t, cfg); got != wantInitConfig(t, pub) {
+			t.Errorf("the next init: .sops.yaml %q", got)
+		}
+	})
+
+	t.Run("the store directory", func(t *testing.T) {
+		skipUnlessPermissionsHold(t)
+		c, out, errOut := testEnv(t)
+		_, pub := testSSHKeypair(t, t.TempDir())
+		cfg := c.sopsConfigPath()
+		c.Domain = "alpha.dev"
+		domainDir := mkdir(t, c.Paths.Clusters+"/alpha.dev")
+		if err := os.Chmod(domainDir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(domainDir, 0o755) })
+
+		if err := c.Init(pub); err == nil {
+			t.Fatalf("want the error of the store step, got nil\nstdout %q", out.String())
+		}
+		if out.String() != "" {
+			t.Errorf("stdout %q", out.String())
+		}
+		if _, err := os.Lstat(cfg); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("an entry is at %s after the failed store step: %v", cfg, err)
+		}
+
+		if err := os.Chmod(domainDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		errOut.Reset()
+		if err := c.Init(pub); err != nil {
+			t.Fatalf("the next init: %v\n%s", err, errOut.String())
+		}
+		if got := readFile(t, cfg); got != wantInitConfig(t, pub) {
+			t.Errorf("the next init: .sops.yaml %q", got)
+		}
+		if got := readFile(t, domainDir+"/secrets/.gitignore"); got != litBlock {
+			t.Errorf("the next init: the .gitignore of the store %q", got)
+		}
+	})
 }

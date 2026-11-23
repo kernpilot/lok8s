@@ -133,13 +133,29 @@ sec_check secrets encrypt              # no .sops.yaml yet → error
 # An RSA key derives no age recipient (ssh-to-age skips it): both refuse
 # with the same lines and status, and write no .sops.yaml.
 ssh-keygen -t rsa -b 2048 -N '' -C parity -f "${WORK}/home/rsa" -q
+# sec_refused_no_recipient <case>: after sec_check of an init with the RSA
+# key, each side exited 1 and its last line of stderr is the refusal.
+sec_refused_no_recipient() {
+  local want="[error] no age recipient derived from WORK/home/rsa.pub (ed25519 SSH keys only) — nothing written to PROJ/.sops.yaml"
+  (( go_rc == 1 && bash_rc == 1 )) || fail "init with an RSA key (${1}): rc go=${go_rc} bash=${bash_rc}, want 1"
+  [[ "$(tail -n 1 "${WORK}/go.err")" == "${want}" && "$(tail -n 1 "${WORK}/bash.err")" == "${want}" ]] \
+    || fail "init with an RSA key (${1}): the last line of stderr is not the refusal"
+}
 sec_check secrets init --ssh-key "${WORK}/home/rsa.pub"
+sec_refused_no_recipient "a first run"
 for impl in go bash; do
   [[ ! -e "${WORK}/sec-${impl}/.sops.yaml" ]] || fail "init (${impl}) with an RSA key wrote .sops.yaml"
 done
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"   # idempotent branch
 sec_state .sops.yaml
+# A rerun with the RSA key is refused too, and .sops.yaml keeps its bytes.
+for impl in go bash; do cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.init"; done
+sec_check secrets init --ssh-key "${WORK}/home/rsa.pub"
+sec_refused_no_recipient "a rerun"
+for impl in go bash; do
+  cmp -s "${WORK}/sops-${impl}.init" "${WORK}/sec-${impl}/.sops.yaml" || fail "init (${impl}) with an RSA key changed .sops.yaml on a rerun"
+done
 sec_check secrets set -n app -e ENC1 enc-value            # set + single-file encrypt
 # The key ENC makes the plaintext Secret.app.default.ENC, a name that ends in
 # .enc in another letter case. The rule !Secret.*.enc can let git commit it,

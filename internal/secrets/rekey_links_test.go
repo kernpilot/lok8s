@@ -787,11 +787,12 @@ func TestEnsureGitignoreReportsAWriteThatFails(t *testing.T) {
 	}
 }
 
-// Init returns the refusal of its .gitignore write (bash:
+// Init returns the refusal of its .gitignore write, and writes no
+// .sops.yaml: the .gitignore comes first (bash:
 // tests/unit/secrets_test.bats).
 func TestInitReturnsAGitignoreWriteThatFails(t *testing.T) {
 	skipUnlessPermissionsHold(t)
-	c, _, errOut := testEnv(t)
+	c, out, errOut := testEnv(t)
 	_, pubPath := testSSHKeypair(t, c.Paths.Base)
 	dir := mkdir(t, c.Paths.Base+"/.secrets")
 	write(t, dir+"/.gitignore", "# old\n")
@@ -802,8 +803,11 @@ func TestInitReturnsAGitignoreWriteThatFails(t *testing.T) {
 	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 	}
-	if errOut.String() != "[error] cannot write .secrets/.gitignore: it was not changed\n" {
-		t.Errorf("stderr:\n%s", errOut.String())
+	if errOut.String() != "[error] cannot write .secrets/.gitignore: it was not changed\n" || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%s", out.String(), errOut.String())
+	}
+	if _, err := os.Lstat(c.sopsConfigPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("init wrote .sops.yaml before its .gitignore: %v", err)
 	}
 }
 

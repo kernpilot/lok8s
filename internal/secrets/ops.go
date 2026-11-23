@@ -50,7 +50,16 @@ func (c *Context) Init(sshKey string) error {
 
 	sopsConfig := c.sopsConfigPath()
 
-	// Before the first write (the config), and on a rerun with a config
+	// A non-ed25519 key derives NOTHING (the skip note above). Init refuses
+	// it before any other step, on a rerun too: the empty recipient is in
+	// every config (grepQF), so a rerun took it for a key that is
+	// configured. A config with `age: ''` is one that no encrypt can use.
+	if !agePubkeyRe.MatchString(agePubkey) {
+		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
+		return ErrHandled
+	}
+
+	// Before the first write (the lock file), and on a rerun with a config
 	// too: the .gitignore of the store that init writes (gitignoreOK).
 	if !c.gitignoreOK(c.initStorePath(), stepFirstWrite) {
 		return ErrHandled
@@ -77,18 +86,19 @@ func (c *Context) Init(sshKey string) error {
 		return nil
 	}
 
-	// A non-ed25519 key derives NOTHING (the skip note above); bash still
-	// wrote `age: ''` and exited 0, leaving a .sops.yaml no encrypt can use.
-	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
+	// No regular file is at the path. An entry of another kind (a link that
+	// names no file, a directory) is refused here, before the lock file is
+	// made, and again under the lock.
+	if !c.initConfigFree(sopsConfig) {
 		return ErrHandled
 	}
 
-	// The write runs under the lock that add-key and remove-key hold for
+	// The writes run under the lock that add-key and remove-key hold for
 	// .sops.yaml (lock.go), so another init, add-key or remove-key cannot
 	// change the file between the check below and the rename. No regular
 	// file is at the path (the check above), so the lock is beside the path
 	// itself, where add-key takes it for a .sops.yaml that is not a link.
+	// The lock is held until Init returns, after the rename.
 	unlock, err := c.lockSopsConfig(sopsConfig)
 	if err != nil {
 		return err
@@ -96,6 +106,25 @@ func (c *Context) Init(sshKey string) error {
 	defer unlock()
 	if !c.initConfigFree(sopsConfig) {
 		return ErrHandled
+	}
+
+	// The store and its .gitignore come before the config: a .sops.yaml is
+	// what makes a rerun, and a rerun does not make the store. So a store
+	// step that fails leaves no .sops.yaml, and the next init runs as a
+	// first run. The .gitignore blocks everything except the SOPS-encrypted
+	// .enc files.
+	if err := c.ensureStore(); err != nil {
+		return err
+	}
+	dir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
+	if err := c.makeStore(dir); err != nil {
+		return err
+	}
+	if err := c.ensureGitignore(dir, stepGitignoreWrite); err != nil {
+		return err
 	}
 
 	content := `# SOPS encryption config for lok8s secret cache files.
@@ -124,20 +153,7 @@ creation_rules:
 	fmt.Fprintf(c.Out, "Created %s\n", sopsConfig)
 	fmt.Fprintf(c.Out, "Age public key: %s\n", agePubkey)
 	fmt.Fprintf(c.Out, "Derived from: %s\n", sshKey)
-
-	// Ensure secrets directory exists with a .gitignore that blocks
-	// everything except SOPS-encrypted .enc files.
-	if err := c.ensureStore(); err != nil {
-		return err
-	}
-	dir, err := c.ResolveStore()
-	if err != nil {
-		return err
-	}
-	if err := c.makeStore(dir); err != nil {
-		return err
-	}
-	return c.ensureGitignore(dir, stepGitignoreWrite)
+	return nil
 }
 
 // writeInitConfig fills the temp file of the .sops.yaml write of Init with
@@ -148,11 +164,12 @@ var writeInitConfig = func(w io.Writer, content []byte) error {
 }
 
 // initConfigFree reports whether the .sops.yaml path still has no entry,
-// read under the lock and without following a link (bash: the check after
-// secrets::_lock in secrets::init). Another init can have written the file
-// while this run waited for the lock. An entry that is not a regular file (a
-// link that names no file, a directory) is not replaced. Each case prints
-// its refusal.
+// read without following a link (bash: the checks before and after
+// secrets::_lock in secrets::init). Init runs it before the lock, so a
+// refusal makes no lock file, and again under the lock: another init can
+// have written the file while this run waited for the lock. An entry that is
+// not a regular file (a link that names no file, a directory) is not
+// replaced. Each case prints its refusal.
 func (c *Context) initConfigFree(path string) bool {
 	info, err := os.Lstat(path)
 	switch {
@@ -167,8 +184,9 @@ func (c *Context) initConfigFree(path string) bool {
 }
 
 // grepQF mirrors `grep -qF pattern file` on in-memory content: an empty
-// pattern matches any content with at least one line (which is how bash
-// init's empty-derivation quirk behaves against an existing .sops.yaml).
+// pattern matches any content with at least one line. Init refuses an empty
+// recipient before its rerun branch, so the empty pattern does not get here
+// from Init.
 func grepQF(content, pattern string) bool {
 	if pattern == "" {
 		return len(content) > 0
