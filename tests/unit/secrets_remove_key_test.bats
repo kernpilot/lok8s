@@ -16,7 +16,7 @@
 # runs the real sops carries the tag real-sops: the argsh container of CI has
 # no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
 # the step. That step also checks the TAP plan of every tagged test under
-# tests/unit (1..19): a test that gets or loses the tag changes that number
+# tests/unit (1..20): a test that gets or loses the tag changes that number
 # in .github/workflows/ci.yml and TESTING.md. No test prints a private key.
 
 setup() {
@@ -1095,7 +1095,7 @@ _rm_path() {
   cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
   DOMAIN=a.dev run _rm_path "${bin}" "${RCPT_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] flock not found: nothing was changed. add-key and remove-key do not run without the lock of .sops.yaml
+  [ "$output" = "[error] flock not found: nothing was changed. init, add-key and remove-key do not run without the lock of .sops.yaml
 [error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
   cmp -s "${CFG}" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc changed" >&2; return 1; }
@@ -1752,7 +1752,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
   exec {fd}>&-
   [ "$status" -eq 1 ]
-  [ "$output" = "[error] ${CFG}.lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
+  [ "$output" = "[error] ${CFG}.lock is held by another lo secrets init, add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${CFG}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]
@@ -1805,7 +1805,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
   exec {lockfd}>&-
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
+  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets init, add-key or remove-key: nothing was changed. When that run ends, run this command again" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${conf}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]

@@ -197,7 +197,7 @@ _add() { # <key> [all] [skip_orphans]
   _add_path() { local PATH="${1}"; shift; _add "${@}"; }
   DOMAIN=a.dev run _add_path "${bin}" "${KEY_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] flock not found: nothing was changed. add-key and remove-key do not run without the lock of .sops.yaml
+  [ "$output" = "[error] flock not found: nothing was changed. init, add-key and remove-key do not run without the lock of .sops.yaml
 [error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock file was made" >&2; return 1; }
@@ -1034,7 +1034,7 @@ Encrypted 2 secret(s)
   [ ! -s "${ENCRYPT_RAN}" ]
 }
 
-_no_fd='[error] bash cannot test an open file through /dev/fd (on Linux, /proc/self/fd): nothing was changed. add-key and remove-key do not run without that test of the lock of .sops.yaml
+_no_fd='[error] bash cannot test an open file through /dev/fd (on Linux, /proc/self/fd): nothing was changed. init, add-key and remove-key do not run without that test of the lock of .sops.yaml
 [error]   mount /proc, or use the lo binary: it tests the lock without /dev/fd'
 
 @test "when bash cannot test a descriptor through /dev/fd, add-key refuses before the lock file with a line that names the cause" {

@@ -151,6 +151,10 @@ var gitignoreEntries = []string{
 	"**/clusters/*/.oidc/",
 	"**/clusters/*/.registries.json",
 	"**/clusters/*/.docker.sock",
+	"# lok8s — the lock of .sops.yaml (secrets init, add-key and remove-key take it) and the temp files of its writes (a killed write leaves one); .sops.yaml itself is committed",
+	".sops.yaml.lock",
+	".sops.yaml.tmp-*",
+	"..sops.yaml.tmp-*",
 }
 
 // ProjectOptions shapes one `lo init project` run.

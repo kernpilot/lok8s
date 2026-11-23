@@ -2,6 +2,11 @@
 .env
 .secrets/*
 !.secrets/Secret.*.enc
+# the lock of .sops.yaml (lo secrets init, add-key, remove-key) and the
+# temp files of its writes; .sops.yaml itself is committed
+.sops.yaml.lock
+.sops.yaml.tmp-*
+..sops.yaml.tmp-*
 
 # example projects (examples/<driver>/): credentials + per-run derived state.
 # The cluster.lok8s.yaml configs ARE committed; everything generated is not.

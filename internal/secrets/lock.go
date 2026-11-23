@@ -2,12 +2,13 @@ package secrets
 
 // lock.go: the lock that add-key and remove-key hold for their whole run,
 // from the read of .sops.yaml to the last re-encrypted file (bash:
-// secrets::_lock). Both twins take flock(2) on the same file,
-// <project>/.sops.yaml.lock (or the lock beside the file at the end of the
-// links of a .sops.yaml symlink), so a Go lo and a bash lo exclude each
-// other too. Without
-// it two runs can read the same .sops.yaml, and the second write puts back
-// the recipient the first one removed. The pattern is the one of
+// secrets::_lock). init holds it from the check that no .sops.yaml is there
+// to the end of its run, so its write cannot replace a file that another
+// init, add-key or remove-key wrote. Both twins take flock(2) on the same
+// file, <project>/.sops.yaml.lock (or the lock beside the file at the end of
+// the links of a .sops.yaml symlink), so a Go lo and a bash lo exclude each
+// other too. Without it two runs can read the same .sops.yaml, and the
+// second write puts back the recipient the first one removed. The pattern is the one of
 // internal/driver/lo/lock.go, with one difference: a wait that runs out
 // refuses the command instead of going on unlocked.
 
@@ -26,7 +27,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// lockWaitEnv sets how many seconds add-key and remove-key wait for the
+// lockWaitEnv sets how many seconds init, add-key and remove-key wait for the
 // lock (default 60, 0 = do not wait).
 const lockWaitEnv = "LO_SECRETS_LOCK_WAIT"
 
@@ -166,7 +167,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		}
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
-			ui.ErrorTo(c.ErrOut, "%s is held by another lo secrets add-key or remove-key: nothing was changed. When that run ends, run this command again", path)
+			ui.ErrorTo(c.ErrOut, "%s is held by another lo secrets init, add-key or remove-key: nothing was changed. When that run ends, run this command again", path)
 			return nil, ErrHandled
 		}
 		_ = lockSleep(context.Background(), 200*time.Millisecond)
