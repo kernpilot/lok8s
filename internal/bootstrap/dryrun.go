@@ -860,9 +860,12 @@ var diffObjectRe = regexp.MustCompile(`^(?:([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z
 //     manifest, the diff input. A manifest object with no namespace
 //     matches its group, version, kind and name in any namespace.
 //
-// Any other header (an external diff tool, a line of the diff text) names
-// nothing: lo prints a name of the manifest only, never a line of the diff
-// text. The bash twin is bootstrap::_diff_objects.
+// The name is the key of the manifest object (diffKeys.match), not the key
+// of the header: an object with no namespace in the manifest prints with
+// no namespace, because the namespace of the header comes from the diff
+// text. Any other header (an external diff tool, a line of the diff text)
+// names nothing: lo prints a name of the manifest only, never a part of
+// the diff text. The bash twin is bootstrap::_diff_objects.
 func diffObjects(diff, manifest string) []string {
 	keys := manifestDiffKeys(manifest)
 	var objs []string
@@ -872,8 +875,12 @@ func diffObjects(diff, manifest string) []string {
 		if !ok {
 			break
 		}
-		if k, live := liveDiffKey(header); live && keys.match(k) {
-			objs = append(objs, kapply.EscapeText(k.label()))
+		k, live := liveDiffKey(header)
+		if !live {
+			continue
+		}
+		if m, ok := keys.match(k); ok {
+			objs = append(objs, kapply.EscapeText(m.label()))
 		}
 	}
 	return objs
@@ -951,14 +958,15 @@ func manifestDiffKeys(manifest string) diffKeys {
 	}
 }
 
-// match reports whether the key of a diff file name is an object of the
-// manifest.
-func (k diffKeys) match(f diffKey) bool {
+// match returns the key of the manifest object that the key of a diff
+// file name names, and whether there is one: f for an object with a
+// namespace, f with no namespace for an object without one.
+func (k diffKeys) match(f diffKey) (diffKey, bool) {
 	if k.exact[f] {
-		return true
+		return f, true
 	}
 	f.namespace = ""
-	return k.anyNamespace[f]
+	return f, k.anyNamespace[f]
 }
 
 // diffParser reads the framing of a unified diff (GNU diff -u -N, as

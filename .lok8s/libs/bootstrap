@@ -2068,7 +2068,9 @@ bootstrap::_diff_objects() {
 # The escaped label of the object of a `--- ` header line of kubectl diff
 # (bootstrap::_diff_objects): a file of the LIVE tree with the kubectl file
 # name whose key is in _exact, or, with no namespace, in _anyns (the arrays
-# of the caller). Returns 1 for any other header.
+# of the caller). The label is the key of the manifest object: a key of
+# _anyns prints with no namespace, because the namespace of the header
+# comes from the diff text. Returns 1 for any other header.
 bootstrap::_diff_header_object() {
   local _re='^(([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^[:space:]/]+)$'
   local _path _dir _api _name
@@ -2078,13 +2080,14 @@ bootstrap::_diff_header_object() {
   [[ "${_path}" == */* && "${_dir##*/}" == LIVE-* ]] || return 1
   [[ "${_path##*/}" =~ ${_re} ]] || return 1
   local _g="${BASH_REMATCH[2]}" _v="${BASH_REMATCH[3]}" _k="${BASH_REMATCH[4]}" _ns="${BASH_REMATCH[5]}" _n="${BASH_REMATCH[6]}"
-  if [[ -z "${_exact["${_g}/${_v}/${_k}/${_ns}/${_n}"]:-}" && -z "${_anyns["${_g}/${_v}/${_k}/${_n}"]:-}" ]]; then
+  _name="${_n}"
+  if [[ -n "${_exact["${_g}/${_v}/${_k}/${_ns}/${_n}"]:-}" ]]; then
+    [[ -z "${_ns}" ]] || _name="${_ns}/${_n}"
+  elif [[ -z "${_anyns["${_g}/${_v}/${_k}/${_n}"]:-}" ]]; then
     return 1
   fi
   _api="${_v}"
   [[ -z "${_g}" ]] || _api="${_g}/${_v}"
-  _name="${_n}"
-  [[ -z "${_ns}" ]] || _name="${_ns}/${_n}"
   kapply::escape "${_api} ${_k} ${_name}"
 }
 

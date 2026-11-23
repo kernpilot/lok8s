@@ -513,10 +513,12 @@ func TestDryRunDiffersWithKubectlTextStillDiffers(t *testing.T) {
 // (diffOutWithCanary) of label: one line for each object of the manifest
 // that differs (the render holds testcni only: extra and other are in the
 // diff, not in the manifest), then the line that names the .diff file at
-// diffPath ("" without --render-dir).
+// diffPath ("" without --render-dir). The testcni ConfigMap of the render
+// sets no namespace, so its line has none: the namespace of the diff header
+// (default) comes from the diff text.
 func wantDebugDiffLines(label, diffPath string) []string {
 	lines := []string{
-		"[debug] bootstrap dry-run: " + label + ": differs: v1 ConfigMap default/testcni\n",
+		"[debug] bootstrap dry-run: " + label + ": differs: v1 ConfigMap testcni\n",
 	}
 	if diffPath == "" {
 		return append(lines, "[debug] bootstrap dry-run: "+label+": lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n")
@@ -542,7 +544,7 @@ func TestDryRunDebugDiffWithoutRenderDir(t *testing.T) {
 		}
 	}
 	refuteOutput(t, stdoutOf(e)+stderrOf(e), diffTextCanary, "+  foo: bar", "@@ ",
-		"differs: v1 ConfigMap default/extra", "differs: v1 ConfigMap default/other")
+		"differs: v1 ConfigMap default/extra", "differs: v1 ConfigMap default/other", "ConfigMap default/testcni")
 }
 
 // LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
@@ -643,7 +645,9 @@ func TestDiffObjects(t *testing.T) {
 		{"a header in no manifest object", diffFile("v1.ConfigMap.default.unknown") + hunk, nil},
 		{"another namespace", diffFile("v1.ConfigMap.other.cfg") + hunk, nil},
 		{"another version", diffFile("apps.v2.Deployment.web.front") + hunk, nil},
-		{"no manifest namespace: any namespace", diffFile("v1.ConfigMap.kube-system.anyns") + hunk, []string{"v1 ConfigMap kube-system/anyns"}},
+		{"no manifest namespace: any namespace, printed with no namespace", diffFile("v1.ConfigMap.kube-system.anyns") + hunk, []string{"v1 ConfigMap anyns"}},
+		{"no manifest namespace: the namespace of the diff text never prints", diffFile("v1.ConfigMap.canary9.anyns") + hunk, []string{"v1 ConfigMap anyns"}},
+		{"cluster-scoped: a namespace in the diff text never prints", diffFile("rbac.authorization.k8s.io.v1.ClusterRole.canary9.admin") + hunk, []string{"rbac.authorization.k8s.io/v1 ClusterRole admin"}},
 		{"a name with an ESC byte, escaped", diffFile("v1.ConfigMap.default.we\x1bb") + hunk, []string{`v1 ConfigMap default/we\x1bb`}},
 		{"a forged header inside a hunk", diffFile("v1.Secret.default.s") +
 			"@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts + "\n a: x\n",

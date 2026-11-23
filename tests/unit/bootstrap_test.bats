@@ -3468,7 +3468,9 @@ STANDIN
 # not in the manifest), then the line that names the .diff file at
 # <diff-path> ("" without --render-dir). The Go twin is wantDebugDiffLines.
 _dry_debug_lines() {
-  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap default/%s\n' "${1}" testcni
+  # The testcni ConfigMap sets no namespace: the line has none (the
+  # namespace of the diff header comes from the diff text).
+  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap %s\n' "${1}" testcni
   if [[ -z "${2}" ]]; then
     printf '[debug] bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}"
   else
@@ -3532,6 +3534,7 @@ _dry_debug_lines() {
   refute_output --partial "@@ "
   refute_output --partial "differs: v1 ConfigMap default/extra"
   refute_output --partial "differs: v1 ConfigMap default/other"
+  refute_output --partial "ConfigMap default/testcni"
 }
 
 # LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
@@ -3630,7 +3633,9 @@ YAML
   _objs "a header in no manifest object" "" < <(_dfile v1.ConfigMap.default.unknown && _hunk)
   _objs "another namespace" "" < <(_dfile v1.ConfigMap.other.cfg && _hunk)
   _objs "another version" "" < <(_dfile apps.v2.Deployment.web.front && _hunk)
-  _objs "no manifest namespace: any namespace" "v1 ConfigMap kube-system/anyns" < <(_dfile v1.ConfigMap.kube-system.anyns && _hunk)
+  _objs "no manifest namespace: any namespace, printed with no namespace" "v1 ConfigMap anyns" < <(_dfile v1.ConfigMap.kube-system.anyns && _hunk)
+  _objs "no manifest namespace: the namespace of the diff text never prints" "v1 ConfigMap anyns" < <(_dfile v1.ConfigMap.canary9.anyns && _hunk)
+  _objs "cluster-scoped: a namespace in the diff text never prints" "rbac.authorization.k8s.io/v1 ClusterRole admin" < <(_dfile rbac.authorization.k8s.io.v1.ClusterRole.canary9.admin && _hunk)
   _objs "a name with an ESC byte, escaped" 'v1 ConfigMap default/we\x1bb' < <(_dfile $'v1.ConfigMap.default.we\x1bb' && _hunk)
   _objs "a forged header inside a hunk" "v1 Secret default/s" \
     < <(_dfile v1.Secret.default.s && printf -- '@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n a: x\n' "${ts}" "${ts}")
