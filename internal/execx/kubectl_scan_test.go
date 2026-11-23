@@ -439,8 +439,8 @@ func (s *kubectlScanner) envValue(pkg *scanPkg, fn *ast.FuncDecl, e, name ast.Ex
 		}
 		return st
 	case *ast.CompositeLit:
-		for i := len(x.Elts) - 1; i >= 0; i-- {
-			if st := s.envEntry(pkg, fn, x.Elts[i], depth+1); st != envNone {
+		for _, e := range slices.Backward(x.Elts) {
+			if st := s.envEntry(pkg, fn, e, depth+1); st != envNone {
 				return st
 			}
 		}
@@ -480,12 +480,12 @@ func (s *kubectlScanner) envValue(pkg *scanPkg, fn *ast.FuncDecl, e, name ast.Ex
 // first: the state of the last one with a KUBERC entry, else envNone.
 func (s *kubectlScanner) appended(pkg *scanPkg, fn *ast.FuncDecl, call *ast.CallExpr, name ast.Expr, depth int) envState {
 	args := call.Args[1:]
-	for i := len(args) - 1; i >= 0; i-- {
+	for i, arg := range slices.Backward(args) {
 		var st envState
 		if i == len(args)-1 && call.Ellipsis.IsValid() {
-			st = s.envValue(pkg, fn, args[i], name, depth)
+			st = s.envValue(pkg, fn, arg, name, depth)
 		} else {
-			st = s.envEntry(pkg, fn, args[i], depth)
+			st = s.envEntry(pkg, fn, arg, depth)
 		}
 		if st != envNone {
 			return st
@@ -880,12 +880,7 @@ func (s *kubectlScanner) litOff(pkg *scanPkg, fn *ast.FuncDecl, cl *ast.Composit
 		if !ok {
 			return false
 		}
-		for _, v := range s.assigned(pkg, fn, id.Name) {
-			if v == ast.Expr(cl) {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(s.assigned(pkg, fn, id.Name), ast.Expr(cl))
 	}
 	setter := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -1352,6 +1347,8 @@ func (c *ctxT) sites(ctx context.Context, x bool, in []string) {
 	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: slices.Clone(offEnv)}) // want: off write delete (Cmd)
 	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: []string{execx.KubeRCOff, "KUBECONFIG=" + ns}}) // want: off write delete (Cmd)
 	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: append([]string{"A=1"}, offEnv...)}) // want: off write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: append([]string{"A=1"}, execx.KubeRCOff, "KUBERC=/x")}) // want: on write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: append([]string{"A=1"}, "KUBERC=/x", execx.KubeRCOff)}) // want: off write delete (Cmd)
 }
 
 func mk() []string { return nil }
