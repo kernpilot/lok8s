@@ -12,6 +12,7 @@
 
 import ^utils/verbose
 import ^utils/credentials
+import ^utils/kapply
 import ^drivers/capi/generate
 
 # ── CLI dispatch ──────────────────────────────────────────
@@ -115,7 +116,7 @@ driver::provision() {
   ns_manifest=$(kubectl --kubeconfig "${mgmt_kubeconfig}" create namespace "${namespace}" \
     --dry-run=client -o yaml) || return 1
   printf '%s\n' "${ns_manifest}" \
-    | KUBERC=off kubectl --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2 || return 1
+    | kapply::run_private "the CAPI namespace" --kubeconfig "${mgmt_kubeconfig}" apply -f - >&2 || return 1
   capi::ensure_credentials "${cluster_yaml}" "${provider}" "${mgmt_kubeconfig}" || return 1
 
   # 5. Generate + apply the CAPI resources. On a freshly-initialized management
@@ -127,7 +128,7 @@ driver::provision() {
   resources=$(capi::generate "${cluster_yaml}" "${provider}") || return 1
   local apply_try
   for apply_try in $(seq 1 10); do
-    if KUBERC=off kubectl apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}") >&2; then
+    if kapply::run_private "the CAPI resources" apply --kubeconfig "${mgmt_kubeconfig}" -f <(echo "${resources}") >&2; then
       break
     fi
     if (( apply_try == 10 )); then
@@ -515,7 +516,7 @@ capi::bootstrap() {
     echo "error: CAPI resource generation failed" >&2
     return 1
   }
-  KUBERC=off kubectl apply --kubeconfig "${bootstrap_kubeconfig}" -f <(echo "${resources}") || {
+  kapply::run_private "the management cluster resources" apply --kubeconfig "${bootstrap_kubeconfig}" -f <(echo "${resources}") || {
     echo "error: applying management cluster resources failed" >&2
     return 1
   }
@@ -540,7 +541,7 @@ capi::bootstrap() {
   # 7. Install lok8s operator on management cluster
   echo "info: installing lok8s operator on management cluster" >&2
   if [[ -d "${PATH_BASE}/operator/deploy" ]]; then
-    KUBERC=off kubectl apply --kubeconfig "${mgmt_kubeconfig}" \
+    kapply::run_private "the lok8s operator" apply --kubeconfig "${mgmt_kubeconfig}" \
       -f "${PATH_BASE}/operator/deploy/" 2>/dev/null || true
   fi
 

@@ -401,6 +401,7 @@ _remote_destroy_stubs() {
   }
   export -f yq
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   # capi::detect_provider lives outside drivers/capi/main, so it is NOT defined
@@ -438,6 +439,7 @@ YAML
   }
   export -f yq
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::provision "test.lok8s.dev"
@@ -465,6 +467,7 @@ YAML
   timeout() { echo "timeout $*" >> "${TIMEOUT_LOG}"; shift 3; "$@"; }
   export -f timeout
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::status "test.lok8s.dev"
@@ -484,6 +487,7 @@ YAML
   }
   export -f yq
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::status "test.lok8s.dev"
@@ -501,6 +505,7 @@ YAML
   }
   export -f yq
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::destroy "test.lok8s.dev"
@@ -514,6 +519,7 @@ YAML
   yq() { [[ "$2" == ".metadata.name" ]] && echo "test-cluster" || echo ""; }
   export -f yq
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::kubeconfig "test.lok8s.dev"
@@ -536,7 +542,9 @@ YAML
 
   export HCLOUD_TOKEN="test-token"
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::ensure_credentials \
@@ -574,6 +582,7 @@ YAML
   }
   export -f kubectl
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
   run driver::destroy "test.lok8s.dev"

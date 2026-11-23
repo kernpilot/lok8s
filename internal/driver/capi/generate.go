@@ -15,6 +15,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -311,12 +312,13 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	// failed create feeds apply an empty stream).
 	var manifest strings.Builder
 	createErr := d.deps.Runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: createArgs, Stdin: strings.NewReader(envFile), Stdout: &manifest})
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
+	// The apply keeps the kubectl output private (kapply.RunPrivate): it
+	// can quote a value of the Secret.
+	if err := kapply.RunPrivate(ctx, d.deps.Runner, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", kubeconfig, "-f", "-"},
-		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(manifest.String()),
-	}); err != nil {
+	}, "the credentials Secret", os.Stdout, stderr); err != nil {
 		return err
 	}
 	return createErr

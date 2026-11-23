@@ -88,6 +88,7 @@ _KUBERC_NOT_YET='kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch
   printf '%s\n' "${sites}" | grep -q $'^off\tlibs/bootstrap:.* diff --server-side'
   printf '%s\n' "${sites}" | grep -q $'^off\tdrivers/lo/utils/services.sh:.*patch deployment coredns .*--patch-file '
   printf '%s\n' "${sites}" | grep -q $'^off\tlibs/kubehz/deploy:.*kapply::run_private "the live agent" apply -k '
+  printf '%s\n' "${sites}" | grep -q $'^off\tdrivers/capi/generate:.*kapply::run_private "the credentials Secret" apply '
   [ "$(printf '%s\n' "${sites}" | grep $'^on\tlibs/kubehz/main:' | grep -cF "${_KUBERC_NOT_YET}")" -eq 1 ]
   missing="$(printf '%s\n' "${sites}" | grep $'^on\t' | grep -vF "${_KUBERC_NOT_YET}" || true)"
   if [[ -n "${missing}" ]]; then

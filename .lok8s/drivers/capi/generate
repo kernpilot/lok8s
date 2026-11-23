@@ -8,6 +8,7 @@ import ^utils/verbose
 import ^utils/template
 import ^utils/spec
 import ^utils/credentials
+import ^utils/kapply
 
 # Detect the CAPI provider from cluster spec fields.
 # Usage: capi::detect_provider <cluster_yaml>
@@ -218,7 +219,7 @@ capi::ensure_credentials() {
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
         --from-env-file=/dev/stdin \
-        --dry-run=client -o yaml | KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f -
+        --dry-run=client -o yaml | kapply::run_private "the credentials Secret" apply --kubeconfig "${kubeconfig}" -f -
       ;;
     aws)
       : "${AWS_REGION:?AWS_REGION required for AWS provider}"
@@ -228,7 +229,7 @@ capi::ensure_credentials() {
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
         --from-env-file=/dev/stdin \
-        --dry-run=client -o yaml | KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f -
+        --dry-run=client -o yaml | kapply::run_private "the credentials Secret" apply --kubeconfig "${kubeconfig}" -f -
       ;;
     *)
       error "Unsupported provider for credentials: ${provider}"

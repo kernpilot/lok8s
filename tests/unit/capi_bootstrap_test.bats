@@ -14,6 +14,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/credentials.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
@@ -351,4 +352,57 @@ YAML
 
   run capi::wait_ready "/tmp/test.yaml" "test-cluster" 5
   assert_success
+}
+
+# MGMT_CANARY stands for a value of the manifest that kubectl quotes on its
+# stdout, MGMT_ERR_CANARY for one on its stderr. Both are made up.
+MGMT_CANARY=zq7MgmtCanary6pLn
+MGMT_ERR_CANARY=zq7MgmtStderrCanary1cVy
+
+# _leaking_kubectl: a kubectl stub. Each apply reads its manifest from stdin
+# when it applies "-f -", and prints one object line and the canaries on its
+# stdout and stderr. A dry-run create prints a Secret. Every other call
+# succeeds.
+_leaking_kubectl() {
+  kubectl() {
+    case " $* " in
+      *" create "*)
+        [[ " $* " != *" --from-env-file=/dev/stdin "* ]] || cat > /dev/null
+        echo "kind: Secret" ;;
+      *" apply "*)
+        [[ " $* " != *" -f - "* ]] || cat > /dev/null
+        printf 'secret/x configured\nInvalid value: "%s"\n' "${MGMT_CANARY}"
+        printf 'Warning: the value "%s" is deprecated\n' "${MGMT_ERR_CANARY}" >&2 ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+  export MGMT_CANARY MGMT_ERR_CANARY
+}
+
+@test "private: capi::bootstrap keeps the kubectl output of each apply private" {
+  # The Go twin: TestKubectlApplyOutputStaysPrivate/bootstrap.
+  command -v yq &>/dev/null || skip "yq required"
+  kind() {
+    case "$1" in
+      get) [[ "$2" != kubeconfig ]] || echo "kubeconfig-content" ;;
+    esac
+    return 0
+  }
+  clusterctl() { [[ "$1" != get ]] || echo "kubeconfig-content"; }
+  export -f kind clusterctl
+  _leaking_kubectl
+  mkdir -p "${PATH_BASE}/operator/deploy"
+  export HCLOUD_TOKEN="test-token"
+  run capi::bootstrap "mgmt.lok8s.dev"
+  assert_success
+  refute_output --partial "${MGMT_CANARY}"
+  refute_output --partial "${MGMT_ERR_CANARY}"
+  assert_line '✓ the management cluster resources · 1 resource'
+  assert_line '✓ the credentials Secret · 1 resource'
+  assert_line '✓ the lok8s operator · 1 resource'
+  LO_SHOW_SENSITIVE_OUTPUT=1 run capi::bootstrap "mgmt.lok8s.dev"
+  assert_success
+  assert_output --partial "${MGMT_CANARY}"
+  assert_line '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for the management cluster resources, which can quote a value of the manifest'
 }

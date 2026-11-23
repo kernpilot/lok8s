@@ -28,6 +28,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -538,13 +539,14 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 	}); err != nil {
 		return err
 	}
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
-		Name:   "kubectl",
-		Args:   []string{"--kubeconfig", mgmtKubeconfig, "apply", "-f", "-"},
-		Env:    []string{execx.KubeRCOff},
-		Stdin:  strings.NewReader(nsManifest.String() + "\n"),
-		Stdout: stderr, // bash: … | kubectl apply -f - >&2
-	}); err != nil {
+	// Each apply of the driver keeps the kubectl output private
+	// (kapply.RunPrivate; bash: kapply::run_private): it can quote a value
+	// of the manifest.
+	if err := kapply.RunPrivate(ctx, d.deps.Runner, execx.Cmd{
+		Name:  "kubectl",
+		Args:  []string{"--kubeconfig", mgmtKubeconfig, "apply", "-f", "-"},
+		Stdin: strings.NewReader(nsManifest.String() + "\n"),
+	}, "the CAPI namespace", stderr, stderr); err != nil { // bash: … >&2
 		return err
 	}
 	if err := d.EnsureCredentialsSecret(ctx, cy, provider, mgmtKubeconfig); err != nil {
@@ -556,15 +558,13 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 		return err
 	}
 	for applyTry := 1; ; applyTry++ {
-		err := d.deps.Runner.Run(ctx, execx.Cmd{
+		err := kapply.RunPrivate(ctx, d.deps.Runner, execx.Cmd{
 			Name: "kubectl",
 			Args: []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", "-"},
-			Env:  []string{execx.KubeRCOff},
 			// bash: -f <(echo "${resources}") — a process substitution; the
 			// Go port feeds stdin, same stream.
-			Stdin:  strings.NewReader(resources),
-			Stdout: stderr, // bash: >&2
-		})
+			Stdin: strings.NewReader(resources),
+		}, "the CAPI resources", stderr, stderr) // bash: >&2
 		if err == nil {
 			return nil
 		}
@@ -810,12 +810,11 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		d.rawErrorLine("CAPI resource generation failed")
 		return ui.Handled(fmt.Errorf("capi: CAPI resource generation failed: %w", err))
 	}
-	if err := d.deps.Runner.Run(ctx, execx.Cmd{
+	if err := kapply.RunPrivate(ctx, d.deps.Runner, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", bootstrapKubeconfig, "-f", "-"},
-		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(resources),
-	}); err != nil {
+	}, "the management cluster resources", os.Stdout, d.stderr()); err != nil {
 		d.rawErrorLine("applying management cluster resources failed")
 		return ui.Handled(fmt.Errorf("capi: applying management cluster resources failed: %w", err))
 	}
@@ -851,12 +850,10 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	// `2>/dev/null || true` in the bash).
 	d.infoLine("installing lok8s operator on management cluster")
 	if deployDir := filepath.Join(d.deps.Paths.Base, "operator", "deploy"); fsutil.DirExists(deployDir) {
-		_ = d.deps.Runner.Run(ctx, execx.Cmd{
-			Name:   "kubectl",
-			Args:   []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", deployDir + "/"},
-			Env:    []string{execx.KubeRCOff},
-			Stderr: io.Discard,
-		})
+		_ = kapply.RunPrivate(ctx, d.deps.Runner, execx.Cmd{
+			Name: "kubectl",
+			Args: []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", deployDir + "/"},
+		}, "the lok8s operator", os.Stdout, io.Discard)
 	}
 
 	// 8. Install CAPI + providers on management cluster.

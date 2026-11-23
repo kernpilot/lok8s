@@ -66,6 +66,7 @@ _load() {
   _yaml
   printf 'apiVersion: v1\nkind: Config\n' > "${PATH_BASE}/.kubeconfig/mgmt.dev.yaml"
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
   :args() { domain="test.dev"; }
   # "self" is the real value (libs/kubehz/main validates hosting ∈ self|hosted);
@@ -198,4 +199,47 @@ _load() {
   driver::provision test.dev || rc=$?
 
   [ "${rc}" -eq 0 ] || { echo "capi provision happy path regressed (rc=${rc})" >&2; return 1; }
+}
+
+# MGMT_CANARY stands for a value of the manifest that kubectl quotes on its
+# stdout, MGMT_ERR_CANARY for one on its stderr. Both are made up.
+MGMT_CANARY=zq7MgmtCanary6pLn
+MGMT_ERR_CANARY=zq7MgmtStderrCanary1cVy
+
+# _leaking_kubectl: a kubectl stub. Each apply reads its manifest from stdin
+# when it applies "-f -", and prints one object line and the canaries on its
+# stdout and stderr. A dry-run create prints a Secret. Every other call
+# succeeds.
+_leaking_kubectl() {
+  kubectl() {
+    case " $* " in
+      *" create "*)
+        [[ " $* " != *" --from-env-file=/dev/stdin "* ]] || cat > /dev/null
+        echo "kind: Secret" ;;
+      *" apply "*)
+        [[ " $* " != *" -f - "* ]] || cat > /dev/null
+        printf 'secret/x configured\nInvalid value: "%s"\n' "${MGMT_CANARY}"
+        printf 'Warning: the value "%s" is deprecated\n' "${MGMT_ERR_CANARY}" >&2 ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+  export MGMT_CANARY MGMT_ERR_CANARY
+}
+
+@test "private: capi provision keeps the kubectl output of the namespace and the resources private" {
+  # The Go twin: TestKubectlApplyOutputStaysPrivate/provision.
+  _load
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  _leaking_kubectl
+  run driver::provision test.dev
+  assert_success
+  refute_output --partial "${MGMT_CANARY}"
+  refute_output --partial "${MGMT_ERR_CANARY}"
+  assert_line '✓ the CAPI namespace · 1 resource'
+  assert_line '✓ the CAPI resources · 1 resource'
+  LO_SHOW_SENSITIVE_OUTPUT=1 run driver::provision test.dev
+  assert_success
+  assert_output --partial "${MGMT_CANARY}"
+  assert_output --partial "${MGMT_ERR_CANARY}"
 }
