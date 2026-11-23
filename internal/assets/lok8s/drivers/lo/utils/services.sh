@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # services.sh — Cluster service setup (CoreDNS)
 
+import ^utils/kapply
+
 lo::coredns() {
   local domain="${1}"
   local coredns_dir="${PATH_LOK8S}/drivers/lo/cluster/coredns"
@@ -9,8 +11,8 @@ lo::coredns() {
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
 
-  KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/corefile.yaml"
-  KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/expose.yaml"
+  kapply::run_private "the CoreDNS Corefile" apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/corefile.yaml"
+  kapply::run_private "the CoreDNS external Service" apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/expose.yaml"
 
   # Pin coredns-external to the LAST loadBalancer.pool IP so it does not race the
   # ingress/Envoy gateway for pool[0]. coredns-external is created HERE — before
@@ -112,7 +114,7 @@ EOF
   if compgen -G "${tmp}/*" >/dev/null 2>&1; then
     kubectl create configmap coredns-custom -n kube-system --kubeconfig "${kubeconfig}" \
       --from-file="${tmp}" --dry-run=client -o yaml \
-      | KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f -
+      | kapply::run_private "the CoreDNS custom ConfigMap" apply --kubeconfig "${kubeconfig}" -f -
   fi
 
   rm -rf "${tmp}"
