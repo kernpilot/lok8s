@@ -14,10 +14,14 @@ package execx
 //     literal, append, slices.Clip, slices.Clone, nil, KubectlEnv of the
 //     tool name kubectl (the literal, or the variable that is also the Name
 //     of the Cmd), and a variable that holds one of these. An entry or a
-//     value that it cannot read counts as another KUBERC value;
+//     value that it cannot read counts as another KUBERC value. Each value
+//     of a variable must give the same state (a declaration with no value
+//     is nil), so an append that only a branch runs does not prove it;
 //   - the function passes the literal, or a variable that holds it, to a
-//     function that sets the Env of the Cmd it takes so (kapply.RunPrivate),
-//     or sets <variable>.Env itself;
+//     function that sets the Env of the Cmd it takes so (kapply.RunPrivate);
+//   - or the Env is off after each <variable>.Env = … write after the
+//     literal, in source order. A write in a branch, a loop or a closure
+//     must keep the state, as the scan does not know if it runs;
 //   - it runs through a wrapper: a function whose Cmd takes the tool name,
 //     the arguments or the Env from a parameter. The wrapper is off when its
 //     Cmd is off, or, for an Env parameter, when the caller passes a value
@@ -53,8 +57,11 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,6 +87,16 @@ var kubeconfigWrites = map[string]bool{
 	"set": true, "set-cluster": true, "set-context": true, "set-credentials": true, "unset": true,
 	"use-context": true, "use": true, "delete-cluster": true, "delete-context": true,
 	"delete-user": true, "rename-context": true,
+}
+
+// subcommandWrites holds, for each kubectl command that writes with some
+// subcommands only, the subcommands that write. The other ones read
+// (rollout status, auth can-i, config view and the like).
+var subcommandWrites = map[string]map[string]bool{
+	"rollout":     {"restart": true, "undo": true, "pause": true, "resume": true},
+	"certificate": {"approve": true, "deny": true},
+	"auth":        {"reconcile": true},
+	"config":      kubeconfigWrites,
 }
 
 // kubectlValueFlags are the global flags that take the next word as their
@@ -163,16 +180,10 @@ func classifyKubectl(ws []word) (verb string, known, write bool) {
 		if i+1 < len(ws) && ws[i+1].ok {
 			sub = ws[i+1].lit
 		}
-		switch w.lit {
-		case "rollout":
-			return "rollout " + sub, true, sub == "restart" || sub == "undo" || sub == "pause" || sub == "resume"
-		case "certificate":
-			return "certificate " + sub, true, sub == "approve" || sub == "deny"
-		case "auth":
-			return "auth " + sub, true, sub == "reconcile"
-		case "config":
-			return "config " + sub, true, kubeconfigWrites[sub]
-		case "create":
+		if writes, ok := subcommandWrites[w.lit]; ok {
+			return w.lit + " " + sub, true, writes[sub]
+		}
+		if w.lit == "create" {
 			// create --dry-run=client -o yaml renders a manifest on the
 			// client, and lo applies it: a write.
 			for _, r := range ws[i+1:] {
@@ -405,8 +416,10 @@ func (s *kubectlScanner) envValue(pkg *scanPkg, fn *ast.FuncDecl, e, name ast.Ex
 		}
 		// Each value must give the same state: the scan does not follow
 		// the flow. A value that adds to the one before it gives the state
-		// of what it adds, when that has a KUBERC entry.
-		st, seen := envNone, false
+		// of what it adds, when that has a KUBERC entry. A declaration with
+		// no value (var env []string) is the value nil: an append that only
+		// a branch runs then does not prove the state.
+		st, seen := envNone, declaredEmpty(fn, x.Name)
 		for _, v := range s.assigned(pkg, fn, x.Name) {
 			var vs envState
 			if call, ok := v.(*ast.CallExpr); ok && isSelfAppend(v, x.Name) {
@@ -513,6 +526,25 @@ func (s *kubectlScanner) envEntry(pkg *scanPkg, fn *ast.FuncDecl, e ast.Expr, de
 		}
 	}
 	return envOther
+}
+
+// declaredEmpty reports whether the function declares the name with no
+// value: var name T.
+func declaredEmpty(fn *ast.FuncDecl, name string) bool {
+	found := false
+	if fn != nil && fn.Body != nil {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if vs, ok := n.(*ast.ValueSpec); ok && len(vs.Values) == 0 {
+				for _, id := range vs.Names {
+					if id.Name == name {
+						found = true
+					}
+				}
+			}
+			return !found
+		})
+	}
+	return found
 }
 
 // sameIdent reports whether a and b are the same variable name.
@@ -832,12 +864,14 @@ func (s *kubectlScanner) eachFunc(do func(pkg *scanPkg, fn *ast.FuncDecl)) {
 }
 
 // litOff reports whether the child of a Cmd literal runs with KubeRCOff:
-// its Env is off (envOff), the function passes the literal (or a variable
-// that holds it) to a function that sets the Env, or it sets <variable>.Env.
+// the function passes the literal (or a variable that holds it) to a
+// function that sets the Env, or the Env is off after each write. The Env
+// of the literal is the first write, and each <variable>.Env = … after the
+// literal is a write, in source order. A write in the block of the literal
+// sets the state (an append with no KUBERC entry keeps it). A write in a
+// nested block (a branch, a loop, a closure) runs or not, so when it would
+// change the state, the state is not proven (envOther).
 func (s *kubectlScanner) litOff(pkg *scanPkg, fn *ast.FuncDecl, cl *ast.CompositeLit) bool {
-	if s.envOff(pkg, fn, field(cl, "Env"), field(cl, "Name")) {
-		return true
-	}
 	holds := func(e ast.Expr) bool {
 		if e == ast.Expr(cl) {
 			return true
@@ -853,28 +887,92 @@ func (s *kubectlScanner) litOff(pkg *scanPkg, fn *ast.FuncDecl, cl *ast.Composit
 		}
 		return false
 	}
-	off := false
+	setter := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch st := n.(type) {
-		case *ast.CallExpr:
-			for _, c := range s.callee(pkg, fn, st) {
-				if idx, ok := s.setters[c]; ok && idx < len(st.Args) && holds(st.Args[idx]) {
-					off = true
-				}
-			}
-		case *ast.AssignStmt:
-			if len(st.Lhs) == len(st.Rhs) {
-				for i, l := range st.Lhs {
-					if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "Env" && holds(sel.X) &&
-						s.envOff(pkg, fn, st.Rhs[i], field(cl, "Name")) {
-						off = true
-					}
+		if call, ok := n.(*ast.CallExpr); ok {
+			for _, c := range s.callee(pkg, fn, call) {
+				if idx, ok := s.setters[c]; ok && idx < len(call.Args) && holds(call.Args[idx]) {
+					setter = true
 				}
 			}
 		}
-		return !off
+		return !setter
 	})
-	return off
+	if setter {
+		return true
+	}
+	name := field(cl, "Name")
+	st := s.envValue(pkg, fn, field(cl, "Env"), name, 0)
+	// write returns the state after an Env write: an append to the same
+	// Env adds its entries, any other value replaces the Env.
+	write := func(prev envState, sel *ast.SelectorExpr, rhs ast.Expr) envState {
+		if call, ok := envSelfAppend(rhs, sel); ok {
+			if a := s.appended(pkg, fn, call, name, 0); a != envNone {
+				return a
+			}
+			return prev
+		}
+		return s.envValue(pkg, fn, rhs, name, 0)
+	}
+	var home ast.Node
+	var scopes []ast.Node
+	var stack []ast.Node
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil {
+			if top := stack[len(stack)-1]; len(scopes) > 0 && scopes[len(scopes)-1] == top {
+				scopes = scopes[:len(scopes)-1]
+			}
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		stack = append(stack, n)
+		switch x := n.(type) {
+		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
+			scopes = append(scopes, n)
+		case *ast.CompositeLit:
+			if x == cl && len(scopes) > 0 {
+				home = scopes[len(scopes)-1]
+			}
+		case *ast.AssignStmt:
+			if home == nil || x.Pos() < cl.Pos() || len(x.Lhs) != len(x.Rhs) {
+				break
+			}
+			for i, l := range x.Lhs {
+				sel, ok := l.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Env" || !holds(sel.X) {
+					continue
+				}
+				next := write(st, sel, x.Rhs[i])
+				if scopes[len(scopes)-1] != home && next != st {
+					next = envOther
+				}
+				st = next
+			}
+		}
+		return true
+	})
+	return st == envOff
+}
+
+// envSelfAppend reports whether rhs is append(<sel>, …), also through
+// slices.Clip or slices.Clone: a write that adds to the Env of the same
+// variable.
+func envSelfAppend(rhs ast.Expr, sel *ast.SelectorExpr) (*ast.CallExpr, bool) {
+	call, ok := rhs.(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return nil, false
+	}
+	if f, ok := call.Fun.(*ast.Ident); !ok || f.Name != "append" {
+		return nil, false
+	}
+	base := call.Args[0]
+	if c, ok := base.(*ast.CallExpr); ok && len(c.Args) == 1 {
+		if f, ok := c.Fun.(*ast.SelectorExpr); ok && (f.Sel.Name == "Clip" || f.Sel.Name == "Clone") {
+			base = c.Args[0]
+		}
+	}
+	b, ok := base.(*ast.SelectorExpr)
+	return call, ok && b.Sel.Name == "Env" && sameIdent(b.X, sel.X)
 }
 
 // findRunners finds the functions that set <param>.Env to KubeRCOff, the
@@ -1112,12 +1210,50 @@ func TestEveryKubectlWriteRunsWithKubeRCOff(t *testing.T) {
 	}
 }
 
+// The bash twin of the scan (tests/unit/kuberc_test.bats, _kubectl_sites)
+// holds the same lists as this scan: the commands that write with some
+// subcommands only and their write subcommands, the write subcommands,
+// and the global flags that take a value. A word that one list has and
+// the other does not makes the two scans read a call in two ways.
+func TestKubectlScanListsMatchTheBashScan(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "tests", "unit", "kuberc_test.bats"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := func(what, re string) []string {
+		t.Helper()
+		m := regexp.MustCompile(re).FindAllSubmatch(src, -1)
+		if len(m) != 1 {
+			t.Errorf("%s: the bash scan has %d such lists, want 1", what, len(m))
+			return nil
+		}
+		got := strings.Split(string(m[0][1]), "|")
+		slices.Sort(got)
+		return got
+	}
+	same := func(what string, got []string, want map[string]bool) {
+		t.Helper()
+		if w := slices.Sorted(maps.Keys(want)); got != nil && !slices.Equal(got, w) {
+			t.Errorf("%s: the bash scan has %q, this scan has %q", what, got, w)
+		}
+	}
+	families := map[string]bool{}
+	for fam, writes := range subcommandWrites {
+		families[fam] = true
+		same(fam+" write subcommands", list(fam, `verb == "`+fam+`" && sub2 ~ /\^\(([^)]*)\)\$/`), writes)
+	}
+	same("commands with write subcommands", list("families", `\} else if \(verb ~ /\^\(([^)]*)\)\$/\) \{\n\s*sub2 = `), families)
+	same("write subcommands", list("writes", `\} else if \(verb ~ /\^\(([^)]*)\)\$/\) \{\n\s*kind = "write"`), kubectlWriteVerbs)
+	same("global flags with a value", list("flags", `if \(x ~ /\^\(([^)]*)\)\$/\) i\+\+`), kubectlValueFlags)
+}
+
 // kubectlScanFixture is a package that holds each form of a kubectl child
 // that the scan must read. A line with a site ends in "// want: <key>".
 const kubectlScanFixture = `package a
 
 import (
 	"context"
+	"slices"
 
 	"example.com/m/internal/execx"
 	"example.com/m/internal/k"
@@ -1193,6 +1329,29 @@ func (c *ctxT) sites(ctx context.Context, x bool, in []string) {
 	cmd := execx.Cmd{Name: "kubectl", Args: []string{"taint", "nodes", "--all", "x-"}} // want: off write taint (Cmd)
 	cmd.Env = []string{execx.KubeRCOff}
 	_ = c.r.Run(ctx, cmd)
+	var condEnv []string
+	if x {
+		condEnv = append(condEnv, execx.KubeRCOff)
+	}
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: condEnv}) // want: on write delete (Cmd)
+	later := execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: []string{execx.KubeRCOff}} // want: on write delete (Cmd)
+	later.Env = append(later.Env, "KUBERC=/x")
+	_ = c.r.Run(ctx, later)
+	kept := execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: []string{execx.KubeRCOff}} // want: off write delete (Cmd)
+	kept.Env = append(kept.Env, "A=1")
+	if x {
+		kept.Env = append(slices.Clip(kept.Env), "B=2")
+	}
+	_ = c.r.Run(ctx, kept)
+	cond := execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}} // want: on write delete (Cmd)
+	if x {
+		cond.Env = []string{execx.KubeRCOff}
+	}
+	_ = c.r.Run(ctx, cond)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: slices.Clip(offEnv)}) // want: off write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: slices.Clone(offEnv)}) // want: off write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: []string{execx.KubeRCOff, "KUBECONFIG=" + ns}}) // want: off write delete (Cmd)
+	_ = c.r.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"delete", "pod", "p"}, Env: append([]string{"A=1"}, offEnv...)}) // want: off write delete (Cmd)
 }
 
 func mk() []string { return nil }
