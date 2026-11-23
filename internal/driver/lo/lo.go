@@ -334,7 +334,8 @@ func (d *Driver) clusterServices(ctx context.Context, domain, clusterName, cy st
 	}
 
 	if getenv("LOK8S_REMOTE_EXPOSE") == "true" {
-		return d.expose(ctx, clusterName, cy, stdout, stderr)
+		_, err := d.expose(ctx, clusterName, cy, stdout, stderr)
+		return err
 	}
 	return nil
 }

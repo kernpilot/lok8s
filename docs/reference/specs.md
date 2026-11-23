@@ -306,6 +306,13 @@ runs entirely on the remote. The remote handles kind, registries,
 bootstrap, and optionally Tilt. The local machine sets up an SSH tunnel
 for kubectl and optionally an nginx proxy for HTTPS access.
 
+**The nginx proxy** (`remote.expose`): the proxy serves HTTPS only. Put its
+TLS certificate and key at `.secrets/tls/tls.crt` and `.secrets/tls/tls.key`
+in the project: lo does not make them. Without both files, lo does not start
+the proxy, removes the proxy of an earlier run and warns. A failed docker step
+of the proxy fails the command, and the error names the step. In CI mode, the
+kubeconfig and the tunnel are still set up, and the run fails at the end.
+
 See [CLI reference — Remote clusters](cli.md#remote-clusters) for usage.
 
 #### Default resolution
