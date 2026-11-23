@@ -478,8 +478,10 @@ func (c *Context) Claim(ctx context.Context, nonce string) error {
 	}
 	// One call, both annotations: the value and its placement stamp. The
 	// nonce reaches kubectl in a merge patch on stdin, never on argv:
-	// every local user can read argv (ps, /proc/<pid>/cmdline). The bash
-	// twin sends the same patch.
+	// every local user can read argv (ps, /proc/<pid>/cmdline). The patch
+	// is a write: it runs with the kubectl user defaults off, so a kuberc
+	// default such as --dry-run=client cannot make it report success and
+	// place nothing. The bash twin sends the same patch.
 	stamp := strconv.FormatInt(c.now().Unix(), 10)
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
 		"kubehz.cloud/claim-nonce": nonce, "kubehz.cloud/claim-nonce-placed": stamp,
@@ -491,6 +493,7 @@ func (c *Context) Claim(ctx context.Context, nonce string) error {
 		Name: "kubectl",
 		Args: []string{"-n", agentNamespace, "patch", "configmap", agentStateName,
 			"--type", "merge", "--patch-file", "/dev/stdin"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: bytes.NewReader(patch), Stdout: io.Discard, Stderr: c.errOut(),
 	}); err != nil {
 		c.errorf("could not annotate configmap/%s — check your kubeconfig permissions", agentStateName)

@@ -542,6 +542,7 @@ YAML
 
 @test "CAPI: the credentials Secret gets its values from an env file on stdin" {
   source "${_PROJECT_ROOT}/.lok8s/utils/credentials.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate"
   local yaml="${PATH_CLUSTERS}/d.example/cluster.lok8s.yaml"
   printf 'kind: CAPI\nmetadata:\n  name: d\n' > "${yaml}"

@@ -291,7 +291,7 @@ func (h *CapiHook) provision(ctx context.Context, name, namespace string, spec a
 	// `echo "${resources}" | kubectl apply -f - 2>&1`: the capture stripped
 	// the trailing newlines, echo adds one back.
 	stream := strings.TrimRight(resources, "\n") + "\n"
-	if err := k.run(ctx, strings.NewReader(stream), k.out(), k.out(), "apply", "-f", "-"); err == nil {
+	if err := k.applyPrivate(ctx, "the CAPI resources", strings.NewReader(stream), k.out(), k.out(), "apply", "-f", "-"); err == nil {
 		fmt.Fprintf(stderr, "info: CAPI resources applied for %s\n", name)
 		// Status reaches Provisioned/Ready via capi-status-sync when the CAPI Cluster is up.
 		return

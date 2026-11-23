@@ -85,11 +85,15 @@ _stub_kubectl() {
         echo 'Error from server (Forbidden): configmaps "kubehz-agent-config" is forbidden' >&2
         return 1 ;;
       *"get configmap kubehz-agent-state"*)
+        printf 'KUBERC=%s\n' "${KUBERC-}" > "${KUBECTL_LOG}.get-env"
         [ -z "${STUB_CM_MISSING:-}" ] || return 1
         return 0 ;;
       *"annotate"*) return 0 ;;
-      # The claim patch comes on stdin (--patch-file /dev/stdin).
-      *"patch configmap"*) cat > "${KUBECTL_PATCH_OUT}"; return 0 ;;
+      # The claim patch comes on stdin (--patch-file /dev/stdin). The stub
+      # also records the KUBERC of the call.
+      *"patch configmap"*)
+        printf 'KUBERC=%s\n' "${KUBERC-}" > "${KUBECTL_PATCH_OUT}.env"
+        cat > "${KUBECTL_PATCH_OUT}"; return 0 ;;
       *"get secret kubehz-agent"*)
         [ -z "${STUB_SECRET_MISSING:-}" ] || return 1
         printf 'khz_agt_bats' | base64 | tr -d '\n' ;;
@@ -175,6 +179,22 @@ _stub_curl() {
   assert_output "${nonce}"
   run command jq -r '.metadata.annotations["kubehz.cloud/claim-nonce-placed"] | test("^[0-9]+$")' "${KUBECTL_PATCH_OUT}"
   assert_output "true"
+}
+
+# The patch is a write: it runs with the kubectl user defaults off
+# (KUBERC=off), as the Go twin. The read of the ConfigMap before it keeps
+# the kuberc of the user.
+@test "claim: the patch runs with the kubectl user defaults off (KUBERC=off), the read keeps them" {
+  _stub_kubectl
+  unset KUBERC
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  run kubehz::claim --nonce "khzn_batsPlacedNonce_43charsBase64urlValue000"
+  assert_success
+  run cat "${KUBECTL_PATCH_OUT}.env"
+  assert_output "KUBERC=off"
+  run cat "${KUBECTL_LOG}.get-env"
+  assert_output "KUBERC="
 }
 
 @test "claim: --nonce - reads the nonce from stdin, as the Go twin" {

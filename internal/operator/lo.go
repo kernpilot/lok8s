@@ -197,7 +197,7 @@ func (h *LoHook) publishKubeconfig(ctx context.Context, name, namespace, domain 
 	var manifest strings.Builder
 	_ = k.run(ctx, nil, &manifest, nil, "create", "secret", "generic", name+"-kubeconfig",
 		"-n", namespace, "--from-file=value="+kubeconfig, "--dry-run=client", "-o", "yaml")
-	_ = k.run(ctx, strings.NewReader(manifest.String()), io.Discard, nil, "apply", "-f", "-")
+	_ = k.applyPrivate(ctx, "the kubeconfig Secret", strings.NewReader(manifest.String()), io.Discard, nil, "apply", "-f", "-")
 
 	k.patchStatus(ctx, "lo", name, namespace, `{"status":{"kubeconfig":{"secretRef":"`+name+`-kubeconfig"}}}`)
 	return nil

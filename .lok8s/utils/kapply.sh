@@ -30,11 +30,13 @@
 # KAPPLY_LAST_OUTPUT for callers to inspect (and appended to the private
 # file of the bootstrap scheduler, see kapply::_private_ok), never printed.
 # LO_SHOW_SENSITIVE_OUTPUT=1
-# prints it as before (kapply::show_sensitive). Each kubectl write from
-# stdin (the apply, the replace of the immutable heal, the replace of the
-# namespace finalize) runs with the kubectl user defaults off (KUBERC=off:
-# a kubectl before v1.33 has no kuberc and ignores it). The Go twin:
-# internal/kapply (private.go).
+# prints it as before (kapply::show_sensitive). Each kubectl write (the
+# apply, the replace of the immutable heal, the replace of the namespace
+# finalize, each finalizer patch of the heal and of the preflight) runs
+# with the kubectl user defaults off (KUBERC=off: a kubectl before v1.33
+# has no kuberc and ignores it), also a patch from the argv: a kuberc
+# default such as --dry-run=client would make it report success and change
+# nothing. The Go twin: internal/kapply (private.go).
 #
 # A plain sourceable util — it uses error/warn/debug from utils/verbose.sh,
 # which every caller (the CLI, deploy, bootstrap, the drivers) loads first.
@@ -296,36 +298,95 @@ kapply::_mode_is() {
   [[ "${got}" == "${1}" ]]
 }
 
+# kapply::_dir_chain <dir> <var>: whether no other user can rename or
+# replace <dir> or a directory above it. It sets <var> to the resolved path
+# of <dir> (cd -P). Each part of the resolved path, from / down to <dir>,
+# must be a directory of root or of this user, and must not be writable by
+# its group or by others unless it has the sticky bit (/tmp passes). The
+# walk goes top-down: a part that passed lets no other user rename or
+# replace an entry in it, so each part that passed stays the same up to the
+# open below it. "/" alone may also show the overflow uid (a user namespace
+# that does not map root shows the "/" of the host so). A part of this
+# user counts only while the uid of this user is not the overflow uid. The
+# rule is the rule of kubehz::space_join_tmp_dir.
+kapply::_dir_chain() {
+  # Names of their own: printf -v sets <var> of the caller, which a local
+  # of the same name would hide.
+  local _dc_real _dc_part _dc_rest _dc_ovf=""
+  _dc_real=$(cd -P -- "${1}" 2>/dev/null && pwd -P && printf x) || return 1
+  [[ "${_dc_real}" == /*$'\n'x ]] || return 1
+  _dc_real="${_dc_real%$'\n'x}"
+  while [[ "${_dc_real}" == //* ]]; do _dc_real="${_dc_real#/}"; done
+  { read -r _dc_ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || _dc_ovf=""
+  [[ "${_dc_ovf}" =~ ^[0-9]+$ ]] || _dc_ovf=65534
+  _dc_part=/ _dc_rest="${_dc_real#/}"
+  while :; do
+    kapply::_chain_part_ok "${_dc_part}" "${_dc_ovf}" || return 1
+    [[ -n "${_dc_rest}" ]] || break
+    _dc_part="${_dc_part%/}/${_dc_rest%%/*}"
+    if [[ "${_dc_rest}" == */* ]]; then _dc_rest="${_dc_rest#*/}"; else _dc_rest=""; fi
+  done
+  printf -v "${2}" '%s' "${_dc_real}"
+}
+
+# kapply::_chain_part_ok <part> <overflow uid>: one part of
+# kapply::_dir_chain. POSIX find (no follow: a link is not a directory), so
+# the same on Linux and macOS.
+kapply::_chain_part_ok() {
+  local -a own=(-user 0)
+  [[ "${EUID}" == "${2}" ]] || own+=(-o -user "${EUID}")
+  [[ "${1}" != / ]] || own+=(-o -user "${2}")
+  [[ "$(find "${1}" -prune -type d \( "${own[@]}" \) \
+    \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) -print 2>/dev/null)" == "${1}" ]]
+}
+
 # kapply::_private_ok: whether kapply::_apply_pass may append the kubectl
-# output to KAPPLY_PRIVATE_LOG. The bootstrap scheduler sets
-# KAPPLY_PRIVATE_DIR (its mktemp -d dir) and KAPPLY_PRIVATE_LOG
-# (<dir>/<seq>.priv) in its own shell, not exported. kapply writes only when:
+# output to KAPPLY_PRIVATE_LOG, through the descriptor _KAPPLY_PRIVATE_FD.
+# The bootstrap scheduler sets KAPPLY_PRIVATE_DIR (its mktemp -d dir) and
+# KAPPLY_PRIVATE_LOG (<dir>/<seq>.priv) in its own shell, not exported.
+# kapply writes only when:
 #   - lo set both (not exported: a value from the environment is refused);
 #   - the dir is an absolute path, a directory and not a link, owned by the
 #     user, with mode 0700, and the file is a plain name in it;
+#   - no other user can rename or replace the dir or a directory above it
+#     (kapply::_dir_chain);
 #   - before the first write the file is not there: kapply makes it with
-#     noclobber and umask 077 and records it (_KAPPLY_PRIVATE_MADE); a later
-#     pass needs the recorded file;
-#   - the file is a regular file and not a link, owned by the user, with
-#     mode 0600.
-# A link, a FIFO or a file that was there before, or one open to others, is
-# refused: the caller prints one fixed line and writes nothing.
+#     noclobber and umask 077 in one open, keeps that descriptor open and
+#     records it (_KAPPLY_PRIVATE_FD, _KAPPLY_PRIVATE_MADE); a later pass
+#     needs the recorded descriptor of the same file;
+#   - the file of the descriptor is a regular file of the user with mode
+#     0600, and it is the file at KAPPLY_PRIVATE_LOG (the reap reads it).
+# The write goes through the descriptor, never through the path again. A
+# link, a FIFO or a file that was there before, one open to others, or a
+# directory that another user can rename, is refused: the caller prints one
+# fixed line and writes nothing.
 kapply::_private_ok() {
-  local dir="${KAPPLY_PRIVATE_DIR-}" log="${KAPPLY_PRIVATE_LOG-}" base
+  local dir="${KAPPLY_PRIVATE_DIR-}" log="${KAPPLY_PRIVATE_LOG-}" base real fd="" mask noclobber=0
   [[ -n "${dir}" && -n "${log}" ]] || return 1
   if ! kapply::_set_by_lo KAPPLY_PRIVATE_DIR || ! kapply::_set_by_lo KAPPLY_PRIVATE_LOG; then
     return 1
   fi
   base="${log##*/}"
   [[ "${dir}" == /* && "${log%/*}" == "${dir}" && -n "${base}" && "${base}" != . && "${base}" != .. ]] || return 1
-  [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || return 1
-  kapply::_mode_is "${dir}" 700 || return 1
-  if [[ "${log}" != "${_KAPPLY_PRIVATE_MADE-}" ]] || ! kapply::_set_by_lo _KAPPLY_PRIVATE_MADE; then
+  if [[ "${log}" == "${_KAPPLY_PRIVATE_MADE-}" ]] && kapply::_set_by_lo _KAPPLY_PRIVATE_MADE \
+    && kapply::_set_by_lo _KAPPLY_PRIVATE_FD && [[ "${_KAPPLY_PRIVATE_FD}" =~ ^[0-9]+$ ]]; then
+    fd="${_KAPPLY_PRIVATE_FD}"
+  else
+    [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || return 1
+    kapply::_mode_is "${dir}" 700 || return 1
+    kapply::_dir_chain "${dir}" real || return 1
     [[ ! -e "${log}" && ! -L "${log}" ]] || return 1
-    ( set -C; umask 077; : > "${log}" ) 2>/dev/null || return 1
-    _KAPPLY_PRIVATE_MADE="${log}"
+    mask=$(umask)
+    [[ $- != *C* ]] || noclobber=1
+    umask 077
+    set -C
+    { exec {fd}>"${real}/${base}"; } 2>/dev/null || fd=""
+    (( noclobber )) || set +C
+    umask "${mask}"
+    [[ -n "${fd}" ]] || return 1
+    _KAPPLY_PRIVATE_FD="${fd}" _KAPPLY_PRIVATE_MADE="${log}"
   fi
-  [[ -f "${log}" && ! -L "${log}" && -O "${log}" ]] || return 1
+  [[ -f "/dev/fd/${fd}" && -O "/dev/fd/${fd}" && -f "${log}" && ! -L "${log}" && "/dev/fd/${fd}" -ef "${log}" ]] || return 1
   kapply::_mode_is "${log}" 600
 }
 
@@ -365,9 +426,9 @@ kapply::_apply_pass() {
   KAPPLY_LAST_OUTPUT="${out}"
   if [[ -n "${KAPPLY_PRIVATE_LOG:-}" && -n "${out}" ]]; then
     if kapply::_private_ok; then
-      printf '%s\n' "${out}" >>"${KAPPLY_PRIVATE_LOG}"
+      printf '%s\n' "${out}" >&"${_KAPPLY_PRIVATE_FD}"
     else
-      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it"
+      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename). lo does not write the kubectl output to it. If this apply hits an immutable or terminating conflict without --force-recreate, the entry fails and does not wait for the recreate confirmation at the end. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the entry then waits for that confirmation."
     fi
   fi
   n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)
@@ -383,6 +444,40 @@ kapply::_apply_pass() {
   fi
   if (( ! tty && n > 0 )) && [[ -z "${KAPPLY_PRIVATE_LOG:-}" ]]; then
     local noun=resources; (( n == 1 )) && noun=resource
+    printf '✓ %s · %d %s\n' "${label}" "${n}" "${noun}"
+  fi
+  (( rc == 0 )) || error "kapply: kubectl apply failed for ${label} (rc=${rc}). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1"
+  return "${rc}"
+}
+
+# kapply::run_private <label> <kubectl args...>
+#   Runs `KUBERC=off kubectl <args...>`, one kubectl write that is not a pass
+#   of kapply::apply (an apply of a file, a directory or a kustomization).
+#   Its stdin goes to kubectl. kubectl writes its stdout and stderr into one
+#   private capture, which lo never prints: the output can quote a value of
+#   the manifest. Returns kubectl's exit and prints fixed lines, as
+#   kapply::_apply_pass does: a [debug] line with the exit code and the
+#   number of objects that kubectl reports; on stdout the summary
+#   "✓ <label> · N resources" when N is not 0; and the fixed [error] line
+#   when kubectl fails. Under LO_SHOW_SENSITIVE_OUTPUT=1: a [warn] line, then
+#   the kubectl output on stderr, and no summary. <label> is a fixed text of
+#   the caller, never a value of the manifest. The Go twin: kapply.RunPrivate.
+kapply::run_private() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }   # the output can quote a Secret value
+  local label="${1}" out rc=0 n
+  shift
+  out=$(KUBERC=off kubectl "$@" 2>&1) || rc=$?
+  n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)
+  debug "kapply: kubectl apply for ${label} exited ${rc} (${n} resources)"
+  if kapply::show_sensitive; then
+    warn "kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for ${label}, which can quote a value of the manifest"
+    [[ -z "${out}" ]] || printf '%s\n' "${out}" >&2
+    return "${rc}"
+  fi
+  if (( n > 0 )); then
+    local noun=resources
+    (( n == 1 )) && noun=resource
     printf '✓ %s · %d %s\n' "${label}" "${n}" "${noun}"
   fi
   (( rc == 0 )) || error "kapply: kubectl apply failed for ${label} (rc=${rc}). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1"
@@ -663,7 +758,7 @@ kapply::_heal_terminating() {
       -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) || continue
     [[ -n "${dts}" ]] || continue
     warn "  clearing finalizers on stuck-terminating ${kind}/${name}"
-    kubectl "${kubectl_flags[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
+    KUBERC=off kubectl "${kubectl_flags[@]}" patch "${kind}" "${name}" "${nsf[@]}" \
       --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 \
       || warn "  could not clear finalizers on ${kind}/${name}"
   done < <(printf '%s' "${manifest}" | yq -r '[.kind, .metadata.name, (.metadata.namespace // "")] | @tsv' 2>/dev/null)
@@ -798,7 +893,7 @@ kapply::preflight() {
     stuck="${kind}"
     [[ "${apiver}" == */* ]] && stuck="${kind}.${apiver##*/}.${apiver%%/*}"
     nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
-    if kubectl "${kubectl_flags[@]}" patch "${stuck}" "${name}" "${nsf[@]}" \
+    if KUBERC=off kubectl "${kubectl_flags[@]}" patch "${stuck}" "${name}" "${nsf[@]}" \
          --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
       report+="${stuck,,}/${name} patched"$'\n'
       report+="cleared ${kind}/${name}${ns:+ (ns ${ns})} — stuck $(( (now - epoch) / 60 ))m${fins:+ · finalizers: ${fins}}"$'\n'
@@ -860,7 +955,7 @@ kapply::_preflight_crd() {
     [[ -n "${iname}" ]] || continue
     [[ "${ns}" == "-" ]] && ns=""
     nsf=(); [[ -n "${ns}" ]] && nsf=(-n "${ns}")
-    if kubectl "${kubectl_flags[@]}" patch "${name}" "${iname}" "${nsf[@]}" \
+    if KUBERC=off kubectl "${kubectl_flags[@]}" patch "${name}" "${iname}" "${nsf[@]}" \
          --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
       drained=$(( drained + 1 ))
     else
@@ -886,7 +981,7 @@ kapply::_preflight_crd() {
   fi
 
   if [[ "${mode}" == "force" ]] && kapply::_crd_allowed "${name}" "${allow}"; then
-    if kubectl "${kubectl_flags[@]}" patch crd "${name}" \
+    if KUBERC=off kubectl "${kubectl_flags[@]}" patch crd "${name}" \
          --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1; then
       echo "customresourcedefinition/${name} patched"
       echo "FORCED CustomResourceDefinition/${name} finalizer off after drain (${drained} cleared, ${failed} failed) — stale etcd CRs may resurrect on re-apply"

@@ -2779,6 +2779,53 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
   done
 }
 
+# PRIVATE_REFUSED: the fixed [warn] line of kapply when it refuses the
+# private file of the scheduler (kapply_test.bats pins it too).
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename). lo does not write the kubectl output to it. If this apply hits an immutable or terminating conflict without --force-recreate, the entry fails and does not wait for the recreate confirmation at the end. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the entry then waits for that confirmation.'
+
+# A TMPDIR that the group of this user can write into, with no sticky bit:
+# kapply refuses the private file of the scheduler. The kubectl output then
+# reaches no file, so the reap cannot see an immutable conflict: the entry
+# fails, and the [warn] line says so. Under LO_SHOW_SENSITIVE_OUTPUT=1 the
+# printed buffer holds the output, and the entry parks.
+@test "bootstrap::apply: a refused private file names the effect, and an immutable conflict fails the entry with no park" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
+  export TMPDIR="${BATS_TEST_TMPDIR}/open"
+  mkdir -m 0770 "${TMPDIR}"
+  _private_kubectl_stub "Error from server (Invalid): ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\": field is immutable" 1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "${PRIVATE_REFUSED}"
+  assert_line '✗ testcni'
+  assert_output --partial '[error] bootstrap: testcni has objects blocked by an immutable/terminating conflict'
+  refute_output --partial 'will confirm at the end'
+  refute_output --partial 'needs recreate'
+  refute_output --partial "${CANARY_VALUE}"
+  LO_SHOW_SENSITIVE_OUTPUT=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "${PRIVATE_REFUSED}"
+  assert_output --partial 'will confirm at the end'
+}
+
+# The same refusal on a clean apply: the [warn] line prints, the entry is
+# ok, and nothing parks. The line names the conflict only as a condition,
+# so it says nothing false here.
+@test "bootstrap::apply: a refused private file on a clean apply prints the warn line, and the entry is ok" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
+  export TMPDIR="${BATS_TEST_TMPDIR}/open"
+  mkdir -m 0770 "${TMPDIR}"
+  _private_kubectl_stub "configmap/testcni serverside-applied" 0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "${PRIVATE_REFUSED}"
+  assert_line '✓ testcni'
+  refute_output --partial '[error]'
+  refute_output --partial 'will confirm at the end'
+  refute_output --partial 'needs recreate'
+}
+
 @test "bootstrap::apply: a terminating-namespace 403 in the private output reaches the prompt" {
   local p="${BATS_TEST_TMPDIR}/prompt.txt"
   write_cluster_spec "testcni"
@@ -2879,11 +2926,66 @@ SH
     bootstrap::_sched_untrap
     trap -p EXIT TERM' > "${BATS_TEST_TMPDIR}/traps" 2>&1 || true
   run cat "${BATS_TEST_TMPDIR}/traps"
-  assert_line --index 0 "trap -- 'bootstrap::_sched_rm; echo caller' EXIT"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status bootstrap::_sched_rm && :; echo caller' EXIT"
   assert_line --index 1 "trap -- 'bootstrap::_sched_signal TERM' SIGTERM"
   assert_line --index 2 "trap -- 'echo caller' EXIT"
   assert_line --index 3 "trap -- 'echo term' SIGTERM"
   assert_line --index 4 "caller"
+}
+
+# The EXIT trap of the scheduler runs the earlier EXIT trap with the exit
+# status of the shell, also under set -e. A subshell chains the traps that
+# it set itself and gets them back afterwards. A trap of its parent never
+# chains: it does not run in the subshell.
+@test "bootstrap::_sched_trap: the earlier EXIT trap reads the exit status, and a subshell chains its own traps only" {
+  export _PROJECT_ROOT
+  local d="${BATS_TEST_TMPDIR}/sched-rc" out="${BATS_TEST_TMPDIR}/sched-rc.out" rc=0
+  mkdir -p "${d}"
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "exit \$?" EXIT
+    bootstrap::_sched_trap "$1"
+    exit 7' _ "${d}" || rc=$?
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}"; return 1; }
+  [ ! -e "${d}" ]
+
+  mkdir -p "${d}"; rc=0
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    set -e
+    trap "echo caller-rc=\$?" EXIT
+    bootstrap::_sched_trap "$1"
+    exit 7' _ "${d}" > "${out}" 2>&1 || rc=$?
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}"; cat "${out}"; return 1; }
+  [ "$(cat "${out}")" = "caller-rc=7" ] || { cat "${out}"; return 1; }
+  [ ! -e "${d}" ]
+
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo parent" EXIT
+    ( trap "echo sub-own" EXIT
+      trap "echo sub-term" TERM
+      bootstrap::_sched_trap /nonexistent/x
+      trap -p EXIT
+      bootstrap::_sched_untrap
+      trap -p EXIT TERM
+      bootstrap::_sched_trap /nonexistent/x
+      exit 0 )
+    ( bootstrap::_sched_trap /nonexistent/x
+      trap -p EXIT
+      exit 0 )
+    trap - EXIT' > "${out}" 2>&1 || true
+  run cat "${out}"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status bootstrap::_sched_rm && :; echo sub-own' EXIT"
+  assert_line --index 1 "trap -- 'echo sub-own' EXIT"
+  assert_line --index 2 "trap -- 'echo sub-term' SIGTERM"
+  assert_line --index 3 "sub-own"
+  assert_line --index 4 "trap -- 'bootstrap::_keep_status bootstrap::_sched_rm && :' EXIT"
+  [ "${#lines[@]}" -eq 5 ]
+  refute_line "parent"
 }
 
 # ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
@@ -3468,7 +3570,9 @@ STANDIN
 # not in the manifest), then the line that names the .diff file at
 # <diff-path> ("" without --render-dir). The Go twin is wantDebugDiffLines.
 _dry_debug_lines() {
-  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap default/%s\n' "${1}" testcni
+  # The testcni ConfigMap sets no namespace: the line has none (the
+  # namespace of the diff header comes from the diff text).
+  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap %s\n' "${1}" testcni
   if [[ -z "${2}" ]]; then
     printf '[debug] bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}"
   else
@@ -3532,6 +3636,7 @@ _dry_debug_lines() {
   refute_output --partial "@@ "
   refute_output --partial "differs: v1 ConfigMap default/extra"
   refute_output --partial "differs: v1 ConfigMap default/other"
+  refute_output --partial "ConfigMap default/testcni"
 }
 
 # LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
@@ -3630,7 +3735,9 @@ YAML
   _objs "a header in no manifest object" "" < <(_dfile v1.ConfigMap.default.unknown && _hunk)
   _objs "another namespace" "" < <(_dfile v1.ConfigMap.other.cfg && _hunk)
   _objs "another version" "" < <(_dfile apps.v2.Deployment.web.front && _hunk)
-  _objs "no manifest namespace: any namespace" "v1 ConfigMap kube-system/anyns" < <(_dfile v1.ConfigMap.kube-system.anyns && _hunk)
+  _objs "no manifest namespace: any namespace, printed with no namespace" "v1 ConfigMap anyns" < <(_dfile v1.ConfigMap.kube-system.anyns && _hunk)
+  _objs "no manifest namespace: the namespace of the diff text never prints" "v1 ConfigMap anyns" < <(_dfile v1.ConfigMap.canary9.anyns && _hunk)
+  _objs "cluster-scoped: a namespace in the diff text never prints" "rbac.authorization.k8s.io/v1 ClusterRole admin" < <(_dfile rbac.authorization.k8s.io.v1.ClusterRole.canary9.admin && _hunk)
   _objs "a name with an ESC byte, escaped" 'v1 ConfigMap default/we\x1bb' < <(_dfile $'v1.ConfigMap.default.we\x1bb' && _hunk)
   _objs "a forged header inside a hunk" "v1 Secret default/s" \
     < <(_dfile v1.Secret.default.s && printf -- '@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n a: x\n' "${ts}" "${ts}")
@@ -6112,7 +6219,7 @@ SH
 
 # A dry run leaves no temp file behind: not when it finishes, not when it
 # is killed (SIGTERM) in the middle of a render. And it CHAINS the caller's
-# EXIT trap instead of replacing it.
+# EXIT trap instead of replacing it, also a trap that a subshell set.
 @test "bootstrap::apply --dry-run leaves no temp files (finished or SIGTERM) and chains the EXIT trap" {
   write_cluster_spec "testcni"
   _dry_kubectl_stub 0
@@ -6122,6 +6229,8 @@ SH
     trap 'echo caller-trap-ran > "${BATS_TEST_TMPDIR}/caller-trap"' EXIT
     bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null >/dev/null 2>&1 ) || true
   [ -z "$(ls -A "${tmp}")" ] || { ls -la "${tmp}"; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/caller-trap" 2>/dev/null)" = caller-trap-ran ] \
+    || { echo "the EXIT trap of the subshell did not run"; return 1; }
 
   # The main-shell path: the caller's EXIT trap is still there afterwards.
   export _PROJECT_ROOT
@@ -6135,7 +6244,7 @@ SH
   # The chained trap while the run lasts, the caller's own trap afterwards,
   # and the caller's trap running at exit.
   run cat "${BATS_TEST_TMPDIR}/traps"
-  assert_line --index 0 "trap -- 'rm -rf -- /nonexistent/x; echo caller' EXIT"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status rm -rf -- /nonexistent/x && :; echo caller' EXIT"
   assert_line --index 1 "trap -- 'echo caller' EXIT"
   assert_line --index 2 "caller"
 
@@ -6157,6 +6266,48 @@ SH
   for (( i = 0; i < 40 && ! -e "${SLEPT}"; i++ )); do sleep 0.1; done
   sleep 0.5
   [ -z "$(ls -A "${tmp}")" ] || { ls -laR "${tmp}"; return 1; }
+}
+
+# The EXIT trap of a dry run runs the earlier EXIT trap with the exit status
+# of the shell, also under set -e. A subshell chains the EXIT trap that it
+# set itself and gets it back afterwards. The EXIT trap of its parent never
+# chains: it does not run in the subshell.
+@test "bootstrap::_dry_run_trap: the earlier EXIT trap reads the exit status, and a subshell chains its own EXIT trap only" {
+  export _PROJECT_ROOT
+  local d="${BATS_TEST_TMPDIR}/dry-rc" out="${BATS_TEST_TMPDIR}/dry-rc.out" rc=0
+  mkdir -p "${d}"
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    set -e
+    trap "r=\$?; echo caller-rc=\$r; exit \$r" EXIT
+    bootstrap::_dry_run_trap "$1"
+    exit 7' _ "${d}" > "${out}" 2>&1 || rc=$?
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}"; cat "${out}"; return 1; }
+  [ "$(cat "${out}")" = "caller-rc=7" ] || { cat "${out}"; return 1; }
+  [ ! -e "${d}" ]
+
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo parent" EXIT
+    ( trap "echo sub-own" EXIT
+      bootstrap::_dry_run_trap /nonexistent/x
+      trap -p EXIT
+      bootstrap::_dry_run_untrap /nonexistent/x
+      trap -p EXIT
+      exit 0 )
+    ( bootstrap::_dry_run_trap /nonexistent/x
+      trap -p EXIT
+      exit 0 )
+    trap - EXIT' > "${out}" 2>&1 || true
+  run cat "${out}"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status rm -rf -- /nonexistent/x && :; echo sub-own' EXIT"
+  assert_line --index 1 "trap -- 'echo sub-own' EXIT"
+  assert_line --index 2 "sub-own"
+  assert_line --index 3 "trap -- 'bootstrap::_keep_status rm -rf -- /nonexistent/x && :' EXIT"
+  [ "${#lines[@]}" -eq 4 ]
+  refute_line "parent"
 }
 
 @test "bootstrap::mode_check: the flag dependencies (the lines the Go cli prints)" {

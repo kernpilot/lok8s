@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/kapply"
 )
 
 // The five waits, all in seconds, all overridable from the environment.
@@ -310,7 +312,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 			}
 		}
 		// 1. The marker first (the CronJob stops beating), suspended.
-		if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
+		if err := c.applyPrivate(ctx, "the CronJob agent", nil, "apply", "-k", agentDir); err != nil {
 			if ctx.Err() != nil {
 				return c.suspendInterrupted(ctx)
 			}
@@ -334,7 +336,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 			return err
 		}
 		// 3. The live agent, which becomes the only producer.
-		if err := c.run(ctx, "kubectl", "apply", "-k", overlay); err != nil {
+		if err := c.applyPrivate(ctx, "the live agent", nil, "apply", "-k", overlay); err != nil {
 			c.errorf("kubehz: could not apply the live agent. The apply can have applied part of the live agent objects. The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator), so %s. Run 'lo kubehz deploy' again, or set spec.kubehz.agent back to cronjob and run it again.", heartbeatsCanStop)
 			return ErrHandled
 		}
@@ -363,7 +365,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 	if err := c.waitLiveAgentGone(ctx); err != nil {
 		return err
 	}
-	if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
+	if err := c.applyPrivate(ctx, "the CronJob agent", nil, "apply", "-k", agentDir); err != nil {
 		if ctx.Err() != nil {
 			return c.suspendInterrupted(ctx)
 		}
@@ -675,7 +677,7 @@ const (
 // apply.
 func (c *Context) proveBindSecret(ctx context.Context, workdir, domain, secret string) error {
 	changed := "The namespace apply can have changed the namespace kubehz-system. The deploy applied no other object."
-	err := c.run(ctx, "kubectl", "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml"))
+	err := c.applyPrivate(ctx, "the namespace kubehz-system", nil, "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml"))
 	if err == nil {
 		changed = "The deploy applied only the namespace kubehz-system."
 		err = c.bindSecretUpsert(ctx, secret, "--dry-run=server")
@@ -703,7 +705,7 @@ func (c *Context) stageBindSecretBytes(ctx context.Context, workdir, domain, sec
 
 // applyBindSecret applies the namespace (a first deploy has none yet), then
 // upserts the Secret with the value secret, and stops at the first failure.
-// kubectl writes the reason to stderr. The value goes in on the stdin of the
+// The kubectl output stays private (applyPrivate). The value goes in on the stdin of the
 // dry-run create (--from-file=bind-secret=/dev/stdin), never on argv, so `ps`
 // does not show it. The server-side apply changes an existing Secret in
 // place (a re-announce rotates the value), so a running CronJob never finds
@@ -711,7 +713,7 @@ func (c *Context) stageBindSecretBytes(ctx context.Context, workdir, domain, sec
 // describe` would show. RBAC: patch on Secrets in kubehz-system, and create
 // when the Secret is new.
 func (c *Context) applyBindSecret(ctx context.Context, workdir, secret string) error {
-	if err := c.run(ctx, "kubectl", "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml")); err != nil {
+	if err := c.applyPrivate(ctx, "the namespace kubehz-system", nil, "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml")); err != nil {
 		return err
 	}
 	return c.bindSecretUpsert(ctx, secret)
@@ -732,11 +734,16 @@ func (c *Context) bindSecretUpsert(ctx context.Context, secret string, extra ...
 		return err
 	}
 	args := append([]string{"apply", "--server-side", "--force-conflicts"}, extra...)
-	return c.Runner.Run(ctx, execx.Cmd{
-		Name: "kubectl", Args: append(args, "-f", "-"),
-		Env:   []string{execx.KubeRCOff},
-		Stdin: &manifest, Stdout: c.out(), Stderr: c.errOut(),
-	})
+	return c.applyPrivate(ctx, "the bind secret", &manifest, append(args, "-f", "-")...)
+}
+
+// applyPrivate runs one kubectl apply of the deploy (args after kubectl)
+// with the kubectl output private (kapply.RunPrivate): the output of an
+// apply can quote a value of the manifest, and the bind secret holds a
+// credential. label names the objects in the fixed lines. A nil stdin is
+// the stdin of lo (bash: kapply::run_private).
+func (c *Context) applyPrivate(ctx context.Context, label string, stdin io.Reader, args ...string) error {
+	return kapply.RunPrivate(ctx, c.Runner, execx.Cmd{Name: "kubectl", Args: args, Stdin: stdin}, label, c.out(), c.errOut())
 }
 
 // podLines keeps only the `pod/<name>` lines of a merged capture — an

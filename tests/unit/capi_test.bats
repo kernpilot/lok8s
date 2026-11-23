@@ -14,6 +14,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/credentials.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/generate"
 
   # Copy CAPI templates to tmpdir (needed by capi::generate)
@@ -510,4 +511,46 @@ _capi_template_placeholders() {
   run capi::generate "${spec}" "hetzner"
   assert_failure
   refute_output --partial "kind: Cluster"
+}
+
+# MGMT_CANARY stands for a value of the manifest that kubectl quotes on its
+# stdout, MGMT_ERR_CANARY for one on its stderr. Both are made up.
+MGMT_CANARY=zq7MgmtCanary6pLn
+MGMT_ERR_CANARY=zq7MgmtStderrCanary1cVy
+
+# _leaking_kubectl: a kubectl stub. Each apply reads its manifest from stdin
+# when it applies "-f -", and prints one object line and the canaries on its
+# stdout and stderr. A dry-run create prints a Secret. Every other call
+# succeeds.
+_leaking_kubectl() {
+  kubectl() {
+    case " $* " in
+      *" create "*)
+        [[ " $* " != *" --from-env-file=/dev/stdin "* ]] || cat > /dev/null
+        echo "kind: Secret" ;;
+      *" apply "*)
+        [[ " $* " != *" -f - "* ]] || cat > /dev/null
+        printf 'secret/x configured\nInvalid value: "%s"\n' "${MGMT_CANARY}"
+        printf 'Warning: the value "%s" is deprecated\n' "${MGMT_ERR_CANARY}" >&2 ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+  export MGMT_CANARY MGMT_ERR_CANARY
+}
+
+@test "private: capi::ensure_credentials keeps the kubectl output of the Secret apply private" {
+  # The Go twin: TestKubectlApplyOutputStaysPrivate/credentials.
+  command -v yq &>/dev/null || skip "yq required"
+  _leaking_kubectl
+  export HCLOUD_TOKEN="test-token"
+  run capi::ensure_credentials "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" hetzner /tmp/kubeconfig.yaml
+  assert_success
+  refute_output --partial "${MGMT_CANARY}"
+  refute_output --partial "${MGMT_ERR_CANARY}"
+  assert_line '✓ the credentials Secret · 1 resource'
+  LO_SHOW_SENSITIVE_OUTPUT=1 run capi::ensure_credentials "${BATS_TEST_TMPDIR}/hetzner-cluster.lok8s.yaml" hetzner /tmp/kubeconfig.yaml
+  assert_success
+  assert_output --partial "${MGMT_CANARY}"
+  assert_output --partial "${MGMT_ERR_CANARY}"
 }

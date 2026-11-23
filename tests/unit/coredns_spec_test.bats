@@ -35,6 +35,7 @@ YAML
   import() { :; }
   export -f import
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/services.sh"
 
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
@@ -101,6 +102,17 @@ YAML
   grep -q $'^KUBERC=off\tapply --kubeconfig .* -f -$' "${log}" || { cat "${log}"; return 1; }
 }
 
+# The rollout restart is a write too: it runs with KUBERC=off, as in the Go
+# twin (TestCorednsRolloutRunsWithKubeRCOff in internal/driver/lo).
+@test "coredns: the rollout restart runs with the kubectl user defaults off (KUBERC=off)" {
+  kubectl_path_stub
+  export KUBERC=/user/kuberc
+  run lo::coredns "x.dev"
+  assert_success
+  grep -q $'^KUBERC=off\trollout restart deployment/coredns -n kube-system --kubeconfig ' "${KUBECTL_PATH_LOG}" || { cat "${KUBECTL_PATH_LOG}"; return 1; }
+  ! grep -q $'^KUBERC=/user/kuberc\trollout ' "${KUBECTL_PATH_LOG}" || { cat "${KUBECTL_PATH_LOG}"; return 1; }
+}
+
 @test "coredns: pins coredns-external to the LAST pool IP (avoids gateway pool[0] race)" {
   # lo::coredns reads metadata.name -> kubeconfig path; kubectl is stubbed.
   lo::coredns "x.dev"
@@ -108,4 +120,74 @@ YAML
   assert_success
   # pool is 10.20.30.1-10.20.30.9 -> coredns-external must take .9, NOT .1
   assert_output --partial "metallb.universe.tf/loadBalancerIPs=10.20.30.9"
+}
+
+# LO_CANARY stands for a value of the manifest that kubectl quotes on its
+# stdout, LO_ERR_CANARY for one on its stderr. Both are made up.
+LO_CANARY=zq7LoCanary2wKd
+LO_ERR_CANARY=zq7LoStderrCanary5hRm
+
+# _leaking_kubectl: a kubectl stub. Each apply reads its manifest from stdin
+# when it applies "-f -", and prints one object line and the canaries on its
+# stdout and stderr. Every other call succeeds.
+_leaking_kubectl() {
+  kubectl() {
+    case " $* " in
+      *" create "*) cat >/dev/null 2>&1 || true ;;
+      *" apply "*)
+        [[ " $* " != *" -f - "* ]] || cat >/dev/null
+        printf 'configmap/x configured\nInvalid value: "%s"\n' "${LO_CANARY}"
+        printf 'Warning: the value "%s" is deprecated\n' "${LO_ERR_CANARY}" >&2 ;;
+    esac
+    return 0
+  }
+  export LO_CANARY LO_ERR_CANARY
+}
+
+@test "private: lo::coredns keeps the kubectl output of each apply private" {
+  # The Go twin: TestDriverAppliesKeepTheKubectlOutputPrivate/coredns.
+  _leaking_kubectl
+  run lo::coredns "x.dev"
+  assert_success
+  refute_output --partial "${LO_CANARY}"
+  refute_output --partial "${LO_ERR_CANARY}"
+  assert_line '✓ the CoreDNS Corefile · 1 resource'
+  assert_line '✓ the CoreDNS external Service · 1 resource'
+  assert_line '✓ the CoreDNS custom ConfigMap · 1 resource'
+  LO_SHOW_SENSITIVE_OUTPUT=1 run lo::coredns "x.dev"
+  assert_success
+  assert_output --partial "${LO_CANARY}"
+  assert_output --partial "${LO_ERR_CANARY}"
+  assert_line '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for the CoreDNS custom ConfigMap, which can quote a value of the manifest'
+}
+
+@test "private: the two registry ConfigMaps keep the kubectl output private" {
+  # The Go twin: TestDriverAppliesKeepTheKubectlOutputPrivate/registries.
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/registries.sh"
+  registry::get() {
+    case "$1 $2" in
+      "build ip") echo 10.1.2.3 ;;
+      "build host") echo lok8s.local ;;
+    esac
+  }
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
+  printf '%s\n' '{"registries":[{"name":"build","ip":"10.1.2.3","url":"","type":"build"}]}' > "${LOK8S_REGISTRY_JSON}"
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  printf 'apiVersion: v1\nkind: Config\n' > "${PATH_BASE}/.kubeconfig/x-dev.yaml"
+  _leaking_kubectl
+  _registries() {
+    lo::registry_configmap "x.dev" "${PATH_CLUSTERS}/x.dev/cluster.lok8s.yaml" &&
+      lo::apply_local_registry_hosting "x.dev"
+  }
+  run _registries
+  assert_success
+  refute_output --partial "${LO_CANARY}"
+  refute_output --partial "${LO_ERR_CANARY}"
+  assert_line '✓ the registries ConfigMap · 1 resource'
+  assert_line '✓ the local registry hosting ConfigMap · 1 resource'
+  LO_SHOW_SENSITIVE_OUTPUT=1 run _registries
+  assert_success
+  assert_output --partial "${LO_CANARY}"
+  assert_output --partial "${LO_ERR_CANARY}"
+  assert_line '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for the registries ConfigMap, which can quote a value of the manifest'
 }

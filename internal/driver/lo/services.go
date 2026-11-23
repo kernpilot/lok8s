@@ -39,8 +39,8 @@ func (d *Driver) coredns(ctx context.Context, out, errOut io.Writer, domain stri
 	}
 	kubeconfig := filepath.Join(d.deps.Paths.Base, ".kubeconfig", clusterName+".yaml")
 
-	_ = d.runOut(ctx, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "corefile.yaml"))
-	_ = d.runOut(ctx, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "expose.yaml"))
+	_ = d.applyPrivate(ctx, "the CoreDNS Corefile", "", out, errOut, "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "corefile.yaml"))
+	_ = d.applyPrivate(ctx, "the CoreDNS external Service", "", out, errOut, "apply", "--kubeconfig", kubeconfig, "-f", filepath.Join(corednsDir, "expose.yaml"))
 
 	// Pin coredns-external to the LAST loadBalancer.pool IP so it does not
 	// race the ingress/Envoy gateway for pool[0]. coredns-external is
@@ -177,7 +177,7 @@ func (d *Driver) corednsCustom(ctx context.Context, out, errOut io.Writer, domai
 	if err != nil {
 		return
 	}
-	_ = d.runInput(ctx, rendered+"\n", out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
+	_ = d.applyPrivate(ctx, "the CoreDNS custom ConfigMap", rendered+"\n", out, errOut, "apply", "--kubeconfig", kubeconfig, "-f", "-")
 }
 
 // runOut runs a tool with the caller's writers (progress phases capture

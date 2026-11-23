@@ -30,6 +30,7 @@ YAML
 
   import() { :; }
   export -f import
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
   :args() { domain="test.dev"; }
   capi::_status_bound() { echo 1; }

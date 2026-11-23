@@ -85,6 +85,7 @@
 
 import ^utils/verbose
 import ^utils/http
+import ^utils/kapply
 
 # Where the vendored manifests live.
 KUBEHZ_AGENT_MANIFESTS="${PATH_LOK8S}/libs/kubehz/manifests/agent"
@@ -443,7 +444,7 @@ kubehz::deploy_apply() (
     #    enrolls but does not beat, so the beat is unowned rather than
     #    contested while we start the live agent.
     kubehz::hold_suspend_traps
-    KUBERC=off kubectl apply -k "${workdir}/agent" || {
+    kapply::run_private "the CronJob agent" apply -k "${workdir}/agent" || {
       rm -f -- "${workdir}/bind-secret"
       error "kubehz: could not apply the CronJob agent (identity bootstrap). ${_KUBEHZ_AGENT_APPLY_MAY_HAVE_CHANGED} Fix the cause, then run 'lo kubehz deploy' again."
       return 1
@@ -463,7 +464,7 @@ kubehz::deploy_apply() (
     #     the time. Run the bootstrap now and wait for its Job to complete.
     kubehz::ensure_identity_secret || return 1
     # 3. Now the live agent, which becomes the only producer.
-    KUBERC=off kubectl apply -k "${overlay}" || {
+    kapply::run_private "the live agent" apply -k "${overlay}" || {
       error "kubehz: could not apply the live agent. The apply can have applied part of the live agent objects. The CronJob does not beat (KUBEHZ_HEARTBEAT_OWNER=operator), so ${_KUBEHZ_HEARTBEATS_CAN_STOP}. Run 'lo kubehz deploy' again, or set spec.kubehz.agent back to cronjob and run it again."
       return 1
     }
@@ -512,7 +513,7 @@ kubehz::deploy_apply() (
   # before the CronJob is allowed to beat again.
   kubehz::wait_live_agent_gone || return 1
   kubehz::hold_suspend_traps
-  KUBERC=off kubectl apply -k "${workdir}/agent" || {
+  kapply::run_private "the CronJob agent" apply -k "${workdir}/agent" || {
     error "kubehz: could not apply the CronJob agent. The live agent is gone. ${_KUBEHZ_AGENT_APPLY_MAY_HAVE_CHANGED} Fix the cause, then run 'lo kubehz deploy' again."
     return 1
   }
@@ -759,7 +760,7 @@ _KUBEHZ_DEPLOY_WITHOUT_SECRET="To deploy without the secret, remove the file and
 kubehz::prove_bind_secret() {
   local workdir="${1}" domain="${2}" copy="${1}/bind-secret"
   local changed="The namespace apply can have changed the namespace kubehz-system. The deploy applied no other object."
-  if KUBERC=off kubectl apply -f "${workdir}/agent/namespace.yaml"; then
+  if kapply::run_private "the namespace kubehz-system" apply -f "${workdir}/agent/namespace.yaml"; then
     changed="The deploy applied only the namespace kubehz-system."
     kubehz::bind_secret_upsert "${copy}" --dry-run=server && return 0
   fi
@@ -782,8 +783,8 @@ kubehz::stage_bind_copy() {
 }
 
 # Apply the namespace (a first deploy has none yet), then upsert the Secret
-# with the value in <copy>, and stop at the first failure. kubectl writes the
-# reason to stderr. The value goes in on the stdin of the dry-run create
+# with the value in <copy>, and stop at the first failure. The kubectl output
+# stays private (kapply::run_private). The value goes in on the stdin of the dry-run create
 # (--from-file=bind-secret=/dev/stdin), never on argv, so `ps` does not show
 # it. The server-side apply changes an existing Secret in place (a
 # re-announce rotates the value), so a running CronJob never finds the Secret
@@ -792,7 +793,7 @@ kubehz::stage_bind_copy() {
 # Secret is new.
 # Usage: kubehz::apply_bind_secret <workdir> <copy>
 kubehz::apply_bind_secret() {
-  KUBERC=off kubectl apply -f "${1}/agent/namespace.yaml" || return 1
+  kapply::run_private "the namespace kubehz-system" apply -f "${1}/agent/namespace.yaml" || return 1
   kubehz::bind_secret_upsert "${2}"
 }
 
@@ -807,7 +808,7 @@ kubehz::bind_secret_upsert() {
   shift
   manifest=$(kubectl -n kubehz-system create secret generic kubehz-agent-bind \
     --from-file=bind-secret=/dev/stdin --dry-run=client -o yaml < "${copy}") || return 1
-  printf '%s\n' "${manifest}" | KUBERC=off kubectl apply --server-side --force-conflicts "$@" -f -
+  printf '%s\n' "${manifest}" | kapply::run_private "the bind secret" apply --server-side --force-conflicts "$@" -f -
 }
 
 # The read of the identity Secret prints the word agent-token when the Secret

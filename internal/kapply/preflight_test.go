@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,9 @@ import (
 // namespace-finalize and CRD-drain behaviors.
 type preflightStub struct {
 	calls        []string
-	getOut       string // answer to `get -f -`
-	nsGetOut     string // answer to `get ns|namespace …`
+	envs         [][]string // the Env of each call, in call order
+	getOut       string     // answer to `get -f -`
+	nsGetOut     string     // answer to `get ns|namespace …`
 	crdName      string
 	crdInstances string // answer to `get <crd-name> -A`
 	crdStays     bool   // keep the CRD wedged after the drain
@@ -38,6 +40,7 @@ func (f *preflightStub) log() string { return strings.Join(f.calls, "\n") }
 
 func (f *preflightStub) Run(ctx context.Context, c execx.Cmd) error {
 	f.calls = append(f.calls, c.Name+" "+strings.Join(c.Args, " "))
+	f.envs = append(f.envs, c.Env)
 	args := c.Args
 	if len(args) == 0 {
 		return nil
@@ -120,6 +123,63 @@ func stuckCRDFixture(f *preflightStub) {
 	f.crdInstances = `{"items":[
     {"metadata":{"namespace":"kubehz-system","name":"k6-burst-1","finalizers":["kubehz.dev/cluster-cleanup"]}},
     {"metadata":{"namespace":"kubehz-system","name":"k6-burst-2","finalizers":["kubehz.dev/cluster-cleanup"]}}]}`
+}
+
+// Each finalizer patch of the preflight (a stuck object of the manifest,
+// an instance of a stuck CRD, the CRD under --crds force) is a write: it
+// runs with the kubectl user defaults off, also though its patch comes
+// from the argv. Each read keeps the kuberc of the user. The bats twin is
+// "preflight: each finalizer patch runs with KUBERC=off" in
+// kapply_test.bats.
+func TestPreflightFinalizerPatchesRunWithKubeRCOff(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stub    func() *preflightStub
+		extra   []string
+		patches int
+	}{
+		{"stuck object", func() *preflightStub {
+			return &preflightStub{getOut: `{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}`}
+		}, nil, 1},
+		{"CRD drain", func() *preflightStub {
+			f := &preflightStub{}
+			stuckCRDFixture(f)
+			return f
+		}, nil, 2},
+		{"CRD force", func() *preflightStub {
+			f := &preflightStub{crdStays: true}
+			stuckCRDFixture(f)
+			return f
+		}, []string{"--crds", "force"}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.stub()
+			a, _ := preflightApplier(f)
+			_ = a.Preflight(t.Context(), crManifest, tc.extra...)
+			patches := 0
+			for i, line := range f.calls {
+				fields := strings.Fields(line)
+				if len(fields) < 2 {
+					continue
+				}
+				off := slices.Contains(f.envs[i], execx.KubeRCOff)
+				switch fields[1] {
+				case "patch":
+					patches++
+					if !off {
+						t.Errorf("%s runs without %s (Env %q)", line, execx.KubeRCOff, f.envs[i])
+					}
+				case "get":
+					if off {
+						t.Errorf("%s: a read runs with %s", line, execx.KubeRCOff)
+					}
+				}
+			}
+			if patches != tc.patches {
+				t.Errorf("%d finalizer patches, want %d:\n%s", patches, tc.patches, f.log())
+			}
+		})
+	}
 }
 
 func TestPreflightNothingTerminating(t *testing.T) {

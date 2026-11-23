@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/kapply"
 )
 
 // kube runs kubectl through the Runner seam with the hook's streams.
@@ -45,6 +46,22 @@ func (k *kube) run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 		stderr = k.errOut()
 	}
 	return k.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: args, Env: []string{execx.KubeRCOff}, Stdin: stdin, Stdout: stdout, Stderr: stderr})
+}
+
+// applyPrivate is `kubectl <args>` for an apply of a hook, with the
+// kubectl output private (kapply.RunPrivate): the output of an apply can
+// quote a value of the manifest, and a kubeconfig Secret holds a
+// credential. label names the objects in the fixed lines. The summary
+// goes to stdout and the other fixed lines to stderr (nil = the hook's
+// own). The child runs with the kubectl user defaults off.
+func (k *kube) applyPrivate(ctx context.Context, label string, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+	if stdout == nil {
+		stdout = k.out()
+	}
+	if stderr == nil {
+		stderr = k.errOut()
+	}
+	return kapply.RunPrivate(ctx, k.runner, execx.Cmd{Name: "kubectl", Args: args, Stdin: stdin}, label, stdout, stderr)
 }
 
 // capture is `$(kubectl <args> 2>/dev/null)`: stdout captured, stderr

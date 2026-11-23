@@ -2068,7 +2068,9 @@ bootstrap::_diff_objects() {
 # The escaped label of the object of a `--- ` header line of kubectl diff
 # (bootstrap::_diff_objects): a file of the LIVE tree with the kubectl file
 # name whose key is in _exact, or, with no namespace, in _anyns (the arrays
-# of the caller). Returns 1 for any other header.
+# of the caller). The label is the key of the manifest object: a key of
+# _anyns prints with no namespace, because the namespace of the header
+# comes from the diff text. Returns 1 for any other header.
 bootstrap::_diff_header_object() {
   local _re='^(([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^[:space:]/]+)$'
   local _path _dir _api _name
@@ -2078,13 +2080,14 @@ bootstrap::_diff_header_object() {
   [[ "${_path}" == */* && "${_dir##*/}" == LIVE-* ]] || return 1
   [[ "${_path##*/}" =~ ${_re} ]] || return 1
   local _g="${BASH_REMATCH[2]}" _v="${BASH_REMATCH[3]}" _k="${BASH_REMATCH[4]}" _ns="${BASH_REMATCH[5]}" _n="${BASH_REMATCH[6]}"
-  if [[ -z "${_exact["${_g}/${_v}/${_k}/${_ns}/${_n}"]:-}" && -z "${_anyns["${_g}/${_v}/${_k}/${_n}"]:-}" ]]; then
+  _name="${_n}"
+  if [[ -n "${_exact["${_g}/${_v}/${_k}/${_ns}/${_n}"]:-}" ]]; then
+    [[ -z "${_ns}" ]] || _name="${_ns}/${_n}"
+  elif [[ -z "${_anyns["${_g}/${_v}/${_k}/${_n}"]:-}" ]]; then
     return 1
   fi
   _api="${_v}"
   [[ -z "${_g}" ]] || _api="${_g}/${_v}"
-  _name="${_n}"
-  [[ -z "${_ns}" ]] || _name="${_ns}/${_n}"
   kapply::escape "${_api} ${_k} ${_name}"
 }
 
@@ -2298,26 +2301,62 @@ bootstrap::_run_dry() {
   return 0
 }
 
+# bootstrap::_own_traps <var> <signal>...
+# Sets <var> to the `trap -p <signal>...` of THIS shell. In a subshell,
+# `trap -p` shows the traps of the PARENT until the subshell sets a trap of
+# its own, and those traps never run there. Any set or reset of a trap in
+# the subshell removes them from the display. Thus in a subshell, this
+# resets the first of USR2, USR1, WINCH and URG that shows no trap: that
+# reset changes no disposition, and `trap -p` then shows only the traps of
+# the subshell. If each of the four shows a trap, the subshell cannot tell
+# its own traps from those of the parent, and <var> is empty. The main shell
+# reads `trap -p` directly.
+bootstrap::_own_traps() {
+  local _ot_var="${1}" _ot_sig
+  shift
+  if (( BASHPID != $$ )); then
+    for _ot_sig in USR2 USR1 WINCH URG ""; do
+      [[ -n "${_ot_sig}" ]] || { printf -v "${_ot_var}" '%s' ""; return 0; }
+      [[ -n "$(trap -p "${_ot_sig}")" ]] || break
+    done
+    trap - "${_ot_sig}"
+  fi
+  printf -v "${_ot_var}" '%s' "$(trap -p "$@")"
+}
+
+# bootstrap::_keep_status <command...>
+# Runs <command>, then returns the exit status that was there before it. An
+# EXIT trap runs it before the earlier EXIT trap that it chains, so that
+# trap still reads the exit status of the shell in $? (a trap such as
+# `exit $?` keeps it). The trap calls it as `bootstrap::_keep_status ... &&
+# :`: under set -e, a status other than 0 then does not stop the trap
+# before the earlier trap runs.
+bootstrap::_keep_status() {
+  local _ks_rc=$?
+  "$@"
+  return "${_ks_rc}"
+}
+
 # bootstrap::_dry_run_trap <dir>
 # Removes <dir> (the dry run's boundary: the plugin home, the stubs, the
 # report, every copy and temp file of the run) on EXIT, CHAINED in front of
 # the EXIT trap this shell already has (bats keeps its own there, and so may
-# any caller). Bash runs the EXIT trap on SIGINT and SIGTERM too, so an
-# interrupted dry run leaves nothing behind. In a subshell, `trap -p` shows
-# the PARENT's traps, which never run there: chaining one would run the
-# parent's trap in the subshell (bats then reported a test twice), so a
-# subshell installs only its own removal. bootstrap::_dry_run_untrap undoes
-# it at the end of the run.
+# any caller), with the exit status kept for that trap
+# (bootstrap::_keep_status). Bash runs the EXIT trap on SIGINT and SIGTERM
+# too, so an interrupted dry run leaves nothing behind. Only the traps of
+# this shell chain (bootstrap::_own_traps): in a subshell, a trap of the
+# parent never chains (it would run in the subshell, and bats then reported
+# a test twice), but a trap that the subshell set itself does.
+# bootstrap::_dry_run_untrap undoes it at the end of the run.
 bootstrap::_dry_run_trap() {
-  local _dir="${1}" _prev=""
-  if (( BASHPID == $$ )); then
-    local -a _trap_words=()
-    eval "_trap_words=($(trap -p EXIT))"
-    (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
-  fi
+  local _dir="${1}" _prev="" _dr_exit=""
+  local -a _trap_words=()
+  bootstrap::_own_traps _dr_exit EXIT
+  eval "_trap_words=(${_dr_exit})"
+  (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
   _BOOTSTRAP_DRY_PREV_TRAP="${_prev}"
   # shellcheck disable=SC2064 # expand now: the dir and the prior trap are fixed values
-  trap "rm -rf -- $(printf '%q' "${_dir}")${_prev:+; ${_prev}}" EXIT
+  trap "bootstrap::_keep_status rm -rf -- $(printf '%q' "${_dir}") && :${_prev:+; ${_prev}}" EXIT
 }
 
 # bootstrap::_dry_run_untrap <dir>
@@ -2336,25 +2375,25 @@ bootstrap::_dry_run_untrap() {
 # Removes the private dir of the scheduler (it holds the kubectl output of
 # the entries, which can quote a value of the manifest) when the shell
 # exits or gets INT, TERM or HUP, and keeps the traps that were there: the
-# EXIT trap removes the dir, then runs the earlier EXIT trap; INT, TERM and
-# HUP remove the dir, put the earlier traps back and send the signal again,
-# so the earlier trap or the default action still runs. Only the main shell
-# chains: in a subshell `trap -p` shows the traps of the parent, which do
-# not run there, so a subshell installs only its own removal (as
-# bootstrap::_dry_run_trap). bootstrap::_sched_untrap puts the earlier
-# traps back. A SIGKILL cannot be trapped: it leaves the dir behind.
+# EXIT trap removes the dir, then runs the earlier EXIT trap with the exit
+# status kept (bootstrap::_keep_status); INT, TERM and HUP remove the dir,
+# put the earlier traps back and send the signal again, so the earlier trap
+# or the default action still runs. Only the traps of this shell chain
+# (bootstrap::_own_traps, as bootstrap::_dry_run_trap): in a subshell, the
+# traps of the parent never chain, but the traps that the subshell set
+# itself do. bootstrap::_sched_untrap puts the earlier traps back. A
+# SIGKILL cannot be trapped: it leaves the dir behind.
 bootstrap::_sched_trap() {
   _BS_SCHED_DIR="${1}"
   _BS_SCHED_PREV=""
-  local _prev=""
-  if (( BASHPID == $$ )); then
-    local -a _trap_words=()
-    eval "_trap_words=($(trap -p EXIT))"
-    (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
-    _BS_SCHED_PREV="$(trap -p EXIT INT TERM HUP)"
-  fi
+  local _prev="" _st_exit=""
+  local -a _trap_words=()
+  bootstrap::_own_traps _st_exit EXIT
+  eval "_trap_words=(${_st_exit})"
+  (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
+  bootstrap::_own_traps _BS_SCHED_PREV EXIT INT TERM HUP
   # shellcheck disable=SC2064 # expand now: the earlier EXIT trap is a fixed value
-  trap "bootstrap::_sched_rm${_prev:+; ${_prev}}" EXIT
+  trap "bootstrap::_keep_status bootstrap::_sched_rm && :${_prev:+; ${_prev}}" EXIT
   trap 'bootstrap::_sched_signal INT' INT
   trap 'bootstrap::_sched_signal TERM' TERM
   trap 'bootstrap::_sched_signal HUP' HUP

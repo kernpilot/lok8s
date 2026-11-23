@@ -412,6 +412,24 @@ _kapply_flags() { local m="$1"; shift; printf '%s' "${m}" | kapply::apply "$@"; 
   refute_output 0
 }
 
+# The finalizer patch of the heal is a write: KUBERC=off, also though its
+# patch comes from the argv (a kuberc default such as --dry-run=client
+# would make it report success and clear nothing). The probe keeps the
+# kuberc of the user. The Go twin:
+# TestStuckTerminatingFinalizerPatchRunsWithKubeRCOff.
+@test "heal: each finalizer patch runs with KUBERC=off" {
+  export KUBERC=/user/kuberc APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT='Error from server: object is being deleted: clusters.postgresql.cnpg.io "db" already exists'
+  export GET_OUT='2026-01-01T00:00:00Z'
+  run _kapply "${CR_MANIFEST}"
+  run grep -c '^patch KUBERC=off$' "${KENV}"
+  assert_output 1
+  run grep -c '^patch ' "${KENV}"
+  assert_output 1
+  run grep -c '^get KUBERC=/user/kuberc$' "${KENV}"
+  refute_output 0
+}
+
 @test "kuberc: a --server <url> flag in front of the verb keeps KUBERC=off on each write" {
   export APPLY_RC=1 LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 GET_OUT='2026-01-01T00:00:00Z'
   export APPLY_OUT="${BOTH_HEALS_OUT}"
@@ -565,7 +583,7 @@ _private_dir() {
   export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
 }
 
-PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it'
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before, a file open to others or a file in a directory that another user can rename). lo does not write the kubectl output to it. If this apply hits an immutable or terminating conflict without --force-recreate, the entry fails and does not wait for the recreate confirmation at the end. LO_SHOW_SENSITIVE_OUTPUT=1 shows the output, and the entry then waits for that confirmation.'
 
 # _assert_private_refused: the pass printed the fixed refusal line and the
 # fixed failure line, never the kubectl output.
@@ -660,6 +678,59 @@ Invalid value: \"${CANARY_VALUE}\""
   [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
 }
 
+# A directory above the private dir that another user can write into, and
+# that has no sticky bit, lets that user rename the dir and put a link to a
+# dir of their own at its path. kapply refuses it before it makes the file.
+@test "private: a directory above the private dir that others can write into, with no sticky bit, is refused, nothing is written" {
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  local open="${BATS_TEST_TMPDIR}/open" mode
+  mkdir "${open}"
+  for mode in 0777 0770; do
+    chmod "${mode}" "${open}"
+    KAPPLY_PRIVATE_DIR="$(mktemp -d "${open}/sched.XXXXXX")"
+    KAPPLY_PRIVATE_LOG="${KAPPLY_PRIVATE_DIR}/1.priv"
+    export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+    run _kapply "${CFG_MANIFEST}"
+    _assert_private_refused
+    [ ! -e "${KAPPLY_PRIVATE_LOG}" ] || { echo "mode ${mode}: the file was made" >&2; return 1; }
+  done
+  # With the sticky bit (as /tmp), another user cannot rename the dir.
+  chmod 1777 "${open}"
+  KAPPLY_PRIVATE_DIR="$(mktemp -d "${open}/sched.XXXXXX")"
+  KAPPLY_PRIVATE_LOG="${KAPPLY_PRIVATE_DIR}/1.priv"
+  export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+  run _kapply "${CFG_MANIFEST}"
+  refute_output --partial 'not safe to write'
+  grep -qF "Invalid value: \"${CANARY_VALUE}\"" "${KAPPLY_PRIVATE_LOG}"
+}
+
+# The first pass makes the file and keeps its descriptor; the pass after a
+# heal writes through that descriptor and checks that the path still holds
+# its file. Here the heal (the replace) renames the dir and puts a new dir
+# and a new file at the old path: the pass after it refuses, and the new
+# file gets no byte.
+@test "private: the pass after a heal writes through the descriptor of the first pass, never through a file put at the path between them" {
+  _private_dir
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: Invalid value: \"${CANARY_VALUE}\": field is immutable"
+  eval "$(declare -f kubectl | sed '1s/^kubectl /_kubectl_stub /')"
+  kubectl() {
+    if [[ " $* " == *" replace "* && ! -e "${KAPPLY_PRIVATE_DIR}.moved" ]]; then
+      mv -- "${KAPPLY_PRIVATE_DIR}" "${KAPPLY_PRIVATE_DIR}.moved"
+      mkdir -m 0700 -- "${KAPPLY_PRIVATE_DIR}"
+      ( umask 077; : > "${KAPPLY_PRIVATE_LOG}" )
+    fi
+    _kubectl_stub "$@"
+  }
+  export -f kubectl _kubectl_stub
+  run _kapply "${DEPLOY_MANIFEST}"
+  grep -q '^replace --force ' "${KENV}"
+  assert_line "${PRIVATE_REFUSED}"
+  refute_output --partial "${CANARY_VALUE}"
+  [ ! -s "${KAPPLY_PRIVATE_LOG}" ]
+  [ "$(grep -c "${CANARY_VALUE}" "${KAPPLY_PRIVATE_DIR}.moved/1.priv")" -eq 1 ]
+}
+
 @test "private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line" {
   export LO_SHOW_SENSITIVE_OUTPUT=1 APPLY_RC=1
   export APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
@@ -686,6 +757,63 @@ Invalid value: \"${CANARY_VALUE}\""
     LO_SHOW_SENSITIVE_OUTPUT="${v}" run kapply::show_sensitive
     assert_failure
   done
+}
+
+# ── kapply::run_private (one kubectl write that is not an apply pass) ───────
+# The Go twin is internal/kapply/run_private_test.go.
+
+@test "run_private: a failed write prints the fixed line, never the kubectl output" {
+  export APPLY_RC=1 APPLY_OUT="configmap/cfg configured
+Invalid value: \"${CANARY_VALUE}\""
+  export APPLY_ERR="Warning: the value \"${STDERR_CANARY}\" of ConfigMap cfg is deprecated"
+  local level
+  for level in "" 1; do
+    DEBUG="${level}" run kapply::run_private "the objects" apply -f - <<< "${CFG_MANIFEST}"
+    assert_equal "${status}" 1
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "${STDERR_CANARY}"
+    assert_line "$(_fixed_fail_line "the objects" 1)"
+    assert_line '✓ the objects · 1 resource'
+  done
+  assert_line '[debug] kapply: kubectl apply for the objects exited 1 (1 resources)'
+}
+
+@test "run_private: a clean write prints the summary line, never the kubectl output, and kubectl reads the stdin of the caller" {
+  kubectl() {
+    cat > "${BATS_TEST_TMPDIR}/stdin"
+    printf 'configmap/cfg serverside-applied\nsecret/s configured\nWarning: unknown field "data.%s"\n' "${CANARY_VALUE}"
+  }
+  run kapply::run_private "the objects" apply -f - <<< "${CFG_MANIFEST}"
+  assert_success
+  assert_output '✓ the objects · 2 resources'
+  run cat "${BATS_TEST_TMPDIR}/stdin"
+  assert_output "${CFG_MANIFEST}"
+}
+
+@test "run_private: the KUBERC of the caller does not reach kubectl, and xtrace shows no output" {
+  export KUBERC=/user/kuberc APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  local trace="${BATS_TEST_TMPDIR}/trace"
+  ( set -x; kapply::run_private "the objects" apply -f /dev/null ) > /dev/null 2> "${trace}"
+  run grep -c '^apply KUBERC=off$' "${KENV}"
+  assert_output 1
+  run grep -c "${CANARY_VALUE}" "${trace}"
+  assert_output 0
+  # A call in the test shell, not in a subshell: a KUBERC=off that the
+  # wrapper exports would stay in this shell.
+  kapply::run_private "the objects" apply -f /dev/null > /dev/null
+  [ "${KUBERC}" = /user/kuberc ]
+}
+
+@test "run_private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line, and no summary" {
+  export LO_SHOW_SENSITIVE_OUTPUT=1 APPLY_RC=1 APPLY_OUT="configmap/cfg configured
+Invalid value: \"${CANARY_VALUE}\"" APPLY_ERR="Warning: ${STDERR_CANARY}"
+  run kapply::run_private "the objects" apply -f - <<< "${CFG_MANIFEST}"
+  assert_equal "${status}" 1
+  assert_line --index 0 '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for the objects, which can quote a value of the manifest'
+  assert_output --partial "${CANARY_VALUE}"
+  assert_output --partial "${STDERR_CANARY}"
+  refute_output --partial '✓ the objects'
+  refute_output --partial 'kapply: kubectl apply failed for'
 }
 
 @test "counted_lines: keeps the <type>/<name> lines that end in an OK verb, nothing else" {
@@ -846,6 +974,38 @@ _stuck_crd_fixture() {
     {"metadata":{"namespace":"kubehz-system","name":"k6-burst-1","finalizers":["kubehz.dev/cluster-cleanup"]}},
     {"metadata":{"namespace":"kubehz-system","name":"k6-burst-2","finalizers":["kubehz.dev/cluster-cleanup"]}}]}'
   export KAPPLY_CRD_WAIT=1 KAPPLY_POLL_INTERVAL=0
+}
+
+# Each finalizer patch of the preflight (a stuck object of the manifest,
+# the instances of a stuck CRD, the CRD under --crds force) is a write:
+# KUBERC=off, also though its patch comes from the argv. The reads keep the
+# kuberc of the user. The Go twin: TestPreflightFinalizerPatchesRunWithKubeRCOff.
+@test "preflight: each finalizer patch runs with KUBERC=off" {
+  command -v jq &>/dev/null || skip "jq required"
+  _preflight_stub
+  eval "$(declare -f kubectl | sed '1s/^kubectl /_preflight_kubectl /')"
+  kubectl() { echo "${1} KUBERC=${KUBERC-<unset>}" >> "${KENV}"; _preflight_kubectl "$@"; }
+  export -f kubectl _preflight_kubectl
+  export KUBERC=/user/kuberc
+  _patches() {
+    run grep -c '^patch ' "${KENV}"
+    assert_output "${1}" || { echo "case: ${2}" >&2; return 1; }
+    run grep -c '^patch KUBERC=off$' "${KENV}"
+    assert_output "${1}" || { echo "case: ${2}" >&2; return 1; }
+    run grep -c '^get KUBERC=/user/kuberc$' "${KENV}"
+    refute_output 0 || { echo "case: ${2}" >&2; return 1; }
+    : > "${KENV}"
+    rm -f "${BATS_TEST_TMPDIR}/crd.drained"
+  }
+  export GET_OUT='{"apiVersion":"postgresql.cnpg.io/v1","kind":"Database","metadata":{"name":"status","namespace":"kubehz-system","deletionTimestamp":"2020-01-01T00:00:00Z","finalizers":["cnpg.io/deleteDatabase"]}}'
+  run _preflight "${CR_MANIFEST}"
+  _patches 1 "stuck object"
+  _stuck_crd_fixture
+  run _preflight "${CR_MANIFEST}"
+  _patches 2 "CRD drain"
+  export CRD_STAYS=1
+  run _preflight_opts "${CR_MANIFEST}" --crds force
+  _patches 3 "CRD force"
 }
 
 @test "preflight: nothing terminating → no patches, reports nothing stuck" {

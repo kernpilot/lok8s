@@ -398,7 +398,7 @@ data:
     hostFromClusterNetwork: "%s"
     help: "https://lok8s.io/guide/services#how-the-image-swap-actually-works"
 `, buildIP, buildHost)
-	return d.runInput(ctx, manifest, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
+	return d.applyPrivate(ctx, "the local registry hosting ConfigMap", manifest, out, errOut, "apply", "--kubeconfig", kubeconfig, "-f", "-")
 }
 
 // cleanupRegistries removes the project's registry containers + volumes +
@@ -484,5 +484,5 @@ metadata:
 data:
 %s
 `, configmapData)
-	return d.runInput(ctx, manifest, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
+	return d.applyPrivate(ctx, "the registries ConfigMap", manifest, out, errOut, "apply", "--kubeconfig", kubeconfig, "-f", "-")
 }

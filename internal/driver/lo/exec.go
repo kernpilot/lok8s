@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/kapply"
 )
 
 // run executes a tool, stdout/stderr inherited (bash: a bare command).
@@ -41,16 +42,17 @@ func (d *Driver) errOutput(ctx context.Context, name string, args ...string) (st
 	return strings.TrimRight(errBuf.String(), "\n"), err
 }
 
-// runInput executes a tool with the given stdin, output inherited-by-writer
-// (bash: cmd <<EOF … EOF / printf … | cmd). Each kubectl child runs with
-// the kubectl user defaults off (execx.KubectlEnv), whatever its arguments.
-func (d *Driver) runInput(ctx context.Context, stdin string, stdout, stderr io.Writer, name string, args ...string) error {
-	return d.deps.Runner.Run(ctx, execx.Cmd{
-		Name: name, Args: args,
-		Env:    execx.KubectlEnv(name),
-		Stdin:  strings.NewReader(stdin),
-		Stdout: stdout, Stderr: stderr,
-	})
+// applyPrivate runs one kubectl apply of the driver (args after kubectl)
+// with the kubectl output private (kapply.RunPrivate): the output of an
+// apply can quote a value of the manifest. label names the objects in the
+// fixed lines. An empty stdin is the stdin of lo (bash:
+// kapply::run_private).
+func (d *Driver) applyPrivate(ctx context.Context, label, stdin string, out, errOut io.Writer, args ...string) error {
+	c := execx.Cmd{Name: "kubectl", Args: args}
+	if stdin != "" {
+		c.Stdin = strings.NewReader(stdin)
+	}
+	return kapply.RunPrivate(ctx, d.deps.Runner, c, label, out, errOut)
 }
 
 // cmdWith builds an execx.Cmd bound to the given writers. Each kubectl

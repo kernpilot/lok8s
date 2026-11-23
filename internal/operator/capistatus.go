@@ -185,7 +185,7 @@ func (h *CapiStatusSyncHook) Trigger(ctx context.Context, events []Event) error 
 			var manifest strings.Builder
 			_ = k.run(ctx, strings.NewReader(kcText), &manifest, nil, "create", "secret", "generic", kubeconfigSecret,
 				"-n", namespace, "--from-file=value=/dev/stdin", "--dry-run=client", "-o", "yaml")
-			_ = k.run(ctx, strings.NewReader(manifest.String()), nil, io.Discard, "apply", "-f", "-")
+			_ = k.applyPrivate(ctx, "the kubeconfig Secret", strings.NewReader(manifest.String()), nil, io.Discard, "apply", "-f", "-")
 
 			_ = k.patchStatusQuiet(ctx, "capi", name, namespace,
 				`{"status":{"kubeconfig":{"secretRef":"`+kubeconfigSecret+`"}}}`)

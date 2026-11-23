@@ -158,6 +158,7 @@ _load_capi_destroy() {
   printf 'apiVersion: v1\nkind: Config\n' > "${PATH_BASE}/.kubeconfig/mgmt.dev.yaml"
   printf 'apiVersion: v1\nkind: Config\n' > "${PATH_BASE}/.kubeconfig/destroytest.yaml"
 
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
   :args() { domain="test.dev"; }
   kubehz::read_config()    { export LOK8S_KUBEHZ_HOSTING="self-hosted"; return 0; }
