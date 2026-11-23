@@ -142,8 +142,7 @@ creation_rules:
 	if err := writeReplacing(sopsConfig, 0o644, func(w io.Writer) error {
 		return writeInitConfig(w, []byte(content))
 	}); err != nil {
-		var left *tempLeftError
-		if errors.As(err, &left) {
+		if left, ok := errors.AsType[*tempLeftError](err); ok {
 			ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", c.rel(left.Name))
 		}
 		ui.ErrorTo(c.ErrOut, "cannot write %s: no config was written", sopsConfig)

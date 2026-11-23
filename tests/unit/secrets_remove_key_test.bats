@@ -16,7 +16,7 @@
 # runs the real sops carries the tag real-sops: the argsh container of CI has
 # no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
 # the step. That step also checks the TAP plan of every tagged test under
-# tests/unit (1..19): a test that gets or loses the tag changes that number
+# tests/unit (1..20): a test that gets or loses the tag changes that number
 # in .github/workflows/ci.yml and TESTING.md. No test prints a private key.
 
 setup() {

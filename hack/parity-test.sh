@@ -137,6 +137,7 @@ ssh-keygen -t rsa -b 2048 -N '' -C parity -f "${WORK}/home/rsa" -q
 # key, each side exited 1 and its last line of stderr is the refusal.
 sec_refused_no_recipient() {
   local want="[error] no age recipient derived from WORK/home/rsa.pub (ed25519 SSH keys only) — nothing written to PROJ/.sops.yaml"
+  # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
   (( go_rc == 1 && bash_rc == 1 )) || fail "init with an RSA key (${1}): rc go=${go_rc} bash=${bash_rc}, want 1"
   [[ "$(tail -n 1 "${WORK}/go.err")" == "${want}" && "$(tail -n 1 "${WORK}/bash.err")" == "${want}" ]] \
     || fail "init with an RSA key (${1}): the last line of stderr is not the refusal"
