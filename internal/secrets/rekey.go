@@ -53,6 +53,26 @@ func RefusePrivateKey(w io.Writer) {
 	ui.ErrorTo(w, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
 }
 
+// RefusePrivateKeyPath prints the refusal for an argument of init or decrypt
+// that has the shape of a private key: their --ssh-key value is the path of
+// a key file. It never prints the argument. Bash twin:
+// secrets::_no_private_key_path.
+func RefusePrivateKeyPath(w io.Writer) {
+	ui.ErrorTo(w, "an argument looks like a private key, not the path of a key file: it is not printed")
+	ui.ErrorTo(w, "pass the path of the key file with --ssh-key")
+}
+
+// shownKeyPath is path for a message, or a placeholder when it has the shape
+// of a private key: a key pasted into LOK8S_SSH_KEY reaches the not-found
+// lines of init and decrypt, which no argv guard sees. Bash twin:
+// secrets::_shown_path.
+func shownKeyPath(path string) string {
+	if LooksLikePrivateKey(path) {
+		return "(not printed: it looks like a private key)"
+	}
+	return path
+}
+
 // QuoteArg is arg in Go quotes for a message, or a placeholder when arg has
 // the shape of a private key.
 func QuoteArg(arg string) string {
@@ -91,8 +111,7 @@ func (c *Context) recipientArg(key string) (string, error) {
 		// error is likewise never surfaced. A private key file is refused
 		// before the library parses it (bash: before ssh-to-age reads it).
 		derived, err := deriveAgePublicKey(key)
-		if errors.Is(err, errPrivateKeyFile) {
-			refusePrivateKeyFile(c.ErrOut, key)
+		if refuseKeyFile(c.ErrOut, key, err) {
 			return "", ErrHandled
 		}
 		if err != nil && !errors.Is(err, errUnsupportedKey) {

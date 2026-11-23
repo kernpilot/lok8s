@@ -369,6 +369,17 @@ for cmd in add-key remove-key; do
   sec_check secrets "${cmd}" "${KEY2}" "${FAKE_ID}"
   sec_no_echo "${FAKE_ID}" "secrets ${cmd} <age key> <private key>"
 done
+# init and decrypt take the path of a key file: a key pasted into --ssh-key,
+# in both flag forms and split into words, is refused the same way.
+for cmd in init decrypt; do
+  sec_check secrets "${cmd}" --ssh-key "${FAKE_ID}"
+  sec_no_echo "${FAKE_ID}" "secrets ${cmd} --ssh-key <private key>"
+  sec_check secrets "${cmd}" "--ssh-key=${PEM_HEAD}"
+  sec_no_echo "OPENSSH" "secrets ${cmd} --ssh-key=<PEM line>"
+  # shellcheck disable=SC2086 # the four words of the PEM line
+  sec_check secrets "${cmd}" -k ${PEM_HEAD}
+  sec_no_echo "OPENSSH" "secrets ${cmd} -k <PEM words>"
+done
 
 # remove-key: the refusals first. None of them may write .sops.yaml.
 KEY2B="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key2.pub")"

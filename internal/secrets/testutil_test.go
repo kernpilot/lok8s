@@ -25,9 +25,22 @@ import (
 // identity of the caller cannot open a file a test expects to stay closed.
 var isolatedIdentityVars = []string{"SOPS_AGE_KEY", "SOPS_AGE_KEY_CMD", "SOPS_AGE_SSH_PRIVATE_KEY_FILE"}
 
+// isolatedHomeVars name a git or GnuPG config outside HOME: testEnv unsets
+// each one, so that git and gpg read the HOME of the test (bash twin:
+// isolate_secrets_home).
+var isolatedHomeVars = []string{"GNUPGHOME", "GIT_CONFIG_GLOBAL"}
+
 // realHome is the HOME that the test binary started with. No key or
 // identity lookup of a test may resolve under it (realHomeLeak).
 var realHome = os.Getenv("HOME")
+
+// guardHome is the HOME that testEnv guards, and reportHomeLeak reports a
+// lookup under it at the cleanup of a test. A test of the guard replaces
+// both.
+var (
+	guardHome      = realHome
+	reportHomeLeak = func(t *testing.T, msg string) { t.Error(msg + " (at the cleanup of the test)") }
+)
 
 // realHomeLeak names the first key or identity lookup that resolves to home
 // or under it, and "" when none does. A path under base (the temp dir of the
@@ -41,6 +54,8 @@ func realHomeLeak(base, home string) string {
 		{"HOME", os.Getenv("HOME")},
 		{"XDG_CONFIG_HOME", os.Getenv("XDG_CONFIG_HOME")},
 		{"SOPS_AGE_KEY_FILE", os.Getenv("SOPS_AGE_KEY_FILE")},
+		{"GNUPGHOME", os.Getenv("GNUPGHOME")},
+		{"GIT_CONFIG_GLOBAL", os.Getenv("GIT_CONFIG_GLOBAL")},
 		{"LOK8S_SSH_KEY (DefaultSSHKey)", DefaultSSHKey()},
 		{"LOK8S_SSH_KEY (DefaultSSHPublicKey)", DefaultSSHPublicKey()},
 	} {
@@ -56,7 +71,9 @@ func realHomeLeak(base, home string) string {
 
 // testEnv builds a throwaway project and a Context writing into buffers.
 // It ends with the sentinel realHomeLeak: a test whose setup leaves a key
-// lookup under the real HOME fails before it reads a key.
+// lookup under the real HOME fails before it reads a key. The cleanup of the
+// test runs it again (reportHomeLeak), because a test body can set a
+// variable after testEnv.
 func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	base := t.TempDir()
@@ -65,16 +82,23 @@ func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	// sops also reads <user config dir>/sops/age/keys.txt, and on Linux that
 	// dir is $XDG_CONFIG_HOME when it is set, not $HOME/.config.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "home", ".config"))
-	for _, v := range isolatedIdentityVars {
+	for _, v := range append(append([]string{}, isolatedIdentityVars...), isolatedHomeVars...) {
 		t.Setenv(v, "")
 		os.Unsetenv(v)
 	}
 	t.Setenv("SOPS_AGE_KEY_FILE", filepath.Join(base, "no-keys.txt"))
 	// remove-key reads the .pub of the SSH key lo decrypts with.
 	t.Setenv("LOK8S_SSH_KEY", filepath.Join(base, "home", ".ssh", "id_ed25519"))
-	if msg := realHomeLeak(base, realHome); msg != "" {
+	if msg := realHomeLeak(base, guardHome); msg != "" {
 		t.Fatal(msg)
 	}
+	// Registered after the t.Setenv calls above, so it runs before they are
+	// undone: it sees the variables as the test left them.
+	t.Cleanup(func() {
+		if msg := realHomeLeak(base, guardHome); msg != "" {
+			reportHomeLeak(t, msg)
+		}
+	})
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	c := &Context{
 		Paths: &config.Paths{

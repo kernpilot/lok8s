@@ -185,9 +185,15 @@ reads that path.
 
 A key file that holds a private key stops `init`, `add-key` and `remove-key`
 before any tool reads it. The error names the path and the fix, and shows
-nothing from the file. The bash implementation never shows the output of
-`ssh-to-age`, because it can quote the key file. It shows the exit status of
-the tool instead.
+nothing from the file. lo reads a key file once and at most 64 KiB, so a
+bigger file stops the command too, and so does a file that lo cannot read.
+The bash implementation never shows the output of `ssh-to-age`, because it
+can quote the key file. It shows the exit status of the tool instead.
+
+`init` and `decrypt` also refuse an argument that looks like a private key,
+for example a key pasted into `--ssh-key`, and do not print it. When the
+value of `LOK8S_SSH_KEY` looks like a private key, the error for a key file
+that lo cannot find shows a placeholder instead of the value.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

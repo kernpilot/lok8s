@@ -43,22 +43,61 @@ var errUnsupportedKey = errors.New("unsupported ssh key type")
 // library parses the file.
 var errPrivateKeyFile = errors.New("the file holds a private key")
 
+// errKeyFileUnreadable and errKeyFileTooBig mark a key file that
+// deriveAgePublicKey does not parse: one it cannot open or read as a regular
+// file, and one bigger than maxPublicKeyFile.
+var (
+	errKeyFileUnreadable = errors.New("the key file cannot be read")
+	errKeyFileTooBig     = errors.New("the key file is too big for a public key")
+)
+
+// maxPublicKeyFile is the most that deriveAgePublicKey reads from a key file:
+// 64 KiB. An OpenSSH public key file is one line of a few hundred bytes, and
+// the line of a 16384-bit RSA key is about 2.8 KiB. Bash twin: the cap of
+// secrets::_read_public_key.
+const maxPublicKeyFile = 64 << 10
+
 // privateKeyFileRe matches a line that starts a private key: a PEM or
-// OpenSSH block (-----BEGIN … PRIVATE KEY-----, in any form), the SSH.com
-// form (---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----), a PuTTY key file, or an
-// age identity in either case (bech32 allows both). A public key file has
-// none of these. Bash twin: secrets::_private_key_file, the same pattern as
-// a grep -E.
-var privateKeyFileRe = regexp.MustCompile(`(?m)^[ \t]*(-{4,5} ?BEGIN ([A-Z0-9]+ )*PRIVATE KEY ?-{4,5}|PuTTY-User-Key-File-)|AGE-SECRET-KEY-|age-secret-key-`)
+// OpenSSH block (-----BEGIN … PRIVATE KEY-----, in any form, the PGP form
+// -----BEGIN PGP PRIVATE KEY BLOCK----- included), the SSH.com form (----
+// BEGIN SSH2 ENCRYPTED PRIVATE KEY ----), a PuTTY key file, or an age
+// identity in either case (bech32 allows both). The line can start with a
+// UTF-8 byte order mark. The age markers match anywhere in the file: a .pub
+// whose comment holds one is refused, which fails closed. A public key file
+// has none of these. Bash twin: the pattern of secrets::_read_public_key.
+var privateKeyFileRe = regexp.MustCompile(`(?m)^\x{FEFF}?[ \t]*(-{4,5} ?BEGIN ([A-Z0-9-]+ )*PRIVATE KEY( BLOCK)? ?-{4,5}|PuTTY-User-Key-File-)|AGE-SECRET-KEY-|age-secret-key-`)
+
+// readPublicKeyFile reads a key file once, at most maxPublicKeyFile bytes,
+// for the check and the parse to see the same bytes. It reads a regular file
+// only.
+func readPublicKeyFile(path string) ([]byte, error) {
+	f, err := os.Open(path) // #nosec G304 -- the key file that the user names
+	if err != nil {
+		return nil, errKeyFileUnreadable
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, errKeyFileUnreadable
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxPublicKeyFile+1))
+	if err != nil {
+		return nil, errKeyFileUnreadable
+	}
+	if len(raw) > maxPublicKeyFile {
+		return nil, errKeyFileTooBig
+	}
+	return raw, nil
+}
 
 // deriveAgePublicKey derives an age recipient from an SSH public key file.
-// Returns ("", errPrivateKeyFile) for a file that holds a private key, before
-// the library parses it; ("", errUnsupportedKey) for a parseable non-ed25519
-// key (the CLI's "skipped key" case → empty output, rc 0 in bash); and a
-// generic error for anything unreadable/unparseable (the CLI's rc 1 case).
-// No caller prints the error: the library error can quote the input.
+// Returns errKeyFileUnreadable or errKeyFileTooBig for a file that it does
+// not read (readPublicKeyFile); ("", errPrivateKeyFile) for a file that holds
+// a private key, before the library parses it; ("", errUnsupportedKey) for a
+// parseable non-ed25519 key (the CLI's "skipped key" case → empty output,
+// rc 0 in bash); and a generic error for anything unparseable (the CLI's rc 1
+// case). No caller prints the error: the library error can quote the input.
 func deriveAgePublicKey(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readPublicKeyFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -75,9 +114,28 @@ func deriveAgePublicKey(path string) (string, error) {
 	return strings.TrimSpace(*key), nil
 }
 
+// refuseKeyFile prints the refusal for a key file that deriveAgePublicKey
+// did not parse: a file it could not read, a file too big for a public key,
+// or a file that holds a private key. It prints the path and the cause, and
+// nothing from the file, and reports whether err was one of these. Bash twin:
+// secrets::_read_public_key.
+func refuseKeyFile(w io.Writer, path string, err error) bool {
+	switch {
+	case errors.Is(err, errKeyFileUnreadable):
+		ui.ErrorTo(w, "cannot read the key file %s: nothing from it is printed", path)
+	case errors.Is(err, errKeyFileTooBig):
+		ui.ErrorTo(w, "%s is bigger than 64 KiB, which no public key file is: nothing from it is printed", path)
+	case errors.Is(err, errPrivateKeyFile):
+		refusePrivateKeyFile(w, path)
+	default:
+		return false
+	}
+	return true
+}
+
 // refusePrivateKeyFile prints the refusal for a key file that holds a
 // private key (errPrivateKeyFile): the path and the fix, and nothing from
-// the file. Bash twin: secrets::_refuse_private_key_file.
+// the file.
 func refusePrivateKeyFile(w io.Writer, path string) {
 	ui.ErrorTo(w, "%s holds a private key, not a public key: nothing from it is printed", path)
 	if strings.HasSuffix(path, ".pub") {

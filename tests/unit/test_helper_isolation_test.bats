@@ -54,19 +54,20 @@ setup() {
 }
 
 # isolate_secrets_home moves HOME and XDG_CONFIG_HOME under the temp dir and
-# unsets every LOK8S_* variable, the sops identity variables and
-# PATH_SECRETS. The values below name no real file.
+# unsets every LOK8S_* variable, the sops identity variables, PATH_SECRETS,
+# GNUPGHOME and GIT_CONFIG_GLOBAL. The values below name no real file.
 @test "isolate_secrets_home moves HOME and unsets the key variables" {
   local home xdg left v
   setup_tmpdir
   export LOK8S_SSH_KEY=/somewhere/.ssh/id_ed25519 LOK8S_SPEC_FILE=/somewhere/spec.yaml
   export SOPS_AGE_KEY=x SOPS_AGE_KEY_FILE=/somewhere/keys.txt SOPS_AGE_KEY_CMD=x
   export SOPS_AGE_SSH_PRIVATE_KEY_FILE=/somewhere/id PATH_SECRETS=/somewhere/store
+  export GNUPGHOME=/somewhere/.gnupg GIT_CONFIG_GLOBAL=/somewhere/.gitconfig
   isolate_secrets_home || fail "isolate_secrets_home failed"
   home=${HOME}
   xdg=${XDG_CONFIG_HOME}
   left="$(compgen -v LOK8S_ || true)"
-  for v in SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS; do
+  for v in SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS GNUPGHOME GIT_CONFIG_GLOBAL; do
     [[ -z "${!v+set}" ]] || left+=" ${v}"
   done
   [[ -d "${home}" ]] || fail "HOME ${home} was not made"

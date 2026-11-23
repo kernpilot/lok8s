@@ -2151,3 +2151,18 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   [ "${own}" = "${LOK8S_SSH_KEY}.pub" ] || { echo "the control did not match: '${own}'" >&2; return 1; }
   [ -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "the control did not call ssh-to-age" >&2; return 1; }
 }
+
+# When LOK8S_SSH_KEY ends in .pub, the own-identity check reads that file,
+# not <key>.pub.pub (Go twin: TestOwnIdentityReadsAPubSuffixedKey).
+@test "remove-key: the own-identity check reads LOK8S_SSH_KEY itself when it ends in .pub" {
+  _load
+  ssh-to-age() { cat > "${BATS_TEST_TMPDIR}/ssh-to-age.in"; echo "${RCPT_A}"; }
+  local pub="${BATS_TEST_TMPDIR}/keys/work.pub"
+  mkdir -p "${pub%/*}"
+  printf 'ssh-ed25519 AAAA work\n' > "${pub}"
+  export LOK8S_SSH_KEY="${pub}"
+  local own=""
+  secrets::_own_identity "${RCPT_A}"
+  [ "${own}" = "${pub}" ] || { echo "own identity '${own}', want ${pub}" >&2; return 1; }
+  cmp -s "${pub}" "${BATS_TEST_TMPDIR}/ssh-to-age.in" || { echo "ssh-to-age did not read ${pub}" >&2; return 1; }
+}

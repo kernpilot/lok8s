@@ -37,6 +37,9 @@ var privateKeyForms = map[string]string{
 	"crlf":         "-----BEGIN OPENSSH " + privKey + "-----\r\n" + keyCanary + "\r\n",
 	"indented":     "  -----BEGIN OPENSSH " + privKey + "-----\n" + keyCanary + "\n",
 	"comment":      "# my laptop key\n-----BEGIN OPENSSH " + privKey + "-----\n" + keyCanary + "\n",
+	"bom":          "\uFEFF-----BEGIN OPENSSH " + privKey + "-----\n" + keyCanary + "\n",
+	"pgp":          "-----BEGIN PGP " + privKey + " BLOCK-----\n" + keyCanary + "\n-----END PGP " + privKey + " BLOCK-----\n",
+	"hyphen type":  "-----BEGIN X-TEST " + privKey + "-----\n" + keyCanary + "\n-----END X-TEST " + privKey + "-----\n",
 }
 
 // testRSAPrivateKey writes a new RSA private key in the OpenSSH form (the
@@ -121,7 +124,7 @@ func TestDeriveRefusesAPrivateKeyFile(t *testing.T) {
 }
 
 // wantPrivateKeyRefusal is the refusal of a key file that holds a private
-// key (bash twin: secrets::_refuse_private_key_file).
+// key (bash twin: secrets::_read_public_key).
 func wantPrivateKeyRefusal(path string) string {
 	fix := "pass the public key file instead: " + path + ".pub"
 	if strings.HasSuffix(path, ".pub") {
@@ -182,6 +185,9 @@ func TestKeyCommandsRefuseAPrivateKeyFile(t *testing.T) {
 // test: none resolves under the HOME the tests started with (bash twin:
 // isolate_secrets_home and assert_no_real_home in tests/test_helper.bash).
 func TestTestEnvIsolatesTheKeyLookups(t *testing.T) {
+	for _, v := range isolatedHomeVars {
+		t.Setenv(v, "/nonexistent-"+v)
+	}
 	c, _, _ := testEnv(t)
 	if msg := realHomeLeak(c.Paths.Base, realHome); msg != "" {
 		t.Error(msg)
@@ -189,9 +195,124 @@ func TestTestEnvIsolatesTheKeyLookups(t *testing.T) {
 	if !strings.HasPrefix(os.Getenv("HOME"), c.Paths.Base+"/") {
 		t.Errorf("HOME %q is not under the temp dir", os.Getenv("HOME"))
 	}
-	for _, v := range isolatedIdentityVars {
+	for _, v := range append(append([]string{}, isolatedIdentityVars...), isolatedHomeVars...) {
 		if _, set := os.LookupEnv(v); set {
 			t.Errorf("%s is set", v)
+		}
+	}
+}
+
+// The cleanup of testEnv checks again: a test body that moves a key lookup
+// under the HOME after testEnv is reported. The guard gets a HOME of the
+// test, and a reporter that records instead of failing. os.Setenv, not
+// t.Setenv: the restore of a t.Setenv in the body runs before the check.
+func TestTestEnvChecksTheHomeAgainAtCleanup(t *testing.T) {
+	const home = "/nonexistent-home-of-the-cleanup-test"
+	oldHome, oldReport := guardHome, reportHomeLeak
+	defer func() { guardHome, reportHomeLeak = oldHome, oldReport }()
+	guardHome = home
+	var got string
+	reportHomeLeak = func(_ *testing.T, msg string) { got = msg }
+	t.Run("a body that moves the key under the HOME", func(t *testing.T) {
+		testEnv(t)
+		os.Setenv("LOK8S_SSH_KEY", home+"/.ssh/id_ed25519")
+	})
+	if !strings.Contains(got, "LOK8S_SSH_KEY") {
+		t.Errorf("the cleanup did not report the key under the HOME: %q", got)
+	}
+}
+
+// remove-key reads the own identity from the .pub of LOK8S_SSH_KEY, which is
+// LOK8S_SSH_KEY itself when it ends in .pub (bash twin: the own-identity
+// test of a .pub LOK8S_SSH_KEY in tests/unit/secrets_remove_key_test.bats).
+func TestOwnIdentityReadsAPubSuffixedKey(t *testing.T) {
+	testEnv(t)
+	_, pub := testSSHKeypair(t, t.TempDir())
+	recipient, err := deriveAgePublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOK8S_SSH_KEY", pub)
+	if got := ownIdentity(recipient); got != pub {
+		t.Errorf("LOK8S_SSH_KEY=<key>.pub: own identity %q, want %q", got, pub)
+	}
+}
+
+// A key file that does not parse prints the lines of each command and no
+// library error: the error can quote the input (bash twin: the containment
+// tests of a failed ssh-to-age).
+func TestKeyParseErrorsPrintNoLibraryError(t *testing.T) {
+	const garbage = "ssh-ed25519 AAAA" + keyCanary + "!!\n"
+	t.Run("init", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		path := filepath.Join(t.TempDir(), "id.pub")
+		write(t, path, garbage)
+		if err := c.Init(path); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		want := "[error] Failed to derive age public key from " + path + "\n[error] Only ed25519 SSH keys are supported\n"
+		if errOut.String() != want || out.String() != "" {
+			t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+		}
+	})
+	t.Run("add-key", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		sopsYAMLWith(t, c, keyA)
+		path := filepath.Join(t.TempDir(), "id.pub")
+		write(t, path, garbage)
+		if err := c.AddKey(path, false, false); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		want := "[error] could not derive an age key from " + path + "\n[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
+		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(out.String()+errOut.String(), keyCanary) ||
+			strings.Contains(errOut.String(), "base64") {
+			t.Errorf("stdout %q\nstderr %q\nwant the two lines first", out.String(), errOut.String())
+		}
+	})
+}
+
+// The key file is read once and at most 64 KiB: a bigger file and a file
+// that cannot be read are refused with the path and the cause, and nothing
+// from the file (bash twin: the cap and the read refusal of
+// secrets::_read_public_key).
+func TestKeyFileReadIsCappedAndFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.pub")
+	write(t, big, "ssh-ed25519 AAAA "+keyCanary+strings.Repeat("x", maxPublicKeyFile))
+	atCap := filepath.Join(dir, "at-cap.pub")
+	write(t, atCap, "ssh-ed25519 AAAA"+strings.Repeat("x", maxPublicKeyFile-len("ssh-ed25519 AAAA")))
+	if _, err := deriveAgePublicKey(big); !errors.Is(err, errKeyFileTooBig) {
+		t.Errorf("a file over 64 KiB: want errKeyFileTooBig, got %v", err)
+	}
+	if _, err := deriveAgePublicKey(atCap); errors.Is(err, errKeyFileTooBig) || errors.Is(err, errKeyFileUnreadable) {
+		t.Errorf("a file of exactly 64 KiB was refused by the cap: %v", err)
+	}
+	cases := map[string]string{
+		big: "[error] " + big + " is bigger than 64 KiB, which no public key file is: nothing from it is printed\n",
+	}
+	if os.Geteuid() != 0 {
+		closed := filepath.Join(dir, "closed.pub")
+		write(t, closed, "ssh-ed25519 AAAA "+keyCanary+"\n")
+		if err := os.Chmod(closed, 0); err != nil {
+			t.Fatal(err)
+		}
+		cases[closed] = "[error] cannot read the key file " + closed + ": nothing from it is printed\n"
+	}
+	for path, want := range cases {
+		c, out, errOut := testEnv(t)
+		if err := c.Init(path); !errors.Is(err, ErrHandled) {
+			t.Fatalf("%s: want ErrHandled, got %v", path, err)
+		}
+		if errOut.String() != want || out.String() != "" {
+			t.Errorf("init: stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+		}
+		c, _, errOut = testEnv(t)
+		sopsYAMLWith(t, c, keyA)
+		if err := c.AddKey(path, false, false); !errors.Is(err, ErrHandled) {
+			t.Fatalf("add-key %s: want ErrHandled, got %v", path, err)
+		}
+		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(errOut.String(), keyCanary) {
+			t.Errorf("add-key: stderr %q\nwant %q first", errOut.String(), want)
 		}
 	}
 }

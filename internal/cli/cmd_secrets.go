@@ -122,7 +122,20 @@ func secretsArgs(minArgs, maxArgs int, names ...string) cobra.PositionalArgs {
 // holds one. GuardPrivateKeyArgv runs the same check on the raw argv, before
 // cobra parses anything.
 func keyArgCommand(c *cobra.Command) *cobra.Command {
-	arity := secretsArgs(1, 1, "key")
+	return privateKeyGuarded(c, secretsArgs(1, 1, "key"), secrets.RefusePrivateKey)
+}
+
+// sshKeyCommand guards init and decrypt the same way: their --ssh-key value
+// is the path of a key file, and a key pasted there must not reach any
+// message either.
+func sshKeyCommand(c *cobra.Command) *cobra.Command {
+	return privateKeyGuarded(c, secretsArgs(0, 0), secrets.RefusePrivateKeyPath)
+}
+
+// privateKeyGuarded sets the Args check and the flag-error func of c: both
+// refuse an argument or a flag value with the shape of a private key, with
+// refuse, before arity or the flag error prints it.
+func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs, refuse func(io.Writer)) *cobra.Command {
 	c.Args = func(cmd *cobra.Command, args []string) error {
 		private := false
 		for _, a := range args {
@@ -132,14 +145,14 @@ func keyArgCommand(c *cobra.Command) *cobra.Command {
 			private = private || secrets.LooksLikePrivateKey(f.Value.String())
 		})
 		if private {
-			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+			refuse(cmd.ErrOrStderr())
 			return ErrHandled
 		}
 		return arity(cmd, args)
 	}
 	c.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		if secrets.LooksLikePrivateKey(err.Error()) {
-			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+			refuse(cmd.ErrOrStderr())
 			return ErrHandled
 		}
 		return argshErrorf(cmd.ErrOrStderr(), "%s", argshFlagError(cmd, err.Error()))
@@ -147,22 +160,29 @@ func keyArgCommand(c *cobra.Command) *cobra.Command {
 	return c
 }
 
-// GuardPrivateKeyArgv refuses a `lo secrets add-key` or `remove-key` call
-// whose raw argv holds an argument with the shape of a private key, flag
-// values and words that look like flags included. main runs it before
-// Execute: cobra's flag parser and the argument checks print what they
-// reject. It prints the refusal (never the argument) and reports whether it
-// refused. Any other command is left to cobra.
+// GuardPrivateKeyArgv refuses a `lo secrets add-key`, `remove-key`, `init`
+// or `decrypt` call whose raw argv holds an argument with the shape of a
+// private key, flag values (`--ssh-key X` and `--ssh-key=X`) and words that
+// look like flags included. main runs it before Execute: cobra's flag parser
+// and the argument checks print what they reject. It prints the refusal
+// (never the argument) and reports whether it refused. Any other command is
+// left to cobra.
 func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) bool {
 	cmd, _, err := root.Find(argv)
 	if err != nil || cmd.Parent() == nil || cmd.Parent().Name() != "secrets" {
 		return false
 	}
-	if cmd.Name() != "add-key" && cmd.Name() != "remove-key" {
+	var refuse func(io.Writer)
+	switch cmd.Name() {
+	case "add-key", "remove-key":
+		refuse = secrets.RefusePrivateKey
+	case "init", "decrypt":
+		refuse = secrets.RefusePrivateKeyPath
+	default:
 		return false
 	}
 	if slices.ContainsFunc(argv, secrets.LooksLikePrivateKey) {
-		secrets.RefusePrivateKey(errOut)
+		refuse(errOut)
 		return true
 	}
 	return false
@@ -213,7 +233,7 @@ func newSecretsInit(paths *config.Paths) *cobra.Command {
 		},
 	}
 	c.Flags().StringP("ssh-key", "k", "", "Path to the SSH public key (default: the .pub file of LOK8S_SSH_KEY, ~/.ssh/id_ed25519.pub)")
-	return c
+	return sshKeyCommand(c)
 }
 
 func newSecretsAddKey(paths *config.Paths) *cobra.Command {
@@ -337,7 +357,7 @@ func newSecretsDecrypt(paths *config.Paths) *cobra.Command {
 		},
 	}
 	c.Flags().StringP("ssh-key", "k", "", "Path to the SSH private key (default: LOK8S_SSH_KEY, ~/.ssh/id_ed25519)")
-	return c
+	return sshKeyCommand(c)
 }
 
 func newSecretsAllow(paths *config.Paths) *cobra.Command {

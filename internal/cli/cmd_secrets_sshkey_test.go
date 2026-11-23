@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"os"
@@ -94,5 +95,83 @@ func TestSecretsSSHKeyHelpNamesTheDefault(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("%s --help lacks %q:\n%s", cmd, want, out)
 		}
+	}
+}
+
+const pathRefusal = "[error] an argument looks like a private key, not the path of a key file: it is not printed\n" +
+	"[error] pass the path of the key file with --ssh-key\n"
+
+// sshKeyArgvs are the argvs of init or decrypt with a private key shape in
+// each place a parser could print it: the --ssh-key value in both forms and
+// with the short flag, a paste split into words, and a --domain value.
+func sshKeyArgvs(cmd string) [][]string {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	return [][]string{
+		{"secrets", cmd, "--ssh-key", pemLine + "\n" + canary},
+		{"secrets", cmd, "--ssh-key=" + pemLine + "\n" + canary},
+		{"secrets", cmd, "-k", fillerIdentity},
+		{"secrets", cmd, "-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"},
+		{"secrets", "--domain", fillerIdentity, cmd},
+	}
+}
+
+// init and decrypt take the path of a key file: a key pasted into their
+// argv is refused before any parser prints it, through cobra Execute and
+// through the argv guard of main (bash twin: secrets::_no_private_key_path).
+func TestSecretsSSHKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
+	paths := secretsProject(t)
+	for _, cmd := range []string{"init", "decrypt"} {
+		for i, argv := range sshKeyArgvs(cmd) {
+			out, errOut, err := runSecrets(t, paths, argv...)
+			if err == nil || out != "" || errOut != pathRefusal {
+				t.Errorf("%s argv %d: err %v, stdout %d bytes, stderr %q", cmd, i, err, len(out), errOut)
+			}
+			var guard bytes.Buffer
+			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != pathRefusal {
+				t.Errorf("%s argv %d: the guard of main did not refuse: %q", cmd, i, guard.String())
+			}
+		}
+	}
+	for _, argv := range [][]string{
+		{"secrets", "init", "--ssh-key", "/k/id_ed25519.pub"},
+		{"secrets", "decrypt", "-k", "/k/id_ed25519"},
+		{"secrets", "decrypt"},
+	} {
+		var guard bytes.Buffer
+		if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
+			t.Errorf("%q: refused, or printed %q", argv, guard.String())
+		}
+	}
+}
+
+// A key pasted into LOK8S_SSH_KEY reaches no argv guard: the not-found lines
+// of init and decrypt print a placeholder instead of the value (bash twin:
+// secrets::_shown_path).
+func TestSecretsKeyNotFoundHidesAPrivateKeyShape(t *testing.T) {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	const shown = "(not printed: it looks like a private key)"
+	for cmd, want := range map[string]string{
+		"init":    "[error] SSH public key not found: " + shown + "\n[error] Generate one with: ssh-keygen -t ed25519\n",
+		"decrypt": "[error] SSH private key not found: " + shown + "\n",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			paths := secretsProject(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+			for _, v := range []string{"SOPS_AGE_KEY", "SOPS_AGE_KEY_CMD", "SOPS_AGE_SSH_PRIVATE_KEY_FILE"} {
+				t.Setenv(v, "")
+				os.Unsetenv(v)
+			}
+			t.Setenv("SOPS_AGE_KEY_FILE", home+"/no-keys.txt")
+			t.Setenv("LOK8S_SSH_KEY", pemLine+"\n"+canary)
+			out, errOut, err := runSecrets(t, paths, "secrets", "--domain", "alpha.dev", cmd)
+			if err == nil || !strings.HasSuffix(errOut, want) {
+				t.Errorf("err %v\nstderr %q\nwant it to end with %q", err, errOut, want)
+			}
+			if strings.Contains(out+errOut, canary) || strings.Contains(out+errOut, "BEGIN") {
+				t.Error("the value of LOK8S_SSH_KEY reached the output")
+			}
+		})
 	}
 }

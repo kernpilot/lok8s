@@ -30,20 +30,20 @@ import (
 // DefaultSSHPublicKey (the .pub of LOK8S_SSH_KEY).
 func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
-		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", sshKey)
+		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", shownKeyPath(sshKey))
 		ui.ErrorTo(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
 		return ErrHandled
 	}
 
-	// A private key file is refused before the library parses it, and
-	// nothing from the file is printed (bash: secrets::_refuse_private_key_file
-	// before ssh-to-age reads the file). No library error is printed: it can
-	// quote the input. bash also keeps the stderr of ssh-to-age from the
-	// terminal, and prints the exit status of the tool instead; the library
-	// has no exit status.
+	// The key file is read once, at most 64 KiB. A file that cannot be read,
+	// a bigger one and one that holds a private key are refused before the
+	// library parses them, and nothing from the file is printed (bash:
+	// secrets::_read_public_key before ssh-to-age reads the text). No library
+	// error is printed: it can quote the input. bash also keeps the stderr of
+	// ssh-to-age from the terminal, and prints the exit status of the tool
+	// instead; the library has no exit status.
 	agePubkey, err := deriveAgePublicKey(sshKey)
-	if errors.Is(err, errPrivateKeyFile) {
-		refusePrivateKeyFile(c.ErrOut, sshKey)
+	if refuseKeyFile(c.ErrOut, sshKey, err) {
 		return ErrHandled
 	}
 	if err != nil && !errors.Is(err, errUnsupportedKey) {
@@ -835,7 +835,7 @@ func (c *Context) Decrypt(sshKey string) error {
 	}
 	if ageKey == "" {
 		if !fsutil.IsRegular(sshKey) {
-			ui.ErrorTo(c.ErrOut, "SSH private key not found: %s", sshKey)
+			ui.ErrorTo(c.ErrOut, "SSH private key not found: %s", shownKeyPath(sshKey))
 			return ErrHandled
 		}
 		derived, err := deriveAgePrivateKey(sshKey)

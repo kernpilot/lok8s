@@ -293,8 +293,9 @@ export _LOK8S_REAL_HOME
 #
 # This function moves HOME and XDG_CONFIG_HOME under BATS_TEST_TMPDIR. It
 # unsets every LOK8S_* variable (LOK8S_SSH_KEY and each other one that can
-# name a path), the sops identity variables and PATH_SECRETS. Then it checks
-# the result (assert_no_real_home). Call it after setup_tmpdir, which
+# name a path), the sops identity variables, PATH_SECRETS, and GNUPGHOME and
+# GIT_CONFIG_GLOBAL (a gpg or git config outside HOME). Then it checks the
+# result (assert_no_real_home). Call it after setup_tmpdir, which
 # replaces BATS_TEST_TMPDIR, and end the teardown with teardown_secrets_home.
 # The guard tests/unit/test_helper_isolation_test.bats checks that every test
 # file that sources the secrets library or runs the real sops calls it.
@@ -310,7 +311,7 @@ isolate_secrets_home() {
   for v in $(compgen -v LOK8S_); do
     unset "${v}"
   done
-  unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS
+  unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS GNUPGHOME GIT_CONFIG_GLOBAL
   assert_no_real_home
 }
 
@@ -324,7 +325,7 @@ isolate_secrets_home() {
 assert_no_real_home() {
   local real="${_LOK8S_REAL_HOME:-}" tmp="${BATS_TEST_TMPDIR:-/nonexistent}" repo="${_PROJECT_ROOT:-/nonexistent}" v val
   [[ -n "${real}" && "${real}" != / ]] || return 0
-  for v in HOME XDG_CONFIG_HOME SOPS_AGE_KEY_FILE SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS PATH_BASE PATH_CLUSTERS $(compgen -v LOK8S_); do
+  for v in HOME XDG_CONFIG_HOME SOPS_AGE_KEY_FILE SOPS_AGE_SSH_PRIVATE_KEY_FILE PATH_SECRETS PATH_BASE PATH_CLUSTERS GNUPGHOME GIT_CONFIG_GLOBAL $(compgen -v LOK8S_); do
     val="${!v:-}"
     [[ -n "${val}" ]] || continue
     case "${val}" in
