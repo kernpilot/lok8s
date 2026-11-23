@@ -118,8 +118,9 @@ defaults off (`KUBERC=off` for that kubectl only), so a kuberc file (the
 kubectl user preferences) cannot change these calls, for example turn on
 `--show-secrets` for a diff. This also holds for the other writes of
 kapply (the replace of an object with an immutable field, the finalize of
-a namespace, the finalizer patches of the heals and of the preflight) and
-for the CoreDNS patch and rollout of the Lo driver. kubectl
+a namespace, the finalizer patches of the heals and of the preflight), for
+the CoreDNS patch and rollout of the Lo driver and for the claim patch of
+`lo kubehz claim`. kubectl
 v1.33 and later read `KUBERC`; an older kubectl has no kuberc and ignores it.
 Your own kubectl calls keep your kuberc.
 

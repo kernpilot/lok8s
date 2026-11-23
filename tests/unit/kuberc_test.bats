@@ -68,19 +68,13 @@ _kubectl_file_sites() {
   done < <(grep -rlE 'kubectl|KUBECTL' --exclude-dir=addons --exclude-dir=tilt "${dir}")
 }
 
-# A call of the bash tree that is not yet covered: the claim-nonce patch of
-# the kubehz lib (the other apply sites are a follow-up). It must match
-# exactly one site that runs without KUBERC=off, so the list shrinks when the
-# site is fixed.
-_KUBERC_NOT_YET='kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch-file /dev/stdin'
-
 @test "kuberc: every kubectl call of the bash tree that reads a file or stdin runs with KUBERC=off" {
   local sites missing
   sites="$(_kubectl_file_sites)"
   # Anti-vacuity: the sweep finds the call sites (kapply, the bootstrap diff
-  # and restore.d, the drivers, the inventory, the agent deploy), the
-  # replaces of the kapply heals and the coredns patch, which is split over
-  # four lines.
+  # and restore.d, the drivers, the inventory, the agent deploy, the claim
+  # patch), the replaces of the kapply heals and the coredns patch, which is
+  # split over four lines.
   [ "$(printf '%s\n' "${sites}" | grep -c .)" -ge 25 ]
   printf '%s\n' "${sites}" | grep -q $'^off\tutils/kapply.sh:.* apply --server-side'
   printf '%s\n' "${sites}" | grep -q $'^off\tutils/kapply.sh:.* replace --force -f -'
@@ -89,8 +83,9 @@ _KUBERC_NOT_YET='kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch
   printf '%s\n' "${sites}" | grep -q $'^off\tdrivers/lo/utils/services.sh:.*patch deployment coredns .*--patch-file '
   printf '%s\n' "${sites}" | grep -q $'^off\tlibs/kubehz/deploy:.*kapply::run_private "the live agent" apply -k '
   printf '%s\n' "${sites}" | grep -q $'^off\tdrivers/capi/generate:.*kapply::run_private "the credentials Secret" apply '
-  [ "$(printf '%s\n' "${sites}" | grep $'^on\tlibs/kubehz/main:' | grep -cF "${_KUBERC_NOT_YET}")" -eq 1 ]
-  missing="$(printf '%s\n' "${sites}" | grep $'^on\t' | grep -vF "${_KUBERC_NOT_YET}" || true)"
+  printf '%s\n' "${sites}" | grep $'^off\tlibs/kubehz/main:' \
+    | grep -qF 'patch configmap "${cm}" --type merge --patch-file /dev/stdin'
+  missing="$(printf '%s\n' "${sites}" | grep $'^on\t' || true)"
   if [[ -n "${missing}" ]]; then
     printf 'a kubectl call that reads a file or stdin without KUBERC=off:\n%s\n' "${missing}" >&2
     return 1

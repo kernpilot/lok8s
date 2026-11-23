@@ -1562,11 +1562,13 @@ kubehz::claim() {
   # clears a stampless nonce as unsourced, and expires a stamped one after the
   # api's challenge TTL (15 minutes) so a dead nonce never echoes forever.
   # jq reads the nonce on stdin, kubectl the patch: neither gets it on argv.
+  # The patch is a write: it runs with the kubectl user defaults off, as each
+  # write of lo (the Go twin too).
   # shellcheck disable=SC2016  # $t is jq program text
   printf '%s' "${nonce}" |
     jq -cRs --arg t "$(date -u +%s)" \
       '{metadata: {annotations: {"kubehz.cloud/claim-nonce": ., "kubehz.cloud/claim-nonce-placed": $t}}}' |
-    kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch-file /dev/stdin >/dev/null || {
+    KUBERC=off kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch-file /dev/stdin >/dev/null || {
     error "could not annotate configmap/${cm} — check your kubeconfig permissions"
     return 1
   }
