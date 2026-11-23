@@ -1,12 +1,13 @@
 package kubehz
 
-// kuberc_test.go — every kubectl apply of the agent deploy (the namespace,
+// kuberc_test.go: every kubectl apply of the agent deploy (the namespace,
 // the bind Secret, its server-side dry run, the CronJob agent and the live
 // agent) runs with the kubectl user defaults off (execx.KubeRCOff). The
-// applies run through Context.run, which sets it on each kubectl child
-// (execx.KubectlEnv), or set it on their own Cmd (bindSecretUpsert). The
-// bash twin is libs/kubehz/deploy (the KUBERC=off prefix). The claim patch
-// of `lo kubehz claim` is a write too (the bash twin: libs/kubehz/main).
+// applies run through applyPrivate: kapply.RunPrivate sets the override
+// on each kubectl it runs. The other kubectl children of Context.run get
+// it from execx.KubectlEnv. The bash twin is libs/kubehz/deploy (the
+// KUBERC=off prefix). The claim patch of `lo kubehz claim` is a write too:
+// it sets the override on its own Cmd (the bash twin: libs/kubehz/main).
 
 import (
 	"slices"
