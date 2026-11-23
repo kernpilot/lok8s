@@ -33,13 +33,17 @@ setup() {
 # message is not a command. A backslash at the end of a line joins the next
 # line. A comment and the body of a here-document are not code. A command is
 # a call when, after the shell words in front of it (if, then, do, ! and the
-# like), it starts with kubectl, ${KUBECTL} or ${kctl}. In front of it can
-# be variable assignments and the words command, timeout, nohup, env, sudo,
-# xargs and exec, with their options. The state is the value of the last
-# KUBERC assignment in front of kubectl: env -i, env -u KUBERC and exec -c
-# clear it, and sudo drops each assignment before it (sudo resets the
-# environment). The subcommand is the first word that is not a flag, the
-# value of a global flag (-n, --kubeconfig and the like) or an array; the
+# like), it starts with kubectl, a path to kubectl, ${KUBECTL} or ${kctl}.
+# In front of it can be variable assignments and the words command,
+# timeout, nohup, env, sudo, xargs and exec, with their options. The state
+# is the value of the last KUBERC assignment in front of kubectl: env -i,
+# env -u KUBERC and exec -c clear it, and sudo drops each assignment before
+# it (sudo resets the environment). command -v and -V look a name up and
+# are not a call. The scan fails closed: a prefix word with a path
+# (/usr/bin/env), an option of a prefix word that the scan does not know,
+# or a prefix word with another word between it and kubectl make the call
+# a "?" site in the state "on". The subcommand is the first word that is
+# not a flag, the value of a global flag (-n, --kubeconfig and the like) or an array; the
 # quotes of a quoted word with no $ in it do not count, and a word that is
 # a variable is "?". A call with "$@" there passes the arguments of its
 # function on: it is a wrapper, not a call. A call of kapply::run_private
@@ -84,7 +88,7 @@ _kubectl_sites() {
         sub(/[[:space:]]+$/, "", x)
         return x
       }
-      function emit(   text, kr, more, a, w, n, i, x, verb, vi, kind, sub2) {
+      function emit(   text, kr, pfx, unk, more, a, w, n, i, x, verb, vi, kind, sub2) {
         c = cur; line = start
         cur = ""; start = 0
         text = c
@@ -94,56 +98,87 @@ _kubectl_sites() {
         while (sub(/^[[:space:]]*(!|[{]|if|then|do|elif|else|while|until|time)([[:space:]]|$)/, "", c)) {}
         sub(/^[[:space:]]+/, "", c)
         # kr is the KUBERC value that the kubectl child gets ("": the one of
-        # the user).
-        kr = ""
+        # the user). pfx: a prefix word came before the command. unk: the
+        # scan cannot read the prefix (an option it does not know, or a
+        # prefix word with a path), so it cannot prove the state.
+        kr = ""; pfx = 0; unk = 0
         for (more = 1; more; ) {
           more = 1
-          if (c ~ /^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]/) {
+          if (c ~ /^[^[:space:]"$]*\/(env|sudo|xargs|exec|nohup|timeout|command)([[:space:]]|$)/) {
+            unk = 1
+          } else if (c ~ /^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]/) {
             a = word()
             if (a ~ /^KUBERC=/) kr = unq(substr(a, 8))
-          } else if (c ~ /^(command|nohup)[[:space:]]/) {
-            word()
-          } else if (match(c, /^timeout([[:space:]]+-[A-Za-z][[:space:]]+[^[:space:]]+)*[[:space:]]+[^[:space:]]+[[:space:]]+/)) {
-            c = substr(c, RLENGTH + 1)
+          } else if (c ~ /^command[[:space:]]/) {
+            word(); pfx = 1
+            while (c ~ /^-[^[:space:]]*[[:space:]]/) {
+              a = word()
+              # command -v and -V look a name up: they run nothing.
+              if (a ~ /^-p*[vV]/) return
+              else if (a != "-p") { unk = 1; break }
+            }
+          } else if (c ~ /^nohup[[:space:]]/) {
+            word(); pfx = 1
+          } else if (c ~ /^timeout[[:space:]]/) {
+            pfx = 1
+            if (match(c, /^timeout([[:space:]]+(-[ks][[:space:]]+[^[:space:]]+|--(kill-after|signal)=[^[:space:]]+|--foreground|--preserve-status|-v|--verbose))*[[:space:]]+[^-[:space:]][^[:space:]]*[[:space:]]+/)) c = substr(c, RLENGTH + 1)
+            else unk = 1
           } else if (c ~ /^env[[:space:]]/) {
-            word()
+            word(); pfx = 1
             while (c ~ /^-[^[:space:]]*[[:space:]]/) {
               a = word()
               if (a == "-" || a == "-i" || a == "--ignore-environment") kr = ""
               else if (a == "-u" || a == "--unset") { if (word() == "KUBERC") kr = "" }
-              else if (a == "-uKUBERC" || a == "--unset=KUBERC") kr = ""
-              else if (a == "-C" || a == "--chdir" || a == "-S" || a == "--split-string") word()
+              else if (a ~ /^-u./ || a ~ /^--unset=/) { if (a == "-uKUBERC" || a == "--unset=KUBERC") kr = "" }
+              else if (a == "-C" || a == "--chdir") word()
+              else if (a !~ /^(-C.+|--chdir=.*|-0|--null|-v|--debug)$/) { unk = 1; break }
             }
           } else if (c ~ /^sudo[[:space:]]/) {
             # sudo resets the environment: only an assignment after it counts.
-            word(); kr = ""
+            word(); kr = ""; pfx = 1
             while (c ~ /^-[^[:space:]]*[[:space:]]/) {
               a = word()
               if (a ~ /^-[ugCDhprtUT]$/) word()
+              else if (a !~ /^(-[ugCDhprtUT].+|-[nkEHSbisAKlvVeP]+)$/) { unk = 1; break }
             }
           } else if (c ~ /^xargs[[:space:]]/) {
-            word()
+            word(); pfx = 1
             while (c ~ /^-[^[:space:]]*[[:space:]]/) {
               a = word()
               if (a ~ /^-[nILPdaEs]$/) word()
+              else if (a !~ /^(-[nILPdaEs].+|-[0rtpxo]+|--(null|no-run-if-empty|verbose|interactive|exit|open-tty))$/) { unk = 1; break }
             }
           } else if (c ~ /^exec[[:space:]]/) {
             # exec -c starts the command with an empty environment.
-            word()
+            word(); pfx = 1
             while (c ~ /^-[^[:space:]]*[[:space:]]/) {
               a = word()
-              if (a ~ /^-[a-z]*c/) kr = ""
-              if (a ~ /^-[a-z]*a$/) word()
+              if (a !~ /^-[cl]*a?$/ || a == "-") { unk = 1; break }
+              if (a ~ /c/) kr = ""
+              if (a ~ /a$/) word()
             }
           } else {
             more = 0
           }
+          if (unk) more = 0
         }
         if (match(c, /^kapply::run_private[[:space:]]+"[^"]*"[[:space:]]+/)) {
           c = "kubectl " substr(c, RLENGTH + 1)
           kr = "off"
         }
-        if (c !~ /^("[$][{](KUBECTL|kctl)[}]"|[$][{](KUBECTL|kctl)[}]|"?[$](KUBECTL|kctl)"?|kubectl)([[:space:]]|$)/) return
+        # A path to kubectl (/usr/local/bin/kubectl) is kubectl.
+        if (match(c, /^[^[:space:]"$]*\/kubectl/) && substr(c, RLENGTH + 1, 1) ~ /^([[:space:]]|)$/) c = "kubectl" substr(c, RLENGTH + 1)
+        if (c !~ /^("[$][{](KUBECTL|kctl)[}]"|[$][{](KUBECTL|kctl)[}]|"?[$](KUBECTL|kctl)"?|kubectl)([[:space:]]|$)/) {
+          # A prefix that the scan could not read to its end, with a kubectl
+          # after it, is a call that the scan cannot read: "?".
+          if ((pfx || unk) && c ~ /(^|[[:space:]])("[$][{](KUBECTL|kctl)[}]"|[$][{](KUBECTL|kctl)[}]|"?[$](KUBECTL|kctl)"?|[^[:space:]]*\/kubectl|kubectl)([[:space:]]|$)/)
+            print "on\t?\t?\t" f ":" line ":" text
+          return
+        }
+        if (unk) {
+          print "on\t?\t?\t" f ":" line ":" text
+          return
+        }
         sub(/[[:space:]]+$/, "", c)
         n = split(c, w, /[[:space:]]+/)
         # A quoted word with no $ in it is the word without its quotes.
@@ -169,7 +204,7 @@ _kubectl_sites() {
           sub2 = w[vi + 1]
           if (verb == "rollout" && sub2 ~ /^(restart|undo|pause|resume)$/) kind = "write"
           if (verb == "certificate" && sub2 ~ /^(approve|deny)$/) kind = "write"
-          if (verb == "auth" && sub2 == "reconcile") kind = "write"
+          if (verb == "auth" && sub2 ~ /^(reconcile)$/) kind = "write"
           if (verb == "config" && sub2 ~ /^(set|set-cluster|set-context|set-credentials|unset|use-context|use|delete-cluster|delete-context|delete-user|rename-context)$/) kind = "write"
           verb = verb " " sub2
         } else if (verb == "create" && c ~ /[[:space:]]--dry-run=client([[:space:]]|$)/) {
@@ -340,6 +375,25 @@ kubectl auth can-i get pods
 kubectl config set-context --current --namespace=x
 kubectl config view --raw
 KUBERC=off kubectl create configmap c --from-file=a --dry-run=client -o yaml
+sudo --user root kubectl delete pod p
+env -iu KUBERC kubectl delete pod p
+xargs --max-args 1 kubectl delete pod
+/usr/bin/env KUBERC=off kubectl delete pod p
+KUBERC=off sudo --login kubectl delete pod p
+KUBERC=off env --weird kubectl delete pod p
+KUBERC=off xargs --weird kubectl delete pod
+KUBERC=off exec -x kubectl delete pod p
+KUBERC=off command -x kubectl delete pod p
+timeout --weird 5 kubectl delete pod p
+nohup retry kubectl delete pod p
+timeout --foreground 5 kubectl delete pod p
+KUBERC=off /usr/local/bin/kubectl delete pod p
+command -v kubectl >/dev/null
+KUBERC=off sudo -n env KUBERC=off kubectl delete pod p
+xargs -r -n1 kubectl delete pod
+KUBERC=off exec -l kubectl delete pod p
+KUBERC=off env -v kubectl delete pod p
+KUBERC=off env -uKUBERC kubectl delete pod p
 ssh h 'kubectl delete node n'
 cat <<EOF
 kubectl delete -f e.yaml
@@ -396,6 +450,24 @@ on	read	auth can-i	utils/a.sh:45
 on	write	config set-context	utils/a.sh:46
 on	read	config view	utils/a.sh:47
 off	write	create (render)	utils/a.sh:48
+on	?	?	utils/a.sh:49
+on	?	?	utils/a.sh:50
+on	?	?	utils/a.sh:51
+on	?	?	utils/a.sh:52
+on	?	?	utils/a.sh:53
+on	?	?	utils/a.sh:54
+on	?	?	utils/a.sh:55
+on	?	?	utils/a.sh:56
+on	?	?	utils/a.sh:57
+on	?	?	utils/a.sh:58
+on	?	?	utils/a.sh:59
+on	write	delete	utils/a.sh:60
+off	write	delete	utils/a.sh:61
+off	write	delete	utils/a.sh:63
+on	write	delete	utils/a.sh:64
+off	write	delete	utils/a.sh:65
+off	write	delete	utils/a.sh:66
+on	write	delete	utils/a.sh:67
 W
 )"
   [ "${sites}" = "${want}" ] || { diff <(printf '%s\n' "${want}") <(printf '%s\n' "${sites}") >&2; return 1; }
