@@ -666,18 +666,19 @@ harness updated.
 
 Defects found while porting. Which implementation still has each one:
 
-- B1 and B2 are in both implementations. The binary reproduces each one,
-  and the Go source carries a `KNOWN DEFECT, PRESERVED ON PURPOSE` comment
-  at the spot. A fix is a user-visible behaviour change that needs its own
-  change and coordination with in-cluster consumers. Fix them in both trees
+- B2 is in both implementations. The binary reproduces it, and the Go
+  source carries a `KNOWN DEFECT, PRESERVED ON PURPOSE` comment at the
+  spot. A fix is a user-visible behaviour change that needs its own change
+  and coordination with in-cluster consumers. Fix it in both trees
   together, and update the parity harness in the same change.
+- B1 is fixed in both implementations. The row stays for its links.
 - B3 and B4 are in the bash implementation only. The binary fixes them (D9,
   D6).
 - B5 is fixed since #269. The row stays for its links.
 
 | # | Defect | Where |
 |---|---|---|
-| B1 | **Remote-expose nginx TLS path mismatch.** The shipped `nginx.conf` references `/tls.cert` (with an E) while the copy lands the file at `/tls.crt`, so the proxy's HTTPS server block cannot find its certificate and the reload fails on TLS. Shipped since the template landed. | `internal/driver/lo/expose.go`, `.lok8s/drivers/lo/utils/expose.sh` |
+| B1 | **Fixed: remote-expose nginx TLS path mismatch.** The shipped `nginx.conf` referenced `/tls.cert` (with an E), but the copy lands the file at `/tls.crt`. Thus the HTTPS server block of the proxy could not find its certificate, and the reload failed on TLS. Now `nginx.conf` reads `/tls.crt`. A test in each implementation compares the `ssl_certificate` and `ssl_certificate_key` paths of `nginx.conf` with the targets of the two copies. | `internal/driver/lo/expose.go`, `.lok8s/drivers/lo/utils/expose.sh`, `.lok8s/drivers/lo/cluster/expose/nginx.conf` |
 | B2 | **Registry ConfigMap port is hardcoded `5000`.** The registries listen on 80/443 (TLS-mode dependent). In-cluster consumers may compensate; correcting it is a coordinated change. | `internal/driver/lo/registries.go` |
 | B3 | **`lo kubehz register` / `join` read `LOK8S_SPEC_FILE` before it is set.** `validate_config` reads a variable only `provision::resolve_spec` sets, and `register` calls it after `validate`, so bash prints a spurious `unbound variable` line and the per-kind validation rules are dead on those two verbs (kind reads as `""`). The binary passes the spec path (D9); the kind rules are exercised through `deploy`, where the bash sets the variable itself. | `hack/parity-kubehz.sh`, `.lok8s/libs/kubehz/` |
 | B4 | **`lo kubehz node … --cluster` guard is dead on dispatch** in bash (D6). | `hack/parity-kubehz.sh` |

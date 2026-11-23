@@ -100,17 +100,11 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 		ExposeImage)
 
 	// Copy rendered config + optional TLS certs into the running container.
+	// The ssl_certificate and ssl_certificate_key paths of nginx.conf are
+	// the targets of the two TLS copies.
 	_ = d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf")
 
 	if fsutil.FileExists(certPath) && fsutil.FileExists(keyPath) {
-		// KNOWN DEFECT, PRESERVED ON PURPOSE: the shipped nginx.conf
-		// references `ssl_certificate /tls.cert` (with an E), but the copy
-		// below lands the file at /tls.CRT — so nginx's TLS server block
-		// cannot find its cert and the reload fails on HTTPS. The bash has
-		// shipped this mismatch since the template landed; fixing either
-		// side is a user-visible behavior change (the proxy suddenly serves
-		// TLS) that belongs to its own change, not this port. Do NOT
-		// silently align the paths.
 		_ = d.runOut(ctx, out, errOut, "docker", "cp", certPath, proxyName+":/tls.crt")
 		_ = d.runOut(ctx, out, errOut, "docker", "cp", keyPath, proxyName+":/tls.key")
 	} else {

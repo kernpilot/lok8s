@@ -50,7 +50,9 @@ lo::expose() {
   )
   docker "${docker_args[@]}" "${LO_EXPOSE_IMAGE}"
 
-  # Copy rendered config + optional TLS certs into the running container
+  # Copy rendered config + optional TLS certs into the running container.
+  # The ssl_certificate and ssl_certificate_key paths of nginx.conf are the
+  # targets of the two TLS copies.
   docker cp "${nginx_conf_file}" "${proxy_name}:/etc/nginx/nginx.conf"
   rm -f "${nginx_conf_file}"
 

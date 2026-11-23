@@ -147,8 +147,8 @@ func exposeFixture(t *testing.T) (*Driver, *fakeRunner, *config.Paths, string) {
 	d, runner, _, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
 	testutil.WriteFile(t, cy, "spec:\n  cluster:\n    domain: test.lok8s.dev\n")
-	// The REAL shipped nginx template — the envsubst whitelist + the
-	// /tls.cert defect are properties of this exact file.
+	// The REAL shipped nginx template: the envsubst whitelist and the TLS
+	// paths are properties of this exact file.
 	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"),
 		readFileT(t, filepath.Join(testutil.RepoRoot(t), ".lok8s", "drivers", "lo", "cluster", "expose", "nginx.conf")))
 	t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s")
@@ -189,33 +189,42 @@ func TestExposeEnvsubstTwoVarWhitelist(t *testing.T) {
 	}
 }
 
-func TestExposeTLSCertDefectPreserved(t *testing.T) {
-	// KNOWN DEFECT preserved: the template references /tls.cert, the copy
-	// lands /tls.crt. This test FAILS if either side is "fixed" in
-	// isolation — the fix is a coordinated change with its own test.
+// The two TLS copies land at the paths that nginx.conf reads: the
+// ssl_certificate and ssl_certificate_key paths of the shipped template are
+// the targets of the docker cp of tls.crt and of tls.key. The test reads
+// both sides, from the template and from the docker argv. bats: "expose:
+// the TLS copies land at the paths that nginx.conf reads"
+// (tests/unit/lo_expose_test.bats).
+func TestExposeTLSCopiesLandAtTheConfPaths(t *testing.T) {
 	d, runner, p, cy := exposeFixture(t)
-	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
-	testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
+	certPath := filepath.Join(p.Base, ".secrets", "tls", "tls.crt")
+	keyPath := filepath.Join(p.Base, ".secrets", "tls", "tls.key")
+	testutil.WriteFile(t, certPath, "CERT")
+	testutil.WriteFile(t, keyPath, "KEY")
 
 	var out, errBuf bytes.Buffer
 	if err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf); err != nil {
 		t.Fatal(err)
 	}
-	copiedCrt := false
-	for _, call := range runner.callsMatching("docker cp") {
-		if strings.HasSuffix(call, "test-dns-proxy:/tls.crt") {
-			copiedCrt = true
+	conf := readFileT(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
+	for _, tc := range []struct{ directive, src string }{
+		{"ssl_certificate", certPath},
+		{"ssl_certificate_key", keyPath},
+	} {
+		m := regexp.MustCompile(`(?m)^\s*`+tc.directive+`\s+(\S+);$`).FindAllStringSubmatch(conf, -1)
+		if len(m) != 1 {
+			t.Fatalf("nginx.conf has %d %s lines, want 1:\n%s", len(m), tc.directive, conf)
 		}
-		if strings.HasSuffix(call, "test-dns-proxy:/tls.cert") {
-			t.Fatal("the copy target was 'fixed' to /tls.cert — that silently changes the proxy's TLS behavior; coordinate with the template")
+		prefix := "docker cp " + tc.src + " test-dns-proxy:"
+		var targets []string
+		for _, call := range runner.calls {
+			if target, ok := strings.CutPrefix(call, prefix); ok {
+				targets = append(targets, target)
+			}
 		}
-	}
-	if !copiedCrt {
-		t.Fatal("tls.crt never copied")
-	}
-	tmpl := readFileT(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"))
-	if !strings.Contains(tmpl, "ssl_certificate /tls.cert;") {
-		t.Fatal("the shipped template no longer says /tls.cert — the preserved defect changed shape; revisit this pin")
+		if len(targets) != 1 || targets[0] != m[0][1] {
+			t.Errorf("%s reads %s, but the copies of %s land at %q:\n%s", tc.directive, m[0][1], tc.src, targets, strings.Join(runner.calls, "\n"))
+		}
 	}
 }
 

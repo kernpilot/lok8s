@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
-# lo_expose_test.bats: the image of the `lo expose` proxy. lo::expose
+# lo_expose_test.bats: the `lo expose` proxy. lo::expose
 # (.lok8s/drivers/lo/utils/expose.sh) starts the proxy container from
 # LO_EXPOSE_IMAGE (.lok8s/drivers/lo/utils/defaults.sh), which is pinned by
-# tag and digest. Go twin: TestExposeRunsThePinnedImage in
+# tag and digest, copies the nginx config and the TLS files into it, and
+# reloads nginx. Go twins: the TestExpose* tests in
 # internal/driver/lo/services_test.go.
 #
 # No test may reach a real tool. Setup puts failing stubs of the tools first
@@ -62,4 +63,39 @@ teardown() {
   [ "${#named[@]}" -eq 1 ] && [ "${named[0]}" == "${want}" ] || {
     echo "docker calls that name an nginx image:"; printf '%s\n' "${named[@]}"; cat "${log}"; return 1
   }
+}
+
+# The two TLS copies land at the paths that nginx.conf reads: the
+# ssl_certificate and ssl_certificate_key paths of the shipped template are
+# the targets of the docker cp of tls.crt and of tls.key. The test reads both
+# sides, from the template and from the docker argv. Go twin:
+# TestExposeTLSCopiesLandAtTheConfPaths.
+@test "expose: the TLS copies land at the paths that nginx.conf reads" {
+  local log="${BATS_TEST_TMPDIR}/docker.log"
+  docker() { printf '%s\n' "$*" >> "${log}"; }
+  yq() { echo "test.lok8s.dev"; }
+  envsubst() { cat; }
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK=lok8s LOK8S_LB_POOL="10.125.50.125-10.125.50.150"
+  mkdir -p "${PATH_BASE}/.secrets/tls"
+  printf 'CERT' > "${PATH_BASE}/.secrets/tls/tls.crt"
+  printf 'KEY' > "${PATH_BASE}/.secrets/tls/tls.key"
+  run lo::expose test-dns "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+  local conf="${PATH_LOK8S}/drivers/lo/cluster/expose/nginx.conf"
+  local directive src want got line
+  for directive in ssl_certificate ssl_certificate_key; do
+    src="${PATH_BASE}/.secrets/tls/tls.crt"
+    [[ "${directive}" == ssl_certificate_key ]] && src="${PATH_BASE}/.secrets/tls/tls.key"
+    want=() got=()
+    while IFS= read -r line; do
+      [[ "${line}" =~ ^[[:space:]]*${directive}[[:space:]]+([^[:space:]]+)\;$ ]] && want+=("${BASH_REMATCH[1]}")
+    done < "${conf}"
+    while IFS= read -r line; do
+      [[ "${line}" == "cp ${src} test-dns-proxy:"* ]] && got+=("${line#"cp ${src} test-dns-proxy:"}")
+    done < "${log}"
+    [ "${#want[@]}" -eq 1 ] || { echo "nginx.conf has ${#want[@]} ${directive} lines, want 1"; cat "${conf}"; return 1; }
+    [ "${#got[@]}" -eq 1 ] && [ "${got[0]}" == "${want[0]}" ] || {
+      echo "${directive} reads ${want[0]}, but the copies of ${src} land at: ${got[*]}"; cat "${log}"; return 1
+    }
+  done
 }
