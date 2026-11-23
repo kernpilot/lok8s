@@ -2794,7 +2794,8 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_failure
   assert_output --partial "${refused}"
-  assert_output --partial '[error] bootstrap: testcni apply failed (rc=1)'
+  assert_line '✗ testcni'
+  assert_output --partial '[error] bootstrap: testcni has objects blocked by an immutable/terminating conflict'
   refute_output --partial 'will confirm at the end'
   refute_output --partial 'needs recreate'
   refute_output --partial "${CANARY_VALUE}"
