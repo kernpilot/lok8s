@@ -3,8 +3,9 @@
 # (.lok8s/drivers/lo/utils/expose.sh) starts the proxy container from
 # LO_EXPOSE_IMAGE (.lok8s/drivers/lo/utils/defaults.sh), which is pinned by
 # tag and digest, copies the nginx config and the TLS files into it, and
-# reloads nginx. Go twins: the TestExpose* tests in
-# internal/driver/lo/services_test.go.
+# reloads nginx. A failed docker step fails the command. Go twins: the
+# TestExpose* and TestRemoteCIFailedExposeFailsTheRun tests in
+# internal/driver/lo/{services,remote}_test.go.
 #
 # No test may reach a real tool. Setup puts failing stubs of the tools first
 # on PATH (stub_tools in tests/test_helper.bash), and teardown fails the test
@@ -98,4 +99,80 @@ teardown() {
       echo "${directive} reads ${want[0]}, but the copies of ${src} land at: ${got[*]}"; cat "${log}"; return 1
     }
   done
+}
+
+# Each docker step of lo::expose must succeed. A failed step fails the
+# command: the error names the step and the container, no later step runs,
+# lo::expose does not print "cluster exposed", and the rendered config does
+# not stay on disk. Go twin: TestExposeFailedDockerStepFailsTheCommand.
+@test "expose: a failed docker step fails the command and names the step" {
+  local log="${BATS_TEST_TMPDIR}/docker.log" fail="" conf="${BATS_TEST_TMPDIR}/nginx.rendered.conf"
+  docker() {
+    printf '%s\n' "$*" >> "${log}"
+    [[ "$*" == *"${fail}"* ]] && return 3
+    return 0
+  }
+  mktemp() { : > "${conf}"; echo "${conf}"; }
+  yq() { echo "test.lok8s.dev"; }
+  envsubst() { cat; }
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK=lok8s LOK8S_LB_POOL="10.125.50.125-10.125.50.150"
+  mkdir -p "${PATH_BASE}/.secrets/tls"
+  printf 'CERT' > "${PATH_BASE}/.secrets/tls/tls.crt"
+  printf 'KEY' > "${PATH_BASE}/.secrets/tls/tls.key"
+  local -a calls=(
+    "run "
+    " test-dns-proxy:/etc/nginx/nginx.conf"
+    " test-dns-proxy:/tls.crt"
+    " test-dns-proxy:/tls.key"
+    "exec test-dns-proxy nginx -s reload"
+  )
+  local -a steps=(
+    "docker run of the proxy container test-dns-proxy"
+    "docker cp of the nginx config to test-dns-proxy:/etc/nginx/nginx.conf"
+    "docker cp of the TLS certificate to test-dns-proxy:/tls.crt"
+    "docker cp of the TLS key to test-dns-proxy:/tls.key"
+    "docker exec test-dns-proxy nginx -s reload"
+  )
+  local i
+  for i in "${!calls[@]}"; do
+    fail="${calls[i]}"
+    : > "${log}"
+    run lo::expose test-dns "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+    [ "${status}" -eq 1 ] || { echo "step ${i}: status ${status}, want 1"; echo "${output}"; return 1; }
+    [[ "${output}" == *"expose: ${steps[i]} failed (exit status 3)."* ]] || {
+      echo "step ${i}: the error does not name the step: ${steps[i]}"; echo "${output}"; return 1
+    }
+    [[ "${output}" != *"cluster exposed"* ]] || { echo "step ${i}: success printed"; echo "${output}"; return 1; }
+    [[ "$(tail -n 1 "${log}")" == *"${fail}"* ]] || { echo "step ${i}: a step ran after the failed one"; cat "${log}"; return 1; }
+    [ ! -e "${conf}" ] || { echo "step ${i}: the rendered config stays on disk"; return 1; }
+  done
+}
+
+# A failed expose fails the remote CI run, as a failed sync or remote
+# provision does, and the summary does not print. Go twin:
+# TestRemoteCIFailedExposeFailsTheRun.
+@test "remote CI: a failed expose fails the run" {
+  docker() { [[ "${1}" == run ]] && return 3; return 0; }
+  ssh() { :; }
+  rsync() { :; }
+  git() { echo "${PATH_BASE}"; }
+  yq() {
+    case "$*" in
+      *metadata.name*) echo "test-dns" ;;
+      *) echo "test.lok8s.dev" ;;
+    esac
+  }
+  envsubst() { cat; }
+  lo::read_network_config() { :; }
+  lo::read_lb_config() { :; }
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK=lok8s
+  export LOK8S_REMOTE_USER=ci LOK8S_REMOTE_IP=203.0.113.7 LOK8S_REMOTE_SYNC_DEST=/workspace
+  export LOK8S_REMOTE_SYNC_PATH=. LOK8S_REMOTE_TILT=false LOK8S_REMOTE_EXPOSE=true
+  LOK8S_REMOTE_SYNC_EXCLUDE=(.git)
+  run lo::remote_ci test.lok8s.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  [ "${status}" -eq 1 ] || { echo "status ${status}, want 1"; echo "${output}"; return 1; }
+  [[ "${output}" == *"expose: docker run of the proxy container test-dns-proxy failed (exit status 3)."* ]] || {
+    echo "${output}"; return 1
+  }
+  [[ "${output}" != *"remote CI cluster ready"* ]] || { echo "${output}"; return 1; }
 }

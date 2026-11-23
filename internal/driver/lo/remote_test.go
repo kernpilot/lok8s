@@ -128,6 +128,49 @@ func TestProvisionRemoteHappyPathSetsDockerHost(t *testing.T) {
 	t.Cleanup(func() { os.Unsetenv("DOCKER_HOST") })
 }
 
+// A failed expose fails the remote CI run, as a failed sync or remote
+// provision does. The summary does not print, and DOCKER_HOST is back to
+// its value from before the expose. bats: "remote CI: a failed expose fails
+// the run" (tests/unit/lo_expose_test.bats).
+func TestRemoteCIFailedExposeFailsTheRun(t *testing.T) {
+	d, runner, _, p := testDriver(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "drivers", "lo", "cluster", "expose", "nginx.conf"),
+		readFileT(t, filepath.Join(testutil.RepoRoot(t), ".lok8s", "drivers", "lo", "cluster", "expose", "nginx.conf")))
+	t.Setenv("LOK8S_REMOTE_IP", "203.0.113.7")
+	t.Setenv("LOK8S_REMOTE_USER", "root")
+	t.Setenv("LOK8S_REMOTE_SYNC_DEST", "/workspace")
+	t.Setenv("LOK8S_REMOTE_SYNC_PATH", ".")
+	t.Setenv("LOK8S_REMOTE_SYNC_EXCLUDE", ".git")
+	t.Setenv("LOK8S_REMOTE_TILT", "false")
+	t.Setenv("LOK8S_REMOTE_EXPOSE", "true")
+	t.Setenv("DOCKER_HOST", "unix:///before.sock")
+
+	runner.handler = func(c execx.Cmd) error {
+		if c.Name == "git" {
+			writeOut(c, p.Base+"\n")
+		}
+		if c.Name == "docker" && len(c.Args) > 0 && c.Args[0] == "run" {
+			return gwExit{code: 3, msg: "exit status 3"}
+		}
+		return nil
+	}
+
+	var out, errBuf bytes.Buffer
+	if err := d.remoteCI(t.Context(), "test.lok8s.dev", d.clusterYAML("test.lok8s.dev"), &out, &errBuf); err == nil {
+		t.Fatalf("remoteCI succeeded after a failed expose:\n%s", out.String())
+	}
+	if want := "expose: docker run of the proxy container test-lifecycle-proxy failed (exit status 3)."; !strings.Contains(errBuf.String(), want) {
+		t.Errorf("stderr does not name the failed step, want %q:\n%s", want, errBuf.String())
+	}
+	if strings.Contains(out.String(), "remote CI cluster ready") {
+		t.Errorf("remoteCI printed its summary after a failed expose:\n%s", out.String())
+	}
+	if got := os.Getenv("DOCKER_HOST"); got != "unix:///before.sock" {
+		t.Errorf("DOCKER_HOST = %q after the failed expose, want the value from before", got)
+	}
+}
+
 func TestRemoteCICommandLinesAndSummary(t *testing.T) {
 	d, runner, _, p := testDriver(t)
 	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), specShared)

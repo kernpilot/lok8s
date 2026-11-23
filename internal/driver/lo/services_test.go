@@ -228,6 +228,51 @@ func TestExposeTLSCopiesLandAtTheConfPaths(t *testing.T) {
 	}
 }
 
+// Each docker step of expose must succeed. A failed step fails expose: the
+// error names the step and the container, no later step runs, and expose
+// does not print "cluster exposed". bats: "expose: a failed docker step
+// fails the command and names the step" (tests/unit/lo_expose_test.bats).
+func TestExposeFailedDockerStepFailsTheCommand(t *testing.T) {
+	for _, tc := range []struct{ name, call, step string }{
+		{"run", "docker run ", "docker run of the proxy container test-dns-proxy"},
+		{"config", " test-dns-proxy:/etc/nginx/nginx.conf", "docker cp of the nginx config to test-dns-proxy:/etc/nginx/nginx.conf"},
+		{"cert", " test-dns-proxy:/tls.crt", "docker cp of the TLS certificate to test-dns-proxy:/tls.crt"},
+		{"key", " test-dns-proxy:/tls.key", "docker cp of the TLS key to test-dns-proxy:/tls.key"},
+		{"reload", "docker exec test-dns-proxy nginx -s reload", "docker exec test-dns-proxy nginx -s reload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, runner, p, cy := exposeFixture(t)
+			testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.crt"), "CERT")
+			testutil.WriteFile(t, filepath.Join(p.Base, ".secrets", "tls", "tls.key"), "KEY")
+			failed := 0
+			runner.handler = func(c execx.Cmd) error {
+				if strings.Contains(c.Name+" "+strings.Join(c.Args, " "), tc.call) {
+					failed++
+					return gwExit{code: 3, msg: "exit status 3"}
+				}
+				return nil
+			}
+			var out, errBuf bytes.Buffer
+			err := d.expose(t.Context(), "test-dns", cy, &out, &errBuf)
+			if failed != 1 {
+				t.Fatalf("the step ran %d times, want 1:\n%s", failed, strings.Join(runner.calls, "\n"))
+			}
+			if err == nil {
+				t.Fatal("expose succeeded after a failed docker step")
+			}
+			if want := "expose: " + tc.step + " failed (exit status 3)."; !strings.Contains(errBuf.String(), want) {
+				t.Errorf("stderr does not name the step, want %q:\n%s", want, errBuf.String())
+			}
+			if strings.Contains(out.String(), "cluster exposed") {
+				t.Errorf("expose printed success after a failed step:\n%s", out.String())
+			}
+			if last := runner.calls[len(runner.calls)-1]; !strings.Contains(last, tc.call) {
+				t.Errorf("a step ran after the failed one: the last call is %q", last)
+			}
+		})
+	}
+}
+
 // The proxy container runs the pinned nginx image: the tag of one version
 // and its digest, never a floating tag. The literal is the value of
 // ExposeImage and of LO_EXPOSE_IMAGE (the bash twin). No other docker call

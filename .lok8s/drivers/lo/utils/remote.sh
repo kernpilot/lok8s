@@ -179,11 +179,12 @@ lo::remote_ci() {
     debug "Tilt started on ${remote} (log: /tmp/lok8s-tilt.log)"
   fi
 
-  # Expose if enabled
+  # Expose if enabled. A failed expose fails the run, as a failed sync or
+  # remote provision does: lo::expose names the failed step.
   if [[ "${LOK8S_REMOTE_EXPOSE}" == "true" ]]; then
     lo::read_network_config "${cluster_yaml}"
     lo::read_lb_config "${cluster_yaml}"
-    DOCKER_HOST="ssh://${remote}" lo::expose "${cluster_name}" "${cluster_yaml}"
+    DOCKER_HOST="ssh://${remote}" lo::expose "${cluster_name}" "${cluster_yaml}" || return 1
   fi
 
   # Set up kubeconfig + SSH tunnel

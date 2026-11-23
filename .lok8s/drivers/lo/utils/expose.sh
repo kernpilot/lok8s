@@ -1,6 +1,20 @@
 # shellcheck shell=bash disable=SC2016
 # SC2016: single-quoted $ here is jq/yq/awk program text or a remote-script literal
 # expose.sh — Nginx reverse proxy for remote cluster access
+#
+# Each docker step that sets up the proxy (the run, each copy and the reload)
+# must succeed. A failed step stops lo::expose with an error that names the
+# step and the container, and lo::expose does not print "cluster exposed".
+# The callers run lo::expose under `|| return 1`, which turns errexit off in
+# the function, so each step checks its own status. Go twin:
+# internal/driver/lo/expose.go.
+
+# lo::expose_step_failed reports a failed docker step of lo::expose: the
+# step, its exit status and the next action (Go: exposeStepFailed).
+lo::expose_step_failed() {
+  local rc="${1}" step="${2}"
+  error "expose: ${step} failed (exit status ${rc}). The proxy does not serve the cluster. Fix the cause in the docker message above, then run lo up again."
+}
 
 lo::expose() {
   local cluster_name="${1}" cluster_yaml="${2}"
@@ -48,23 +62,41 @@ lo::expose() {
     --network "${network}"
     -p 80:80 -p 443:443
   )
-  docker "${docker_args[@]}" "${LO_EXPOSE_IMAGE}"
+  docker "${docker_args[@]}" "${LO_EXPOSE_IMAGE}" || {
+    lo::expose_step_failed "$?" "docker run of the proxy container ${proxy_name}"
+    rm -f "${nginx_conf_file}"
+    return 1
+  }
 
   # Copy rendered config + optional TLS certs into the running container.
   # The ssl_certificate and ssl_certificate_key paths of nginx.conf are the
   # targets of the two TLS copies.
-  docker cp "${nginx_conf_file}" "${proxy_name}:/etc/nginx/nginx.conf"
+  local rc=0
+  docker cp "${nginx_conf_file}" "${proxy_name}:/etc/nginx/nginx.conf" || rc=$?
   rm -f "${nginx_conf_file}"
+  if (( rc != 0 )); then
+    lo::expose_step_failed "${rc}" "docker cp of the nginx config to ${proxy_name}:/etc/nginx/nginx.conf"
+    return 1
+  fi
 
   if [[ -f "${cert_path}" ]] && [[ -f "${key_path}" ]]; then
-    docker cp "${cert_path}" "${proxy_name}:/tls.crt"
-    docker cp "${key_path}" "${proxy_name}:/tls.key"
+    docker cp "${cert_path}" "${proxy_name}:/tls.crt" || {
+      lo::expose_step_failed "$?" "docker cp of the TLS certificate to ${proxy_name}:/tls.crt"
+      return 1
+    }
+    docker cp "${key_path}" "${proxy_name}:/tls.key" || {
+      lo::expose_step_failed "$?" "docker cp of the TLS key to ${proxy_name}:/tls.key"
+      return 1
+    }
   else
     warn "expose: TLS certs not found at ${cert_path} — proxy will run without TLS"
   fi
 
   # Reload nginx with the new config
-  docker exec "${proxy_name}" nginx -s reload
+  docker exec "${proxy_name}" nginx -s reload || {
+    lo::expose_step_failed "$?" "docker exec ${proxy_name} nginx -s reload"
+    return 1
+  }
 
   local access_ip="${LOK8S_REMOTE_IP:-localhost}"
   debug "expose: nginx proxy ${proxy_name} running on ${access_ip}:443 → ${backend_ip}"

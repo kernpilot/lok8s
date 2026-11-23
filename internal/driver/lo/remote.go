@@ -253,7 +253,8 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 
 	// Expose if enabled. The config reads are best-effort here like the
 	// bash (suppressed-errexit context): a failed read still proceeds into
-	// expose with whatever env is set.
+	// expose with whatever env is set. A failed expose fails the run, as a
+	// failed sync or remote provision does: expose names the failed step.
 	if getenv("LOK8S_REMOTE_EXPOSE") == "true" {
 		_ = readNetworkConfig(clusterYAML, errOut)
 		readLBConfig(clusterYAML)
@@ -261,11 +262,14 @@ func (d *Driver) remoteCI(ctx context.Context, domain, clusterYAML string, out, 
 		// prefix on a function — temporary in default bash mode).
 		prev, had := os.LookupEnv("DOCKER_HOST")
 		os.Setenv("DOCKER_HOST", "ssh://"+remote)
-		_ = d.expose(ctx, clusterName, clusterYAML, out, errOut)
+		err := d.expose(ctx, clusterName, clusterYAML, out, errOut)
 		if had {
 			os.Setenv("DOCKER_HOST", prev)
 		} else {
 			os.Unsetenv("DOCKER_HOST")
+		}
+		if err != nil {
+			return err
 		}
 	}
 

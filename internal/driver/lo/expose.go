@@ -3,11 +3,11 @@ package lo
 // expose.go — nginx reverse proxy for remote cluster access
 // (.lok8s/drivers/lo/utils/expose.sh).
 //
-// ERREXIT-SUPPRESSION PARITY NOTE: like lo::coredns, the bash lo::expose
-// ran under the caller's `|| return 1`, so its docker steps were
-// effectively best-effort — a failed `docker run`/`docker cp` did not abort
-// the function, whose status came from the final echo (0). Only the missing
-// nginx template returned 1. The port mirrors that exactly.
+// Each docker step that sets up the proxy (the run, each copy and the
+// reload) must succeed. A failed step stops expose with an error that names
+// the step and the container, and expose does not print "cluster exposed".
+// The bash twin checks each step itself: its callers run it under
+// `|| return 1`, which turns errexit off in the function.
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/build"
+	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -93,29 +94,47 @@ func (d *Driver) expose(ctx context.Context, clusterName, clusterYAML string, ou
 	// docker cp streams file content over the Docker connection (works with
 	// DOCKER_HOST=ssh:// where -v mounts can't reach local paths). The image
 	// is ExposeImage (defaults.go), pinned by tag and digest.
-	_ = d.runOut(ctx, out, errOut, "docker", "run", "-d", "--restart=always",
+	if err := d.runOut(ctx, out, errOut, "docker", "run", "-d", "--restart=always",
 		"--name", proxyName,
 		"--network", network,
 		"-p", "80:80", "-p", "443:443",
-		ExposeImage)
+		ExposeImage); err != nil {
+		return exposeStepFailed(errOut, "docker run of the proxy container "+proxyName, err)
+	}
 
 	// Copy rendered config + optional TLS certs into the running container.
 	// The ssl_certificate and ssl_certificate_key paths of nginx.conf are
 	// the targets of the two TLS copies.
-	_ = d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf")
+	if err := d.runOut(ctx, out, errOut, "docker", "cp", tmpConf.Name(), proxyName+":/etc/nginx/nginx.conf"); err != nil {
+		return exposeStepFailed(errOut, "docker cp of the nginx config to "+proxyName+":/etc/nginx/nginx.conf", err)
+	}
 
 	if fsutil.FileExists(certPath) && fsutil.FileExists(keyPath) {
-		_ = d.runOut(ctx, out, errOut, "docker", "cp", certPath, proxyName+":/tls.crt")
-		_ = d.runOut(ctx, out, errOut, "docker", "cp", keyPath, proxyName+":/tls.key")
+		if err := d.runOut(ctx, out, errOut, "docker", "cp", certPath, proxyName+":/tls.crt"); err != nil {
+			return exposeStepFailed(errOut, "docker cp of the TLS certificate to "+proxyName+":/tls.crt", err)
+		}
+		if err := d.runOut(ctx, out, errOut, "docker", "cp", keyPath, proxyName+":/tls.key"); err != nil {
+			return exposeStepFailed(errOut, "docker cp of the TLS key to "+proxyName+":/tls.key", err)
+		}
 	} else {
 		ui.WarnTo(errOut, "expose: TLS certs not found at %s — proxy will run without TLS", certPath)
 	}
 
 	// Reload nginx with the new config.
-	_ = d.runOut(ctx, out, errOut, "docker", "exec", proxyName, "nginx", "-s", "reload")
+	if err := d.runOut(ctx, out, errOut, "docker", "exec", proxyName, "nginx", "-s", "reload"); err != nil {
+		return exposeStepFailed(errOut, "docker exec "+proxyName+" nginx -s reload", err)
+	}
 
 	accessIP := config.EnvOr("LOK8S_REMOTE_IP", "localhost")
 	ui.DebugTo(errOut, "expose: nginx proxy %s running on %s:443 → %s", proxyName, accessIP, backendIP)
 	fmt.Fprintf(out, ":: cluster exposed at https://*.%s (via %s:443)\n", domain, accessIP)
 	return nil
+}
+
+// exposeStepFailed reports a failed docker step of expose: the step, its
+// exit status and the next action (bash: lo::expose_step_failed).
+func exposeStepFailed(errOut io.Writer, step string, err error) error {
+	ui.ErrorTo(errOut, "expose: %s failed (exit status %d). The proxy does not serve the cluster. Fix the cause in the docker message above, then run lo up again.",
+		step, execx.ExitCode(err))
+	return ui.Handled(fmt.Errorf("expose: %s: %w", step, err))
 }
