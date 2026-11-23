@@ -1,6 +1,6 @@
 package capi
 
-// kuberc_test.go — every kubectl apply of the capi driver, and the delete
+// kuberc_test.go: every kubectl apply of the capi driver, and the delete
 // of the workload Cluster, runs with the kubectl user defaults off
 // (execx.KubeRCOff): a kuberc of the operator cannot change the write. The
 // bash twin is drivers/capi/{main,generate} (the KUBERC=off prefix).

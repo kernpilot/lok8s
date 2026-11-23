@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# kuberc_test.bats — every kubectl call of the bash tree that writes runs
+# kuberc_test.bats: every kubectl call of the bash tree that writes runs
 # with the kubectl user defaults off: `KUBERC=off kubectl …`. A kuberc can
 # set a flag default for any kubectl command: --dry-run=client makes a
 # delete, an annotate or a rollout restart report success and change
@@ -18,7 +18,7 @@ setup() {
   load "../test_helper"
 }
 
-# _kubectl_sites [<dir>] — each kubectl call of the bash tree (default
+# _kubectl_sites [<dir>]: each kubectl call of the bash tree (default
 # .lok8s), one per line, with four fields divided by a tab:
 #   - "off" or "on": with a KUBERC=off prefix or not;
 #   - "write", "read" or "?" (the scan cannot read the subcommand);
