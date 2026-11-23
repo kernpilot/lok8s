@@ -2879,11 +2879,66 @@ SH
     bootstrap::_sched_untrap
     trap -p EXIT TERM' > "${BATS_TEST_TMPDIR}/traps" 2>&1 || true
   run cat "${BATS_TEST_TMPDIR}/traps"
-  assert_line --index 0 "trap -- 'bootstrap::_sched_rm; echo caller' EXIT"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status bootstrap::_sched_rm && :; echo caller' EXIT"
   assert_line --index 1 "trap -- 'bootstrap::_sched_signal TERM' SIGTERM"
   assert_line --index 2 "trap -- 'echo caller' EXIT"
   assert_line --index 3 "trap -- 'echo term' SIGTERM"
   assert_line --index 4 "caller"
+}
+
+# The EXIT trap of the scheduler runs the earlier EXIT trap with the exit
+# status of the shell, also under set -e. A subshell chains the traps that
+# it set itself and gets them back afterwards. A trap of its parent never
+# chains: it does not run in the subshell.
+@test "bootstrap::_sched_trap: the earlier EXIT trap reads the exit status, and a subshell chains its own traps only" {
+  export _PROJECT_ROOT
+  local d="${BATS_TEST_TMPDIR}/sched-rc" out="${BATS_TEST_TMPDIR}/sched-rc.out" rc=0
+  mkdir -p "${d}"
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "exit \$?" EXIT
+    bootstrap::_sched_trap "$1"
+    exit 7' _ "${d}" || rc=$?
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}"; return 1; }
+  [ ! -e "${d}" ]
+
+  mkdir -p "${d}"; rc=0
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    set -e
+    trap "echo caller-rc=\$?" EXIT
+    bootstrap::_sched_trap "$1"
+    exit 7' _ "${d}" > "${out}" 2>&1 || rc=$?
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}"; cat "${out}"; return 1; }
+  [ "$(cat "${out}")" = "caller-rc=7" ] || { cat "${out}"; return 1; }
+  [ ! -e "${d}" ]
+
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo parent" EXIT
+    ( trap "echo sub-own" EXIT
+      trap "echo sub-term" TERM
+      bootstrap::_sched_trap /nonexistent/x
+      trap -p EXIT
+      bootstrap::_sched_untrap
+      trap -p EXIT TERM
+      bootstrap::_sched_trap /nonexistent/x
+      exit 0 )
+    ( bootstrap::_sched_trap /nonexistent/x
+      trap -p EXIT
+      exit 0 )
+    trap - EXIT' > "${out}" 2>&1 || true
+  run cat "${out}"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status bootstrap::_sched_rm && :; echo sub-own' EXIT"
+  assert_line --index 1 "trap -- 'echo sub-own' EXIT"
+  assert_line --index 2 "trap -- 'echo sub-term' SIGTERM"
+  assert_line --index 3 "sub-own"
+  assert_line --index 4 "trap -- 'bootstrap::_keep_status bootstrap::_sched_rm && :' EXIT"
+  [ "${#lines[@]}" -eq 5 ]
+  refute_line "parent"
 }
 
 # ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
@@ -6117,7 +6172,7 @@ SH
 
 # A dry run leaves no temp file behind: not when it finishes, not when it
 # is killed (SIGTERM) in the middle of a render. And it CHAINS the caller's
-# EXIT trap instead of replacing it.
+# EXIT trap instead of replacing it, also a trap that a subshell set.
 @test "bootstrap::apply --dry-run leaves no temp files (finished or SIGTERM) and chains the EXIT trap" {
   write_cluster_spec "testcni"
   _dry_kubectl_stub 0
@@ -6127,6 +6182,8 @@ SH
     trap 'echo caller-trap-ran > "${BATS_TEST_TMPDIR}/caller-trap"' EXIT
     bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null >/dev/null 2>&1 ) || true
   [ -z "$(ls -A "${tmp}")" ] || { ls -la "${tmp}"; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/caller-trap" 2>/dev/null)" = caller-trap-ran ] \
+    || { echo "the EXIT trap of the subshell did not run"; return 1; }
 
   # The main-shell path: the caller's EXIT trap is still there afterwards.
   export _PROJECT_ROOT
@@ -6140,7 +6197,7 @@ SH
   # The chained trap while the run lasts, the caller's own trap afterwards,
   # and the caller's trap running at exit.
   run cat "${BATS_TEST_TMPDIR}/traps"
-  assert_line --index 0 "trap -- 'rm -rf -- /nonexistent/x; echo caller' EXIT"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status rm -rf -- /nonexistent/x && :; echo caller' EXIT"
   assert_line --index 1 "trap -- 'echo caller' EXIT"
   assert_line --index 2 "caller"
 
@@ -6162,6 +6219,48 @@ SH
   for (( i = 0; i < 40 && ! -e "${SLEPT}"; i++ )); do sleep 0.1; done
   sleep 0.5
   [ -z "$(ls -A "${tmp}")" ] || { ls -laR "${tmp}"; return 1; }
+}
+
+# The EXIT trap of a dry run runs the earlier EXIT trap with the exit status
+# of the shell, also under set -e. A subshell chains the EXIT trap that it
+# set itself and gets it back afterwards. The EXIT trap of its parent never
+# chains: it does not run in the subshell.
+@test "bootstrap::_dry_run_trap: the earlier EXIT trap reads the exit status, and a subshell chains its own EXIT trap only" {
+  export _PROJECT_ROOT
+  local d="${BATS_TEST_TMPDIR}/dry-rc" out="${BATS_TEST_TMPDIR}/dry-rc.out" rc=0
+  mkdir -p "${d}"
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    set -e
+    trap "r=\$?; echo caller-rc=\$r; exit \$r" EXIT
+    bootstrap::_dry_run_trap "$1"
+    exit 7' _ "${d}" > "${out}" 2>&1 || rc=$?
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}"; cat "${out}"; return 1; }
+  [ "$(cat "${out}")" = "caller-rc=7" ] || { cat "${out}"; return 1; }
+  [ ! -e "${d}" ]
+
+  bash -c '
+    import() { :; }
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo parent" EXIT
+    ( trap "echo sub-own" EXIT
+      bootstrap::_dry_run_trap /nonexistent/x
+      trap -p EXIT
+      bootstrap::_dry_run_untrap /nonexistent/x
+      trap -p EXIT
+      exit 0 )
+    ( bootstrap::_dry_run_trap /nonexistent/x
+      trap -p EXIT
+      exit 0 )
+    trap - EXIT' > "${out}" 2>&1 || true
+  run cat "${out}"
+  assert_line --index 0 "trap -- 'bootstrap::_keep_status rm -rf -- /nonexistent/x && :; echo sub-own' EXIT"
+  assert_line --index 1 "trap -- 'echo sub-own' EXIT"
+  assert_line --index 2 "sub-own"
+  assert_line --index 3 "trap -- 'bootstrap::_keep_status rm -rf -- /nonexistent/x && :' EXIT"
+  [ "${#lines[@]}" -eq 4 ]
+  refute_line "parent"
 }
 
 @test "bootstrap::mode_check: the flag dependencies (the lines the Go cli prints)" {
