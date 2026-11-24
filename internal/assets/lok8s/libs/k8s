@@ -96,7 +96,11 @@ k8s::infrastructure() {
   # the no-mint run, and kustomize gets the home that lo checked, as an
   # absolute path (Go: build.CheckNoMintPlugin in k8sKustomizeArtifact).
   if build::_no_mint_requested; then
-    local -x KUSTOMIZE_PLUGIN_HOME="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+    # The value comes first: a `local -x` with no value starts empty and
+    # would hide the caller's home.
+    local abs_home
+    abs_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+    local -x KUSTOMIZE_PLUGIN_HOME="${abs_home}"
     build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME}" "lo k8s" || return 1
   fi
   mkdir -p "${out_dir}"
@@ -130,7 +134,11 @@ k8s::platform() {
   domain::export_secrets_store "${domain}" || return 1
   # The no-mint check is the one of k8s::infrastructure.
   if build::_no_mint_requested; then
-    local -x KUSTOMIZE_PLUGIN_HOME="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+    # The value comes first: a `local -x` with no value starts empty and
+    # would hide the caller's home.
+    local abs_home
+    abs_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+    local -x KUSTOMIZE_PLUGIN_HOME="${abs_home}"
     build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME}" "lo k8s" || return 1
   fi
   mkdir -p "${out_dir}"
