@@ -26,6 +26,8 @@ setup() {
   # bootstrap::apply now renders via addons::render (libs/addons); with `import`
   # stubbed we source it directly so the shared render path is available.
   source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+  # addons::render runs the no-mint check of libs/build (its import too).
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
   # Fake addon dir: .lok8s/addons/testcni/
   ADDON_DIR="${PATH_LOK8S}/addons/testcni"
@@ -620,12 +622,147 @@ YAML
   run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
   assert_success
   [ "$(cat "${KENV}")" = "keys-only=0" ]
-  # An entry env line that names it (the engine refuses that before the
-  # render; this is the render's own backstop) loses to the pin too.
-  rm -f "${KENV}"
-  run addons::render "${ADDON_DIR}" "lo" "hetzner" "" "LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1"
+  # An entry env line that names it is refused: see "addons::render refuses
+  # an env line that sets one of lo's own variables".
+}
+
+# addons::render refuses an entry env line that sets one of lo's own
+# variables itself: the engine refuses such an entry before the render, and
+# this is the backstop for any other caller. kustomize does not run. Go:
+# TestRenderRefusesProtectedEnv.
+@test "addons::render refuses an env line that sets one of lo's own variables" {
+  _no_mint_addon
+  local name
+  for name in LOK8S_SECRETS_NO_MINT LOK8S_SECRETS_DISABLE LOK8S_INTERNAL_SECRETS_KEYS_ONLY \
+      KUSTOMIZE_PLUGIN_HOME PATH_SECRETS; do
+    rm -f "${KENV}"
+    run addons::render "${NO_MINT_ADDON}" "lo" "" "" $'LOK8S_USER_FOO=x\n'"${name}=0"
+    assert_failure
+    assert_output "[error] addons::render: env: may not set ${name}"
+    [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+  done
+  run addons::render "${NO_MINT_ADDON}" "lo" "" "" "LOK8S_USER_FOO=x"
   assert_success
-  [ "$(cat "${KENV}")" = "keys-only=0" ]
+  [ -e "${KENV}" ]
+}
+
+# --- no-mint: a real addon render checks the Secret plugin ---------------------
+
+# _no_mint_addon: an addon without chart.yaml (no values to stack), a
+# kustomize that records the plugin home it gets, and a yq that passes the
+# stream through (the render's last step, not under test here).
+_no_mint_addon() {
+  NO_MINT_ADDON="${BATS_TEST_TMPDIR}/plain-addon"
+  mkdir -p "${NO_MINT_ADDON}"
+  printf 'resources: []\n' > "${NO_MINT_ADDON}/kustomization.yaml"
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() {
+    printf 'home=%s\n' "${KUSTOMIZE_PLUGIN_HOME-<unset>}" > "${KENV}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  yq() { cat; }
+  export -f kustomize yq
+}
+
+# With LOK8S_SECRETS_NO_MINT set, a real render refuses a Secret plugin
+# without the no-mint run before kustomize runs: an older plugin ignores the
+# switch and generates values into the store. Go:
+# TestRenderNoMintRefusesAPluginWithoutTheNoMintRun.
+@test "addons::render with no-mint refuses a Secret plugin without the no-mint run" {
+  _no_mint_addon
+  export LOK8S_SECRETS_NO_MINT=1
+  local caps
+  for caps in $'dry-run\nkeys-only\n' ""; do
+    rm -f "${KENV}" "${BATS_TEST_TMPDIR}/plugin-runs"
+    no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" "${caps}"
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_failure
+    assert_output "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+    [ "$(no_mint_probes)" = 1 ]
+    [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+  done
+}
+
+# A plugin with the no-mint run passes, and kustomize gets the plugin home
+# that the check probed. Without the plugin, the line names the render. Go:
+# TestRenderNoMintAcceptsAPluginWithTheNoMintRun.
+@test "addons::render with no-mint renders with the Secret plugin that it checked" {
+  _no_mint_addon
+  export LOK8S_SECRETS_NO_MINT=1
+  no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\nno-mint\n'
+  run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+  assert_success
+  [ "$(no_mint_probes)" = 1 ]
+  [ "$(cat "${KENV}")" = "home=${KUSTOMIZE_PLUGIN_HOME}" ]
+
+  rm -f "${KENV}" "${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+  run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+  assert_failure
+  assert_output "[error] addons::render: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+  [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+}
+
+# A dry run checks too, with and without --allow-generators: the switch wins
+# over a dry run, and a plugin that has the dry run but not the no-mint run
+# would report a value that it would generate instead of failing. The check
+# probes the plugin of the real home. A plugin with the no-mint run renders:
+# kustomize gets the checked home with --allow-generators and the
+# boundary's home without it. Go: TestRenderDryRunNoMintChecksThePlugin.
+@test "addons::render with no-mint checks the Secret plugin in a dry run" {
+  _no_mint_addon
+  export LOK8S_SECRETS_NO_MINT=1
+  local bootstrap_dry_boundary="${BATS_TEST_TMPDIR}/boundary" bootstrap_dry_run=1 bootstrap_allow_generators want
+  mkdir -p "${bootstrap_dry_boundary}/tmp"
+  for bootstrap_allow_generators in 0 1; do
+    rm -f "${KENV}" "${BATS_TEST_TMPDIR}/plugin-runs"
+    no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\n'
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_failure
+    assert_output "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+    [ "$(no_mint_probes)" = 1 ]
+    [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+
+    no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\nno-mint\n'
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_success
+    want="${bootstrap_dry_boundary}/plugins"
+    (( ! bootstrap_allow_generators )) || want="${KUSTOMIZE_PLUGIN_HOME}"
+    [ "$(cat "${KENV}")" = "home=${want}" ]
+  done
+}
+
+# A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory: the
+# check probes the plugin there, and kustomize gets that home as an
+# absolute path. kustomize runs an exec plugin from the kustomization
+# directory, where a relative home would name another plugin. Go:
+# TestPluginChecksResolveARelativeHome (the home that the check returns,
+# which addons.Render gives kustomize).
+@test "addons::render with no-mint gives kustomize a relative plugin home as an absolute path" {
+  _no_mint_addon
+  no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\nno-mint\n'
+  local abs="${KUSTOMIZE_PLUGIN_HOME}"
+  cd "$(dirname "${abs}")"
+  export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME="$(basename "${abs}")"
+  run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+  assert_success
+  [ "$(no_mint_probes)" = 1 ]
+  [ "$(cat "${KENV}")" = "home=${abs}" ]
+}
+
+# With the switch off, the plugin is not probed. Go:
+# TestRenderNoMintOffDoesNotProbe.
+@test "addons::render with no-mint off does not probe the Secret plugin" {
+  _no_mint_addon
+  no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\n'
+  local value
+  for value in "" 0 false; do
+    rm -f "${KENV}"
+    export LOK8S_SECRETS_NO_MINT="${value}"
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_success
+    [ "$(no_mint_probes)" = 0 ]
+    [ -e "${KENV}" ]
+  done
 }
 
 @test "bootstrap::apply passes env: overrides to the render only, never the orchestration shell" {
@@ -2894,6 +3031,7 @@ source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
 source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
 source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
 source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+source "${_PROJECT_ROOT}/.lok8s/libs/build"
 source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
 source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
 source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
@@ -4715,6 +4853,24 @@ CASES
   [ ! -e "${BATS_TEST_TMPDIR}/ran" ]
 }
 
+# A ".." after a symlinked directory in the plugin home: the boundary links
+# and checks the plugin of the clean home, the home that the no-mint check
+# probes, not the plugin next to the target of the link (Go: filepath.Join
+# in DryRunBoundary.build cleans the path).
+@test "the dry run links the plugin of the clean home when a .. follows a symlink" {
+  local b="${BATS_TEST_TMPDIR}/boundary" t="${BATS_TEST_TMPDIR}/h" rel="secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${b}" "${t}/real/sub" "${t}/home/${rel%/*}" "${t}/real/home/${rel%/*}"
+  ln -s "${t}/real/sub" "${t}/link"
+  printf '#!/bin/sh\ntouch "%s"\necho dry-run\n' "${t}/ran-clean" > "${t}/home/${rel}"
+  printf '#!/bin/sh\ntouch "%s"\necho dry-run\n' "${t}/ran-other" > "${t}/real/home/${rel}"
+  chmod +x "${t}/home/${rel}" "${t}/real/home/${rel}"
+  KUSTOMIZE_PLUGIN_HOME="${t}/link/../home" run addons::dry_run_boundary "${b}"
+  assert_success
+  [ "$(readlink "${b}/plugins/${rel}")" = "${t}/home/${rel}" ]
+  [ -e "${t}/ran-clean" ]
+  [ ! -e "${t}/ran-other" ]
+}
+
 # With a Secret plugin in the project, a link of the boundary that does not
 # resolve is refused, not skipped (Go:
 # TestDryRunBoundaryRefusesAPluginLinkThatDoesNotResolve).
@@ -5536,6 +5692,7 @@ _dry_window_open() {
 import() { :; }
 source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
 source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+source "${_PROJECT_ROOT}/.lok8s/libs/build"
 ${before}
 addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b-${n}" || exit 1
 trap -p INT TERM
@@ -6258,7 +6415,7 @@ SH
   kustomize() { sleep 2; : > "${SLEPT}"; echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"; }
   export -f kustomize
   ( export TMPDIR="${tmp}"; bootstrap_dry_run=1
-    exec bash -c 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/addons"; source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"; bootstrap_dry_run=1 bootstrap::apply test.lok8s.dev "'"${CLUSTER_YAML}"'" "'"${KUBECONFIG_FILE}"'"' \
+    exec bash -c 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/addons"; source "${_PROJECT_ROOT}/.lok8s/libs/build"; source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"; bootstrap_dry_run=1 bootstrap::apply test.lok8s.dev "'"${CLUSTER_YAML}"'" "'"${KUBECONFIG_FILE}"'"' \
       </dev/null >/dev/null 2>&1 ) &
   local pid=$!
   local i

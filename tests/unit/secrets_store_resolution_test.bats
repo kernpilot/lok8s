@@ -243,6 +243,7 @@ _render_addons_setup() {
   command -v yq &>/dev/null || skip "yq not available"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   local addon="${BATS_TEST_TMPDIR}/addon"
   mkdir -p "${addon}"
   printf 'resources: []\n' > "${addon}/kustomization.yaml"
@@ -382,6 +383,7 @@ _require_crypto() {
 # without one stops before the render.
 @test "k8s::infrastructure: renders with the domain store; refuses a domain without one" {
   source "${_PROJECT_ROOT}/.lok8s/libs/k8s"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   export KLOG="${BATS_TEST_TMPDIR}/kustomize.log"
   kustomize() { echo "${PATH_SECRETS:-<unset>}" >> "${KLOG}"; echo "kind: ConfigMap"; }
   export -f kustomize
@@ -404,6 +406,7 @@ _require_crypto() {
 
 @test "k8s::platform: a domain without a store stops before the render" {
   source "${_PROJECT_ROOT}/.lok8s/libs/k8s"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   export KLOG="${BATS_TEST_TMPDIR}/kustomize.log"
   kustomize() { : > "${KLOG}"; echo "kind: ConfigMap"; }
   export -f kustomize
@@ -414,4 +417,177 @@ _require_crypto() {
   assert_failure
   assert_line --partial "$(_refusal)"
   [ ! -e "${KLOG}" ] || { echo "kustomize ran"; return 1; }
+}
+
+# _k8s_no_mint_setup: libs/k8s with a domain that has its own store, a
+# targets dir and a legacy overlay, and a kustomize first on PATH that
+# records the plugin home it gets. It is a program, not a shell function,
+# so it sees only the exported environment, as the real kustomize does.
+# KUSTOMIZE_PLUGIN_HOME is unset: the home is <project>/.kustomize, as for
+# every other render.
+_k8s_no_mint_setup() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/k8s"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
+  export KLOG="${BATS_TEST_TMPDIR}/kustomize.log"
+  mkdir -p "${BATS_TEST_TMPDIR}/kbin"
+  printf '#!%s\necho "home=${KUSTOMIZE_PLUGIN_HOME-<unset>}" >> %q\necho "kind: ConfigMap"\n' \
+    "${BASH}" "${KLOG}" > "${BATS_TEST_TMPDIR}/kbin/kustomize"
+  chmod +x "${BATS_TEST_TMPDIR}/kbin/kustomize"
+  export PATH="${BATS_TEST_TMPDIR}/kbin:${PATH}"
+  unset -f kustomize
+  mkdir -p "${PATH_CLUSTERS}/new.dev/secrets" "${PATH_CLUSTERS}/new.dev/targets" "${PATH_BASE}/.k8s/overlays/new.dev"
+  unset KUSTOMIZE_PLUGIN_HOME
+}
+
+# _k8s_exec_stub: a stub kustomize that runs the Secret plugin the way
+# kustomize runs an exec plugin. It joins the plugin path by its text
+# (kustomize: filepath.Join, which cleans repeated slashes, "." and ".."
+# elements; here: awk), then runs the plugin from the kustomization
+# directory (the last argument). It prints one ConfigMap. Go:
+# execPluginKustomize.
+_k8s_exec_stub() {
+  cat > "${BATS_TEST_TMPDIR}/kbin/kustomize" <<'EOF'
+#!/bin/sh
+for a in "$@"; do dir=$a; done
+plugin=$(awk -v p="$KUSTOMIZE_PLUGIN_HOME/secrets.lok8s.dev/v1/secret/Secret" 'BEGIN {
+	n = split(p, a, "/"); abs = (substr(p, 1, 1) == "/"); k = 0
+	for (i = 1; i <= n; i++) {
+		s = a[i]
+		if (s == "" || s == ".") continue
+		if (s == "..") {
+			if (k > 0 && o[k] != "..") { k--; continue }
+			if (abs) continue
+		}
+		o[++k] = s
+	}
+	r = abs ? "/" : ""
+	for (i = 1; i <= k; i++) r = r (i > 1 ? "/" : "") o[i]
+	if (r == "") r = "."
+	print r
+}')
+(cd "$dir" && "$plugin" </dev/null >/dev/null 2>&1)
+echo "kind: ConfigMap"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/kbin/kustomize"
+}
+
+# _k8s_label_plugin <home> <label> <capabilities> <log>: a Secret plugin in
+# <home> that appends "probe <label>" or "run <label>" to <log> and prints
+# <capabilities> (printf format) for --capabilities.
+_k8s_label_plugin() {
+  mkdir -p "${1}/secrets.lok8s.dev/v1/secret"
+  printf '#!%s\nif [[ "${1:-}" == --capabilities ]]; then echo "probe %s" >> %q; printf "%s"; exit 0; fi\necho "run %s" >> %q\n' \
+    "${BASH}" "${2}" "${4}" "${3}" "${2}" "${4}" > "${1}/secrets.lok8s.dev/v1/secret/Secret"
+  chmod +x "${1}/secrets.lok8s.dev/v1/secret/Secret"
+}
+
+# With LOK8S_SECRETS_NO_MINT set, `lo k8s` refuses a Secret plugin without
+# the no-mint run before the render, and kustomize gets the plugin home that
+# the check probed. Go: TestK8sArtifactChecksTheNoMintPlugin.
+@test "k8s::infrastructure and k8s::platform with no-mint check the Secret plugin" {
+  _k8s_no_mint_setup
+  export LOK8S_SECRETS_NO_MINT=1
+  local domain=new.dev fn
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${KLOG}" "${BATS_TEST_TMPDIR}/plugin-runs"
+    no_mint_plugin "${PATH_BASE}/.kustomize" $'dry-run\nkeys-only\n'
+    run "${fn}"
+    assert_failure
+    assert_line "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+    [ "$(no_mint_probes)" = 1 ]
+    [ ! -e "${KLOG}" ] || { echo "${fn}: kustomize ran"; return 1; }
+
+    no_mint_plugin "${PATH_BASE}/.kustomize" $'dry-run\nkeys-only\nno-mint\n'
+    run "${fn}"
+    assert_success
+    run cat "${KLOG}"
+    assert_output "home=${PATH_BASE}/.kustomize"
+  done
+}
+
+# kustomize runs an exec plugin from the kustomization directory, so a
+# relative KUSTOMIZE_PLUGIN_HOME names another plugin there than the one in
+# the working directory of lo. With a relative home, each command probes the
+# plugin of the working directory and gives kustomize that home as an
+# absolute path. The stub kustomize runs the Secret plugin the way kustomize
+# does: from the kustomization directory, by its path under the home. An
+# older plugin waits at the same relative path in each kustomization
+# directory and must not run. Go: TestNoMintRelativeHomeRunsTheProbedPlugin.
+@test "k8s::infrastructure and k8s::platform with no-mint and a relative plugin home run the probed plugin" {
+  _k8s_no_mint_setup
+  _k8s_exec_stub
+  local log="${BATS_TEST_TMPDIR}/plugin-runs.log" domain=new.dev fn home
+  _k8s_label_plugin "${PATH_BASE}/.kustomize" project 'dry-run\nkeys-only\nno-mint\n' "${log}"
+  for home in "${PATH_CLUSTERS}/new.dev/targets/.kustomize" "${PATH_BASE}/.k8s/overlays/new.dev/.kustomize"; do
+    _k8s_label_plugin "${home}" kustomization-dir 'dry-run\nkeys-only\n' "${log}"
+  done
+  export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME=.kustomize
+  cd "${PATH_BASE}"
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${log}"
+    run "${fn}"
+    assert_success
+    run cat "${log}"
+    assert_output $'probe project\nrun project'
+  done
+}
+
+# With a symlinked working directory, kustomize joins the plugin path by
+# its text: <link>/../plugins is the plugins directory next to the link,
+# not the one next to the target of the link. Each command resolves the
+# home the same way, so it probes the plugin that kustomize runs. With an
+# older plugin next to the link, each command refuses it, also when the
+# plugin next to the target has the no-mint run. Go:
+# TestNoMintSymlinkedWorkingDirectoryProbesThePluginThatRuns.
+@test "k8s::infrastructure and k8s::platform with no-mint, a symlinked working directory and ../plugins probe the plugin that runs" {
+  _k8s_no_mint_setup
+  _k8s_exec_stub
+  local log="${BATS_TEST_TMPDIR}/plugin-runs.log" domain=new.dev fn
+  local root="${BATS_TEST_TMPDIR}/sym"
+  mkdir -p "${root}/work" "${root}/srv/project"
+  ln -s "${root}/srv/project" "${root}/work/link"
+  export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME=../plugins
+  cd "${root}/work/link"
+  _k8s_label_plugin "${root}/work/plugins" next-to-link 'dry-run\nkeys-only\nno-mint\n' "${log}"
+  _k8s_label_plugin "${root}/srv/plugins" next-to-target 'dry-run\nkeys-only\n' "${log}"
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${log}"
+    run "${fn}"
+    assert_success
+    run cat "${log}"
+    assert_output $'probe next-to-link\nrun next-to-link'
+  done
+  _k8s_label_plugin "${root}/work/plugins" next-to-link 'dry-run\nkeys-only\n' "${log}"
+  _k8s_label_plugin "${root}/srv/plugins" next-to-target 'dry-run\nkeys-only\nno-mint\n' "${log}"
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${log}"
+    run "${fn}"
+    assert_failure
+    assert_line --partial "does not have the no-mint run"
+    run cat "${log}"
+    assert_output 'probe next-to-link'
+  done
+}
+
+# Without the plugin, the line of each command names `lo k8s`. With the
+# switch off, the plugin is not probed. Go:
+# TestK8sArtifactNoMintNamesTheCommandAndIsOffByDefault.
+@test "k8s::infrastructure and k8s::platform with no-mint name lo k8s; the switch off does not probe" {
+  _k8s_no_mint_setup
+  export LOK8S_SECRETS_NO_MINT=1
+  mkdir -p "${PATH_BASE}/.kustomize"
+  local domain=new.dev fn
+  for fn in k8s::infrastructure k8s::platform; do
+    run "${fn}"
+    assert_failure
+    assert_line "[error] lo k8s: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+    [ ! -e "${KLOG}" ] || { echo "${fn}: kustomize ran"; return 1; }
+  done
+
+  no_mint_plugin "${PATH_BASE}/.kustomize" ""
+  export LOK8S_SECRETS_NO_MINT=0
+  run k8s::infrastructure
+  assert_success
+  [ "$(no_mint_probes)" = 0 ]
+  [ -e "${KLOG}" ]
 }

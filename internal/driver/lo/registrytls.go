@@ -31,6 +31,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -232,6 +233,18 @@ func (d *Driver) registryTLSMint(ctx context.Context, domain, vol string, exists
 			fmt.Fprintf(errOut, "       %s. Build it with 'lo kustomize build' (needs go), or set\n", pluginBin)
 			fmt.Fprintln(errOut, "       spec.registries.tls: false for plain-HTTP registries. Then retry.")
 			return nil, ui.Handled(fmt.Errorf("secret plugin not built at %s", pluginBin))
+		}
+		// With LOK8S_SECRETS_NO_MINT set, the plugin must have the no-mint
+		// run, as the in-process generator has: an older plugin ignores the
+		// switch and mints (the leaf, and a CA in CAROOT when there is
+		// none). The mint runs the plugin from the home that the check
+		// probed (bash: build::_no_mint_capable in lo::registry_tls_mint).
+		home, err := build.CheckNoMintPlugin(ctx, d.deps.Paths, d.deps.Runner, errOut, "registry TLS")
+		if err != nil {
+			return nil, err
+		}
+		if home != "" {
+			pluginBin = filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))
 		}
 	}
 

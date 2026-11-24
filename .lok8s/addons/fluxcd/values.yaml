@@ -42,6 +42,14 @@ logLevel: info
 # Core GitOps controllers — enabled by default so `bootstrap: [fluxcd]` yields a
 # working GitOps engine (a Git source can be reconciled into applied manifests
 # and Helm releases with no further controllers).
+#
+# Memory limit: 1Gi for each of the three. The source controller builds an
+# artifact for each new revision of a source. With a limit of 256Mi, a Git
+# repository of about 60 MB got the controller OOMKilled at the artifact
+# build of each new revision, so no new revision became ready. For a larger
+# source, set a higher limit with an inline override, for example
+# `- fluxcd: {sourceController: {resources: {limits: {memory: 2Gi}}}}` in
+# spec.bootstrap.
 sourceController:
   create: true
   resources:
@@ -49,7 +57,7 @@ sourceController:
       cpu: 50m
       memory: 64Mi
     limits:
-      memory: 256Mi
+      memory: 1Gi
 
 kustomizeController:
   create: true
@@ -58,7 +66,7 @@ kustomizeController:
       cpu: 50m
       memory: 64Mi
     limits:
-      memory: 256Mi
+      memory: 1Gi
 
 helmController:
   create: true
@@ -67,7 +75,7 @@ helmController:
       cpu: 50m
       memory: 64Mi
     limits:
-      memory: 256Mi
+      memory: 1Gi
 
 # Notification controller: receives events + serves the receiver webhook
 # endpoint (alerts/notifications, and inbound webhooks that trigger a

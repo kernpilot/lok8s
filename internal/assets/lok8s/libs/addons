@@ -15,6 +15,7 @@ import ^utils/domain
 import ^utils/verbose
 import ^utils/template
 import ^utils/spec
+import ^libs/build
 
 main::addons() {
   local domain="${domain:-${DOMAIN_NAME:-}}" detail=0
@@ -515,6 +516,11 @@ addons::dry_run_boundary() {
     error "bootstrap dry-run: the kustomize plugin home ${_home} is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path"
     return 1
   fi
+  # The links use the clean home, the home that the no-mint check probes
+  # (build::_abs_plugin_home; Go: filepath.Join in DryRunBoundary.build). With
+  # the home as typed, a ".." after a symlinked directory would make the
+  # kernel follow the link first, and the dry run would run another plugin.
+  _home="$(build::_abs_plugin_home "${_home}")" || return 1
   for _d in plugins bin helm-plugins store tmp; do
     mkdir -p "${_dir}/${_d}" && chmod 700 "${_dir}/${_d}" || return 1
   done
@@ -889,6 +895,33 @@ addons::_write_staged() {
   ( umask 077; set -C; cat > "${1}" )
 }
 
+# addons::_reserved_env_name <env-lines>
+# Prints the first name (in byte order) that env-lines (KEY=value, one per
+# line) may not set and returns 0, or returns 1 when there is none.
+# Reserved: LOK8S_BOOTSTRAP_*, LOK8S_INTERNAL_*, BOOTSTRAP_*, bootstrap_*,
+# PATH_SECRETS, KUBECONFIG, KUSTOMIZE_PLUGIN_HOME, HELM_PLUGINS, and the
+# Secret plugin's switches LOK8S_SECRETS_DISABLE and LOK8S_SECRETS_NO_MINT
+# (the Go twin: addons.IsProtectedEnv). The bootstrap engine refuses such
+# an entry before the render (bootstrap::_reserved_env_name), and
+# addons::render refuses it itself as the backstop for any other caller.
+addons::_reserved_env_name() {
+  local _lines="${1}" _kv _k
+  local -a _names=()
+  while IFS= read -r _kv; do
+    [[ -n "${_kv}" ]] || continue
+    _names+=("${_kv%%=*}")
+  done <<< "${_lines}"
+  (( ${#_names[@]} )) || return 1
+  while IFS= read -r _k; do
+    case "${_k}" in
+      LOK8S_BOOTSTRAP_*|LOK8S_INTERNAL_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME|HELM_PLUGINS|LOK8S_SECRETS_DISABLE|LOK8S_SECRETS_NO_MINT)
+        echo "${_k}"
+        return 0 ;;
+    esac
+  done < <(printf '%s\n' "${_names[@]}" | LC_ALL=C sort)
+  return 1
+}
+
 # addons::_with_env [KEY=value]... -- <command> [args...]
 # Runs command with the KEY=value pairs exported. Called as one element of a
 # pipeline, so the exports stay in that subshell. No local variable: an
@@ -930,6 +963,14 @@ addons::render() {
     _dry=1
     _tmp_root="${bootstrap_dry_boundary}/tmp"
   fi
+  # The engine refuses a reserved `env:` name before it renders (an entry
+  # error, named); this is the backstop for any other caller (Go:
+  # addons.ProtectedEnvOverride in addons.Render).
+  local _bad_var
+  if _bad_var="$(addons::_reserved_env_name "${env_lines}")"; then
+    error "addons::render: env: may not set ${_bad_var}"
+    return 1
+  fi
   local -a _entry=()
   local _kv _wl_extra="" _path="${PATH}"
   while IFS= read -r _kv; do
@@ -938,6 +979,20 @@ addons::render() {
     [[ "${_kv%%=*}" != "PATH" ]] || _path="${_kv#*=}"
     [[ ! "${_kv%%=*}" =~ ^LOK8S_(SPEC|USER)_ ]] || _wl_extra+="\${${_kv%%=*}} "
   done <<< "${env_lines}"
+  # With LOK8S_SECRETS_NO_MINT set, the render needs a Secret plugin that has
+  # the no-mint run (Go: build.CheckNoMintPlugin in addons.Render), in a dry
+  # run too: the switch wins over a dry run, and a plugin without the
+  # no-mint run would report a value that it would generate instead of
+  # failing. The check reads the real plugin home as an absolute path
+  # (build::_abs_plugin_home), which _kenv below gives kustomize on a real
+  # run and on a dry run with --allow-generators. A dry run without
+  # --allow-generators gives kustomize the boundary's home, which links the
+  # plugin of the real home.
+  local _home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+  if build::_no_mint_requested; then
+    _home="$(build::_abs_plugin_home "${_home}")"
+    build::_no_mint_capable "${_home}" "addons::render" || return 1
+  fi
   local build_dir="${addon_dir}" _cleanup=""
   if [[ -f "${addon_dir}/chart.yaml" ]]; then
     # Stack values: base < driver < provider < inline (later wins). Facts
@@ -1004,7 +1059,7 @@ addons::render() {
   # root" in a shell without the project .envrc. A dry run overrides it below.
   # The Secret plugin's keys-only setting is 0 on every addon render, after
   # the entry's env, whatever the environment holds (Go: render.Build).
-  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${_home}"
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0)
   local -a _kflags=(--enable-alpha-plugins --enable-exec)
   if (( _dry )); then

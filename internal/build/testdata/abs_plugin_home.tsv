@@ -1,0 +1,22 @@
+# A KUSTOMIZE_PLUGIN_HOME value, a tab, and the path that Go's filepath.Abs
+# gives for it with the working directory @ROOT@/a/b/c. The tests of
+# absPluginHome (Go) and build::_abs_plugin_home (bash) read this table.
+.kustomize	@ROOT@/a/b/c/.kustomize
+./.kustomize	@ROOT@/a/b/c/.kustomize
+.//plugins/	@ROOT@/a/b/c/plugins
+./a/../b	@ROOT@/a/b/c/b
+a//b/	@ROOT@/a/b/c/a/b
+../plugins	@ROOT@/a/b/plugins
+../../..	@ROOT@
+.	@ROOT@/a/b/c
+plugins/.	@ROOT@/a/b/c/plugins
+my plugins/.kustomize	@ROOT@/a/b/c/my plugins/.kustomize
+..plugins	@ROOT@/a/b/c/..plugins
+...	@ROOT@/a/b/c/...
+no-such-home	@ROOT@/a/b/c/no-such-home
+/x/./y/..	/x
+/a/../../b	/b
+//x//	/x
+/..	/
+/	/
+/opt/plugins	/opt/plugins

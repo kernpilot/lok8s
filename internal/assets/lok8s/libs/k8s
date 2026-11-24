@@ -14,6 +14,7 @@ import ^utils/types
 import ^utils/domain
 import ^utils/verbose
 import ^drivers/capi/generate
+import ^libs/build
 
 main::k8s() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -91,6 +92,17 @@ k8s::infrastructure() {
   local out_dir="${PATH_CLUSTERS}/${domain}/artifacts"
   # The domain's own store, as `lo build` uses it; no silent flat fallback.
   domain::export_secrets_store "${domain}" || return 1
+  # With LOK8S_SECRETS_NO_MINT set, the render needs a Secret plugin that has
+  # the no-mint run, and kustomize gets the home that lo checked, as an
+  # absolute path (Go: build.CheckNoMintPlugin in k8sKustomizeArtifact).
+  if build::_no_mint_requested; then
+    # The value comes first: a `local -x` with no value starts empty and
+    # would hide the caller's home.
+    local abs_home
+    abs_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+    local -x KUSTOMIZE_PLUGIN_HOME="${abs_home}"
+    build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME}" "lo k8s" || return 1
+  fi
   mkdir -p "${out_dir}"
   # The Secret plugin's keys-only setting is explicit: 0, whatever the
   # environment holds. This lib also runs as its own entry, without the
@@ -120,6 +132,15 @@ k8s::platform() {
     return 1
   fi
   domain::export_secrets_store "${domain}" || return 1
+  # The no-mint check is the one of k8s::infrastructure.
+  if build::_no_mint_requested; then
+    # The value comes first: a `local -x` with no value starts empty and
+    # would hide the caller's home.
+    local abs_home
+    abs_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+    local -x KUSTOMIZE_PLUGIN_HOME="${abs_home}"
+    build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME}" "lo k8s" || return 1
+  fi
   mkdir -p "${out_dir}"
   # The keys-only setting is explicit here too (see k8s::infrastructure).
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \

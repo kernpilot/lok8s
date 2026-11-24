@@ -555,6 +555,46 @@ func TestDryRunBoundaryRefusesARelativePluginHome(t *testing.T) {
 	}
 }
 
+// A ".." after a symlinked directory in the plugin home: the boundary links
+// and checks the plugin of the clean home (filepath.Join cleans the path),
+// the home that the no-mint check probes, not the plugin next to the target
+// of the link (bash: the dry run links the plugin of the clean home when a
+// .. follows a symlink).
+func TestDryRunBoundaryLinksThePluginOfTheCleanHome(t *testing.T) {
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+	rel := filepath.FromSlash(toolchain.SecretPluginRel)
+	clean := filepath.Join(base, "home", rel)
+	spyScript(t, clean, filepath.Join(base, "ran-clean"), "dry-run\n", 0)
+	spyScript(t, filepath.Join(base, "real", "home", rel), filepath.Join(base, "ran-other"), "dry-run\n", 0)
+	if err := os.MkdirAll(filepath.Join(base, "real", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "real", "sub"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(KustomizePluginHomeEnv, base+"/link/../home")
+	b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
+	if err != nil {
+		t.Fatalf("NewDryRunBoundary: %v", err)
+	}
+	defer b.Close()
+	target, err := os.Readlink(filepath.Join(b.PluginHome, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != clean {
+		t.Errorf("the link names %q, want %q", target, clean)
+	}
+	if !fsutil.FileExists(filepath.Join(base, "ran-clean")) {
+		t.Error("the plugin of the clean home did not run")
+	}
+	if fsutil.FileExists(filepath.Join(base, "ran-other")) {
+		t.Error("the plugin next to the target of the link ran")
+	}
+}
+
 // boundaryWithPlugin builds the boundary of a project whose Secret plugin
 // prints "dry-run", and returns the plugin home and the plugin's project
 // path.

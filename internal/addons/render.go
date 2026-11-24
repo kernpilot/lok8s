@@ -42,7 +42,7 @@ import (
 // LOK8S_SECRETS_NO_MINT (an entry must not turn the store-free switch or
 // the no-mint switch off for its render). An entry that names one is an
 // entry error on a real run and on a dry run alike (bash:
-// bootstrap::_reserved_env_name).
+// addons::_reserved_env_name).
 func ProtectedEnvOverride(env map[string]string) string {
 	names := make([]string, 0, len(env))
 	for k := range env {
@@ -122,6 +122,18 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 		ui.ErrorTo(stderr, "addons::render: env: may not set %s", v)
 		return "", fmt.Errorf("addons render: env: may not set %s", v)
 	}
+	// With LOK8S_SECRETS_NO_MINT set, the render needs a Secret plugin that
+	// has the no-mint run (build.CheckNoMintPlugin), in a dry run too: the
+	// switch wins over a dry run, and a plugin without the no-mint run
+	// would report a value that it would generate instead of failing. The
+	// check reads the real plugin home. A real run, and a dry run with
+	// --allow-generators, give kustomize the home that the check probed. A
+	// dry run without --allow-generators keeps the boundary's home, which
+	// links the plugins of the real home.
+	checkedHome, err := build.CheckNoMintPlugin(ctx, paths, runner, stderr, "addons::render")
+	if err != nil {
+		return "", fmt.Errorf("addons render: %s: %w", addonDir, err)
+	}
 	buildDir, cleanup, err := stageBuildDir(paths, stderr, addonDir, kind, providerName, inlineValues, dry)
 	defer cleanup()
 	if err != nil {
@@ -139,6 +151,9 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 	sort.Strings(envNames)
 	for _, k := range envNames {
 		cmdEnv = append(cmdEnv, k+"="+env[k])
+	}
+	if checkedHome != "" && (dry == nil || allowGenerators) {
+		cmdEnv = append(cmdEnv, KustomizePluginHomeEnv+"="+checkedHome)
 	}
 	// A real run passes --enable-exec (KRM exec functions). A dry run does
 	// not: the built-in plugins are legacy exec plugins, which

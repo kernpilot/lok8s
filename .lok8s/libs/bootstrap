@@ -12,7 +12,7 @@ BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 # the dry run keep their state in), LOK8S_INTERNAL_* (lo's internal
 # contracts with its plugins), PATH_SECRETS, KUBECONFIG,
 # KUSTOMIZE_PLUGIN_HOME, HELM_PLUGINS, LOK8S_SECRETS_DISABLE and
-# LOK8S_SECRETS_NO_MINT (see bootstrap::_reserved_env_name).
+# LOK8S_SECRETS_NO_MINT (see addons::_reserved_env_name).
 # The entry's env reaches only its render subprocesses (addons::render),
 # never this shell.
 #
@@ -1532,29 +1532,10 @@ bootstrap::_write_guarded() {
   cat > "${_path}"
 }
 
-# bootstrap::_reserved_env_name <env-lines>
-# Prints the first name (in byte order) env-lines (KEY=value, one per line)
-# may not set and returns 0, or returns 1 when there is none. Reserved:
-# LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_*, PATH_SECRETS, KUBECONFIG,
-# KUSTOMIZE_PLUGIN_HOME, HELM_PLUGINS, and the Secret plugin's switches
-# LOK8S_SECRETS_DISABLE and LOK8S_SECRETS_NO_MINT (the Go twin:
-# addons.IsProtectedEnv).
+# bootstrap::_reserved_env_name <env-lines>: addons::_reserved_env_name,
+# under the name that the engine and the doctor call.
 bootstrap::_reserved_env_name() {
-  local _lines="${1}" _kv _k
-  local -a _names=()
-  while IFS= read -r _kv; do
-    [[ -n "${_kv}" ]] || continue
-    _names+=("${_kv%%=*}")
-  done <<< "${_lines}"
-  (( ${#_names[@]} )) || return 1
-  while IFS= read -r _k; do
-    case "${_k}" in
-      LOK8S_BOOTSTRAP_*|LOK8S_INTERNAL_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME|HELM_PLUGINS|LOK8S_SECRETS_DISABLE|LOK8S_SECRETS_NO_MINT)
-        echo "${_k}"
-        return 0 ;;
-    esac
-  done < <(printf '%s\n' "${_names[@]}" | LC_ALL=C sort)
-  return 1
+  addons::_reserved_env_name "$@"
 }
 
 # bootstrap::_dry_run_one <name> <dir> <kind> <provider> <kubeconfig> \

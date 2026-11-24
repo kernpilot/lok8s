@@ -461,14 +461,20 @@ variable is internal to lo (the last row): do not set it.
 | `LOK8S_SECRETS_NO_MINT` | `1` / `true` (case-insensitive) | **Read-only store.** The plugin generates no value into the store and writes no file (no entry, no `.sha`, no `.bash-allow`, no store directory, no CA in `CAROOT`). It reads the store as a dry run does. When the run would generate an entry (the store has neither the plaintext nor the `.enc` file) or write one (an `env:` or `update: true` value that the store does not hold), or would make the CA in `CAROOT`, the run fails after every generator of the Secret ran. The error names each entry by namespace, Secret name and key, never a value or a length, and emits nothing. A `bash:` entry that the store lacks does not run its command. An `update: true` command still runs; only its value is checked, and the command itself can write anything. When the run also stops on an error, the message quotes that error as a run without the switch prints it: it is not redacted, and a `bash:` command's stderr can be in it. When the store holds every value, the run emits the same Secret as a run without the switch. Off: unset, empty, `0`, `false`. Any other value **fails** before anything is read, so a typo cannot turn the switch off. Use it for a render that must only read an existing store: a release render, a drift check, a build in a fresh worktree. kustomize stops at the first plugin that fails, so one failed render names the entries of one Secret. |
 | `LOK8S_INTERNAL_SECRETS_KEYS_ONLY` | `1` / `true`, `0` / `false` | **Internal to lo. Do not export it.** Only [`lo build --keys-only`](../guide/deployment.md#list-the-keys-of-the-secrets-keys-only) sets it to `1`, for its own render. lo sets it to `0` on every other kustomize and plugin call, and an addon entry's `env:` cannot set it. With `1` and `LOK8S_SECRETS_DISABLE=1`, the plugin emits each Secret with its key names and empty values, plus the annotation `secrets.lok8s.dev/keys-only: "true"`. It reads only the Secret spec: it does not read, decrypt or mint the store, and it runs no generator. With `1` but without `LOK8S_SECRETS_DISABLE=1`, the run fails before it reads anything. An unknown value fails. A plugin that is older than this variable sees only `LOK8S_SECRETS_DISABLE=1` and emits nothing, and a plugin older than v0.2.0 does not know that switch either: lo checks the plugin before it sets `1` (see `--capabilities` below). |
 
-Set `LOK8S_SECRETS_NO_MINT` for one `lo build` command only
+Set `LOK8S_SECRETS_NO_MINT` for one command only
 (`LOK8S_SECRETS_NO_MINT=1 lo build ...`). Do not export it in a shell profile.
-Only `lo build` checks that the plugin has the no-mint run (see
-`--capabilities` below). Other commands that run the plugin (`lo bootstrap`,
-`lo k8s`, the registry TLS mint of `lo up`) do not check it. With a plugin
-that has the no-mint run, they fail when they would generate a value. An
-older plugin ignores the switch there and generates values. An addon entry's
-`env:` cannot set `LOK8S_SECRETS_NO_MINT` or `LOK8S_SECRETS_DISABLE`.
+Each command that execs the plugin against a store checks that the plugin
+has the no-mint run (see `--capabilities` below): `lo build`, the addon
+render of `lo bootstrap` and of the KubeOne driver, `lo k8s`, and the
+registry TLS mint of `lo up` when it execs the plugin (`LO_RENDER=exec`, or
+the bash tree). A dry run (`lo bootstrap --dry-run`) checks too, because
+the switch wins over a dry run (see **Precedence** below): the check reads
+the plugin home of the project, and the dry run keeps its own plugin home
+unless `--allow-generators` is set. A render in process (`lo-full`, and the
+registry TLS mint of `lo`) serves the plugin itself, which has the no-mint
+run. With the switch set, these commands fail
+when they would generate a value. An addon entry's `env:` cannot set
+`LOK8S_SECRETS_NO_MINT` or `LOK8S_SECRETS_DISABLE`.
 
 **`--capabilities`:** `Secret --capabilities` prints the runs that the
 plugin has, one per line: `dry-run`, `keys-only` and `no-mint`. It reads no
@@ -476,10 +482,20 @@ spec and no store, and it writes nothing else. A plugin that does not print
 `no-mint` ignores `LOK8S_SECRETS_NO_MINT` and generates, so a caller that
 sets the variable checks for that line first. lo runs the check before a
 keys-only render that execs the plugin, and refuses a plugin that does not
-print `keys-only`. `lo build` runs it too when `LOK8S_SECRETS_NO_MINT` holds
-a value that is not an off value (an unknown value too) and the build reads
-the store (not `--no-secrets`), and refuses a plugin that does not print
-`no-mint`. lo runs the check so that an older plugin can do nothing with it: in an empty
+print `keys-only`. Each command of the list above runs it too when
+`LOK8S_SECRETS_NO_MINT` holds a value that is not an off value (an unknown
+value too) and the command reads the store (not `lo build --no-secrets`),
+and refuses a plugin that does not print `no-mint`. The error
+line names the command, for example `lo k8s:` or `addons::render:`, when
+the plugin home or the plugin is missing. lo resolves a relative
+`KUSTOMIZE_PLUGIN_HOME` from its working directory to an absolute path, and
+cleans the path by its text only, as kustomize does (a `..` after a
+symlinked directory names the directory next to the link). The check
+probes the plugin in that home, and kustomize gets that absolute home, so
+kustomize runs the plugin that lo checked. kustomize runs an exec plugin
+from the kustomization directory, where a relative home names another
+plugin. A home that does not exist resolves too, and the check refuses it.
+lo runs the check so that an older plugin can do nothing with it: in an empty
 temporary directory, with an empty stdin, `PATH_SECRETS` at a path that does
 not exist, `LOK8S_SECRETS_DISABLE=1` and `LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0`.
 The check is a compatibility check. It is not isolation and not

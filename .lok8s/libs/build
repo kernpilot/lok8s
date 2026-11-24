@@ -327,9 +327,14 @@ build::artifacts() {
     domain::export_secrets_store "${domain}" || return 1
     # With LOK8S_SECRETS_NO_MINT set, a build that reads the store needs a
     # Secret plugin that has the no-mint run. kustomize gets the plugin home
-    # that lo checked, for this function only (Go: checkNoMintPlugin).
+    # that lo checked, as an absolute path, for this function only (Go:
+    # checkNoMintPlugin).
     if build::_no_mint_requested; then
-      local -x KUSTOMIZE_PLUGIN_HOME="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+      # The value comes first: a `local -x` with no value starts empty and
+      # would hide the caller's home.
+      local abs_home
+      abs_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
+      local -x KUSTOMIZE_PLUGIN_HOME="${abs_home}"
       build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME}" || return 1
     fi
   fi
@@ -516,6 +521,8 @@ build::_render_kubeconfig() {
 # <line>. It prints nothing. It returns 0 when the plugin printed the line,
 # 2 when the probe could not make its directory, 3 when a signal stopped
 # it (an exit status of 129 to 192) and 1 otherwise (Go: probeCapability).
+# <plugin> is an absolute path (build::_abs_plugin_home): the run in the
+# probe directory would resolve a relative one from there.
 build::_probe_capability() {
   local plugin="${1}" want="${2}" prefix="${3}" caps="" rc=0
   caps=$(
@@ -539,6 +546,44 @@ build::_probe_capability() {
   return 1
 }
 
+# build::_abs_plugin_home <home>: print <home> as an absolute, clean path,
+# the path that Go's filepath.Abs gives (Go: absPluginHome). The checks
+# probe the plugin in this home, and the callers give kustomize this home,
+# so kustomize runs the plugin that lo probed. kustomize runs an exec plugin
+# with the kustomization directory as its working directory, so a relative
+# home would name another plugin there.
+# A relative home gets the working directory before it. Then the path is
+# cleaned by its text only, as filepath.Clean does: repeated slashes
+# collapse, a "." element drops, a ".." element removes the element before
+# it (a ".." at the root stays at the root), and a trailing slash drops.
+# kustomize joins the plugin path the same way (filepath.Join), so a ".."
+# after a symlinked directory names the directory next to the link for lo
+# and for kustomize, not the directory next to the target of the link. The
+# file system is not read: a home that does not exist stays one, and the
+# check refuses it. Pure bash: the frozen tree also runs where GNU
+# coreutils (realpath -m) is missing.
+build::_abs_plugin_home() {
+  local home="${1}" rest part
+  local -a out=()
+  [[ "${home}" == /* ]] || home="${PWD}/${home}"
+  rest="${home}"
+  while [[ -n "${rest}" ]]; do
+    part="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${part}" in
+      '' | .) ;;
+      ..) if (( ${#out[@]} )); then out=("${out[@]:0:${#out[@]}-1}"); fi ;;
+      *) out+=("${part}") ;;
+    esac
+  done
+  if (( ${#out[@]} == 0 )); then
+    printf '/\n'
+    return 0
+  fi
+  local IFS=/
+  printf '/%s\n' "${out[*]}"
+}
+
 # build::_no_mint_requested: true when LOK8S_SECRETS_NO_MINT holds a value
 # that is not an off value. Off: unset, empty, or "0" or "false" in any
 # letter case with spaces around it. An unknown value counts too: the
@@ -555,23 +600,28 @@ build::_no_mint_requested() {
   return 0
 }
 
-# build::_no_mint_capable <plugin home>: refuse a Secret plugin that does
-# not have the no-mint run (Go: checkNoMintPlugin). build::artifacts calls
-# it when LOK8S_SECRETS_NO_MINT is requested (build::_no_mint_requested)
-# and the build reads the store (not --no-secrets). A plugin older than
-# the no-mint run ignores the variable and generates values into the
-# store, which is the failure that the switch exists to stop. The checks
-# are those of build::_keys_only_capable: the home must exist, the Secret
-# executable must be in it, and the probe must print "no-mint". Each
-# failure is one line that names the plugin path.
+# build::_no_mint_capable <plugin home> [<caller>]: refuse a Secret plugin
+# that does not have the no-mint run (Go: build.CheckNoMintPlugin). Each
+# caller that runs the plugin against a store calls it when
+# LOK8S_SECRETS_NO_MINT is requested (build::_no_mint_requested):
+# build::artifacts when the build reads the store (not --no-secrets),
+# addons::render (a dry run too), k8s::infrastructure,
+# k8s::platform and lo::registry_tls_mint. <caller> names the caller at the
+# start of each error line but the last (the refusal of a plugin without
+# the no-mint run keeps the text of lo build), default: lo build. A plugin
+# older than the no-mint run ignores the variable and generates values,
+# which is the failure that the switch exists to stop. The checks are those of
+# build::_keys_only_capable: the home must exist, the Secret executable
+# must be in it, and the probe must print "no-mint". Each failure is one
+# line that names the plugin path.
 build::_no_mint_capable() {
-  local home="${1}" plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" rc=0
+  local home="${1}" plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" who="${2:-lo build}" rc=0
   if [[ ! -d "${home}" ]]; then
-    error "lo build: LOK8S_SECRETS_NO_MINT is set, but the kustomize plugin home ${home#"${PATH_BASE}/"} does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+    error "${who}: LOK8S_SECRETS_NO_MINT is set, but the kustomize plugin home ${home#"${PATH_BASE}/"} does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
   if [[ ! -f "${plugin}" ]]; then
-    error "lo build: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin ${plugin#"${PATH_BASE}/"} does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+    error "${who}: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin ${plugin#"${PATH_BASE}/"} does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
   build::_probe_capability "${plugin}" no-mint lok8s-no-mint || rc=$?
@@ -579,11 +629,11 @@ build::_no_mint_capable() {
     return 0
   fi
   if (( rc == 2 )); then
-    error "lo build: cannot make a temporary directory for the check of the Secret plugin ${plugin#"${PATH_BASE}/"}"
+    error "${who}: cannot make a temporary directory for the check of the Secret plugin ${plugin#"${PATH_BASE}/"}"
     return 1
   fi
   if (( rc == 3 )); then
-    error "lo build: the check of the Secret plugin ${plugin#"${PATH_BASE}/"} was interrupted"
+    error "${who}: the check of the Secret plugin ${plugin#"${PATH_BASE}/"} was interrupted"
     return 1
   fi
   error "the Secret plugin ${plugin#"${PATH_BASE}/"} does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
@@ -672,9 +722,10 @@ build::keys_only() {
     error "domain ${domain} has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]"
     return 1
   fi
-  # The plugin home as the Go render sets it (config.KustomizePluginHome):
-  # the probe and kustomize use the same one.
-  local plugin_home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+  # The plugin home as the Go render sets it (config.KustomizePluginHome),
+  # as an absolute path: the probe and kustomize use the same one.
+  local plugin_home
+  plugin_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
   build::_keys_only_capable "${plugin_home}" || return 1
   if ! command -v yq &>/dev/null; then
     error "lo build --keys-only: yq not found — install the pinned toolchain (b install)"

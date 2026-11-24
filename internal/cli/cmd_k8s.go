@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/driver"
@@ -183,9 +184,20 @@ func k8sKustomizeArtifact(ctx context.Context, paths *config.Paths, d, src, outD
 	if err := domain.CheckSecretsStore(paths.Clusters, d, config.FlatSecretsStore(paths), stderr); err != nil {
 		return ErrHandled
 	}
+	// With LOK8S_SECRETS_NO_MINT set, the render needs a Secret plugin that
+	// has the no-mint run, and kustomize gets the home that the check probed
+	// (bash: build::_no_mint_capable in k8s::infrastructure / k8s::platform).
+	runner := newRunner(paths)
+	home, err := build.CheckNoMintPlugin(ctx, paths, runner, stderr, "lo k8s")
+	if err != nil {
+		return ErrHandled
+	}
 	env := []string{"KUBECONFIG=" + paths.Base + "/.kubeconfig/secret." + d + ".yaml"}
 	if store := paths.Clusters + "/" + d + "/secrets"; fsutil.DirExists(store) {
 		env = append(env, "PATH_SECRETS="+store)
+	}
+	if home != "" {
+		env = append(env, config.KustomizePluginHomeEnv+"="+home)
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
@@ -199,7 +211,7 @@ func k8sKustomizeArtifact(ctx context.Context, paths *config.Paths, d, src, outD
 	// created (truncated) before the render, as the redirect did.
 	out, runErr := render.Build(ctx, src, render.Options{
 		Paths:  paths,
-		Runner: newRunner(paths),
+		Runner: runner,
 		Env:    env,
 		Stderr: stderr,
 	})
