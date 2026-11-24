@@ -327,9 +327,10 @@ build::artifacts() {
     domain::export_secrets_store "${domain}" || return 1
     # With LOK8S_SECRETS_NO_MINT set, a build that reads the store needs a
     # Secret plugin that has the no-mint run. kustomize gets the plugin home
-    # that lo checked, for this function only (Go: checkNoMintPlugin).
+    # that lo checked, as an absolute path, for this function only (Go:
+    # checkNoMintPlugin).
     if build::_no_mint_requested; then
-      local -x KUSTOMIZE_PLUGIN_HOME="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+      local -x KUSTOMIZE_PLUGIN_HOME="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
       build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME}" || return 1
     fi
   fi
@@ -516,13 +517,10 @@ build::_render_kubeconfig() {
 # <line>. It prints nothing. It returns 0 when the plugin printed the line,
 # 2 when the probe could not make its directory, 3 when a signal stopped
 # it (an exit status of 129 to 192) and 1 otherwise (Go: probeCapability).
+# <plugin> is an absolute path (build::_abs_plugin_home): the run in the
+# probe directory would resolve a relative one from there.
 build::_probe_capability() {
   local plugin="${1}" want="${2}" prefix="${3}" caps="" rc=0
-  # A relative plugin path resolves from the working directory, as a
-  # relative KUSTOMIZE_PLUGIN_HOME does for kustomize. The run in the probe
-  # directory would not find it and would report a plugin without the
-  # capability (Go: filepath.Abs in probeCapability).
-  [[ "${plugin}" == /* ]] || plugin="${PWD}/${plugin}"
   caps=$(
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}-XXXXXX") || { echo "lok8s:no-probe-dir"; exit 1; }
     trap 'rm -rf "${probe_dir}"' EXIT
@@ -542,6 +540,20 @@ build::_probe_capability() {
     return 3
   fi
   return 1
+}
+
+# build::_abs_plugin_home <home>: print <home> as an absolute path, resolved
+# from the working directory (Go: absPluginHome). The checks probe the
+# plugin in this home, and the callers give kustomize this home, so
+# kustomize runs the plugin that lo probed. kustomize runs an exec plugin
+# with the kustomization directory as its working directory, so a relative
+# home would name another plugin there. The path does not have to exist: a
+# home that does not exist stays one, and the check refuses it.
+build::_abs_plugin_home() {
+  local home="${1}"
+  while [[ "${home}" == ./* ]]; do home="${home#./}"; done
+  [[ "${home}" == /* ]] || home="${PWD}/${home}"
+  printf '%s\n' "${home}"
 }
 
 # build::_no_mint_requested: true when LOK8S_SECRETS_NO_MINT holds a value
@@ -681,9 +693,10 @@ build::keys_only() {
     error "domain ${domain} has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]"
     return 1
   fi
-  # The plugin home as the Go render sets it (config.KustomizePluginHome):
-  # the probe and kustomize use the same one.
-  local plugin_home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+  # The plugin home as the Go render sets it (config.KustomizePluginHome),
+  # as an absolute path: the probe and kustomize use the same one.
+  local plugin_home
+  plugin_home="$(build::_abs_plugin_home "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")"
   build::_keys_only_capable "${plugin_home}" || return 1
   if ! command -v yq &>/dev/null; then
     error "lo build --keys-only: yq not found — install the pinned toolchain (b install)"

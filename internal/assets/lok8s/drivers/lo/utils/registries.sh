@@ -384,8 +384,13 @@ lo::registry_tls_mint() {
   # With LOK8S_SECRETS_NO_MINT set, the plugin must have the no-mint run: an
   # older plugin ignores the switch and mints (the leaf, and a CA in CAROOT
   # when there is none). Go: build.CheckNoMintPlugin in registryTLSMint.
+  # The mint runs the plugin from the home that the check probed, as an
+  # absolute path (build::_abs_plugin_home).
   if build::_no_mint_requested; then
-    build::_no_mint_capable "${plugin_bin%/secrets.lok8s.dev/v1/secret/Secret}" "registry TLS" || return 1
+    local _home
+    _home="$(build::_abs_plugin_home "${plugin_bin%/secrets.lok8s.dev/v1/secret/Secret}")"
+    build::_no_mint_capable "${_home}" "registry TLS" || return 1
+    plugin_bin="${_home}/secrets.lok8s.dev/v1/secret/Secret"
   fi
 
   local domain_dir="${PATH_CLUSTERS}/${domain_name}"

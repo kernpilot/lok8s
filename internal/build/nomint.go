@@ -48,7 +48,7 @@ func checkNoMintPlugin(ctx context.Context, o *Options, stderr io.Writer) error 
 // print "no-mint". Each failure is one line that names the plugin path,
 // and the error is ErrHandled. It returns the plugin home that it checked,
 // or "" when it did not check (the switch is off, or the render is
-// in-process). The caller gives that home to kustomize, or runs the plugin
+// in-process). The home is an absolute path (absPluginHome). The caller gives that home to kustomize, or runs the plugin
 // from it, so the run uses the plugin that lo checked.
 func CheckNoMintPlugin(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, who string) (string, error) {
 	if !secret.NoMintRequested(os.LookupEnv) {
@@ -64,7 +64,11 @@ func CheckNoMintPlugin(ctx context.Context, paths *config.Paths, runner execx.Ru
 	if runner == nil {
 		runner = execx.NewRunner(paths)
 	}
-	home := config.KustomizePluginHome(paths)
+	home, err := absPluginHome(paths)
+	if err != nil {
+		ui.ErrorTo(stderr, "%s: %v", who, err)
+		return "", ErrHandled
+	}
 	if !fsutil.DirExists(home) {
 		ui.ErrorTo(stderr, "%s: %s is set, but the kustomize plugin home %s does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo",
 			who, secret.NoMintEnv, config.RelTo(paths.Base, home))

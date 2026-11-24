@@ -463,6 +463,40 @@ _k8s_no_mint_setup() {
   done
 }
 
+# kustomize runs an exec plugin from the kustomization directory, so a
+# relative KUSTOMIZE_PLUGIN_HOME names another plugin there than the one in
+# the working directory of lo. With a relative home, each command probes the
+# plugin of the working directory and gives kustomize that home as an
+# absolute path. The stub kustomize runs the Secret plugin the way kustomize
+# does: from the kustomization directory, by its path under the home. An
+# older plugin waits at the same relative path in each kustomization
+# directory and must not run. Go: TestNoMintRelativeHomeRunsTheProbedPlugin.
+@test "k8s::infrastructure and k8s::platform with no-mint and a relative plugin home run the probed plugin" {
+  _k8s_no_mint_setup
+  local log="${BATS_TEST_TMPDIR}/plugin-runs.log" domain=new.dev fn home
+  printf '#!%s\nfor a in "$@"; do dir="$a"; done\n(cd "${dir}" && "${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" </dev/null >/dev/null 2>&1)\necho "kind: ConfigMap"\n' \
+    "${BASH}" > "${BATS_TEST_TMPDIR}/kbin/kustomize"
+  _label_plugin() {
+    mkdir -p "${1}/secrets.lok8s.dev/v1/secret"
+    printf '#!%s\nif [[ "${1:-}" == --capabilities ]]; then echo "probe %s" >> %q; printf "%s"; exit 0; fi\necho "run %s" >> %q\n' \
+      "${BASH}" "${2}" "${log}" "${3}" "${2}" "${log}" > "${1}/secrets.lok8s.dev/v1/secret/Secret"
+    chmod +x "${1}/secrets.lok8s.dev/v1/secret/Secret"
+  }
+  _label_plugin "${PATH_BASE}/.kustomize" project 'dry-run\nkeys-only\nno-mint\n'
+  for home in "${PATH_CLUSTERS}/new.dev/targets/.kustomize" "${PATH_BASE}/.k8s/overlays/new.dev/.kustomize"; do
+    _label_plugin "${home}" kustomization-dir 'dry-run\nkeys-only\n'
+  done
+  export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME=.kustomize
+  cd "${PATH_BASE}"
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${log}"
+    run "${fn}"
+    assert_success
+    run cat "${log}"
+    assert_output $'probe project\nrun project'
+  done
+}
+
 # Without the plugin, the line of each command names `lo k8s`. With the
 # switch off, the plugin is not probed. Go:
 # TestK8sArtifactNoMintNamesTheCommandAndIsOffByDefault.

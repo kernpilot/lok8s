@@ -731,6 +731,24 @@ _no_mint_addon() {
   done
 }
 
+# A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory: the
+# check probes the plugin there, and kustomize gets that home as an
+# absolute path. kustomize runs an exec plugin from the kustomization
+# directory, where a relative home would name another plugin. Go:
+# TestPluginChecksResolveARelativeHome (the home that the check returns,
+# which addons.Render gives kustomize).
+@test "addons::render with no-mint gives kustomize a relative plugin home as an absolute path" {
+  _no_mint_addon
+  no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\nno-mint\n'
+  local abs="${KUSTOMIZE_PLUGIN_HOME}"
+  cd "$(dirname "${abs}")"
+  export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME="$(basename "${abs}")"
+  run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+  assert_success
+  [ "$(no_mint_probes)" = 1 ]
+  [ "$(cat "${KENV}")" = "home=${abs}" ]
+}
+
 # With the switch off, the plugin is not probed. Go:
 # TestRenderNoMintOffDoesNotProbe.
 @test "addons::render with no-mint off does not probe the Secret plugin" {

@@ -305,7 +305,8 @@ func keysOnlyUnparsed(stderr io.Writer, domainName, artifactPath string) {
 // exists: KUSTOMIZE_PLUGIN_HOME, then directories under XDG_CONFIG_HOME
 // and HOME. With an absent home it would load a plugin that lo did not
 // check. The home that lo checked goes to kustomize as
-// KUSTOMIZE_PLUGIN_HOME (o.pluginHome). The Secret executable must be in
+// KUSTOMIZE_PLUGIN_HOME (o.pluginHome), as an absolute path
+// (absPluginHome). The Secret executable must be in
 // the home too: without it, a kustomize built with Go plugin support
 // loads the Go plugin (Secret.so) of the same generator, which lo cannot
 // probe. A probe that a signal stops (an exit status of 129 to 192) or a
@@ -319,7 +320,11 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 	if mode, err := render.CurrentMode(); err == nil && mode == render.ModeInProcess {
 		return nil
 	}
-	home := config.KustomizePluginHome(o.Paths)
+	home, err := absPluginHome(o.Paths)
+	if err != nil {
+		ui.ErrorTo(stderr, "lo build --keys-only: %v", err)
+		return ErrHandled
+	}
 	if !fsutil.DirExists(home) {
 		ui.ErrorTo(stderr, "lo build --keys-only: the kustomize plugin home %s does not exist, so kustomize would load plugins from other directories that lo does not check — run 'lo toolchain install' to install the plugin of this lo",
 			config.RelTo(o.Paths.Base, home))
@@ -352,6 +357,24 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 	return refuse()
 }
 
+// absPluginHome is the kustomize plugin home (config.KustomizePluginHome)
+// as an absolute path, resolved from the working directory of lo (bash:
+// build::_abs_plugin_home). The checks probe the plugin in this home and
+// give kustomize this home, so kustomize runs the plugin that lo probed.
+// kustomize runs an exec plugin with the kustomization directory as its
+// working directory, so a relative home would name another plugin there.
+// The path does not have to exist: a home that does not exist stays one,
+// and the check refuses it. It fails only when the working directory is
+// unknown.
+func absPluginHome(paths *config.Paths) (string, error) {
+	home := config.KustomizePluginHome(paths)
+	abs, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the kustomize plugin home %s: %w", home, err)
+	}
+	return abs, nil
+}
+
 // capabilityProbe is the result of probeCapability.
 type capabilityProbe int
 
@@ -372,14 +395,9 @@ const (
 // checkKeysOnlyPlugin describes: an empty stdin, PATH_SECRETS at a path
 // in dir that does not exist, the store-free switch on and the keys-only
 // setting off, so no plugin version can do anything with it. runner runs
-// the probe. A relative plugin path resolves from the working directory of
-// lo, as a relative KUSTOMIZE_PLUGIN_HOME does for kustomize: the run in
-// dir would resolve it from dir, find no plugin and report a plugin without
-// the capability.
+// the probe. plugin is an absolute path (absPluginHome): the run in dir
+// would resolve a relative one from dir.
 func probeCapability(ctx context.Context, runner execx.Runner, plugin, dir, want string) capabilityProbe {
-	if abs, err := filepath.Abs(plugin); err == nil {
-		plugin = abs
-	}
 	var out strings.Builder
 	err := runner.Run(ctx, execx.Cmd{
 		Name: plugin,

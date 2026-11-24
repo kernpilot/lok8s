@@ -978,12 +978,15 @@ addons::render() {
   # the no-mint run (Go: build.CheckNoMintPlugin in addons.Render), in a dry
   # run too: the switch wins over a dry run, and a plugin without the
   # no-mint run would report a value that it would generate instead of
-  # failing. The check reads the real plugin home, which _kenv below gives
-  # kustomize on a real run and on a dry run with --allow-generators. A dry
-  # run without --allow-generators gives kustomize the boundary's home,
-  # which links the plugin of the real home.
+  # failing. The check reads the real plugin home as an absolute path
+  # (build::_abs_plugin_home), which _kenv below gives kustomize on a real
+  # run and on a dry run with --allow-generators. A dry run without
+  # --allow-generators gives kustomize the boundary's home, which links the
+  # plugin of the real home.
+  local _home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
   if build::_no_mint_requested; then
-    build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" "addons::render" || return 1
+    _home="$(build::_abs_plugin_home "${_home}")"
+    build::_no_mint_capable "${_home}" "addons::render" || return 1
   fi
   local build_dir="${addon_dir}" _cleanup=""
   if [[ -f "${addon_dir}/chart.yaml" ]]; then
@@ -1051,7 +1054,7 @@ addons::render() {
   # root" in a shell without the project .envrc. A dry run overrides it below.
   # The Secret plugin's keys-only setting is 0 on every addon render, after
   # the entry's env, whatever the environment holds (Go: render.Build).
-  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${_home}"
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0)
   local -a _kflags=(--enable-alpha-plugins --enable-exec)
   if (( _dry )); then

@@ -839,19 +839,22 @@ YAML
   [[ ! -e "${KENV}" && ! -e "${BATS_TEST_TMPDIR}/old-plugin-ran" ]] || { echo "the render or the old plugin ran"; return 1; }
 }
 
-# A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory, as it
-# does for kustomize: the probe runs the plugin by its absolute path, not
-# from the probe directory. Go: TestNoMintCheckResolvesARelativeHome.
-@test "build::_no_mint_capable resolves a relative plugin home from the working directory" {
-  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
-  mkdir -p "${TMPDIR}"
-  _secret_plugin 'dry-run\nkeys-only\nno-mint\n'
+# A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory, to
+# an absolute path that the checks probe and the callers give kustomize:
+# kustomize runs an exec plugin from the kustomization directory, where a
+# relative home names another plugin. A home that does not exist resolves
+# too. Go: TestPluginChecksResolveARelativeHome.
+@test "build::_abs_plugin_home resolves a relative plugin home from the working directory" {
   cd "${BATS_TEST_TMPDIR}"
-  run build::_no_mint_capable .kustomize "lo k8s"
+  run build::_abs_plugin_home .kustomize
   assert_success
-  assert_output ""
-  run cat "${PROBE_LOG}"
-  assert_line --index 0 "args=--capabilities"
+  assert_output "${BATS_TEST_TMPDIR}/.kustomize"
+  run build::_abs_plugin_home ./.kustomize
+  assert_output "${BATS_TEST_TMPDIR}/.kustomize"
+  run build::_abs_plugin_home no-such-home
+  assert_output "${BATS_TEST_TMPDIR}/no-such-home"
+  run build::_abs_plugin_home /opt/plugins
+  assert_output "/opt/plugins"
 }
 
 # The output guard: a render that holds an object with the keys-only marker

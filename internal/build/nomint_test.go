@@ -338,26 +338,107 @@ func TestKeysOnlyCheckAsksForItsOwnLine(t *testing.T) {
 }
 
 // A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory of
-// lo, as it does for kustomize: the probe runs the plugin by its absolute
-// path, not from the probe directory, and the check returns the home as
-// the environment names it. bats: "build::_no_mint_capable resolves a
-// relative plugin home from the working directory".
-func TestNoMintCheckResolvesARelativeHome(t *testing.T) {
+// lo. Both checks probe the plugin of that home and return it, or keep it
+// for kustomize, as an absolute path: kustomize runs an exec plugin from
+// the kustomization directory, where a relative home names another
+// plugin. bats: "build::_abs_plugin_home resolves a relative plugin home
+// from the working directory".
+func TestPluginChecksResolveARelativeHome(t *testing.T) {
 	p, _, probeLog, _, _ := noMintProject(t, "printf 'dry-run\\nkeys-only\\nno-mint\\n'")
 	t.Setenv(secret.NoMintEnv, "1")
 	t.Setenv(render.ModeEnv, string(render.ModeExec))
 	t.Chdir(p.Base)
 	t.Setenv(config.KustomizePluginHomeEnv, ".kustomize")
+	want := filepath.Join(p.Base, ".kustomize")
 	var stderr bytes.Buffer
 	home, err := CheckNoMintPlugin(t.Context(), p, nil, &stderr, "lo build")
 	if err != nil {
 		t.Fatalf("CheckNoMintPlugin: %v\n%s", err, stderr.String())
 	}
-	if home != ".kustomize" {
-		t.Errorf("home = %q, want .kustomize", home)
+	if home != want {
+		t.Errorf("no-mint home = %q, want %q", home, want)
 	}
-	if raw, err := os.ReadFile(probeLog); err != nil || !strings.Contains(string(raw), "args=--capabilities") {
-		t.Errorf("the probe did not run the plugin: %v %q", err, raw)
+	o := Options{Paths: p}
+	if err := checkKeysOnlyPlugin(t.Context(), &o, &stderr); err != nil {
+		t.Fatalf("checkKeysOnlyPlugin: %v\n%s", err, stderr.String())
+	}
+	if o.pluginHome != want {
+		t.Errorf("keys-only home = %q, want %q", o.pluginHome, want)
+	}
+	raw, err := os.ReadFile(probeLog)
+	if err != nil {
+		t.Fatalf("the probes did not run the plugin: %v", err)
+	}
+	if n := strings.Count(string(raw), "args=--capabilities\n"); n != 2 {
+		t.Errorf("probes = %d, want 2\n%s", n, raw)
+	}
+
+	// A relative home that does not exist resolves too, and the check
+	// refuses it by its path in the project.
+	t.Setenv(config.KustomizePluginHomeEnv, "no-such-home")
+	stderr.Reset()
+	if _, err := CheckNoMintPlugin(t.Context(), p, nil, &stderr, "lo build"); !errors.Is(err, ErrHandled) {
+		t.Fatalf("CheckNoMintPlugin with a missing home = %v, want ErrHandled", err)
+	}
+	wantErr := "[error] lo build: LOK8S_SECRETS_NO_MINT is set, but the kustomize plugin home no-such-home does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo\n"
+	if stderr.String() != wantErr {
+		t.Errorf("stderr = %q\nwant %q", stderr.String(), wantErr)
+	}
+}
+
+// relativeHomeKustomize is a stub kustomize that runs the Secret plugin the
+// way kustomize runs an exec plugin: from the kustomization directory (the
+// last argument), by its path under KUSTOMIZE_PLUGIN_HOME. A relative home
+// then resolves from that directory. It prints the render of stubRender.
+const relativeHomeKustomize = "#!/bin/sh\n" +
+	"for a in \"$@\"; do dir=$a; done\n" +
+	"(cd \"$dir\" && \"$KUSTOMIZE_PLUGIN_HOME/secrets.lok8s.dev/v1/secret/Secret\" </dev/null >/dev/null 2>&1)\n" +
+	"cat \"$KUSTOMIZE_STUB_OUTPUT\"\n"
+
+// labelPlugin writes a Secret plugin into home that appends "probe <label>"
+// or "run <label>" to log and prints caps for --capabilities.
+func labelPlugin(t *testing.T, home, label, caps, log string) {
+	t.Helper()
+	path := filepath.Join(home, "secrets.lok8s.dev", "v1", "secret", "Secret")
+	writeFileT(t, path, "#!/bin/sh\n"+
+		"if [ \"$1\" = --capabilities ]; then echo 'probe "+label+"' >> '"+log+"'; printf '"+caps+"'; exit 0; fi\n"+
+		"echo 'run "+label+"' >> '"+log+"'\n")
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With a relative KUSTOMIZE_PLUGIN_HOME, kustomize runs the plugin that lo
+// probed. Two plugins record their runs: the one in the plugin home of
+// the working directory (it has the no-mint run), and an older one at the
+// same relative path under the domain directory, which kustomize would run
+// with the relative home. lo build gives kustomize the absolute home, so
+// the probed plugin runs and the older one does not. bats:
+// "k8s::infrastructure and k8s::platform with no-mint and a relative plugin
+// home run the probed plugin".
+func TestNoMintRelativeHomeRunsTheProbedPlugin(t *testing.T) {
+	p, domainDir := artifactsProject(t)
+	stubRender(t, p, twoDocRender)
+	if err := os.WriteFile(filepath.Join(p.Bin, "kustomize"), []byte(relativeHomeKustomize), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(p.Base, "plugin-runs.log")
+	labelPlugin(t, filepath.Join(p.Base, ".kustomize"), "project", "dry-run\\nkeys-only\\nno-mint\\n", log)
+	labelPlugin(t, filepath.Join(domainDir, ".kustomize"), "domain-dir", "dry-run\\nkeys-only\\n", log)
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv(secret.NoMintEnv, "1")
+	t.Chdir(p.Base)
+	t.Setenv(config.KustomizePluginHomeEnv, ".kustomize")
+	stderr, err := buildArtifacts(t, p, false)
+	if err != nil {
+		t.Fatalf("Artifacts: %v\n%s", err, stderr)
+	}
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(raw), "probe project\nrun project\n"; got != want {
+		t.Errorf("plugin runs = %q, want %q", got, want)
 	}
 }
 
