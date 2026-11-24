@@ -202,7 +202,8 @@ func TestRenderNoMintOffDoesNotProbe(t *testing.T) {
 // no-mint run would report a value that it would generate instead of
 // failing. The check probes the plugin of the real home. A plugin with the
 // no-mint run renders: kustomize gets the checked home with
-// --allow-generators and the boundary's home without it. bats:
+// --allow-generators (also when the environment names another home after
+// the check) and the boundary's home without it. bats:
 // "addons::render with no-mint checks the Secret plugin in a dry run".
 func TestRenderDryRunNoMintChecksThePlugin(t *testing.T) {
 	for _, allow := range []bool{false, true} {
@@ -233,10 +234,17 @@ func TestRenderDryRunNoMintChecksThePlugin(t *testing.T) {
 				t.Errorf("kustomize ran: %v", f.calls)
 			}
 
+			// The runner names another home after the probe, so a render
+			// that takes the home from the environment again gives
+			// kustomize that one.
 			noMintPlugin(t, p, "dry-run\\nkeys-only\\nno-mint\\n")
+			other := filepath.Join(p.Base, "other-home")
 			errBuf.Reset()
-			if _, err := RenderDryRun(t.Context(), p, &noMintRunner{fakeKustomize: f}, &errBuf, dir, "lo", "hetzner", "", nil, b, allow); err != nil {
+			if _, err := RenderDryRun(t.Context(), p, &noMintRunner{fakeKustomize: f, switchTo: other}, &errBuf, dir, "lo", "hetzner", "", nil, b, allow); err != nil {
 				t.Fatalf("RenderDryRun with the no-mint run: %v\n%s", err, errBuf.String())
+			}
+			if home := os.Getenv(KustomizePluginHomeEnv); home != other {
+				t.Fatalf("the probe did not run through the runner: KUSTOMIZE_PLUGIN_HOME = %q, want %q", home, other)
 			}
 			if len(f.calls) != 1 {
 				t.Fatalf("kustomize calls = %d, want 1", len(f.calls))
