@@ -34,8 +34,11 @@ func checkNoMintPlugin(ctx context.Context, o *Options, stderr io.Writer) error 
 // run when the process environment asks for it (bash:
 // build::_no_mint_capable). Each caller that runs the plugin against a
 // store calls it before the run: `lo build`, the addon render (lo
-// bootstrap, the KubeOne addon staging, the doctor), `lo k8s` and the
-// registry TLS mint. who names the caller at the start of each error line.
+// bootstrap, the doctor), `lo k8s` and the registry TLS mint. The KubeOne
+// addon staging does not call it: it runs the bash render through the
+// provider bridge (internal/provider/bridge, kubeonePrepareApplyScript),
+// and build::_no_mint_capable checks there. who names the caller at the
+// start of each error line.
 // secret.NoMintRequested is true for any value of secret.NoMintEnv that is
 // not an off value, an unknown value too. A plugin older than the no-mint
 // run ignores the variable and generates values, which is the failure that
