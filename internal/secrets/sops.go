@@ -212,11 +212,8 @@ func DecryptEntry(encPath string) ([]byte, error) {
 		ageKey = keysFileIdentity()
 	}
 	if ageKey == "" {
-		sshKey := os.Getenv("LOK8S_SSH_KEY")
-		if sshKey == "" {
-			sshKey = os.Getenv("HOME") + "/.ssh/id_ed25519"
-		}
-		if fsutil.IsRegular(sshKey) {
+		// The private key, by design: the identity that decrypts.
+		if sshKey := DefaultSSHKey(); fsutil.IsRegular(sshKey) {
 			if derived, err := deriveAgePrivateKey(sshKey); err == nil {
 				ageKey = derived
 			}

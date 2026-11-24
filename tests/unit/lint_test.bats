@@ -4,6 +4,9 @@
 setup() {
   load "../test_helper"
   setup_tmpdir
+  # The secrets library is sourced below: HOME under the temp dir, and no
+  # LOK8S_* or sops identity variable.
+  isolate_secrets_home
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
   # PIN the flat store rather than letting it default to ${PATH_BASE}/.secrets.
@@ -121,7 +124,7 @@ YAML
 }
 
 teardown() {
-  teardown_tmpdir
+  teardown_secrets_home
 }
 
 # Helper: create a yq mock that dispatches on the query argument.

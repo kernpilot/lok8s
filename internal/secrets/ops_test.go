@@ -87,7 +87,7 @@ func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 	sameStates(t, before, fileStates(t, c.Paths.Base))
 
 	// A rerun: the config exists and lists the key.
-	agePubkey, _, err := deriveAgePublicKey(pubPath)
+	agePubkey, err := deriveAgePublicKey(pubPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,14 +104,91 @@ func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 	sameStates(t, before, fileStates(t, c.Paths.Base))
 }
 
+// A missing public key file gets a hint. When the private key of that .pub
+// exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
+// ed25519 there asks to overwrite the key that decrypt reads. The private
+// key gets a stat only: its file has mode 000 and holds the canary. Each
+// path goes through shownKeyPath, then into single quotes when the shell
+// would split or expand it (a space). Without the private key (no file, a
+// directory, or a path that does not end in .pub) the hint is ssh-keygen -t
+// ed25519. When something that is not a regular file is at the path of the
+// .pub (a directory, a link to no file), there is no hint: a command that
+// writes the .pub would write through the link. When the path has the
+// shape of a private key, shownKeyPath replaces it, and there is no hint:
+// it would hold the placeholder. Bash twin: "secrets init: a missing .pub
+// beside its private key gets the ssh-keygen -y hint".
 func TestInitMissingKey(t *testing.T) {
-	c, _, errOut := testEnv(t)
-	if err := c.Init(c.Paths.Base + "/nope"); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file of mode 000: the stat-only proof needs another user")
 	}
-	if !strings.Contains(errOut.String(), "SSH public key not found:") ||
-		!strings.Contains(errOut.String(), "Generate one with: ssh-keygen -t ed25519") {
-		t.Errorf("stderr: %s", errOut.String())
+	c, _, errOut := testEnv(t)
+	base := c.Paths.Base
+	for _, dir := range []string{base + "/adir", base + "/dirpub.pub"} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(base+"/no-such-file", base+"/linkpub.pub"); err != nil {
+		t.Fatal(err)
+	}
+	fake := base + "/AGE-SECRET-KEY-1" + keyCanary
+	for _, private := range []string{base + "/id", base + "/work key", base + "/dirpub", base + "/linkpub", fake} {
+		if err := os.WriteFile(private, []byte(keyCanary+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(private, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const generate = "[error] Generate one with: ssh-keygen -t ed25519\n"
+	for key, hint := range map[string]string{
+		base + "/id.pub":       "[error] Write it from the private key with: ssh-keygen -y -f " + base + "/id > " + base + "/id.pub\n",
+		base + "/work key.pub": "[error] Write it from the private key with: ssh-keygen -y -f '" + base + "/work key' > '" + base + "/work key.pub'\n",
+		fake + ".pub":          "",
+		fake + "-gone.pub":     "",
+		base + "/nope":         generate,
+		base + "/none.pub":     generate,
+		base + "/adir.pub":     generate,
+		base + "/dirpub.pub":   "",
+		base + "/linkpub.pub":  "",
+	} {
+		errOut.Reset()
+		if err := c.Init(key); !errors.Is(err, ErrHandled) {
+			t.Fatalf("%s: want ErrHandled, got %v", key, err)
+		}
+		want := "[error] SSH public key not found: " + shownKeyPath(key) + "\n" + hint
+		if errOut.String() != want || strings.Contains(errOut.String(), keyCanary) {
+			t.Errorf("%s:\n got %q\nwant %q", key, errOut.String(), want)
+		}
+	}
+}
+
+// A path in the hint of Init stays as it is when the shell reads it as one
+// word with no expansion, else it goes into single quotes, with each single
+// quote as these four bytes:
+//
+//	'\''
+//
+// Bash twin: "secrets::_shown_quoted gives the bytes of shellQuoted" in
+// tests/unit/secrets_test.bats (the same table).
+func TestShellQuoted(t *testing.T) {
+	for in, want := range map[string]string{
+		"/home/u/.ssh/id_ed25519": "/home/u/.ssh/id_ed25519",
+		"a-b_c@d%e+f=g:h,i./j":    "a-b_c@d%e+f=g:h,i./j",
+		"/home/u/.ssh/work key":   "'/home/u/.ssh/work key'",
+		"it's":                    `'it'\''s'`,
+		"":                        "''",
+		"~/id":                    "'~/id'",
+		"$HOME/id":                "'$HOME/id'",
+		"a\nb":                    "'a\nb'",
+		"key\n":                   "'key\n'",
+		"/k/\u00e9":               "'/k/\u00e9'",
+		"(not printed: it looks)": "'(not printed: it looks)'",
+		`back\slash`:              `'back\slash'`,
+	} {
+		if got := shellQuoted(in); got != want {
+			t.Errorf("shellQuoted(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -585,7 +662,7 @@ func TestDecryptViaSSHKeyDerivation(t *testing.T) {
 	privPath, pubPath := testSSHKeypair(t, c.Paths.Base)
 
 	// Encrypt to the recipient derived from the SSH public key…
-	pub, _, err := deriveAgePublicKey(pubPath)
+	pub, err := deriveAgePublicKey(pubPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,12 +740,9 @@ func TestAddKeyContainment(t *testing.T) {
 	if strings.Contains(combined, canary) {
 		t.Error("private key material leaked")
 	}
-	// Exact stderr: the two [error] lines and NOTHING else. The Go library's
-	// own parse errors happen not to embed input material today, so a
-	// canary-only assertion would pass even if the raw error were surfaced —
-	// this pins that nothing beyond the ported messages reaches the operator.
-	want := "[error] could not derive an age key from " + keyPath + "\n" +
-		"[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
+	// Exact stderr: the private key refusal and NOTHING else. The file is
+	// refused before the library parses it, and no line of it is printed.
+	want := wantPrivateKeyRefusal(keyPath)
 	if errOut.String() != want {
 		t.Errorf("stderr not contained to the ported messages:\n%q\nwant:\n%q", errOut.String(), want)
 	}

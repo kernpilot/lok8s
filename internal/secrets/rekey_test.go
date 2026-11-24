@@ -207,6 +207,24 @@ func TestAddKeyAllWithEveryStoreUnreadableSaysNoStore(t *testing.T) {
 	}
 }
 
+// QuoteArg puts an argument in Go quotes for a message, or a placeholder
+// when it has the shape of a private key or holds a PEM block.
+func TestQuoteArg(t *testing.T) {
+	for in, want := range map[string]string{
+		"-o":                                   `"-o"`,
+		"sp-1a2b3c4d":                          `"sp-1a2b3c4d"`,
+		fakeAgeIdentity:                        "(not printed: it looks like a private key)",
+		"-----BEGIN OPENSSH PRIVATE KEY-----":  "(not printed: it looks like a private key)",
+		"-----BEGIN CERTIFICATE-----\nMIIB":    "(not printed: it holds a PEM block)",
+		"-----BEGIN":                           "(not printed: it holds a PEM block)",
+		`{"ca":"-----BEGIN CERTIFICATE-----"}`: "(not printed: it holds a PEM block)",
+	} {
+		if got := QuoteArg(in); got != want {
+			t.Errorf("QuoteArg(%.24q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // ── the private-key refusal (both commands) ───────────────────────────────
 
 // fakeAgeIdentity has the shape of an age identity but is made of a fixed
@@ -224,7 +242,17 @@ func TestKeyArgumentRefusesAPrivateKey(t *testing.T) {
 		{"add-key", func(c *Context, k string) error { return c.AddKey(k, false, false) }},
 		{"remove-key", func(c *Context, k string) error { return c.RemoveKey(k, false, false) }},
 	} {
-		for _, arg := range []string{fakeAgeIdentity, strings.ToLower(fakeAgeIdentity), "-----BEGIN OPENSSH PRIVATE KEY-----", "-----BEGIN"} {
+		// Each argument, and the first line of its refusal: a private key,
+		// or the PEM block when the argument has no private key.
+		const keyFirst = "[error] an argument looks like a private key: it is not printed\n"
+		const pemFirst = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n"
+		for arg, first := range map[string]string{
+			fakeAgeIdentity:                       keyFirst,
+			strings.ToLower(fakeAgeIdentity):      keyFirst,
+			"-----BEGIN OPENSSH PRIVATE KEY-----": keyFirst,
+			"-----BEGIN":                          pemFirst,
+			"-----BEGIN CERTIFICATE-----":         pemFirst,
+		} {
 			t.Run(tc.name, func(t *testing.T) {
 				c, out, errOut := testEnv(t)
 				sopsYAMLWith(t, c, keyA+","+keyB)
@@ -233,12 +261,13 @@ func TestKeyArgumentRefusesAPrivateKey(t *testing.T) {
 				if err := tc.run(c, arg); !errors.Is(err, ErrHandled) {
 					t.Fatalf("want ErrHandled, got %v", err)
 				}
-				want := "[error] the key argument looks like a private key — it is not printed\n" +
-					"[error] pass an age public key (age1…) or the path to an ed25519 SSH public key\n"
+				want := first + "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
 				if errOut.String() != want || out.String() != "" {
 					t.Errorf("output not contained to the two refusal lines: stdout %d bytes, stderr %d bytes", out.Len(), errOut.Len())
 				}
-				if strings.Contains(out.String()+errOut.String(), arg) {
+				// The refusal names the marker "-----BEGIN" itself: look for
+				// an echo in what is left of the output without it.
+				if strings.Contains(strings.Replace(out.String()+errOut.String(), want, "", 1), arg) {
 					t.Error("the argument was echoed")
 				}
 				if readFile(t, c.sopsConfigPath()) != before {

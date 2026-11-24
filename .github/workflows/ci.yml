@@ -183,7 +183,7 @@ jobs:
         # sops or ssh-to-age resolves to another file. The TAP output goes
         # through tee into a log, under pipefail (as in "Provision &
         # register" of spinup.yml), so a failed test fails the step. The step
-        # also fails when the plan is not 1..20 (the twenty tagged tests)
+        # also fails when the plan is not 1..21 (the 21 tagged tests)
         # or when a test skipped.
         env:
           ARGSH_NO_AUTO_DOWNLOAD: "1"
@@ -202,7 +202,7 @@ jobs:
           log="$(mktemp)"
           bats --filter-tags real-sops tests/unit/ | tee "${log}"
           plan="$(head -n 1 "${log}")"
-          if [[ "${plan}" != "1..20" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..20"; exit 1; fi
+          if [[ "${plan}" != "1..21" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..21"; exit 1; fi
           if grep -q '# skip' "${log}"; then echo "::error::a real-sops bats test skipped"; exit 1; fi
 
       - name: Real-git bats tests (native, the git of the runner)

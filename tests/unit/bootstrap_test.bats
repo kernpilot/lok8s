@@ -6162,6 +6162,11 @@ SH
   for t in sops ssh-keygen ssh-to-age; do
     command -v "${t}" >/dev/null || skip "${t} not installed"
   done
+  # The real sops also reads the identities under HOME (the age keys file
+  # and the SSH keys of ~/.ssh): HOME goes under the temp dir, then the
+  # setup's LOK8S_NONINTERACTIVE comes back.
+  isolate_secrets_home
+  export LOK8S_NONINTERACTIVE=1
   unset -f sops
   write_cluster_spec "testcni"
   local k="${BATS_TEST_TMPDIR}/k1" k2="${BATS_TEST_TMPDIR}/k2"

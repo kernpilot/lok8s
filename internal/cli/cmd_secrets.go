@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -28,15 +28,6 @@ import (
 )
 
 func init() { registerPorted("secrets", newSecretsCommand) }
-
-// defaultSSHKey resolves the LOK8S_SSH_KEY default chain
-// (bash: : "${LOK8S_SSH_KEY:=${HOME}/.ssh/id_ed25519}").
-func defaultSSHKey() string {
-	if v := os.Getenv("LOK8S_SSH_KEY"); v != "" {
-		return v
-	}
-	return os.Getenv("HOME") + "/.ssh/id_ed25519"
-}
 
 // secretsRun maps the secrets package's already-printed sentinel onto the cli
 // one.
@@ -129,26 +120,46 @@ func secretsArgs(minArgs, maxArgs int, names ...string) cobra.PositionalArgs {
 // both with the value. So the Args check refuses a positional or a flag value
 // of that shape first, and the flag-error func does not print an error that
 // holds one. GuardPrivateKeyArgv runs the same check on the raw argv, before
-// cobra parses anything.
+// cobra parses anything; these checks stay for a caller that runs the
+// command without main.
 func keyArgCommand(c *cobra.Command) *cobra.Command {
-	arity := secretsArgs(1, 1, "key")
+	return privateKeyGuarded(c, secretsArgs(1, 1, "key"))
+}
+
+// sshKeyCommand guards init and decrypt the same way: their --ssh-key value
+// is the path of a key file, and a key pasted there must not reach any
+// message either.
+func sshKeyCommand(c *cobra.Command) *cobra.Command {
+	return privateKeyGuarded(c, secretsArgs(0, 0))
+}
+
+// privateKeyGuarded sets the Args check and the flag-error func of c: both
+// refuse an argument or a flag value with the shape of a private key
+// (secrets.RefusePrivateKey), before arity or the flag error prints it. The
+// positionals are checked joined with spaces, as the guard of main checks
+// the argv: a paste split into words is one key. Each command here takes a
+// path or an age public key, never a PEM block, so the check is
+// secrets.LooksLikeKeyArg: the first word of a PEM block counts too.
+func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Command {
 	c.Args = func(cmd *cobra.Command, args []string) error {
-		private := false
-		for _, a := range args {
-			private = private || secrets.LooksLikePrivateKey(a)
+		var refused []string
+		if joined := strings.Join(args, " "); secrets.LooksLikeKeyArg(joined) {
+			refused = append(refused, joined)
 		}
 		cmd.Flags().Visit(func(f *pflag.Flag) {
-			private = private || secrets.LooksLikePrivateKey(f.Value.String())
+			if v := f.Value.String(); secrets.LooksLikeKeyArg(v) {
+				refused = append(refused, v)
+			}
 		})
-		if private {
-			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+		if len(refused) > 0 {
+			secrets.RefusePrivateKey(cmd.ErrOrStderr(), strings.Join(refused, " "))
 			return ErrHandled
 		}
 		return arity(cmd, args)
 	}
 	c.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
-		if secrets.LooksLikePrivateKey(err.Error()) {
-			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+		if secrets.LooksLikeKeyArg(err.Error()) {
+			secrets.RefusePrivateKey(cmd.ErrOrStderr(), err.Error())
 			return ErrHandled
 		}
 		return argshErrorf(cmd.ErrOrStderr(), "%s", argshFlagError(cmd, err.Error()))
@@ -156,23 +167,124 @@ func keyArgCommand(c *cobra.Command) *cobra.Command {
 	return c
 }
 
-// GuardPrivateKeyArgv refuses a `lo secrets add-key` or `remove-key` call
-// whose raw argv holds an argument with the shape of a private key, flag
-// values and words that look like flags included. main runs it before
-// Execute: cobra's flag parser and the argument checks print what they
-// reject. It prints the refusal (never the argument) and reports whether it
-// refused. Any other command is left to cobra.
+// GuardPrivateKeyArgv refuses a `lo secrets` call whose raw argv, its words
+// joined with spaces, has the shape of a private key or holds the start of
+// a PEM block, "-----BEGIN" (secrets.LooksLikeKeyArg): a positional, a flag
+// value (`--ssh-key X`, `--ssh-key=X`, `--domain X`), a flag that cobra does
+// not know (`--unknown=X`), or a paste split into words. No command of lo
+// secrets takes a PEM block as an argument (a certificate, a public key, a
+// static key of OpenVPN): such a word starts with "-", so pflag reads it as
+// a flag, and its error ("bad flag syntax: <arg>") prints all of it. main
+// runs the guard before Execute: cobra's flag parser, its unknown-command
+// error and the argument checks print what they reject. It covers `lo
+// secrets` and every command under it, and fails closed: when cobra cannot
+// resolve a command, it refuses too. That is a Find error, or an argv that
+// resolves to the root itself, whose unknown-command error prints the first
+// word. It prints the refusal (never the argument) and reports whether it
+// refused. A resolved command outside `lo secrets` is left to cobra, unless
+// the first word of the argv by the bash rule is `secrets` (namesSecrets).
+//
+// The first line of the refusal names a private key or the PEM block. For
+// `lo secrets set` (and its alias) the second line names stdin
+// (secrets.RefusePrivateKeyValue), else the key file
+// (secrets.RefusePrivateKey). Bash twin: secrets::_guard_lo_argv in main of
+// lo, before its parser (the same scope and the same fail-closed rule), and
+// secrets::_no_private_argv in main::secrets.
 func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) bool {
-	cmd, _, err := root.Find(argv)
-	if err != nil || cmd.Parent() == nil || cmd.Parent().Name() != "secrets" {
+	joined := strings.Join(argv, " ")
+	if !secrets.LooksLikeKeyArg(joined) {
 		return false
 	}
-	if cmd.Name() != "add-key" && cmd.Name() != "remove-key" {
-		return false
-	}
-	if slices.ContainsFunc(argv, secrets.LooksLikePrivateKey) {
-		secrets.RefusePrivateKey(errOut)
+	cmd, rest, err := root.Find(argv)
+	if err == nil && (isSecretsSet(cmd) || isSecretsGroup(cmd) && isSetWord(secretsSubcommand(cmd, rest))) {
+		secrets.RefusePrivateKeyValue(errOut, joined)
 		return true
+	}
+	if err == nil && cmd.HasParent() && !underSecrets(cmd) && !namesSecrets(root, secretsSubcommand(root, argv)) {
+		return false
+	}
+	secrets.RefusePrivateKey(errOut, joined)
+	return true
+}
+
+// namesSecrets reports whether word names `lo secrets` under root (its name
+// or an alias). The guard asks it for the first word of the argv by the
+// rule of secrets::_argv_words, where a flag that root does not know is a
+// switch. cobra's Find reads an unknown flag with no "=" as a flag that
+// takes the next word: for `lo <block> secrets l` it takes "secrets" as the
+// value of the flag "<block>" and resolves to `lo lint`, whose flag parser
+// then prints the block. The bash tree reads "secrets" as the command
+// there, so the guard refuses too.
+func namesSecrets(root *cobra.Command, word string) bool {
+	for _, c := range root.Commands() {
+		if c.Name() == "secrets" {
+			return word == c.Name() || c.HasAlias(word)
+		}
+	}
+	return false
+}
+
+// isSecretsSet reports whether cmd is `lo secrets set`: its argument is a
+// secret value, so its refusal names stdin, not a key file.
+func isSecretsSet(cmd *cobra.Command) bool {
+	return cmd.Name() == "set" && isSecretsGroup(cmd.Parent())
+}
+
+// isSecretsGroup reports whether cmd is `lo secrets` itself: the group, or
+// the shim of a project that routes it to the bash tree (the shim parses no
+// flag and has no subcommand, so Find stops there).
+func isSecretsGroup(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Name() == "secrets" && cmd.HasParent() && !cmd.Parent().HasParent()
+}
+
+// isSetWord reports whether word names set in the usage table of the bash
+// `lo secrets` (set and its alias s).
+func isSetWord(word string) bool {
+	return word == "set" || word == "s"
+}
+
+// secretsSubcommand is the first word of rest that is not a flag or the
+// value of a flag that takes one: the subcommand of `lo secrets` when Find
+// stops at the group. A flag that cmd does not know is a switch, and a
+// cluster of short flags is not split, as in secrets::_argv_words.
+func secretsSubcommand(cmd *cobra.Command, rest []string) string {
+	lookup := func(word string) *pflag.Flag {
+		if strings.HasPrefix(word, "--") {
+			if f := cmd.Flags().Lookup(word[2:]); f != nil {
+				return f
+			}
+			return cmd.InheritedFlags().Lookup(word[2:])
+		}
+		if len(word) != 2 {
+			return nil
+		}
+		if f := cmd.Flags().ShorthandLookup(word[1:]); f != nil {
+			return f
+		}
+		return cmd.InheritedFlags().ShorthandLookup(word[1:])
+	}
+	skip := false
+	for _, word := range rest {
+		switch {
+		case skip:
+			skip = false
+		case strings.HasPrefix(word, "-") && strings.Contains(word, "="):
+		case strings.HasPrefix(word, "-"):
+			f := lookup(word)
+			skip = f != nil && f.NoOptDefVal == ""
+		default:
+			return word
+		}
+	}
+	return ""
+}
+
+// underSecrets reports whether cmd is `lo secrets` or a command under it.
+func underSecrets(cmd *cobra.Command) bool {
+	for ; cmd != nil && cmd.HasParent(); cmd = cmd.Parent() {
+		if cmd.Name() == "secrets" && !cmd.Parent().HasParent() {
+			return true
+		}
 	}
 	return false
 }
@@ -215,14 +327,14 @@ func newSecretsInit(paths *config.Paths) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sshKey, _ := cmd.Flags().GetString("ssh-key")
 			if sshKey == "" {
-				sshKey = defaultSSHKey()
+				sshKey = secrets.DefaultSSHPublicKey()
 			}
 			ctx := secretsContext(cmd, paths, "", "")
 			return secretsRun(ctx.Init(sshKey))
 		},
 	}
-	c.Flags().StringP("ssh-key", "k", "", "Path to SSH public key")
-	return c
+	c.Flags().StringP("ssh-key", "k", "", "Path to the SSH public key (default: the .pub file of LOK8S_SSH_KEY, ~/.ssh/id_ed25519.pub)")
+	return sshKeyCommand(c)
 }
 
 func newSecretsAddKey(paths *config.Paths) *cobra.Command {
@@ -339,14 +451,14 @@ func newSecretsDecrypt(paths *config.Paths) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sshKey, _ := cmd.Flags().GetString("ssh-key")
 			if sshKey == "" {
-				sshKey = defaultSSHKey()
+				sshKey = secrets.DefaultSSHKey()
 			}
 			ctx := secretsContext(cmd, paths, "", "")
 			return secretsRun(ctx.Decrypt(sshKey))
 		},
 	}
-	c.Flags().StringP("ssh-key", "k", "", "Path to SSH private key")
-	return c
+	c.Flags().StringP("ssh-key", "k", "", "Path to the SSH private key (default: LOK8S_SSH_KEY, ~/.ssh/id_ed25519)")
+	return sshKeyCommand(c)
 }
 
 func newSecretsAllow(paths *config.Paths) *cobra.Command {

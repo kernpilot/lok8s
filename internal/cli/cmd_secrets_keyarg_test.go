@@ -23,8 +23,29 @@ const pemLine = "-----BEGIN OPENSSH PRIVATE " + "KEY-----"
 // fixtureRcpt has the shape of an age public key.
 var fixtureRcpt = "age1" + strings.Repeat("q", 57) + "z"
 
-const privateKeyRefusal = "[error] the key argument looks like a private key — it is not printed\n" +
-	"[error] pass an age public key (age1…) or the path to an ed25519 SSH public key\n"
+// privateKeyRefusal is what every argv check of lo secrets prints
+// (secrets.RefusePrivateKey; bash: secrets::_no_private_key).
+const privateKeyRefusal = "[error] an argument looks like a private key: it is not printed\n" +
+	"[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
+
+// privateKeyValueRefusal is what the guard prints for lo secrets set, whose
+// argument is a value, when the argv has the shape of a private key
+// (secrets.RefusePrivateKeyValue; bash: secrets::_no_private_value).
+const privateKeyValueRefusal = "[error] an argument looks like a private key: it is not printed\n" +
+	"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
+
+// pemPathRefusal is what every argv check of lo secrets other than set
+// prints for a word that holds "-----BEGIN" when the refused words have no
+// private key: the first line names the PEM block (secrets.RefusePrivateKey;
+// bash: secrets::_no_private_key).
+const pemPathRefusal = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n" +
+	"[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
+
+// pemValueRefusal is what the guard prints for lo secrets set when the argv
+// holds "-----BEGIN" and has no private key (a certificate, a public key, a
+// static key of OpenVPN): the first line names the PEM block.
+const pemValueRefusal = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n" +
+	"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
 
 // privateKeyArgvs are the argvs of one key command with a private key shape
 // in each place a parser could print it: a flag-like PEM line, the PEM block
@@ -42,7 +63,11 @@ func privateKeyArgvs(cmd string) [][]string {
 }
 
 // Through cobra Execute (no main): the flag-error func and the Args check
-// refuse, and print the two refusal lines only.
+// refuse, and print the two refusal lines only. The flag-error func sees
+// the first word of a paste split into words only ("-----BEGIN"), so its
+// first line names the PEM block. The guard of main sees the whole argv and
+// runs first in the binary: its first line names the private key, as in
+// the bash tree.
 func TestSecretsKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
 	for _, cmd := range []string{"add-key", "remove-key"} {
 		for _, argv := range privateKeyArgvs(cmd) {
@@ -51,22 +76,34 @@ func TestSecretsKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
 			if err == nil {
 				t.Errorf("%s: no error", strings.Join(argv[:2], " "))
 			}
-			if out != "" || errOut != privateKeyRefusal {
+			want := privateKeyRefusal
+			if argv[2] == "-----BEGIN" {
+				want = pemPathRefusal
+			}
+			if out != "" || errOut != want {
 				t.Errorf("argv %d words (%s): stdout %d bytes, stderr %q", len(argv), cmd, len(out), errOut)
 			}
+			// The refusal names the marker "-----BEGIN" itself: look for an
+			// echo in what is left of the output without it.
+			rest := strings.Replace(out+errOut, want, "", 1)
 			for _, a := range argv[1:] {
 				if strings.Contains(a, "BEGIN") || strings.Contains(strings.ToUpper(a), "AGE-SECRET-KEY-") {
-					if strings.Contains(out+errOut, a) {
+					if strings.Contains(rest, a) {
 						t.Errorf("%s: an argument was echoed", cmd)
 					}
 				}
+			}
+			var guard bytes.Buffer
+			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyRefusal {
+				t.Errorf("argv %d words (%s): the guard of main printed %q", len(argv), cmd, guard.String())
 			}
 		}
 	}
 }
 
-// The raw argv guard of main: it refuses before cobra parses, for the two
-// key commands only.
+// The raw argv guard of main: it refuses before cobra parses. The argvs of
+// add-key and remove-key here; the rest of lo secrets in
+// TestGuardPrivateKeyArgvCoversTheSecretsTree.
 func TestGuardPrivateKeyArgv(t *testing.T) {
 	paths := secretsProject(t)
 	for _, cmd := range []string{"add-key", "remove-key"} {
@@ -83,7 +120,6 @@ func TestGuardPrivateKeyArgv(t *testing.T) {
 	for _, argv := range [][]string{
 		{"secrets", "remove-key", fixtureRcpt},
 		{"secrets", "add-key", fixtureRcpt, "--all"},
-		{"secrets", "list", fillerIdentity},
 		{"version"},
 	} {
 		var errOut bytes.Buffer

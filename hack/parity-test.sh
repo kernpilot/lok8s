@@ -136,7 +136,7 @@ ssh-keygen -t rsa -b 2048 -N '' -C parity -f "${WORK}/home/rsa" -q
 # sec_refused_no_recipient <case>: after sec_check of an init with the RSA
 # key, each side exited 1 and its last line of stderr is the refusal.
 sec_refused_no_recipient() {
-  local want="[error] no age recipient derived from WORK/home/rsa.pub (ed25519 SSH keys only) — nothing written to PROJ/.sops.yaml"
+  local want="[error] no age recipient derived from WORK/home/rsa.pub (ed25519 SSH keys only): nothing written to PROJ/.sops.yaml"
   # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
   (( go_rc == 1 && bash_rc == 1 )) || fail "init with an RSA key (${1}): rc go=${go_rc} bash=${bash_rc}, want 1"
   [[ "$(tail -n 1 "${WORK}/go.err")" == "${want}" && "$(tail -n 1 "${WORK}/bash.err")" == "${want}" ]] \
@@ -147,8 +147,27 @@ sec_refused_no_recipient "a first run"
 for impl in go bash; do
   [[ ! -e "${WORK}/sec-${impl}/.sops.yaml" ]] || fail "init (${impl}) with an RSA key wrote .sops.yaml"
 done
+# A private key is refused before any tool reads it: each side exits 1, the
+# last two lines of its stderr are the refusal (the path and the fix), no
+# line of the key reaches its output, and no .sops.yaml is written.
+sec_check secrets init --ssh-key "${WORK}/home/key"
+# shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+(( go_rc == 1 && bash_rc == 1 )) || fail "init with a private key: rc go=${go_rc} bash=${bash_rc}, want 1"
+grep -v -- '-----' "${WORK}/home/key" > "${WORK}/key.body"
+for impl in go bash; do
+  [[ "$(tail -n 2 "${WORK}/${impl}.err")" == "[error] WORK/home/key holds a private key, not a public key: nothing from it is printed
+[error] pass the public key file instead: WORK/home/key.pub" ]] || fail "init (${impl}) with a private key: stderr is not the refusal"
+  ! grep -qFf "${WORK}/key.body" "${WORK}/${impl}.out" "${WORK}/${impl}.err" || fail "init (${impl}) with a private key: a line of the key reached the output"
+  [[ ! -e "${WORK}/sec-${impl}/.sops.yaml" ]] || fail "init (${impl}) with a private key wrote .sops.yaml"
+done
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"
 sec_check secrets init --ssh-key "${WORK}/home/key.pub"   # idempotent branch
+# Without --ssh-key, init reads the .pub of LOK8S_SSH_KEY (WORK/home/key.pub),
+# not the private key that LOK8S_SSH_KEY names: both take the idempotent
+# branch and exit 0.
+sec_check secrets init
+# shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+(( go_rc == 0 && bash_rc == 0 )) || fail "init with the default key: rc go=${go_rc} bash=${bash_rc}, want 0"
 sec_state .sops.yaml
 # A rerun with the RSA key is refused too, and .sops.yaml keeps its bytes.
 for impl in go bash; do cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.init"; done
@@ -350,6 +369,104 @@ for cmd in add-key remove-key; do
   sec_check secrets "${cmd}" "${KEY2}" "${FAKE_ID}"
   sec_no_echo "${FAKE_ID}" "secrets ${cmd} <age key> <private key>"
 done
+# init and decrypt take the path of a key file: a key pasted into --ssh-key,
+# in both flag forms and split into words, is refused the same way.
+for cmd in init decrypt; do
+  sec_check secrets "${cmd}" --ssh-key "${FAKE_ID}"
+  sec_no_echo "${FAKE_ID}" "secrets ${cmd} --ssh-key <private key>"
+  sec_check secrets "${cmd}" "--ssh-key=${PEM_HEAD}"
+  sec_no_echo "OPENSSH" "secrets ${cmd} --ssh-key=<PEM line>"
+  # shellcheck disable=SC2086 # the four words of the PEM line
+  sec_check secrets "${cmd}" -k ${PEM_HEAD}
+  sec_no_echo "OPENSSH" "secrets ${cmd} -k <PEM words>"
+done
+# lo secrets set takes a value: a private key there is refused with the
+# line that names stdin, also as a paste split into words. So is any PEM
+# block (a static key of OpenVPN, a certificate): its first character is
+# "-", so the flag parser of set would read it as a flag and print it. The
+# key-path commands refuse any PEM block (here a certificate line). For a
+# PEM block that is not a private key, the first line of the refusal of set
+# names the PEM block; for a private key, it names a private key.
+SET_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
+[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
+SET_KEY_REFUSAL="[error] an argument looks like a private key: it is not printed
+[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
+PEM_PATH_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
+sec_check secrets set -n app KEY "${FAKE_ID}"
+sec_no_echo "${FAKE_ID}" "secrets set <private key>"
+if [[ "$(cat "${WORK}/go.err")" != "${SET_KEY_REFUSAL}" ]]; then
+  fail "secrets set <private key>: not the refusal that names a private key and stdin"
+fi
+# shellcheck disable=SC2086 # the four words of the PEM line
+sec_check s s -n app KEY ${PEM_HEAD}
+sec_no_echo "OPENSSH" "secrets s <PEM words>"
+if [[ "$(cat "${WORK}/go.err")" != "${SET_KEY_REFUSAL}" ]]; then
+  fail "secrets s <PEM words>: not the refusal that names a private key and stdin"
+fi
+PEM_BODY="c2VjcmV0LWJvZHktbm90LWEta2V5"
+for pem in "OpenVPN Static key V1" "CERTIFICATE"; do
+  sec_check secrets set -n vpn ta.key "-----BEGIN ${pem}-----"$'\n'"${PEM_BODY}"$'\n'"-----END ${pem}-----"
+  sec_no_echo "${PEM_BODY}" "secrets set <${pem} block>"
+  if [[ "$(cat "${WORK}/go.err")" != "${SET_REFUSAL}" ]]; then
+    fail "secrets set <${pem} block>: not the refusal that names the PEM block and stdin"
+  fi
+done
+sec_check secrets add-key "-----BEGIN CERTIFICATE-----"
+if [[ "$(cat "${WORK}/go.err")" != "${PEM_PATH_REFUSAL}" ]]; then
+  fail "secrets add-key <certificate line>: not the refusal that names the PEM block and the key file"
+fi
+# Another command of lo secrets (list, a typo of set) refuses a PEM block
+# too: no command of lo secrets takes one as an argument. The second line
+# names the key file.
+for sub in list st; do
+  sec_check secrets "${sub}" ta.key "-----BEGIN OpenVPN Static key V1-----"$'\n'"${PEM_BODY}"$'\n'"-----END OpenVPN Static key V1-----"
+  sec_no_echo "${PEM_BODY}" "secrets ${sub} <OpenVPN block>"
+  if [[ "$(cat "${WORK}/go.err")" != "${PEM_PATH_REFUSAL}" ]]; then
+    fail "secrets ${sub} <OpenVPN block>: not the refusal that names the PEM block and the key file"
+  fi
+done
+# init: a .pub that is missing beside its private key gets the hint that
+# writes the .pub from the private key. The private key is not read: a
+# filler file. Without a private key, the hint is ssh-keygen -t ed25519.
+printf 'filler\n' > "${WORK}/home/lonely"
+sec_check secrets init --ssh-key "${WORK}/home/lonely.pub"
+# check prints the work dir as WORK.
+if ! grep -qF "[error] Write it from the private key with: ssh-keygen -y -f WORK/home/lonely > WORK/home/lonely.pub" "${WORK}/go.err"; then
+  fail "secrets init <missing .pub beside its private key>: no ssh-keygen -y hint"
+fi
+sec_check secrets init --ssh-key "${WORK}/home/absent.pub"
+if ! grep -qF "[error] Generate one with: ssh-keygen -t ed25519" "${WORK}/go.err"; then
+  fail "secrets init <missing .pub>: no ssh-keygen -t hint"
+fi
+# A path that the shell would split goes into single quotes in the hint.
+printf 'filler\n' > "${WORK}/home/work key"
+sec_check secrets init --ssh-key "${WORK}/home/work key.pub"
+if ! grep -qF "[error] Write it from the private key with: ssh-keygen -y -f 'WORK/home/work key' > 'WORK/home/work key.pub'" "${WORK}/go.err"; then
+  fail "secrets init <missing .pub, a path with a space>: the hint does not quote the paths"
+fi
+# Something that is not a regular file at the path of the .pub (here a
+# directory) gets no hint: a command that writes the .pub would write
+# through a link or stop at that entry.
+printf 'filler\n' > "${WORK}/home/dirpub"
+mkdir -p "${WORK}/home/dirpub.pub"
+sec_check secrets init --ssh-key "${WORK}/home/dirpub.pub"
+if [[ "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: WORK/home/dirpub.pub" ]]; then
+  fail "secrets init <a directory at the .pub>: not the one line with no hint"
+fi
+# The whole argv of lo secrets, before any parser: a key in the --domain
+# value (on either side of the command), in a flag that no parser knows, as
+# a command that lo does not know, and a PuTTY paste split into words.
+sec_check secrets --domain "${FAKE_ID}" init
+sec_no_echo "${FAKE_ID}" "secrets --domain <private key> init"
+sec_check --domain "${FAKE_ID}" secrets list
+sec_no_echo "${FAKE_ID}" "--domain <private key> secrets list"
+sec_check secrets "--unknown=${FAKE_ID}" init
+sec_no_echo "${FAKE_ID}" "secrets --unknown=<private key> init"
+sec_check "${FAKE_ID}"
+sec_no_echo "${FAKE_ID}" "<private key> as the command"
+sec_check secrets add-key PuTTY-User-Key-File-3: ssh-ed25519 Encryption: none
+sec_no_echo "PuTTY" "secrets add-key <PuTTY words>"
 
 # remove-key: the refusals first. None of them may write .sops.yaml.
 KEY2B="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key2.pub")"

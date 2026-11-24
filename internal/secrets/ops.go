@@ -24,28 +24,83 @@ import (
 
 // ── Init ─────────────────────────────────────────────────
 
+// publicKeyHint is the hint of Init for a public key file that is not a
+// regular file, or "" for no hint. There is a hint only when nothing is at
+// that path (its lstat fails). When something else is there (a directory, a
+// FIFO, a link to no file), a command that writes the file writes through
+// the link or stops at that entry, and "Generate one" names a new key where
+// there is already a file: the line before the hint, which names the path,
+// is the whole message. When the private key of that .pub is a regular
+// file, the hint writes the .pub from it: a `ssh-keygen -t ed25519` there
+// asks to overwrite the key that decrypt reads. The private key is checked
+// with a stat only; it is never read. Each path goes through shownKeyPath,
+// then shellQuoted. When shownKeyPath replaces the path (it has the shape of
+// a private key), there is no hint either: the hint would hold the
+// placeholder, and a paste of it makes a file of that name. The private key
+// path is a prefix of the .pub path, so the test of the .pub path covers
+// both. Bash twin: the hint of secrets::init.
+func publicKeyHint(sshKey string) string {
+	if _, err := os.Lstat(sshKey); err == nil || shownKeyPath(sshKey) != sshKey {
+		return ""
+	}
+	if private, ok := strings.CutSuffix(sshKey, ".pub"); ok && private != "" && fsutil.IsRegular(private) {
+		return fmt.Sprintf("Write it from the private key with: ssh-keygen -y -f %s > %s",
+			shellQuoted(shownKeyPath(private)), shellQuoted(shownKeyPath(sshKey)))
+	}
+	return "Generate one with: ssh-keygen -t ed25519"
+}
+
+// shellQuoted is word for a command line in a hint that the user pastes
+// into a shell: as it is when each byte is an ASCII letter, a digit or one
+// of _@%+=:,./- (and word is not empty), else in single quotes. Each single
+// quote in word becomes these four bytes (close the quote, an escaped
+// quote, open the quote again):
+//
+//	'\''
+//
+// A ~ is quoted too: at the start of a word, the shell expands it. Bash
+// twin: secrets::_shown_quoted.
+func shellQuoted(word string) string {
+	plain := word != ""
+	for i := 0; i < len(word) && plain; i++ {
+		b := word[i]
+		plain = 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' ||
+			strings.IndexByte("_@%+=:,./-", b) >= 0
+	}
+	if plain {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
+}
+
 // Init configures SOPS/age encryption from an SSH public key (bash:
 // secrets::init). The bash `command -v ssh-to-age/sops` gates disappear —
-// both are libraries in the Go build.
+// both are libraries in the Go build. The cli passes --ssh-key, else
+// DefaultSSHPublicKey (the .pub of LOK8S_SSH_KEY).
 func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
-		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", sshKey)
-		ui.ErrorTo(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
+		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", shownKeyPath(sshKey))
+		if hint := publicKeyHint(sshKey); hint != "" {
+			ui.ErrorTo(c.ErrOut, "%s", hint)
+		}
 		return ErrHandled
 	}
 
-	agePubkey, skipNote, err := deriveAgePublicKey(sshKey)
-	if err != nil && !errors.Is(err, errUnsupportedKey) {
-		ui.ErrorTo(c.ErrOut, "Failed to derive age public key from %s", sshKey)
-		ui.ErrorTo(c.ErrOut, "Only ed25519 SSH keys are supported")
+	// The key file is read once, at most 64 KiB. A file that cannot be read,
+	// a bigger one and one that holds a private key are refused before the
+	// library parses them, and nothing from the file is printed (bash:
+	// secrets::_read_public_key before ssh-to-age reads the text). No library
+	// error is printed: it can quote the input. bash also keeps the stderr of
+	// ssh-to-age from the terminal, and prints the exit status of the tool
+	// instead; the library has no exit status.
+	agePubkey, err := deriveAgePublicKey(sshKey)
+	if refuseKeyFile(c.ErrOut, sshKey, err) {
 		return ErrHandled
 	}
-	// bash leaves ssh-to-age's stderr uncontained here (public keys only —
-	// leaking a public key is not a leak); the CLI's "skipped key: …" note for
-	// a non-ed25519 key is the one line that surfaces, and the derivation
-	// result stays empty exactly like the binary's rc-0 skip.
-	if skipNote != "" {
-		fmt.Fprintln(c.ErrOut, skipNote)
+	if err != nil && !errors.Is(err, errUnsupportedKey) {
+		ui.ErrorTo(c.ErrOut, "Failed to derive age public key from %s", shownKeyPath(sshKey))
+		ui.ErrorTo(c.ErrOut, "Only ed25519 SSH keys are supported")
+		return ErrHandled
 	}
 
 	sopsConfig := c.sopsConfigPath()
@@ -55,7 +110,7 @@ func (c *Context) Init(sshKey string) error {
 	// every config (grepQF), so a rerun took it for a key that is
 	// configured. A config with `age: ''` is one that no encrypt can use.
 	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only) — nothing written to %s", sshKey, sopsConfig)
+		ui.ErrorTo(c.ErrOut, "no age recipient derived from %s (ed25519 SSH keys only): nothing written to %s", shownKeyPath(sshKey), sopsConfig)
 		return ErrHandled
 	}
 
@@ -81,7 +136,7 @@ func (c *Context) Init(sshKey string) error {
 			return nil
 		}
 		ui.WarnTo(c.ErrOut, ".sops.yaml exists but doesn't contain this key")
-		ui.WarnTo(c.ErrOut, "Add it with: lo secrets add-key %s", sshKey)
+		ui.WarnTo(c.ErrOut, "Add it with: lo secrets add-key %s", shownKeyPath(sshKey))
 		fmt.Fprintf(c.Out, "Your age public key: %s\n", agePubkey)
 		return nil
 	}
@@ -151,7 +206,7 @@ creation_rules:
 
 	fmt.Fprintf(c.Out, "Created %s\n", sopsConfig)
 	fmt.Fprintf(c.Out, "Age public key: %s\n", agePubkey)
-	fmt.Fprintf(c.Out, "Derived from: %s\n", sshKey)
+	fmt.Fprintf(c.Out, "Derived from: %s\n", shownKeyPath(sshKey))
 	return nil
 }
 
@@ -831,17 +886,17 @@ func (c *Context) Decrypt(sshKey string) error {
 	}
 	if ageKey == "" {
 		if !fsutil.IsRegular(sshKey) {
-			ui.ErrorTo(c.ErrOut, "SSH private key not found: %s", sshKey)
+			ui.ErrorTo(c.ErrOut, "SSH private key not found: %s", shownKeyPath(sshKey))
 			return ErrHandled
 		}
 		derived, err := deriveAgePrivateKey(sshKey)
 		if err != nil {
 			// Contained: the library error (like the binary's stderr) can
 			// carry input material for a private key — never surface it.
-			ui.ErrorTo(c.ErrOut, "Failed to derive age key from %s", sshKey)
+			ui.ErrorTo(c.ErrOut, "Failed to derive age key from %s", shownKeyPath(sshKey))
 			ui.ErrorTo(c.ErrOut, "If your SSH key is passphrase-protected, derive once:")
 			ui.ErrorTo(c.ErrOut, "  mkdir -p ~/.config/sops/age")
-			ui.ErrorTo(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", sshKey)
+			ui.ErrorTo(c.ErrOut, "  ssh-to-age -private-key -i %s > ~/.config/sops/age/keys.txt", shownKeyPath(sshKey))
 			ui.ErrorTo(c.ErrOut, "  chmod 600 ~/.config/sops/age/keys.txt")
 			ui.ErrorTo(c.ErrOut, "(you'll be prompted for the passphrase once)")
 			return ErrHandled

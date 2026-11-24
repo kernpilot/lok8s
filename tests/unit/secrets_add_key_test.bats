@@ -20,15 +20,14 @@
 # BATS_TEST_TMPDIR, and the encrypt step is stubbed (the whole sweep, or sops
 # alone: _load_sweep), so no sops key is needed and no real cache file is
 # reachable. HOME, XDG_CONFIG_HOME (sops reads <config
-# dir>/sops/age/keys.txt) and SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR too.
+# dir>/sops/age/keys.txt) and SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR
+# too (isolate_secrets_home), and no LOK8S_* variable is set.
 
 setup() {
   load "../test_helper"
   setup_tmpdir
-  export HOME="${BATS_TEST_TMPDIR}/home"
-  export XDG_CONFIG_HOME="${HOME}/.config"
+  isolate_secrets_home
   export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/no-keys.txt"
-  unset SOPS_AGE_KEY SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE
   export PATH_BASE="${BATS_TEST_TMPDIR}/base"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
   mkdir -p "${HOME}" "${PATH_BASE}" "${PATH_CLUSTERS}/a.dev/secrets" "${PATH_CLUSTERS}/b.dev/secrets"
@@ -46,7 +45,7 @@ creation_rules:
 YAML
 }
 
-teardown() { teardown_tmpdir; }
+teardown() { teardown_secrets_home; }
 
 _load() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" 2>/dev/null || true
@@ -231,8 +230,8 @@ _add() { # <key> [all] [skip_orphans]
   local before; before="$(cat "${PATH_BASE}/.sops.yaml")"
   run _add "${fake}"
   [ "$status" -eq 1 ]
-  [ "$output" = "[error] the key argument looks like a private key — it is not printed
-[error] pass an age public key (age1…) or the path to an ed25519 SSH public key" ] || {
+  [ "$output" = "[error] an argument looks like a private key: it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)" ] || {
     echo "unexpected output (${#output} bytes)" >&2; return 1; }
   [[ "$output" != *"${fake}"* ]]
   [ "$(cat "${PATH_BASE}/.sops.yaml")" = "${before}" ]
@@ -1535,4 +1534,36 @@ ${store}/Secret.db.default.K" ] || { echo "sops ran on: $(cat "${SOPS_LOG}")" >&
     echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ ! -s "${ENCRYPT_RAN}" ]
+}
+
+# A key file that holds a private key is refused before ssh-to-age reads it:
+# the path and the fix, nothing from the file (Go twin:
+# TestKeyCommandsRefuseAPrivateKeyFile). ssh-to-age is a function that logs
+# a call. "PRIVATE KEY" is in two parts, so that the private-key rule of a
+# secret scanner does not match this file.
+@test "add-key: a key file that holds a private key is refused before ssh-to-age reads it" {
+  _load
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; echo "${KEY_B}"; }
+  local key="${BATS_TEST_TMPDIR}/id_ed25519"
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" CANARY_SECRET_MATERIAL_DO_NOT_LEAK > "${key}"
+  run secrets::_recipient "${key}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${key} holds a private key, not a public key: nothing from it is printed
+[error] pass the public key file instead: ${key}.pub" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age read the file" >&2; return 1; }
+}
+
+# A derivation that fails prints the lines of the Go twin and the exit status
+# of ssh-to-age, never its output: the tool quotes its input on a failure.
+@test "add-key: the output of a failed ssh-to-age is not shown, its exit status is" {
+  _load
+  ssh-to-age() { echo "ssh-to-age: failed to convert 'CANARY_SECRET_MATERIAL_DO_NOT_LEAK'" >&2; return 2; }
+  local key="${BATS_TEST_TMPDIR}/id.pub"
+  printf 'ssh-ed25519 AAAA test\n' > "${key}"
+  run secrets::_recipient "${key}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] could not derive an age key from ${key}
+[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key
+[error] ssh-to-age exited 2: its output is not shown, because it can quote the key file" ] || {
+    echo "$output" >&2; return 1; }
 }

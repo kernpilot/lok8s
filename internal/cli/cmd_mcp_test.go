@@ -1012,6 +1012,34 @@ func TestMcpDoesNotEchoAPrivateKeyArgument(t *testing.T) {
 	}
 }
 
+// TestMcpDoesNotEchoAPEMBlockArgument: a dash argument that holds a PEM
+// block with no private key (a static key of OpenVPN as the value of
+// lo_secrets_set, a certificate for lo_secrets_add-key) is refused like any
+// dash argument, and
+// the refusal names a placeholder, not the block. No process starts.
+func TestMcpDoesNotEchoAPEMBlockArgument(t *testing.T) {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	for _, c := range []struct {
+		tool string
+		args []string
+	}{
+		{"lo_secrets_set", []string{"ta.key", "-----BEGIN OpenVPN Static key V1-----\n" + canary + "\n-----END OpenVPN Static key V1-----"}},
+		{"lo_secrets_add-key", []string{"-----BEGIN CERTIFICATE-----\nMIIB" + canary + "\n-----END CERTIFICATE-----"}},
+	} {
+		res := mcpCall(t, mcpExposure{destructive: true}, c.tool, map[string]any{}, c.args)
+		text := resultText(res)
+		if !res.IsError || !strings.Contains(text, "the argument (not printed: it holds a PEM block) starts with a dash") {
+			t.Errorf("%s: isError=%v text=%q, want the refusal with the placeholder", c.tool, res.IsError, strings.ReplaceAll(text, canary, "<canary>"))
+		}
+		if strings.Contains(text, canary) || strings.Contains(text, "-----BEGIN") {
+			t.Errorf("%s: the block reached the tool error", c.tool)
+		}
+		if strings.Contains(text, toolCallArgvMark) {
+			t.Errorf("%s: a process ran", c.tool)
+		}
+	}
+}
+
 // TestMcpRunsAnAllowedCallWithItsArgvUnchanged: the argv of an allowed
 // call is <command path> <flags> <args>, nothing added. A routed project
 // hands it to the argsh tree, which has no "--" marker.

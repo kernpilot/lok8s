@@ -9,6 +9,9 @@ setup() {
   # `run --separate-stderr` (the decrypt compare test) needs bats >= 1.5.
   bats_require_minimum_version 1.5.0
   setup_tmpdir
+  # HOME under the temp dir, and no LOK8S_* or sops identity variable: the
+  # library defaults LOK8S_SSH_KEY to ${HOME}/.ssh/id_ed25519.
+  isolate_secrets_home
 
   export PATH="${_PROJECT_ROOT}/.bin:${PATH}"
   export PATH_BASE="${BATS_TEST_TMPDIR}"
@@ -23,7 +26,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
 }
 
-teardown() { teardown_tmpdir; }
+teardown() { teardown_secrets_home; }
 
 require_tools() {
   for t in sops ssh-to-age ssh-keygen; do
@@ -1065,6 +1068,8 @@ _init_fakes() {
 # A key that derives no age recipient (ssh-to-age skips a key that is not
 # ed25519: it prints a note and exits 0) is refused with the line of the Go
 # twin and status 1, and nothing is written: no .sops.yaml and no lock file.
+# The note of ssh-to-age does not reach the output: init keeps the stderr of
+# the tool from the terminal, because on a failure it quotes its input.
 # A rerun (a .sops.yaml is there) refuses the key the same way: grep -qF with
 # an empty pattern matches every config, so a rerun took it for a key that
 # is configured (Go twin: TestInitRefusesAKeyThatDerivesNoRecipient).
@@ -1082,16 +1087,15 @@ _init_fakes() {
     before="$(_store_state "${PATH_BASE}")"
     run secrets::init
     [ "$status" -eq 1 ] || { echo "${run_kind}: status $status: $output" >&2; return 1; }
-    [ "$output" = "skipped key: got ssh-rsa key type, but only ed25519 keys are supported
-[error] no age recipient derived from ${LOK8S_SSH_KEY} (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
+    [ "$output" = "[error] no age recipient derived from ${LOK8S_SSH_KEY} (ed25519 SSH keys only): nothing written to ${PATH_BASE}/.sops.yaml" ] || {
       echo "${run_kind}: $output" >&2; return 1; }
     [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${run_kind}: init wrote a file" >&2; return 1; }
   done
 }
 
 # The same with the real ssh-to-age and an RSA key of the test. :args is a
-# stub here, so the key goes in LOK8S_SSH_KEY (its default names the
-# developer's private key).
+# stub here, so the key goes in LOK8S_SSH_KEY (a .pub path, which init reads
+# as it is).
 # bats test_tags=real-sops
 @test "secrets init: a real RSA key derives no age recipient, and nothing is written" {
   require_tools
@@ -1101,9 +1105,152 @@ _init_fakes() {
   before="$(_store_state "${PATH_BASE}")"
   run secrets::init
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "${output##*$'\n'}" = "[error] no age recipient derived from ${BATS_TEST_TMPDIR}/id_rsa.pub (ed25519 SSH keys only) — nothing written to ${PATH_BASE}/.sops.yaml" ] || {
+  [ "${output}" = "[error] no age recipient derived from ${BATS_TEST_TMPDIR}/id_rsa.pub (ed25519 SSH keys only): nothing written to ${PATH_BASE}/.sops.yaml" ] || {
     echo "$output" >&2; return 1; }
   [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "init wrote a file" >&2; return 1; }
+}
+
+# The body of every private key fixture: no output may hold it.
+KEY_CANARY=CANARY_SECRET_MATERIAL_DO_NOT_LEAK
+
+# _private_key_forms <dir>: writes one file per form of a private key file,
+# each with KEY_CANARY as its body (Go twin: privateKeyForms). "PRIVATE KEY"
+# is in two parts, so that the private-key rule of a secret scanner does not
+# match this file.
+_private_key_forms() {
+  local d="${1}" k="PRIVATE ""KEY" c="${KEY_CANARY}"
+  mkdir -p "${d}"
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n-----END OPENSSH %s-----\n' "${k}" "${c}" "${k}" > "${d}/openssh"
+  printf -- '-----BEGIN RSA %s-----\n%s\n-----END RSA %s-----\n' "${k}" "${c}" "${k}" > "${d}/rsa-pem"
+  printf -- '-----BEGIN EC %s-----\n%s\n-----END EC %s-----\n' "${k}" "${c}" "${k}" > "${d}/ec-pem"
+  printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${k}" "${c}" "${k}" > "${d}/pkcs8"
+  printf -- '-----BEGIN ENCRYPTED %s-----\n%s\n-----END ENCRYPTED %s-----\n' "${k}" "${c}" "${k}" > "${d}/pkcs8-enc"
+  printf -- '---- BEGIN SSH2 ENCRYPTED %s ----\n%s\n---- END SSH2 ENCRYPTED %s ----\n' "${k}" "${c}" "${k}" > "${d}/ssh2"
+  printf 'PuTTY-User-Key-File-3: ssh-ed25519\n%s\n' "${c}" > "${d}/putty"
+  printf 'AGE-SECRET-KEY-1%s\n' "${c}" > "${d}/age-identity"
+  printf 'age-secret-key-1%s\n' "${c,,}" > "${d}/age-lower"
+  printf -- '-----BEGIN OPENSSH %s-----\r\n%s\r\n' "${k}" "${c}" > "${d}/crlf"
+  printf -- '  -----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${c}" > "${d}/indented"
+  printf -- '# my laptop key\n-----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${c}" > "${d}/comment"
+  printf '\xef\xbb\xbf-----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${c}" > "${d}/bom"
+  printf -- '-----BEGIN PGP %s BLOCK-----\n%s\n-----END PGP %s BLOCK-----\n' "${k}" "${c}" "${k}" > "${d}/pgp"
+  printf -- '-----BEGIN X-TEST %s-----\n%s\n-----END X-TEST %s-----\n' "${k}" "${c}" "${k}" > "${d}/hyphen-type"
+}
+
+# _private_key_refusal <path>: the refusal of a key file that holds a
+# private key (Go twin: wantPrivateKeyRefusal).
+_private_key_refusal() {
+  printf '[error] %s holds a private key, not a public key: nothing from it is printed\n' "${1}"
+  if [[ "${1}" == *.pub ]]; then
+    printf '[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key'
+  else
+    printf '[error] pass the public key file instead: %s.pub' "${1}"
+  fi
+}
+
+# Without --ssh-key, init reads the public key: the .pub of LOK8S_SSH_KEY,
+# the path itself when it ends in .pub, and ${HOME}/.ssh/id_ed25519.pub
+# without the variable. It never reads the private key beside it: ssh-to-age
+# (a function here) gets the bytes of the .pub (Go twin:
+# TestDefaultSSHKeys, TestSecretsInitDefaultsToThePublicKey).
+@test "secrets init: the default key is the .pub of LOK8S_SSH_KEY, and ~/.ssh/id_ed25519.pub without it" {
+  _init_fakes
+  ssh-to-age() { cat > "${BATS_TEST_TMPDIR}/ssh-to-age.in"; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  local k="PRIVATE ""KEY" dir="${BATS_TEST_TMPDIR}/keys" env want
+  mkdir -p "${HOME}/.ssh" "${dir}"
+  for want in "${HOME}/.ssh/id_ed25519" "${dir}/work"; do
+    printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "${k}" "${KEY_CANARY}" > "${want}"
+    printf 'ssh-ed25519 AAAA %s\n' "${want##*/}" > "${want}.pub"
+  done
+  for env in "" "${dir}/work" "${dir}/work.pub"; do
+    want="${dir}/work.pub"
+    if [[ -z "${env}" ]]; then
+      unset LOK8S_SSH_KEY
+      want="${HOME}/.ssh/id_ed25519.pub"
+    else
+      export LOK8S_SSH_KEY="${env}"
+    fi
+    run secrets::_ssh_public_key
+    [ "$status" -eq 0 ] && [ "$output" = "${want}" ] || { echo "LOK8S_SSH_KEY='${env}': $output" >&2; return 1; }
+    rm -f "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/ssh-to-age.in"
+    run secrets::init
+    [ "$status" -eq 0 ] || { echo "LOK8S_SSH_KEY='${env}': status $status: $output" >&2; return 1; }
+    cmp -s "${BATS_TEST_TMPDIR}/ssh-to-age.in" "${want}" || { echo "LOK8S_SSH_KEY='${env}': ssh-to-age did not read ${want}" >&2; return 1; }
+    [[ "${output}" == *"Derived from: ${want}"* && "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "LOK8S_SSH_KEY='${env}': $output" >&2; return 1; }
+  done
+}
+
+# A key file that holds a private key, in every form, is refused before
+# ssh-to-age reads it: the path and the fix, nothing from the file, status 1,
+# and nothing written. Also when the path ends in .pub. ssh-to-age and sops
+# are functions; ssh-to-age logs a call (Go twin:
+# TestInitRefusesAPrivateKeyFile).
+@test "secrets init: a private key file is refused before ssh-to-age reads it" {
+  _init_fakes
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  local dir="${BATS_TEST_TMPDIR}/forms" f path before n=0
+  _private_key_forms "${dir}"
+  for f in "${dir}"/*; do
+    cp "${f}" "${f}.pub"
+  done
+  for path in "${dir}"/*; do
+    n=$((n + 1))
+    KEY_PATH="${path}"
+    :args() { ssh_key="${KEY_PATH}"; }
+    before="$(_store_state "${PATH_BASE}")"
+    run secrets::init
+    [ "$status" -eq 1 ] || { echo "${path##*/}: status $status: $output" >&2; return 1; }
+    [ "$output" = "$(_private_key_refusal "${path}")" ] || { echo "${path##*/}: $output" >&2; return 1; }
+    [[ "${output,,}" != *"${KEY_CANARY,,}"* ]] || { echo "${path##*/}: the file reached the output" >&2; return 1; }
+    [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "${path##*/}: ssh-to-age read the file" >&2; return 1; }
+    [ "$(_store_state "${PATH_BASE}")" = "${before}" ] || { echo "${path##*/}: init wrote a file" >&2; return 1; }
+  done
+  [ "${n}" -eq 30 ] || { echo "${n} paths, not 30" >&2; return 1; }
+}
+
+# A derivation that fails (ssh-to-age exits non-zero) prints the two lines
+# of the Go twin and the exit status of the tool, never its output: the tool
+# quotes its input on a failure. ssh-to-age is a function that does so.
+@test "secrets init: the output of a failed ssh-to-age is not shown, its exit status is" {
+  _init_fakes
+  ssh-to-age() { echo "ssh-to-age: failed to convert '${KEY_CANARY}'" >&2; return 3; }
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] Failed to derive age public key from ${LOK8S_SSH_KEY}
+[error] Only ed25519 SSH keys are supported
+[error] ssh-to-age exited 3: its output is not shown, because it can quote the key file" ] || {
+    echo "$output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml" >&2; return 1; }
+}
+
+# The same with the real tools: private keys that ssh-keygen made (ed25519
+# and RSA) are refused, and a file that does not parse prints no line of
+# itself through the real ssh-to-age, which quotes its input on a failure.
+# bats test_tags=real-sops
+@test "secrets init: real private keys are refused, and a real ssh-to-age failure prints no line of the file" {
+  require_tools
+  local k body
+  ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id_ed25519" -q
+  ssh-keygen -t rsa -b 2048 -N '' -C test -f "${BATS_TEST_TMPDIR}/id_rsa" -q
+  for k in id_ed25519 id_rsa; do
+    KEY_PATH="${BATS_TEST_TMPDIR}/${k}"
+    :args() { ssh_key="${KEY_PATH}"; }
+    run secrets::init
+    [ "$status" -eq 1 ] || { echo "${k}: status $status: $output" >&2; return 1; }
+    [ "$output" = "$(_private_key_refusal "${KEY_PATH}")" ] || { echo "${k}: $output" >&2; return 1; }
+    body="${BATS_TEST_TMPDIR}/${k}.body"
+    grep -v -- '-----' "${KEY_PATH}" > "${body}"
+    ! grep -qFf "${body}" <<< "${output}" || { echo "${k}: a line of the key reached the output" >&2; return 1; }
+  done
+  printf 'not a key %s\n' "${KEY_CANARY}" > "${BATS_TEST_TMPDIR}/garbage.pub"
+  KEY_PATH="${BATS_TEST_TMPDIR}/garbage.pub"
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "garbage: status $status: $output" >&2; return 1; }
+  [ "${#lines[@]}" -eq 3 ] && [[ "${lines[2]}" =~ ^\[error\]\ ssh-to-age\ exited\ [1-9][0-9]*:\ its\ output\ is\ not\ shown ]] || {
+    echo "garbage: $output" >&2; return 1; }
+  [[ "${output}" != *"${KEY_CANARY}"* ]] || { echo "garbage: the file reached the output" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml" >&2; return 1; }
 }
 
 # While another run holds the lock of .sops.yaml, init refuses with the line
@@ -1878,4 +2025,507 @@ _two_secrets() {
   run secrets_cli encrypt --name "../../etc"
   assert_failure
   assert_output --partial "invalid --name"
+}
+
+# _path_refusal: the refusal of an argument of lo secrets with the shape of a
+# private key, which every argv check prints (Go twin: privateKeyRefusal).
+_path_refusal() {
+  printf '%s\n' '[error] an argument looks like a private key: it is not printed' \
+    '[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)'
+}
+
+# _value_refusal: the refusal of lo secrets set, whose argument is a value,
+# for a private key: its second line names stdin (Go twin:
+# privateKeyValueRefusal).
+_value_refusal() {
+  printf '%s\n' '[error] an argument looks like a private key: it is not printed' \
+    '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
+}
+
+# _pem_path_refusal: the refusal of an argument of lo secrets other than set
+# that holds a PEM block with no private key: its first line names the PEM
+# block (Go twin: pemPathRefusal).
+_pem_path_refusal() {
+  printf '%s\n' '[error] a value starts a PEM block (-----BEGIN): it is not printed' \
+    '[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)'
+}
+
+# _pem_value_refusal: the refusal of lo secrets set for a PEM block that is
+# not a private key: its first line names the PEM block (Go twin:
+# pemValueRefusal).
+_pem_value_refusal() {
+  printf '%s\n' '[error] a value starts a PEM block (-----BEGIN): it is not printed' \
+    '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
+}
+
+# _refused_path_arg <cmd> <arg>...: runs secrets::<cmd> with the arguments,
+# and fails unless it refused them with _path_refusal and printed no canary.
+_refused_path_arg() {
+  local cmd="${1}"
+  shift
+  run "secrets::${cmd}" "${@}" < /dev/null
+  [ "$status" -eq 1 ] && [ "$output" = "$(_path_refusal)" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+    echo "${cmd} (${#} words): status ${status}: ${output}" >&2
+    return 1
+  }
+}
+
+# init and decrypt take the path of a key file: a key pasted into their
+# arguments is refused before :args reads them (:args prints an argument it
+# rejects), and nothing from it is printed; also a paste split into words
+# (the SSH.com and the PuTTY forms). Without the refusal, both runs here
+# succeed with the key of _init_fakes. A path of a key file passes: a check
+# that refuses every argument fails the last run (Go twin:
+# TestSecretsSSHKeyCommandsDoNotEchoAPrivateKey).
+@test "secrets init and decrypt: a private key in the arguments is refused and not printed" {
+  _init_fakes
+  local pem="-----BEGIN OPENSSH PRIVATE ""KEY-----" cmd
+  for cmd in init decrypt; do
+    _refused_path_arg "${cmd}" --ssh-key "${pem}"$'\n'"${KEY_CANARY}"
+    _refused_path_arg "${cmd}" "--ssh-key=${pem}"$'\n'"${KEY_CANARY}"
+    _refused_path_arg "${cmd}" -k "AGE-SECRET-KEY-1${KEY_CANARY}"
+    _refused_path_arg "${cmd}" -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+    _refused_path_arg "${cmd}" --ssh-key ---- BEGIN SSH2 ENCRYPTED "PRIVATE" "KEY" ---- "${KEY_CANARY}"
+    _refused_path_arg "${cmd}" --ssh-key PuTTY-User-Key-File-3: ssh-ed25519 Encryption: none "${KEY_CANARY}"
+  done
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml" >&2; return 1; }
+  run secrets::init --ssh-key "${BATS_TEST_TMPDIR}/id.pub"
+  [ "$status" -eq 0 ] && [ -e "${PATH_BASE}/.sops.yaml" ] || {
+    echo "a path of a key file was refused: status $status: $output" >&2; return 1; }
+}
+
+# A key pasted into LOK8S_SSH_KEY reaches no argument check: the not-found
+# lines of init and decrypt print a placeholder instead of the value, and
+# init prints no hint, which would hold the placeholder (Go twin:
+# TestSecretsKeyNotFoundHidesAPrivateKeyShape).
+@test "secrets init and decrypt: the not-found line does not print a private key from LOK8S_SSH_KEY" {
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
+  local shown="(not printed: it looks like a private key)"
+  export LOK8S_SSH_KEY="-----BEGIN OPENSSH PRIVATE ""KEY-----"$'\n'"${KEY_CANARY}"
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}" ] || {
+    echo "init: status $status: $output" >&2; return 1; }
+  run secrets::decrypt < /dev/null
+  [ "$status" -eq 1 ] && [[ "${output}" == *"[error] SSH private key not found: ${shown}" ]] || {
+    echo "decrypt: status $status: $output" >&2; return 1; }
+  [[ "${output}" != *"${KEY_CANARY}"* && "${output}" != *BEGIN* ]] || { echo "decrypt printed the value" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+}
+
+# A missing public key file gets a hint. When the private key of that .pub
+# exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
+# ed25519 there asks to overwrite the key that decrypt reads. The private key
+# gets a test -f only: its file has mode 000 and holds the canary, and
+# ssh-to-age never runs. Each path goes through secrets::_shown_path, then
+# into single quotes when the shell would split or expand it (a space).
+# Without the private key (no file, or a directory) the hint is ssh-keygen
+# -t ed25519. When something that is not a regular file is at the path of
+# the .pub (a directory, a link to no file), there is no hint: a command
+# that writes the .pub would write through the link. When the path has the
+# shape of a private key, secrets::_shown_path replaces it, and there is no
+# hint either: it would hold the placeholder. The key comes from
+# LOK8S_SSH_KEY: :args is a stub here (the --ssh-key form runs in
+# hack/parity-test.sh). Go twin: TestInitMissingKey.
+@test "secrets init: a missing .pub beside its private key gets the ssh-keygen -y hint" {
+  (( EUID != 0 )) || skip "root reads a file of mode 000: the test -f proof needs another user"
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
+  local dir="${BATS_TEST_TMPDIR}/keys" key want private
+  local generate="[error] Generate one with: ssh-keygen -t ed25519"
+  local fake="${dir}/AGE-SECRET-KEY-1${KEY_CANARY}"
+  mkdir -p "${dir}/adir" "${dir}/dirpub.pub"
+  ln -s "${dir}/no-such-file" "${dir}/linkpub.pub"
+  for private in "${dir}/id" "${dir}/work key" "${dir}/dirpub" "${dir}/linkpub" "${fake}"; do
+    printf '%s\n' "${KEY_CANARY}" > "${private}"
+    chmod 000 "${private}"
+  done
+  _hint() {
+    local first
+    export LOK8S_SSH_KEY="${1}"
+    run secrets::init
+    first="[error] SSH public key not found: $(secrets::_shown_path "${key}")"
+    [ "$status" -eq 1 ] && [ "$output" = "${first}${want:+$'\n'}${want}" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "${1//${KEY_CANARY}/<canary>}: status ${status}: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  }
+  key="${dir}/id.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${dir}/id > ${dir}/id.pub"
+  _hint "${dir}/id"
+  _hint "${dir}/id.pub"
+  key="${dir}/work key.pub" want="[error] Write it from the private key with: ssh-keygen -y -f '${dir}/work key' > '${dir}/work key.pub'"
+  _hint "${dir}/work key"
+  key="${fake}.pub" want=""
+  _hint "${fake}"
+  key="${fake}-gone.pub"
+  _hint "${fake}-gone"
+  want="${generate}"
+  for key in "${dir}/none.pub" "${dir}/adir.pub"; do
+    _hint "${key%.pub}"
+  done
+  want=""
+  for key in "${dir}/dirpub.pub" "${dir}/linkpub.pub"; do
+    _hint "${key%.pub}"
+  done
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+}
+
+# A path in the hint of init stays as it is when the shell reads it as one
+# word with no expansion, else it goes into single quotes, with each ' as
+# '\''. The x keeps a newline at the end. Go twin: TestShellQuoted (the same
+# table).
+@test "secrets::_shown_quoted gives the bytes of shellQuoted" {
+  local -A table=(
+    ['/home/u/.ssh/id_ed25519']='/home/u/.ssh/id_ed25519'
+    ['a-b_c@d%e+f=g:h,i./j']='a-b_c@d%e+f=g:h,i./j'
+    ['/home/u/.ssh/work key']="'/home/u/.ssh/work key'"
+    ["it's"]="'it'\\''s'"
+    ['~/id']="'~/id'"
+    ['$HOME/id']="'\$HOME/id'"
+    [$'a\nb']=$'\'a\nb\''
+    [$'key\n']=$'\'key\n\''
+    [$'/k/\xc3\xa9']=$'\'/k/\xc3\xa9\''
+    ['(not printed: it looks)']="'(not printed: it looks)'"
+    ['back\slash']="'back\\slash'"
+  )
+  local in got
+  for in in "${!table[@]}"; do
+    got="$(secrets::_shown_quoted "${in}"; printf x)"
+    [ "${got%x}" = "${table[${in}]}" ] || { echo "$(printf '%q' "${in}"): got $(printf '%q' "${got%x}")" >&2; return 1; }
+  done
+  got="$(secrets::_shown_quoted ""; printf x)"
+  [ "${got%x}" = "''" ] || { echo "empty: got ${got%x}" >&2; return 1; }
+}
+
+# The key file is read once and at most 64 KiB: a bigger file, a file that
+# holds a NUL byte, and a file that cannot be read, are refused with the
+# path and the cause, before ssh-to-age reads anything; a file of exactly
+# 64 KiB passes the cap. A file over 64 KiB of NUL bytes is a file over
+# 64 KiB, as in Go. The same for the key of add-key and remove-key
+# (secrets::_recipient). Go twin: TestKeyFileReadIsCappedAndFailsClosed.
+@test "secrets init and add-key: a key file over 64 KiB, with a NUL byte, or one that cannot be read, is refused" {
+  _init_fakes
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  local big="${BATS_TEST_TMPDIR}/big.pub" at_cap="${BATS_TEST_TMPDIR}/at-cap.pub" closed="${BATS_TEST_TMPDIR}/closed.pub" path want
+  { printf 'ssh-ed25519 AAAA %s' "${KEY_CANARY}"; head -c 65536 /dev/zero | tr '\0' x; } > "${big}"
+  { printf 'ssh-ed25519 AAAA'; head -c $((65536 - 16)) /dev/zero | tr '\0' x; } > "${at_cap}"
+  [ "$(wc -c < "${at_cap}")" -eq 65536 ] || { echo "the fixture is not 64 KiB" >&2; return 1; }
+  local nul="${BATS_TEST_TMPDIR}/nul.pub" big_nul="${BATS_TEST_TMPDIR}/big-nul.pub"
+  printf 'ssh-ed25519 AAAA\0%s\n' "${KEY_CANARY}" > "${nul}"
+  head -c 65537 /dev/zero > "${big_nul}"
+  local -A cases=(
+    ["${big}"]="[error] ${big} is bigger than 64 KiB, which no public key file is: nothing from it is printed"
+    ["${big_nul}"]="[error] ${big_nul} is bigger than 64 KiB, which no public key file is: nothing from it is printed"
+    ["${nul}"]="[error] ${nul} holds a NUL byte, which no public key file holds: nothing from it is printed"
+  )
+  if (( EUID != 0 )); then
+    printf 'ssh-ed25519 AAAA %s\n' "${KEY_CANARY}" > "${closed}"
+    chmod 000 "${closed}"
+    cases["${closed}"]="[error] cannot read the key file ${closed}: nothing from it is printed"
+  fi
+  for path in "${!cases[@]}"; do
+    want="${cases[${path}]}"
+    KEY_PATH="${path}"
+    :args() { ssh_key="${KEY_PATH}"; }
+    run secrets::init
+    [ "$status" -eq 1 ] && [ "$output" = "${want}" ] || { echo "init ${path##*/}: status $status: $output" >&2; return 1; }
+    run secrets::_recipient "${path}"
+    [ "$status" -eq 1 ] && [ "$output" = "${want}" ] || { echo "_recipient ${path##*/}: status $status: $output" >&2; return 1; }
+    [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "${path##*/}: ssh-to-age ran" >&2; return 1; }
+  done
+  [ ! -e "${PATH_BASE}/.sops.yaml" ] || { echo "init wrote .sops.yaml" >&2; return 1; }
+  KEY_PATH="${at_cap}"
+  run secrets::init
+  [ "$status" -eq 0 ] && [ -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || {
+    echo "a file of exactly 64 KiB: status $status: $output" >&2; return 1; }
+}
+
+# ssh-to-age reads the text that the check read, on stdin; it does not open
+# the file again. head (the read) is a function here that removes the file
+# after it read it: a second open of the file fails, and init with it. The
+# same for the key of add-key and remove-key (secrets::_recipient); the
+# own-identity check is in tests/unit/secrets_remove_key_test.bats (Go twin:
+# deriveAgePublicKey reads the file once by design).
+@test "secrets init and add-key: ssh-to-age gets the checked text, not a second read of the file" {
+  _init_fakes
+  ssh-to-age() { cat > "${BATS_TEST_TMPDIR}/ssh-to-age.in"; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  local key="${BATS_TEST_TMPDIR}/once.pub"
+  printf 'ssh-ed25519 AAAA once\n' > "${key}"
+  export LOK8S_SSH_KEY="${key}"
+  head() { local rc=0; command head "${@}" || rc=$?; rm -f -- "${LOK8S_SSH_KEY}"; return "${rc}"; }
+  run secrets::init
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ ! -e "${key}" ] || { echo "the read did not go through head" >&2; return 1; }
+  printf 'ssh-ed25519 AAAA once\n' > "${BATS_TEST_TMPDIR}/expect"
+  cmp -s "${BATS_TEST_TMPDIR}/expect" "${BATS_TEST_TMPDIR}/ssh-to-age.in" || {
+    echo "ssh-to-age read other bytes than the file held" >&2; return 1; }
+  [[ "${output}" == *"Derived from: ${key}"* ]] || { echo "$output" >&2; return 1; }
+  printf 'ssh-ed25519 AAAA once\n' > "${key}"
+  rm -f -- "${BATS_TEST_TMPDIR}/ssh-to-age.in"
+  run secrets::_recipient "${key}"
+  [ "$status" -eq 0 ] || { echo "_recipient: status $status: $output" >&2; return 1; }
+  [ ! -e "${key}" ] || { echo "_recipient: the read did not go through head" >&2; return 1; }
+  cmp -s "${BATS_TEST_TMPDIR}/expect" "${BATS_TEST_TMPDIR}/ssh-to-age.in" || {
+    echo "_recipient: ssh-to-age read other bytes than the file held" >&2; return 1; }
+}
+
+# _refused_main <arg>...: runs main::secrets with the arguments, and fails
+# unless it refused them with _path_refusal and printed no canary.
+_refused_main() {
+  run main::secrets "${@}" < /dev/null
+  [ "$status" -eq 1 ] && [ "$output" = "$(_path_refusal)" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+    echo "main::secrets (${#} words): status ${status}: ${output}" >&2
+    return 1
+  }
+}
+
+# main::secrets checks the whole argv, its words joined with spaces, before
+# :usage, which prints a flag or a command that it rejects: a key in the
+# --domain value, in a flag that :usage does not know, in a command that
+# takes no key, and a paste split into words (the SSH.com and the PuTTY
+# forms). A path of a key file passes to :usage (Go twin:
+# TestGuardPrivateKeyArgvCoversTheSecretsTree).
+@test "main::secrets: a private key anywhere in the argv is refused before :usage, and not printed" {
+  _init_fakes
+  :usage() { echo ran >> "${BATS_TEST_TMPDIR}/usage.ran"; usage=(true); }
+  local id="AGE-SECRET-KEY-1${KEY_CANARY}" pem="-----BEGIN OPENSSH PRIVATE ""KEY-----"
+  _refused_main --domain "${id}" init
+  _refused_main "--unknown=${id}" init
+  _refused_main --domain "${id}" list
+  _refused_main "${id}"
+  _refused_main list "${pem}"$'\n'"${KEY_CANARY}"
+  _refused_main init --ssh-key ---- BEGIN SSH2 ENCRYPTED "PRIVATE" "KEY" ---- "${KEY_CANARY}"
+  _refused_main add-key PuTTY-User-Key-File-3: ssh-ed25519 Encryption: none "${KEY_CANARY}"
+  _refused_main add-key Private-Lines: 1 "${KEY_CANARY}"
+  [ ! -e "${BATS_TEST_TMPDIR}/usage.ran" ] || { echo ":usage ran for a refused argv" >&2; return 1; }
+  run main::secrets init --ssh-key "${BATS_TEST_TMPDIR}/id.pub"
+  [ "$status" -eq 0 ] && [ -e "${BATS_TEST_TMPDIR}/usage.ran" ] || {
+    echo "a path of a key file did not reach :usage: status $status: $output" >&2; return 1; }
+}
+
+# _path_without <tool>: prints PATH, with each directory that holds <tool>
+# replaced by a directory of links to its other entries: the tool is absent,
+# and every other command is still there.
+_path_without() {
+  local tool="${1}" d f out="" n=0 shadow
+  local -a dirs=()
+  IFS=: read -r -a dirs <<< "${PATH}"
+  for d in "${dirs[@]}"; do
+    if [[ -e "${d}/${tool}" ]]; then
+      n=$(( n + 1 ))
+      shadow="${BATS_TEST_TMPDIR}/path-without-${n}"
+      mkdir -p "${shadow}"
+      for f in "${d}"/*; do
+        [[ "${f##*/}" == "${tool}" ]] || ln -s "${f}" "${shadow}/${f##*/}"
+      done
+      d="${shadow}"
+    fi
+    out+="${out:+:}${d}"
+  done
+  printf '%s\n' "${out}"
+}
+
+# Without ssh-to-age, decrypt prints how to make the age key file, and that
+# command line names the key: a key pasted into LOK8S_SSH_KEY prints as a
+# placeholder there too. ssh-to-age is absent here, not a stub. Go derives
+# with the library and has no such lines.
+@test "secrets decrypt: without ssh-to-age, the help lines do not print a private key from LOK8S_SSH_KEY" {
+  unset -f ssh-to-age
+  PATH="$(_path_without ssh-to-age)"
+  hash -r
+  ! command -v ssh-to-age > /dev/null || { echo "ssh-to-age is still on PATH" >&2; return 1; }
+  export LOK8S_SSH_KEY="-----BEGIN OPENSSH PRIVATE ""KEY-----"$'\n'"${KEY_CANARY}"
+  run secrets::decrypt < /dev/null
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "${output}" == *'[error] Cannot find age private key. Options:'* ]] || { echo "$output" >&2; return 1; }
+  [[ "${output}" == *'[error]      ssh-to-age -private-key < (not printed: it looks like a private key) > ${HOME}/.config/sops/age/keys.txt'* ]] || {
+    echo "$output" >&2; return 1; }
+  [[ "${output}" != *"${KEY_CANARY}"* && "${output}" != *BEGIN* ]] || { echo "decrypt printed the value" >&2; return 1; }
+}
+
+# A key path with the shape of a private key is not printed: every message
+# of init and decrypt that names the key file prints a placeholder
+# (secrets::_shown_path). The path is a real file in a directory whose name
+# holds an age identity marker (Go twin:
+# TestKeyPathMessagesHideAPrivateKeyShape; the remove-key warning is in
+# tests/unit/secrets_remove_key_test.bats).
+@test "secrets init and decrypt: a key path with the shape of a private key is not printed" {
+  _init_fakes
+  local marker="AGE-SECRET-""KEY-1SHAPEDPATH" shown="(not printed: it looks like a private key)"
+  local dir="${BATS_TEST_TMPDIR}/${marker}" path
+  mkdir -p "${dir}"
+  _no_marker() {
+    [[ "${output}" != *"${marker}"* && "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "${1}: the path or the file reached the output: ${output}" >&2; return 1; }
+  }
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" "${KEY_CANARY}" > "${dir}/key"
+  head -c 65537 /dev/zero | tr '\0' x > "${dir}/big.pub"
+  printf 'ssh-ed25519 AAAA\0\n' > "${dir}/nul.pub"
+  local -A cases=(
+    ["${dir}/key"]="[error] ${shown} holds a private key, not a public key: nothing from it is printed
+[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key"
+    ["${dir}/big.pub"]="[error] ${shown} is bigger than 64 KiB, which no public key file is: nothing from it is printed"
+    ["${dir}/nul.pub"]="[error] ${shown} holds a NUL byte, which no public key file holds: nothing from it is printed"
+  )
+  if (( EUID != 0 )); then
+    printf 'ssh-ed25519 AAAA\n' > "${dir}/closed.pub"
+    chmod 000 "${dir}/closed.pub"
+    cases["${dir}/closed.pub"]="[error] cannot read the key file ${shown}: nothing from it is printed"
+  fi
+  :args() { ssh_key="${KEY_PATH}"; }
+  for path in "${!cases[@]}"; do
+    KEY_PATH="${path}"
+    run secrets::init
+    [ "$status" -eq 1 ] && [ "$output" = "${cases[${path}]}" ] || { echo "init ${path##*/}: status $status: $output" >&2; return 1; }
+    _no_marker "init ${path##*/}"
+  done
+  # ssh-to-age fails, then derives nothing, then derives a key; then init
+  # runs again with another key in .sops.yaml.
+  KEY_PATH="${dir}/id.pub"
+  printf 'ssh-ed25519 AAAA test\n' > "${KEY_PATH}"
+  ssh-to-age() { cat > /dev/null; return 1; }
+  run secrets::init
+  [ "$status" -eq 1 ] && [[ "${output}" == "[error] Failed to derive age public key from ${shown}"$'\n'* ]] || {
+    echo "init, ssh-to-age failed: status $status: $output" >&2; return 1; }
+  _no_marker "init, ssh-to-age failed"
+  ssh-to-age() { cat > /dev/null; }
+  run secrets::init
+  [ "$status" -eq 1 ] && [[ "${output}" == "[error] no age recipient derived from ${shown} (ed25519 SSH keys only)"* ]] || {
+    echo "init, no recipient: status $status: $output" >&2; return 1; }
+  _no_marker "init, no recipient"
+  ssh-to-age() { cat > /dev/null; echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  run secrets::init
+  [ "$status" -eq 0 ] && [[ "${output}" == *"Derived from: ${shown}"* ]] || {
+    echo "init: status $status: $output" >&2; return 1; }
+  _no_marker "init"
+  printf 'creation_rules:\n  - age: age1other\n' > "${PATH_BASE}/.sops.yaml"
+  run secrets::init
+  [ "$status" -eq 0 ] && [[ "${output}" == *"[warn] Add it with: lo secrets add-key ${shown}"* ]] || {
+    echo "init again: status $status: $output" >&2; return 1; }
+  _no_marker "init again"
+  # decrypt: ssh-to-age fails on the key.
+  KEY_PATH="${dir}/id_ed25519"
+  printf 'not a key %s\n' "${KEY_CANARY}" > "${KEY_PATH}"
+  ssh-to-age() { cat > /dev/null; return 1; }
+  run secrets::decrypt < /dev/null
+  [ "$status" -eq 1 ] && [[ "${output}" == *"[error] Failed to derive age key from ${shown}"* ]] &&
+    [[ "${output}" == *"[error]   ssh-to-age -private-key -i ${shown} > ~/.config/sops/age/keys.txt"* ]] || {
+    echo "decrypt: status $status: $output" >&2; return 1; }
+  _no_marker "decrypt"
+}
+
+# main of lo runs secrets::_guard_lo_argv before its parser, which takes the
+# global flags (--domain too) from anywhere in the argv and prints a command
+# that it does not know. The check reads the tables of main (here a part of
+# them): the command is the first word that is not a flag or the value of a
+# flag that takes one. lo secrets, its alias, and an argv with no known
+# command are refused; another command passes (Go twin:
+# TestGuardPrivateKeyArgvCoversTheSecretsTree; the real tables run in the
+# real-entrypoint test of tests/unit/secrets_remove_key_test.bats).
+@test "secrets::_guard_lo_argv: lo secrets and an unknown command are refused, another command passes" {
+  local -a usage=('up|u@destructive' 'Start cluster' 'version@readonly' 'Print versions'
+    '#hooks' 'Dev hooks' 'secrets|s' 'Manage secrets')
+  local -a args=('-' 'Global flags:' 'verbose|v:+' 'Verbose' 'cluster|s' 'Cluster name' 'domain|' 'Domain')
+  local id="AGE-SECRET-KEY-1${KEY_CANARY}"
+  _root_refused() {
+    run secrets::_guard_lo_argv "${@}"
+    [ "$status" -eq 1 ] && [ "$output" = "$(_path_refusal)" ] || {
+      echo "lo ${*//${id}/<id>}: status ${status}: ${output//${id}/<id>}" >&2; return 1; }
+  }
+  _root_passes() {
+    run secrets::_guard_lo_argv "${@}"
+    [ "$status" -eq 0 ] && [ -z "$output" ] || {
+      echo "lo ${*//${id}/<id>}: status ${status}: ${output//${id}/<id>}" >&2; return 1; }
+  }
+  _root_refused secrets --domain "${id}" init
+  _root_refused s --domain "${id}" init
+  _root_refused --domain "${id}" secrets list
+  _root_refused -v --cluster "${id}" s list
+  _root_refused "--domain=${id}" secrets
+  _root_refused "${id}"
+  _root_refused "${id}" up
+  _root_refused --domain "${id}"
+  _root_refused "--unknown=${id}"
+  _root_passes --domain alpha.dev version "${id}"
+  _root_passes -s "${id}" up
+  _root_passes u "${id}"
+  _root_passes hooks "${id}"
+  _root_passes secrets init --ssh-key /k/id_ed25519.pub
+}
+
+# No command of lo secrets takes a PEM block as an argument, and a word that
+# holds "-----BEGIN" starts with "-": :args reads it as a flag and prints
+# it. So the checks of main of lo and of main::secrets refuse such a word (a
+# certificate, a public key, a static key of OpenVPN), and the first line
+# names the PEM block. For set it names stdin: through each alias, with
+# --domain on either side, and with an unknown flag or "--" before secrets
+# or before set (the words of the argv find set there; the binary refuses
+# those with the line that names the key file, see the residual of the Go
+# twin). For another command of lo secrets (list, a typo of set) it names
+# the key file. A command outside lo secrets is left to that command. A
+# private key is refused the same way, also as a paste split into words
+# (whose words hold "-----BEGIN" too), and the first line names a private
+# key. The key-path commands refuse any PEM block in their own check
+# (secrets::_is_key_arg). Go twin: TestGuardPrivateKeyArgvRefusesAPEMBlock,
+# TestLooksLikePrivateKeyArgvMarkers.
+@test "secrets: a PEM block or a private key is refused, for set with the stdin line" {
+  _init_fakes
+  local -a usage=('up|u@destructive' 'Start cluster' 'secrets|s' 'Manage secrets')
+  local -a args=('-' 'Global flags:' 'verbose|v:+' 'Verbose' 'cluster|s' 'Cluster name' 'domain|' 'Domain')
+  local cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIB${KEY_CANARY}"$'\n'"-----END CERTIFICATE-----"
+  local pub="-----BEGIN PUBLIC KEY-----"$'\n'"MCow${KEY_CANARY}"$'\n'"-----END PUBLIC KEY-----"
+  local ovpn="-----BEGIN OpenVPN Static key V1-----"$'\n'"${KEY_CANARY}"$'\n'"-----END OpenVPN Static key V1-----"
+  local pem="-----BEGIN OPENSSH PRIVATE ""KEY-----" id="AGE-SECRET-KEY-1${KEY_CANARY}" value
+  _passes() {
+    run "${@}"
+    [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "${*}: status ${status}: ${output}" >&2; return 1; }
+  }
+  _refused_as() {
+    local want="${1}"
+    shift
+    run "${@}" < /dev/null
+    [ "$status" -eq 1 ] && [ "$output" = "$("${want}")" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "${1} (${#} words): status ${status}: ${output}" >&2; return 1; }
+  }
+  for value in "${cert}" "${pub}" "${ovpn}" "-----BEGIN"; do
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv secrets set -n tls tls.crt "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv s s --domain alpha.dev -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv --domain alpha.dev secrets set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv secrets --no-such-flag set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_no_private_argv set -n tls tls.crt "${value}"
+    _refused_as _pem_value_refusal secrets::_no_private_argv --no-such-flag s ta.key "${value}"
+    _refused_as _pem_value_refusal main::secrets set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv --no-such-flag secrets set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv -- secrets set -n vpn ta.key "${value}"
+    # Another command of lo secrets: the refusal names the key file.
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets list "${value}"
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets --domain set list "${value}"
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets st ta.key "${value}"
+    _refused_as _pem_path_refusal secrets::_no_private_argv list "${value}"
+    _refused_as _pem_path_refusal secrets::_no_private_argv st ta.key "${value}"
+    _refused_as _pem_path_refusal main::secrets list "${value}"
+    # The block as one word before secrets: an unknown flag is a switch, so
+    # secrets is the command (Go twin: namesSecrets).
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv "${value}" secrets l
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv "${value}" secrets init
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv "${value}" s init
+    # A command outside lo secrets is left to that command, also when
+    # secrets is the value of --domain.
+    _passes secrets::_guard_lo_argv up "${value}"
+    _passes secrets::_guard_lo_argv --domain secrets up "${value}"
+  done
+  _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY "${pem}"$'\n'"${KEY_CANARY}"
+  _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _value_refusal secrets::_guard_lo_argv s s -n app KEY "${id}"
+  _refused_as _value_refusal secrets::_guard_lo_argv --domain alpha.dev secrets set -n app KEY "${id}"
+  _refused_as _value_refusal secrets::_guard_lo_argv secrets --domain alpha.dev set KEY "${id}"
+  _refused_as _value_refusal secrets::_no_private_argv set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _value_refusal secrets::_no_private_argv s KEY "${id}"
+  _refused_as _value_refusal main::secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _path_refusal secrets::_guard_lo_argv secrets add-key -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _path_refusal secrets::_guard_lo_argv secrets list set "${id}"
+  _refused_as _path_refusal secrets::_guard_lo_argv "${pem}"$'\n'"${KEY_CANARY}" secrets l
+  _refused_as _path_refusal secrets::_guard_lo_argv "${pem}"$'\n'"${KEY_CANARY}" secrets init
+  _refused_as _path_refusal secrets::_no_private_argv list set "${id}"
+  # The key-path commands refuse any PEM block in their own check.
+  _refused_as _pem_path_refusal secrets::add-key "${cert}"
+  _refused_as _pem_path_refusal secrets::init --ssh-key "${cert}"
 }

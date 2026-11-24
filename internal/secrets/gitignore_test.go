@@ -391,7 +391,7 @@ func TestInitRerunChecksTheGitignore(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c, out, errOut := testEnv(t)
 			_, pubPath := testSSHKeypair(t, c.Paths.Base)
-			agePubkey, _, err := deriveAgePublicKey(pubPath)
+			agePubkey, err := deriveAgePublicKey(pubPath)
 			if err != nil {
 				t.Fatal(err)
 			}

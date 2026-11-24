@@ -19,6 +19,7 @@
 setup() {
   load "../test_helper"
   setup_tmpdir
+  isolate_secrets_home
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
@@ -32,7 +33,7 @@ setup() {
   export -f import :usage :args
 }
 
-teardown() { teardown_tmpdir; }
+teardown() { teardown_secrets_home; }
 
 # _per_domain_project: a.dev keeps its own store, new.dev is a domain
 # directory without one.

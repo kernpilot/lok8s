@@ -29,12 +29,16 @@ import (
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
-// privateKeyMarkers are the spellings of a private key pasted as the key
-// argument: an age identity (in either case, because bech32 allows both), a
-// PEM or OpenSSH private key block, and the first line of any PEM block
-// (an unquoted paste splits the block into words, and the first one is
-// "-----BEGIN").
-var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "-----BEGIN"}
+// privateKeyMarkers are the spellings of a private key pasted as an
+// argument: an age identity (in either case, because bech32 allows both),
+// the first line of a PEM, OpenSSH, PGP or SSH.com private key block (each
+// form holds "PRIVATE KEY"), and a PuTTY key file (its first line, and the
+// line before its private part). The argv checks join the words with spaces,
+// so "PRIVATE KEY" also matches a paste split into words. Another PEM block
+// (a certificate, a public key) does not match: a call outside the argv of
+// `lo secrets set` and of the key-path commands passes with one
+// (LooksLikeKeyArg). Bash twin: secrets::_is_private_key.
+var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "PuTTY-User-Key-File-", "Private-Lines:"}
 
 // LooksLikePrivateKey reports whether arg has the shape of a private key.
 func LooksLikePrivateKey(arg string) bool {
@@ -46,18 +50,75 @@ func LooksLikePrivateKey(arg string) bool {
 	return false
 }
 
-// RefusePrivateKey prints the refusal for a private key argument. It never
-// prints the argument.
-func RefusePrivateKey(w io.Writer) {
-	ui.ErrorTo(w, "the key argument looks like a private key — it is not printed")
-	ui.ErrorTo(w, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
+// LooksLikeKeyArg is LooksLikePrivateKey for an argument of a command that
+// takes the path of a key file or an age public key (init, decrypt, add-key,
+// remove-key), and for the argv of `lo secrets set`. No such argument is a
+// PEM block, so the first word of any PEM block ("-----BEGIN") counts too: a
+// paste split into words reaches cobra's flag parser as the flag
+// "-----BEGIN", and its error prints that word. The value of set goes on
+// stdin: as an argument, a PEM block starts with "-", and the flag error
+// prints all of it. Bash twin: secrets::_is_key_arg.
+func LooksLikeKeyArg(arg string) bool {
+	return LooksLikePrivateKey(arg) || strings.Contains(arg, "-----BEGIN")
+}
+
+// refusedArgLine prints the first line of a refusal of lo secrets: it names
+// a private key when argv (the refused words, joined with spaces) has the
+// shape of one (LooksLikePrivateKey), else the PEM block (a certificate, a
+// public key, a static key of OpenVPN). Bash twin:
+// secrets::_refused_arg_line.
+func refusedArgLine(w io.Writer, argv string) {
+	if LooksLikePrivateKey(argv) {
+		ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+		return
+	}
+	ui.ErrorTo(w, "a value starts a PEM block (-----BEGIN): it is not printed")
+}
+
+// RefusePrivateKey prints the refusal for an argument of lo secrets that has
+// the shape of a private key or holds a PEM block (LooksLikeKeyArg). It
+// never prints the argument. argv is the refused words, joined with spaces:
+// they choose the first line (refusedArgLine). Every argv check of lo
+// secrets prints it: the guard of main for the whole argv, and the checks
+// of add-key, remove-key, init and decrypt. Bash twin:
+// secrets::_no_private_key.
+func RefusePrivateKey(w io.Writer, argv string) {
+	refusedArgLine(w, argv)
+	ui.ErrorTo(w, "pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)")
+}
+
+// RefusePrivateKeyValue is the refusal of `lo secrets set`: its argument is
+// a secret value, not the path of a key file, and set reads the value from
+// stdin when the argument is left out. The guard of main prints it for an
+// argv that resolves to set and has a private key or a PEM block in it
+// (LooksLikeKeyArg). argv is that argv, joined with spaces: it chooses the
+// first line (refusedArgLine). Bash twin: secrets::_no_private_value.
+func RefusePrivateKeyValue(w io.Writer, argv string) {
+	refusedArgLine(w, argv)
+	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")
+}
+
+// shownKeyPath is path for a message, or a placeholder when it has the shape
+// of a private key: a key pasted into LOK8S_SSH_KEY reaches the messages of
+// init, decrypt and remove-key, which no argv guard sees. Every message that
+// prints a key path prints it through shownKeyPath. Bash twin:
+// secrets::_shown_path.
+func shownKeyPath(path string) string {
+	if LooksLikePrivateKey(path) {
+		return "(not printed: it looks like a private key)"
+	}
+	return path
 }
 
 // QuoteArg is arg in Go quotes for a message, or a placeholder when arg has
-// the shape of a private key.
+// the shape of a private key or holds a PEM block (LooksLikeKeyArg): a PEM
+// block can be key material, and a message must not print it.
 func QuoteArg(arg string) string {
 	if LooksLikePrivateKey(arg) {
 		return "(not printed: it looks like a private key)"
+	}
+	if LooksLikeKeyArg(arg) {
+		return "(not printed: it holds a PEM block)"
 	}
 	return strconv.Quote(arg)
 }
@@ -69,8 +130,8 @@ func QuoteArg(arg string) string {
 func (c *Context) recipientArg(key string) (string, error) {
 	// Before any message that prints the argument: the not-a-file error
 	// below echoes it, and for a pasted private key that is key material.
-	if LooksLikePrivateKey(key) {
-		RefusePrivateKey(c.ErrOut)
+	if LooksLikeKeyArg(key) {
+		RefusePrivateKey(c.ErrOut, key)
 		return "", ErrHandled
 	}
 
@@ -88,8 +149,12 @@ func (c *Context) recipientArg(key string) (string, error) {
 		// ENTIRE input on failure, which for a mistakenly-passed PRIVATE key
 		// would print the key material (see
 		// tests/unit/secret_material_containment_test.bats). The library
-		// error is likewise never surfaced.
-		derived, _, err := deriveAgePublicKey(key)
+		// error is likewise never surfaced. A private key file is refused
+		// before the library parses it (bash: before ssh-to-age reads it).
+		derived, err := deriveAgePublicKey(key)
+		if refuseKeyFile(c.ErrOut, key, err) {
+			return "", ErrHandled
+		}
 		if err != nil && !errors.Is(err, errUnsupportedKey) {
 			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", key)
 			ui.ErrorTo(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
@@ -991,8 +1056,9 @@ func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selecte
 // recipient belongs to (bash: secrets::_own_identity): the sops age keys
 // file (${SOPS_AGE_KEY_FILE:-~/.config/sops/age/keys.txt}) by its
 // "# public key: " lines, or the SSH key lo decrypts with
-// (${LOK8S_SSH_KEY:-~/.ssh/id_ed25519}) by the age key of its .pub. "" when
-// neither matches. No private key is printed or derived. It reads these two
+// (${LOK8S_SSH_KEY:-~/.ssh/id_ed25519}) by the age key of its .pub
+// (DefaultSSHPublicKey). "" when neither matches. No private key is printed
+// or derived: a .pub that holds a private key is no match. It reads these two
 // sources only, and the scope line says so (ownIdentityScope).
 func ownIdentity(recipient string) string {
 	keyFile := os.Getenv("SOPS_AGE_KEY_FILE")
@@ -1008,12 +1074,8 @@ func ownIdentity(recipient string) string {
 			}
 		}
 	}
-	sshKey := os.Getenv("LOK8S_SSH_KEY")
-	if sshKey == "" {
-		sshKey = os.Getenv("HOME") + "/.ssh/id_ed25519"
-	}
-	if pub := sshKey + ".pub"; fsutil.IsRegular(pub) {
-		if derived, _, err := deriveAgePublicKey(pub); err == nil && derived == recipient {
+	if pub := DefaultSSHPublicKey(); fsutil.IsRegular(pub) {
+		if derived, err := deriveAgePublicKey(pub); err == nil && derived == recipient {
 			return pub
 		}
 	}
@@ -1498,7 +1560,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		return ErrHandled
 	}
 	if own := ownIdentity(agePubkey); own != "" {
-		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file", own)
+		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file", shownKeyPath(own))
 	}
 	ui.WarnTo(c.ErrOut, "%s", ownIdentityScope)
 

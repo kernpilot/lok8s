@@ -88,6 +88,18 @@ lo secrets set --domain app.example.com --name myapp --namespace default API_TOK
 To store the literal string `-` as a value, use the pipe form:
 `printf %s - | lo secrets set … API_TOKEN`.
 
+A value that starts with `-`, for example a certificate (a PEM block), goes on
+stdin too: the flag parser reads such an argument as a flag. `set` refuses any
+PEM block or private key as the value argument before a parser reads it, does
+not print it, and says to use stdin (see below). A value that holds a PEM
+block at a later position also goes on stdin, for example a JSON document
+with a certificate in it: `set` refuses each argument that holds
+`-----BEGIN`.
+
+```bash
+lo secrets set --domain app.example.com --name tls tls.crt < cert.pem
+```
+
 It's then cached like any generated value and can be encrypted + committed.
 
 Pass **`--encrypt`** (short `-e`; the alias `--enc` also works) to SOPS-encrypt the
@@ -168,7 +180,7 @@ teammates, commit them **encrypted**: no separate key ceremony, your SSH key
 *is* your encryption identity (via `ssh-to-age`; ed25519 only).
 
 ```bash
-# one-time: derive an age key from ~/.ssh/id_ed25519 and write .sops.yaml
+# one-time: derive an age key from ~/.ssh/id_ed25519.pub and write .sops.yaml
 lo secrets init                                 # needs `sops` + `ssh-to-age` (b install)
 
 lo secrets --domain app.example.com encrypt     # write Secret.*.enc for committing
@@ -177,6 +189,41 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 # on another machine / for a teammate whose age key is in .sops.yaml:
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
+
+`init` reads the public key: `--ssh-key`, else the `.pub` file of
+`LOK8S_SSH_KEY` (by default `~/.ssh/id_ed25519.pub`). `LOK8S_SSH_KEY` names
+the private key that `decrypt` reads. When its value ends in `.pub`, `init`
+reads that path. When nothing is at the path of the `.pub` file and its
+private key is a regular file, the error shows the command that writes the
+`.pub` from the private key (`ssh-keygen -y -f <key> > <key>.pub`, with each
+path in single quotes when the shell would split or expand it). Do not run
+`ssh-keygen -t ed25519` there: it asks to overwrite the key that `decrypt`
+reads. When something that is not a regular file is at that path (a
+directory, a FIFO, a link to no file), the error names the path and shows no
+command: a command that writes the `.pub` would write through the link or
+stop at that entry.
+
+A key file that holds a private key stops `init`, `add-key` and `remove-key`
+before any tool reads it. The error names the path and the fix, and shows
+nothing from the file. lo reads a key file once and at most 64 KiB, so a
+bigger file stops the command too. So do a file with a NUL byte and a file
+that lo cannot read.
+
+The bash implementation never shows the output of `ssh-to-age`, because it
+can quote the key file. It shows the exit status of the tool instead.
+
+Every `lo secrets` command refuses an argument that looks like a private
+key or holds a PEM block (a certificate, a public key, a static key of
+OpenVPN), and does not print it. No command of `lo secrets` takes a PEM
+block as an argument: it starts with `-`, so the flag parser reads it as a
+flag and prints it. The refusal includes a key pasted into `--ssh-key` or
+`--domain`, a key in place of a command, and a paste that the shell splits
+into words. For a PEM block that is not a private key, the first line of
+the error is `a value starts a PEM block (-----BEGIN): it is not printed`.
+For `set`, the error says to pass the value on stdin. When the value of
+`LOK8S_SSH_KEY` looks like a private key, each message that names the key
+file shows a placeholder instead of the value, and `init` shows no command
+to write the `.pub` file.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also
