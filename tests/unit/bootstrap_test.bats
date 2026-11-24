@@ -622,12 +622,28 @@ YAML
   run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
   assert_success
   [ "$(cat "${KENV}")" = "keys-only=0" ]
-  # An entry env line that names it (the engine refuses that before the
-  # render; this is the render's own backstop) loses to the pin too.
-  rm -f "${KENV}"
-  run addons::render "${ADDON_DIR}" "lo" "hetzner" "" "LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1"
+  # An entry env line that names it is refused: see "addons::render refuses
+  # an env line that sets one of lo's own variables".
+}
+
+# addons::render refuses an entry env line that sets one of lo's own
+# variables itself: the engine refuses such an entry before the render, and
+# this is the backstop for any other caller. kustomize does not run. Go:
+# TestRenderRefusesProtectedEnv.
+@test "addons::render refuses an env line that sets one of lo's own variables" {
+  _no_mint_addon
+  local name
+  for name in LOK8S_SECRETS_NO_MINT LOK8S_SECRETS_DISABLE LOK8S_INTERNAL_SECRETS_KEYS_ONLY \
+      KUSTOMIZE_PLUGIN_HOME PATH_SECRETS; do
+    rm -f "${KENV}"
+    run addons::render "${NO_MINT_ADDON}" "lo" "" "" $'LOK8S_USER_FOO=x\n'"${name}=0"
+    assert_failure
+    assert_output "[error] addons::render: env: may not set ${name}"
+    [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+  done
+  run addons::render "${NO_MINT_ADDON}" "lo" "" "" "LOK8S_USER_FOO=x"
   assert_success
-  [ "$(cat "${KENV}")" = "keys-only=0" ]
+  [ -e "${KENV}" ]
 }
 
 # --- no-mint: a real addon render checks the Secret plugin ---------------------

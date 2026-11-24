@@ -42,7 +42,7 @@ import (
 // LOK8S_SECRETS_NO_MINT (an entry must not turn the store-free switch or
 // the no-mint switch off for its render). An entry that names one is an
 // entry error on a real run and on a dry run alike (bash:
-// bootstrap::_reserved_env_name).
+// addons::_reserved_env_name).
 func ProtectedEnvOverride(env map[string]string) string {
 	names := make([]string, 0, len(env))
 	for k := range env {
