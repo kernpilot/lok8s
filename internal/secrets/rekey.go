@@ -76,9 +76,16 @@ func RefusePrivateKey(w io.Writer) {
 // a secret value, not the path of a key file, and set reads the value from
 // stdin when the argument is left out. The guard of main prints it for an
 // argv that resolves to set and has a private key or a PEM block in it
-// (LooksLikeKeyArg). Bash twin: secrets::_no_private_value.
-func RefusePrivateKeyValue(w io.Writer) {
-	ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+// (LooksLikeKeyArg). argv is that argv, joined with spaces. The first line
+// names a private key when argv has the shape of one (LooksLikePrivateKey),
+// else the PEM block (a certificate, a public key, a static key of
+// OpenVPN). Bash twin: secrets::_no_private_value.
+func RefusePrivateKeyValue(w io.Writer, argv string) {
+	if LooksLikePrivateKey(argv) {
+		ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+	} else {
+		ui.ErrorTo(w, "a value starts a PEM block (-----BEGIN): it is not printed")
+	}
 	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")
 }
 

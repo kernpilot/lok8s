@@ -179,7 +179,8 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // certificate, a public key or a static key of OpenVPN. Such a value starts
 // with "-", so no parser of set can take it as an argument, and the flag
 // error of pflag ("bad flag syntax: <arg>") prints all of it. Its refusal
-// names stdin (secrets.RefusePrivateKeyValue). Bash twin:
+// names stdin, and its first line names the PEM block when the argv has no
+// private key (secrets.RefusePrivateKeyValue). Bash twin:
 // secrets::_guard_lo_argv in main of lo, before its parser (the same scope
 // and the same fail-closed rule), and secrets::_no_private_argv in
 // main::secrets.
@@ -190,7 +191,7 @@ func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) b
 	}
 	cmd, rest, err := root.Find(argv)
 	if err == nil && (isSecretsSet(cmd) || isSecretsGroup(cmd) && isSetWord(secretsSubcommand(cmd, rest))) {
-		secrets.RefusePrivateKeyValue(errOut)
+		secrets.RefusePrivateKeyValue(errOut, joined)
 		return true
 	}
 	if !secrets.LooksLikePrivateKey(joined) || err == nil && cmd.HasParent() && !underSecrets(cmd) {

@@ -384,23 +384,30 @@ done
 # line that names stdin, also as a paste split into words. So is any PEM
 # block (a static key of OpenVPN, a certificate): its first character is
 # "-", so the flag parser of set would read it as a flag and print it. The
-# key-path commands refuse any PEM block (here a certificate line).
-SET_REFUSAL="[error] an argument looks like a private key: it is not printed
+# key-path commands refuse any PEM block (here a certificate line). For a
+# PEM block that is not a private key, the first line of the refusal of set
+# names the PEM block; for a private key, it names a private key.
+SET_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
+[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
+SET_KEY_REFUSAL="[error] an argument looks like a private key: it is not printed
 [error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
 sec_check secrets set -n app KEY "${FAKE_ID}"
 sec_no_echo "${FAKE_ID}" "secrets set <private key>"
+if [[ "$(cat "${WORK}/go.err")" != "${SET_KEY_REFUSAL}" ]]; then
+  fail "secrets set <private key>: not the refusal that names a private key and stdin"
+fi
 # shellcheck disable=SC2086 # the four words of the PEM line
 sec_check s s -n app KEY ${PEM_HEAD}
 sec_no_echo "OPENSSH" "secrets s <PEM words>"
-if ! grep -qF "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>" "${WORK}/go.err"; then
-  fail "secrets set <PEM words>: the refusal does not name stdin"
+if [[ "$(cat "${WORK}/go.err")" != "${SET_KEY_REFUSAL}" ]]; then
+  fail "secrets s <PEM words>: not the refusal that names a private key and stdin"
 fi
 PEM_BODY="c2VjcmV0LWJvZHktbm90LWEta2V5"
 for pem in "OpenVPN Static key V1" "CERTIFICATE"; do
   sec_check secrets set -n vpn ta.key "-----BEGIN ${pem}-----"$'\n'"${PEM_BODY}"$'\n'"-----END ${pem}-----"
   sec_no_echo "${PEM_BODY}" "secrets set <${pem} block>"
   if [[ "$(cat "${WORK}/go.err")" != "${SET_REFUSAL}" ]]; then
-    fail "secrets set <${pem} block>: not the refusal that names stdin"
+    fail "secrets set <${pem} block>: not the refusal that names the PEM block and stdin"
   fi
 done
 sec_check secrets add-key "-----BEGIN CERTIFICATE-----"

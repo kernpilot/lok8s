@@ -263,8 +263,9 @@ func TestGuardPrivateKeyArgvCoversTheSecretsTree(t *testing.T) {
 // refuses any word of set that holds "-----BEGIN" (a certificate, a public
 // key, a static key of OpenVPN) with the stdin line, before cobra parses,
 // through the alias, with --domain on either side and with an unknown flag
-// before the subcommand. A private key is refused the same way, also as a
-// paste split into words. Another command of lo secrets keeps its rule: a
+// before the subcommand, and the first line names the PEM block. A private
+// key is refused the same way, also as a paste split into words (whose
+// words hold "-----BEGIN" too), and the first line names a private key. Another command of lo secrets keeps its rule: a
 // PEM block that is not a private key passes the guard there, and a private
 // key gets the refusal that names a key file. The same in a project that
 // routes lo secrets to the bash tree, where Find stops at the shim (checked
@@ -295,7 +296,7 @@ func TestGuardPrivateKeyArgvSetRefusesAPEMBlock(t *testing.T) {
 				{"secrets", "--no-such-flag", "set", "-n", "vpn", "ta.key", value},
 			} {
 				var guard bytes.Buffer
-				if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyValueRefusal {
+				if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != pemValueRefusal {
 					t.Errorf("%s, set argv %d with %.20q: not refused, or printed %q", name, i, value, guard.String())
 				}
 			}

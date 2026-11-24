@@ -2034,10 +2034,19 @@ _path_refusal() {
     '[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)'
 }
 
-# _value_refusal: the refusal of lo secrets set, whose argument is a value:
-# its second line names stdin (Go twin: privateKeyValueRefusal).
+# _value_refusal: the refusal of lo secrets set, whose argument is a value,
+# for a private key: its second line names stdin (Go twin:
+# privateKeyValueRefusal).
 _value_refusal() {
   printf '%s\n' '[error] an argument looks like a private key: it is not printed' \
+    '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
+}
+
+# _pem_value_refusal: the refusal of lo secrets set for a PEM block that is
+# not a private key: its first line names the PEM block (Go twin:
+# pemValueRefusal).
+_pem_value_refusal() {
+  printf '%s\n' '[error] a value starts a PEM block (-----BEGIN): it is not printed' \
     '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
 }
 
@@ -2434,8 +2443,10 @@ _path_without() {
 # prints it. So the checks of main of lo and of main::secrets refuse any word
 # of set that holds "-----BEGIN" (a certificate, a public key, a static key
 # of OpenVPN) with the stdin line, through each alias, with --domain on
-# either side and with an unknown flag before the subcommand. A private key
-# is refused the same way, also as a paste split into words. The other
+# either side and with an unknown flag before the subcommand, and the first
+# line names the PEM block. A private key is refused the same way, also as
+# a paste split into words (whose words hold "-----BEGIN" too), and the
+# first line names a private key. The other
 # commands keep their rule: a PEM block that is not a private key passes
 # these checks, a private key gets the refusal that names a key file, and
 # the key-path commands refuse any PEM block in their own check
@@ -2461,13 +2472,13 @@ _path_without() {
       echo "${1} (${#} words): status ${status}: ${output}" >&2; return 1; }
   }
   for value in "${cert}" "${pub}" "${ovpn}" "-----BEGIN"; do
-    _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n tls tls.crt "${value}"
-    _refused_as _value_refusal secrets::_guard_lo_argv s s --domain alpha.dev -n vpn ta.key "${value}"
-    _refused_as _value_refusal secrets::_guard_lo_argv --domain alpha.dev secrets set -n vpn ta.key "${value}"
-    _refused_as _value_refusal secrets::_guard_lo_argv secrets --no-such-flag set -n vpn ta.key "${value}"
-    _refused_as _value_refusal secrets::_no_private_argv set -n tls tls.crt "${value}"
-    _refused_as _value_refusal secrets::_no_private_argv --no-such-flag s ta.key "${value}"
-    _refused_as _value_refusal main::secrets set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv secrets set -n tls tls.crt "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv s s --domain alpha.dev -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv --domain alpha.dev secrets set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv secrets --no-such-flag set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_no_private_argv set -n tls tls.crt "${value}"
+    _refused_as _pem_value_refusal secrets::_no_private_argv --no-such-flag s ta.key "${value}"
+    _refused_as _pem_value_refusal main::secrets set -n vpn ta.key "${value}"
     # Another command keeps its rule: a PEM block that is not a private key
     # passes these checks.
     _passes secrets::_guard_lo_argv secrets list "${value}"

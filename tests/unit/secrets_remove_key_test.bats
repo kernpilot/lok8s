@@ -2033,11 +2033,11 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
 # refused before any parser, and the refusal names stdin; the PEM line
 # split into words too. So is a PEM block that is not a private key (a
 # static key of OpenVPN, a certificate): its first character is "-", so
-# :args of set would read it as a flag and print it. Exit status 1, and
-# nothing of the value in the output.
+# :args of set would read it as a flag and print it. Its first line names
+# the PEM block. Exit status 1, and nothing of the value in the output.
 @test "the real entrypoint refuses a private key or a PEM block as the value of set with the stdin line" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
-  local canary=CANARY_SECRET_MATERIAL_DO_NOT_LEAK fake cert ovpn want value
+  local canary=CANARY_SECRET_MATERIAL_DO_NOT_LEAK fake cert ovpn want pem_want value
   fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
   cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIB${canary}"$'\n'"-----END CERTIFICATE-----"
   ovpn="-----BEGIN OpenVPN Static key V1-----"$'\n'"${canary}"$'\n'"-----END OpenVPN Static key V1-----"
@@ -2050,9 +2050,11 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   _run_lo s s -n app KEY ${PEM_HEAD} < /dev/null
   [ "$status" -ne 0 ] && [ "$output" = "${want}" ] || {
     echo "s s <PEM words>: rc ${status}: ${output}" >&2; return 1; }
+  pem_want="[error] a value starts a PEM block (-----BEGIN): it is not printed
+[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
   for value in "${ovpn}" "${cert}"; do
     _run_lo secrets set -n vpn ta.key "${value}" < /dev/null
-    [ "$status" -eq 1 ] && [ "$output" = "${want}" ] && [[ "$output" != *"${canary}"* ]] || {
+    [ "$status" -eq 1 ] && [ "$output" = "${pem_want}" ] && [[ "$output" != *"${canary}"* ]] || {
       echo "set <${value%%$'\n'*}>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
   done
 }

@@ -364,13 +364,13 @@ func TestKeysOnlyRefusesAnOldPluginExec(t *testing.T) {
 // The real entrypoint, for lo secrets set with a PEM block as its value (a
 // static key of OpenVPN, a certificate): the guard refuses it before cobra
 // parses, exit status 1, with the two lines of the refusal that names
-// stdin, and nothing of the value on either stream. Without the guard,
+// the PEM block and stdin, and nothing of the value on either stream. Without the guard,
 // pflag's "bad flag syntax: <arg>" prints the whole value. In a project
 // that routes lo secrets to the bash tree, the guard runs in front of the
 // shim: the tree (a stub that leaves a mark) never runs.
 func TestSetRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
-	const refusal = "[error] an argument looks like a private key: it is not printed\n" +
+	const refusal = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n" +
 		"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
 	self, err := os.Executable()
 	if err != nil {

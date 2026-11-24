@@ -214,7 +214,9 @@ key, and does not print it. That includes a key pasted into `--ssh-key` or
 `--domain`, a key in place of a command, and a paste that the shell splits
 into words. For `set`, the error says to pass the value on stdin, and `set`
 also refuses any PEM block (a certificate, a public key, a static key of
-OpenVPN): such a value starts with `-`, so it cannot be an argument.
+OpenVPN): such a value starts with `-`, so it cannot be an argument. For a
+PEM block that is not a private key, the first line of the error is `a
+value starts a PEM block (-----BEGIN): it is not printed`.
 `init`, `decrypt`, `add-key` and `remove-key` take a path or an age public
 key, so they refuse any PEM block too. The other commands refuse only a
 private key. When the
