@@ -369,6 +369,9 @@ vendor_lo_utils() {
 no_mint_plugin() {
   local plugin="${1}/secrets.lok8s.dev/v1/secret/Secret"
   mkdir -p "${plugin%/*}" || return 1
+  # The format is the text of the fake plugin: its ${PWD##*/} and ${1:-}
+  # must expand when the plugin runs, not here.
+  # shellcheck disable=SC2016
   printf '#!%s\nprintf "%%s\\n" "${PWD##*/}" >> %q\n[[ "${1:-}" != --capabilities ]] || printf %%s %q\n' \
     "${BASH}" "${BATS_TEST_TMPDIR}/plugin-runs" "${2}" > "${plugin}" || return 1
   chmod +x "${plugin}"
