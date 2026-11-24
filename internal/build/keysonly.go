@@ -363,9 +363,11 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 // give kustomize this home, so kustomize runs the plugin that lo probed.
 // kustomize runs an exec plugin with the kustomization directory as its
 // working directory, so a relative home would name another plugin there.
-// The path does not have to exist: a home that does not exist stays one,
-// and the check refuses it. It fails only when the working directory is
-// unknown.
+// filepath.Abs also cleans the path by its text, as filepath.Join does in
+// kustomize, so a ".." after a symlinked directory names the directory
+// next to the link for lo and for kustomize. The path does not have to
+// exist: a home that does not exist stays one, and the check refuses it.
+// It fails only when the working directory is unknown.
 func absPluginHome(paths *config.Paths) (string, error) {
 	home := config.KustomizePluginHome(paths)
 	abs, err := filepath.Abs(home)

@@ -488,9 +488,11 @@ value too) and the command reads the store (not `lo build --no-secrets`),
 and refuses a plugin that does not print `no-mint`. The error
 line names the command, for example `lo k8s:` or `addons::render:`, when
 the plugin home or the plugin is missing. lo resolves a relative
-`KUSTOMIZE_PLUGIN_HOME` from its working directory to an absolute path. The
-check probes the plugin in that home, and kustomize gets that absolute home,
-so kustomize runs the plugin that lo checked. kustomize runs an exec plugin
+`KUSTOMIZE_PLUGIN_HOME` from its working directory to an absolute path, and
+cleans the path by its text only, as kustomize does (a `..` after a
+symlinked directory names the directory next to the link). The check
+probes the plugin in that home, and kustomize gets that absolute home, so
+kustomize runs the plugin that lo checked. kustomize runs an exec plugin
 from the kustomization directory, where a relative home names another
 plugin. A home that does not exist resolves too, and the check refuses it.
 lo runs the check so that an older plugin can do nothing with it: in an empty

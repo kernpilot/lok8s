@@ -542,18 +542,42 @@ build::_probe_capability() {
   return 1
 }
 
-# build::_abs_plugin_home <home>: print <home> as an absolute path, resolved
-# from the working directory (Go: absPluginHome). The checks probe the
-# plugin in this home, and the callers give kustomize this home, so
-# kustomize runs the plugin that lo probed. kustomize runs an exec plugin
+# build::_abs_plugin_home <home>: print <home> as an absolute, clean path,
+# the path that Go's filepath.Abs gives (Go: absPluginHome). The checks
+# probe the plugin in this home, and the callers give kustomize this home,
+# so kustomize runs the plugin that lo probed. kustomize runs an exec plugin
 # with the kustomization directory as its working directory, so a relative
-# home would name another plugin there. The path does not have to exist: a
-# home that does not exist stays one, and the check refuses it.
+# home would name another plugin there.
+# A relative home gets the working directory before it. Then the path is
+# cleaned by its text only, as filepath.Clean does: repeated slashes
+# collapse, a "." element drops, a ".." element removes the element before
+# it (a ".." at the root stays at the root), and a trailing slash drops.
+# kustomize joins the plugin path the same way (filepath.Join), so a ".."
+# after a symlinked directory names the directory next to the link for lo
+# and for kustomize, not the directory next to the target of the link. The
+# file system is not read: a home that does not exist stays one, and the
+# check refuses it. Pure bash: the frozen tree also runs where GNU
+# coreutils (realpath -m) is missing.
 build::_abs_plugin_home() {
-  local home="${1}"
-  while [[ "${home}" == ./* ]]; do home="${home#./}"; done
+  local home="${1}" rest part
+  local -a out=()
   [[ "${home}" == /* ]] || home="${PWD}/${home}"
-  printf '%s\n' "${home}"
+  rest="${home}"
+  while [[ -n "${rest}" ]]; do
+    part="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${part}" in
+      '' | .) ;;
+      ..) if (( ${#out[@]} )); then out=("${out[@]:0:${#out[@]}-1}"); fi ;;
+      *) out+=("${part}") ;;
+    esac
+  done
+  if (( ${#out[@]} == 0 )); then
+    printf '/\n'
+    return 0
+  fi
+  local IFS=/
+  printf '/%s\n' "${out[*]}"
 }
 
 # build::_no_mint_requested: true when LOK8S_SECRETS_NO_MINT holds a value

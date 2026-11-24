@@ -839,22 +839,28 @@ YAML
   [[ ! -e "${KENV}" && ! -e "${BATS_TEST_TMPDIR}/old-plugin-ran" ]] || { echo "the render or the old plugin ran"; return 1; }
 }
 
-# A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory, to
-# an absolute path that the checks probe and the callers give kustomize:
-# kustomize runs an exec plugin from the kustomization directory, where a
-# relative home names another plugin. A home that does not exist resolves
-# too. Go: TestPluginChecksResolveARelativeHome.
-@test "build::_abs_plugin_home resolves a relative plugin home from the working directory" {
-  cd "${BATS_TEST_TMPDIR}"
-  run build::_abs_plugin_home .kustomize
-  assert_success
-  assert_output "${BATS_TEST_TMPDIR}/.kustomize"
-  run build::_abs_plugin_home ./.kustomize
-  assert_output "${BATS_TEST_TMPDIR}/.kustomize"
-  run build::_abs_plugin_home no-such-home
-  assert_output "${BATS_TEST_TMPDIR}/no-such-home"
-  run build::_abs_plugin_home /opt/plugins
-  assert_output "/opt/plugins"
+# build::_abs_plugin_home gives the path that Go's filepath.Abs gives: a
+# relative home gets the working directory before it, and the path is
+# cleaned by its text. The checks probe that path, and the callers give it
+# to kustomize, which runs an exec plugin from the kustomization directory
+# and joins the plugin path by its text. The table is the one of the Go
+# test (internal/build/testdata/abs_plugin_home.tsv), with the working
+# directory @ROOT@/a/b/c. Go: TestAbsPluginHomeMatchesFilepathAbs,
+# TestPluginChecksResolveARelativeHome.
+@test "build::_abs_plugin_home gives the path that filepath.Abs gives" {
+  local root in want rows=0
+  root="$(cd "${BATS_TEST_TMPDIR}" && pwd)/abs"
+  mkdir -p "${root}/a/b/c"
+  cd "${root}/a/b/c"
+  while IFS=$'\t' read -r in want; do
+    [[ -z "${in}" || "${in}" == '#'* ]] && continue
+    want="${want//@ROOT@/${root}}"
+    run build::_abs_plugin_home "${in}" < /dev/null
+    assert_success
+    assert_output "${want}"
+    rows=$((rows + 1))
+  done < "${_PROJECT_ROOT}/internal/build/testdata/abs_plugin_home.tsv"
+  (( rows >= 15 ))
 }
 
 # The output guard: a render that holds an object with the keys-only marker

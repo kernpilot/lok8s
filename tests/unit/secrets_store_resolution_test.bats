@@ -439,6 +439,48 @@ _k8s_no_mint_setup() {
   unset KUSTOMIZE_PLUGIN_HOME
 }
 
+# _k8s_exec_stub: a stub kustomize that runs the Secret plugin the way
+# kustomize runs an exec plugin. It joins the plugin path by its text
+# (kustomize: filepath.Join, which cleans repeated slashes, "." and ".."
+# elements; here: awk), then runs the plugin from the kustomization
+# directory (the last argument). It prints one ConfigMap. Go:
+# execPluginKustomize.
+_k8s_exec_stub() {
+  cat > "${BATS_TEST_TMPDIR}/kbin/kustomize" <<'EOF'
+#!/bin/sh
+for a in "$@"; do dir=$a; done
+plugin=$(awk -v p="$KUSTOMIZE_PLUGIN_HOME/secrets.lok8s.dev/v1/secret/Secret" 'BEGIN {
+	n = split(p, a, "/"); abs = (substr(p, 1, 1) == "/"); k = 0
+	for (i = 1; i <= n; i++) {
+		s = a[i]
+		if (s == "" || s == ".") continue
+		if (s == "..") {
+			if (k > 0 && o[k] != "..") { k--; continue }
+			if (abs) continue
+		}
+		o[++k] = s
+	}
+	r = abs ? "/" : ""
+	for (i = 1; i <= k; i++) r = r (i > 1 ? "/" : "") o[i]
+	if (r == "") r = "."
+	print r
+}')
+(cd "$dir" && "$plugin" </dev/null >/dev/null 2>&1)
+echo "kind: ConfigMap"
+EOF
+  chmod +x "${BATS_TEST_TMPDIR}/kbin/kustomize"
+}
+
+# _k8s_label_plugin <home> <label> <capabilities> <log>: a Secret plugin in
+# <home> that appends "probe <label>" or "run <label>" to <log> and prints
+# <capabilities> (printf format) for --capabilities.
+_k8s_label_plugin() {
+  mkdir -p "${1}/secrets.lok8s.dev/v1/secret"
+  printf '#!%s\nif [[ "${1:-}" == --capabilities ]]; then echo "probe %s" >> %q; printf "%s"; exit 0; fi\necho "run %s" >> %q\n' \
+    "${BASH}" "${2}" "${4}" "${3}" "${2}" "${4}" > "${1}/secrets.lok8s.dev/v1/secret/Secret"
+  chmod +x "${1}/secrets.lok8s.dev/v1/secret/Secret"
+}
+
 # With LOK8S_SECRETS_NO_MINT set, `lo k8s` refuses a Secret plugin without
 # the no-mint run before the render, and kustomize gets the plugin home that
 # the check probed. Go: TestK8sArtifactChecksTheNoMintPlugin.
@@ -473,18 +515,11 @@ _k8s_no_mint_setup() {
 # directory and must not run. Go: TestNoMintRelativeHomeRunsTheProbedPlugin.
 @test "k8s::infrastructure and k8s::platform with no-mint and a relative plugin home run the probed plugin" {
   _k8s_no_mint_setup
+  _k8s_exec_stub
   local log="${BATS_TEST_TMPDIR}/plugin-runs.log" domain=new.dev fn home
-  printf '#!%s\nfor a in "$@"; do dir="$a"; done\n(cd "${dir}" && "${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" </dev/null >/dev/null 2>&1)\necho "kind: ConfigMap"\n' \
-    "${BASH}" > "${BATS_TEST_TMPDIR}/kbin/kustomize"
-  _label_plugin() {
-    mkdir -p "${1}/secrets.lok8s.dev/v1/secret"
-    printf '#!%s\nif [[ "${1:-}" == --capabilities ]]; then echo "probe %s" >> %q; printf "%s"; exit 0; fi\necho "run %s" >> %q\n' \
-      "${BASH}" "${2}" "${log}" "${3}" "${2}" "${log}" > "${1}/secrets.lok8s.dev/v1/secret/Secret"
-    chmod +x "${1}/secrets.lok8s.dev/v1/secret/Secret"
-  }
-  _label_plugin "${PATH_BASE}/.kustomize" project 'dry-run\nkeys-only\nno-mint\n'
+  _k8s_label_plugin "${PATH_BASE}/.kustomize" project 'dry-run\nkeys-only\nno-mint\n' "${log}"
   for home in "${PATH_CLUSTERS}/new.dev/targets/.kustomize" "${PATH_BASE}/.k8s/overlays/new.dev/.kustomize"; do
-    _label_plugin "${home}" kustomization-dir 'dry-run\nkeys-only\n'
+    _k8s_label_plugin "${home}" kustomization-dir 'dry-run\nkeys-only\n' "${log}"
   done
   export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME=.kustomize
   cd "${PATH_BASE}"
@@ -494,6 +529,43 @@ _k8s_no_mint_setup() {
     assert_success
     run cat "${log}"
     assert_output $'probe project\nrun project'
+  done
+}
+
+# With a symlinked working directory, kustomize joins the plugin path by
+# its text: <link>/../plugins is the plugins directory next to the link,
+# not the one next to the target of the link. Each command resolves the
+# home the same way, so it probes the plugin that kustomize runs. With an
+# older plugin next to the link, each command refuses it, also when the
+# plugin next to the target has the no-mint run. Go:
+# TestNoMintSymlinkedWorkingDirectoryProbesThePluginThatRuns.
+@test "k8s::infrastructure and k8s::platform with no-mint, a symlinked working directory and ../plugins probe the plugin that runs" {
+  _k8s_no_mint_setup
+  _k8s_exec_stub
+  local log="${BATS_TEST_TMPDIR}/plugin-runs.log" domain=new.dev fn
+  local root="${BATS_TEST_TMPDIR}/sym"
+  mkdir -p "${root}/work" "${root}/srv/project"
+  ln -s "${root}/srv/project" "${root}/work/link"
+  export LOK8S_SECRETS_NO_MINT=1 KUSTOMIZE_PLUGIN_HOME=../plugins
+  cd "${root}/work/link"
+  _k8s_label_plugin "${root}/work/plugins" next-to-link 'dry-run\nkeys-only\nno-mint\n' "${log}"
+  _k8s_label_plugin "${root}/srv/plugins" next-to-target 'dry-run\nkeys-only\n' "${log}"
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${log}"
+    run "${fn}"
+    assert_success
+    run cat "${log}"
+    assert_output $'probe next-to-link\nrun next-to-link'
+  done
+  _k8s_label_plugin "${root}/work/plugins" next-to-link 'dry-run\nkeys-only\n' "${log}"
+  _k8s_label_plugin "${root}/srv/plugins" next-to-target 'dry-run\nkeys-only\nno-mint\n' "${log}"
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${log}"
+    run "${fn}"
+    assert_failure
+    assert_line --partial "does not have the no-mint run"
+    run cat "${log}"
+    assert_output 'probe next-to-link'
   done
 }
 
