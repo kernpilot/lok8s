@@ -939,13 +939,15 @@ addons::render() {
     [[ "${_kv%%=*}" != "PATH" ]] || _path="${_kv#*=}"
     [[ ! "${_kv%%=*}" =~ ^LOK8S_(SPEC|USER)_ ]] || _wl_extra+="\${${_kv%%=*}} "
   done <<< "${env_lines}"
-  # With LOK8S_SECRETS_NO_MINT set, a real render needs a Secret plugin that
-  # has the no-mint run (Go: build.CheckNoMintPlugin in addons.Render). The
-  # check reads the home that _kenv below gives kustomize, after the entry's
-  # env. A dry run does not check: its plugin has the dry run
-  # (addons::dry_run_boundary checks it), and a dry run writes nothing to
-  # the store.
-  if (( ! _dry )) && build::_no_mint_requested; then
+  # With LOK8S_SECRETS_NO_MINT set, the render needs a Secret plugin that has
+  # the no-mint run (Go: build.CheckNoMintPlugin in addons.Render), in a dry
+  # run too: the switch wins over a dry run, and a plugin without the
+  # no-mint run would report a value that it would generate instead of
+  # failing. The check reads the real plugin home, which _kenv below gives
+  # kustomize on a real run and on a dry run with --allow-generators. A dry
+  # run without --allow-generators gives kustomize the boundary's home,
+  # which links the plugin of the real home.
+  if build::_no_mint_requested; then
     build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" "addons::render" || return 1
   fi
   local build_dir="${addon_dir}" _cleanup=""

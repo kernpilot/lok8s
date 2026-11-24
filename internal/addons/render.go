@@ -122,18 +122,17 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 		ui.ErrorTo(stderr, "addons::render: env: may not set %s", v)
 		return "", fmt.Errorf("addons render: env: may not set %s", v)
 	}
-	// With LOK8S_SECRETS_NO_MINT set, a real render needs a Secret plugin
-	// that has the no-mint run, and kustomize gets the home that the check
-	// probed (build.CheckNoMintPlugin). A dry run does not check: its
-	// plugin has the dry run (the boundary checks it), and a dry run writes
-	// nothing to the store.
-	checkedHome := ""
-	if dry == nil {
-		home, err := build.CheckNoMintPlugin(ctx, paths, runner, stderr, "addons::render")
-		if err != nil {
-			return "", fmt.Errorf("addons render: %s: %w", addonDir, err)
-		}
-		checkedHome = home
+	// With LOK8S_SECRETS_NO_MINT set, the render needs a Secret plugin that
+	// has the no-mint run (build.CheckNoMintPlugin), in a dry run too: the
+	// switch wins over a dry run, and a plugin without the no-mint run
+	// would report a value that it would generate instead of failing. The
+	// check reads the real plugin home. A real run, and a dry run with
+	// --allow-generators, give kustomize the home that the check probed. A
+	// dry run without --allow-generators keeps the boundary's home, which
+	// links the plugins of the real home.
+	checkedHome, err := build.CheckNoMintPlugin(ctx, paths, runner, stderr, "addons::render")
+	if err != nil {
+		return "", fmt.Errorf("addons render: %s: %w", addonDir, err)
 	}
 	buildDir, cleanup, err := stageBuildDir(paths, stderr, addonDir, kind, providerName, inlineValues, dry)
 	defer cleanup()
@@ -153,7 +152,7 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 	for _, k := range envNames {
 		cmdEnv = append(cmdEnv, k+"="+env[k])
 	}
-	if checkedHome != "" {
+	if checkedHome != "" && (dry == nil || allowGenerators) {
 		cmdEnv = append(cmdEnv, KustomizePluginHomeEnv+"="+checkedHome)
 	}
 	// A real run passes --enable-exec (KRM exec functions). A dry run does

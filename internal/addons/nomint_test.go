@@ -4,7 +4,7 @@ package addons
 // bootstrap, the KubeOne addon staging and the doctor call Render) refuses
 // a Secret plugin that does not have the no-mint run before kustomize runs
 // (build.CheckNoMintPlugin), and kustomize gets the plugin home that the
-// check probed. A dry run does not check. bats: the addons::render no-mint
+// check probed. A dry run checks too. bats: the addons::render no-mint
 // tests in tests/unit/bootstrap_test.bats.
 
 import (
@@ -173,10 +173,9 @@ func TestRenderNoMintAcceptsAPluginWithTheNoMintRun(t *testing.T) {
 	}
 }
 
-// With the switch off, the plugin is not probed. A dry run does not probe
-// for the no-mint run either: its plugin has the dry run, which the
-// boundary checks, and a dry run writes nothing to the store.
-func TestRenderNoMintOffOrDryRunDoesNotProbe(t *testing.T) {
+// With the switch off, the plugin is not probed. bats: "addons::render with
+// no-mint off does not probe the Secret plugin".
+func TestRenderNoMintOffDoesNotProbe(t *testing.T) {
 	for _, value := range []string{"", "0", "false"} {
 		t.Run("switch "+value, func(t *testing.T) {
 			dir := writeAddon(t)
@@ -196,23 +195,65 @@ func TestRenderNoMintOffOrDryRunDoesNotProbe(t *testing.T) {
 			}
 		})
 	}
-	t.Run("dry run", func(t *testing.T) {
-		dir := writeAddon(t)
-		p := testPaths(t)
-		log := noMintPlugin(t, p, "dry-run\\nkeys-only\\n")
-		b := dryBoundary(t, p)
-		before := pluginRuns(t, log)
-		t.Setenv(secret.NoMintEnv, "1")
-		f := newFakeKustomize(t, kustomizeManifest)
-		var errBuf strings.Builder
-		if _, err := RenderDryRun(t.Context(), p, &noMintRunner{fakeKustomize: f}, &errBuf, dir, "lo", "hetzner", "", nil, b, false); err != nil {
-			t.Fatalf("RenderDryRun: %v\n%s", err, errBuf.String())
+}
+
+// A dry run checks too, with and without --allow-generators: the switch
+// wins over a dry run, and a plugin that has the dry run but not the
+// no-mint run would report a value that it would generate instead of
+// failing. The check probes the plugin of the real home. A plugin with the
+// no-mint run renders: kustomize gets the checked home with
+// --allow-generators and the boundary's home without it. bats:
+// "addons::render with no-mint checks the Secret plugin in a dry run".
+func TestRenderDryRunNoMintChecksThePlugin(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		name := "without --allow-generators"
+		if allow {
+			name = "with --allow-generators"
 		}
-		if n := pluginRuns(t, log); n != before {
-			t.Errorf("the dry run ran the plugin %d times, want none", n-before)
-		}
-		if len(f.calls) != 1 {
-			t.Errorf("kustomize calls = %d, want 1", len(f.calls))
-		}
-	})
+		t.Run(name, func(t *testing.T) {
+			dir := writeAddon(t)
+			p := testPaths(t)
+			log := noMintPlugin(t, p, "dry-run\\nkeys-only\\n")
+			f := newFakeKustomize(t, kustomizeManifest)
+			b := dryBoundary(t, p)
+			before := pluginRuns(t, log)
+			t.Setenv(secret.NoMintEnv, "1")
+			var errBuf strings.Builder
+			_, err := RenderDryRun(t.Context(), p, &noMintRunner{fakeKustomize: f}, &errBuf, dir, "lo", "hetzner", "", nil, b, allow)
+			if !errors.Is(err, ui.ErrHandled) {
+				t.Fatalf("RenderDryRun = %v, want the handled error\n%s", err, errBuf.String())
+			}
+			if errBuf.String() != staleNoMintRefusal {
+				t.Errorf("stderr = %q\nwant %q", errBuf.String(), staleNoMintRefusal)
+			}
+			if n := pluginRuns(t, log) - before; n != 1 {
+				t.Errorf("the dry run ran the plugin %d times, want one probe", n)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("kustomize ran: %v", f.calls)
+			}
+
+			noMintPlugin(t, p, "dry-run\\nkeys-only\\nno-mint\\n")
+			errBuf.Reset()
+			if _, err := RenderDryRun(t.Context(), p, &noMintRunner{fakeKustomize: f}, &errBuf, dir, "lo", "hetzner", "", nil, b, allow); err != nil {
+				t.Fatalf("RenderDryRun with the no-mint run: %v\n%s", err, errBuf.String())
+			}
+			if len(f.calls) != 1 {
+				t.Fatalf("kustomize calls = %d, want 1", len(f.calls))
+			}
+			var homes []string
+			for _, kv := range f.envs[0] {
+				if v, ok := strings.CutPrefix(kv, KustomizePluginHomeEnv+"="); ok {
+					homes = append(homes, v)
+				}
+			}
+			want := b.PluginHome
+			if allow {
+				want = filepath.Join(p.Base, ".kustomize")
+			}
+			if !slices.Equal(homes, []string{want}) {
+				t.Errorf("kustomize got the plugin homes %q, want only %q", homes, want)
+			}
+		})
+	}
 }

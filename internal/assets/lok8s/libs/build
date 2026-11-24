@@ -560,7 +560,7 @@ build::_no_mint_requested() {
 # caller that runs the plugin against a store calls it when
 # LOK8S_SECRETS_NO_MINT is requested (build::_no_mint_requested):
 # build::artifacts when the build reads the store (not --no-secrets),
-# addons::render on a real run (not a dry run), k8s::infrastructure,
+# addons::render (a dry run too), k8s::infrastructure,
 # k8s::platform and lo::registry_tls_mint. <caller> names the caller at the
 # start of each error line (default: lo build). A plugin older than the
 # no-mint run ignores the variable and generates values, which is the

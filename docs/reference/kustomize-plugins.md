@@ -467,10 +467,12 @@ Each command that execs the plugin against a store checks that the plugin
 has the no-mint run (see `--capabilities` below): `lo build`, the addon
 render of `lo bootstrap` and of the KubeOne driver, `lo k8s`, and the
 registry TLS mint of `lo up` when it execs the plugin (`LO_RENDER=exec`, or
-the bash tree). A dry run (`lo bootstrap --dry-run`) does not check: its
-plugin has the dry run, and a dry run writes nothing to the store. A render
-in process (`lo-full`, and the registry TLS mint of `lo`) serves the plugin
-itself, which has the no-mint run. With the switch set, these commands fail
+the bash tree). A dry run (`lo bootstrap --dry-run`) checks too, because
+the switch wins over a dry run (see **Precedence** below): the check reads
+the plugin home of the project, and the dry run keeps its own plugin home
+unless `--allow-generators` is set. A render in process (`lo-full`, and the
+registry TLS mint of `lo`) serves the plugin itself, which has the no-mint
+run. With the switch set, these commands fail
 when they would generate a value. An addon entry's `env:` cannot set
 `LOK8S_SECRETS_NO_MINT` or `LOK8S_SECRETS_DISABLE`.
 
@@ -482,8 +484,8 @@ sets the variable checks for that line first. lo runs the check before a
 keys-only render that execs the plugin, and refuses a plugin that does not
 print `keys-only`. Each command of the list above runs it too when
 `LOK8S_SECRETS_NO_MINT` holds a value that is not an off value (an unknown
-value too) and the command reads the store (not `lo build --no-secrets`, not
-a dry run), and refuses a plugin that does not print `no-mint`. The error
+value too) and the command reads the store (not `lo build --no-secrets`),
+and refuses a plugin that does not print `no-mint`. The error
 line names the command, for example `lo k8s:` or `addons::render:`, when
 the plugin home or the plugin is missing. lo runs the check so that an older plugin can do nothing with it: in an empty
 temporary directory, with an empty stdin, `PATH_SECRETS` at a path that does

@@ -686,27 +686,49 @@ _no_mint_addon() {
   [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
 }
 
-# A dry run does not probe: its plugin has the dry run (the boundary checks
-# it), and a dry run writes nothing to the store. The switch off does not
-# probe either. Go: TestRenderNoMintOffOrDryRunDoesNotProbe.
-@test "addons::render with no-mint does not probe in a dry run or with the switch off" {
+# A dry run checks too, with and without --allow-generators: the switch wins
+# over a dry run, and a plugin that has the dry run but not the no-mint run
+# would report a value that it would generate instead of failing. The check
+# probes the plugin of the real home. A plugin with the no-mint run renders:
+# kustomize gets the checked home with --allow-generators and the
+# boundary's home without it. Go: TestRenderDryRunNoMintChecksThePlugin.
+@test "addons::render with no-mint checks the Secret plugin in a dry run" {
+  _no_mint_addon
+  export LOK8S_SECRETS_NO_MINT=1
+  local bootstrap_dry_boundary="${BATS_TEST_TMPDIR}/boundary" bootstrap_dry_run=1 bootstrap_allow_generators want
+  mkdir -p "${bootstrap_dry_boundary}/tmp"
+  for bootstrap_allow_generators in 0 1; do
+    rm -f "${KENV}" "${BATS_TEST_TMPDIR}/plugin-runs"
+    no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\n'
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_failure
+    assert_output "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+    [ "$(no_mint_probes)" = 1 ]
+    [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+
+    no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\nno-mint\n'
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_success
+    want="${bootstrap_dry_boundary}/plugins"
+    (( ! bootstrap_allow_generators )) || want="${KUSTOMIZE_PLUGIN_HOME}"
+    [ "$(cat "${KENV}")" = "home=${want}" ]
+  done
+}
+
+# With the switch off, the plugin is not probed. Go:
+# TestRenderNoMintOffDoesNotProbe.
+@test "addons::render with no-mint off does not probe the Secret plugin" {
   _no_mint_addon
   no_mint_plugin "${KUSTOMIZE_PLUGIN_HOME}" $'dry-run\nkeys-only\n'
-  export LOK8S_SECRETS_NO_MINT=1
-  local bootstrap_dry_boundary="${BATS_TEST_TMPDIR}/boundary" bootstrap_dry_run=1
-  mkdir -p "${bootstrap_dry_boundary}/tmp"
-  run addons::render "${NO_MINT_ADDON}" "lo" "" ""
-  assert_success
-  [ "$(no_mint_probes)" = 0 ]
-  [ -e "${KENV}" ]
-
-  bootstrap_dry_run=0
-  export LOK8S_SECRETS_NO_MINT=false
-  rm -f "${KENV}"
-  run addons::render "${NO_MINT_ADDON}" "lo" "" ""
-  assert_success
-  [ "$(no_mint_probes)" = 0 ]
-  [ -e "${KENV}" ]
+  local value
+  for value in "" 0 false; do
+    rm -f "${KENV}"
+    export LOK8S_SECRETS_NO_MINT="${value}"
+    run addons::render "${NO_MINT_ADDON}" "lo" "" ""
+    assert_success
+    [ "$(no_mint_probes)" = 0 ]
+    [ -e "${KENV}" ]
+  done
 }
 
 @test "bootstrap::apply passes env: overrides to the render only, never the orchestration shell" {
