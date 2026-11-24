@@ -2029,6 +2029,29 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   _lo_refused "${fake}"
 }
 
+# The real entrypoint, for lo secrets set: a private key as its value is
+# refused before any parser, and the refusal names stdin; the PEM line
+# split into words too. A certificate passes the guard: :args of set then
+# reads it as a flag (its first character is "-"), and that error is not
+# the refusal. The run with the certificate has no store to write to.
+@test "the real entrypoint refuses a private key as the value of set with the stdin line, and passes a certificate" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  local fake cert want
+  fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
+  cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIBfake"$'\n'"-----END CERTIFICATE-----"
+  want="[error] an argument looks like a private key: it is not printed
+[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
+  _run_lo secrets set -n app KEY "${fake}" < /dev/null
+  [ "$status" -ne 0 ] && [ "$output" = "${want}" ] || {
+    echo "set <private key>: rc ${status}: ${output//${fake}/<private key>}" >&2; return 1; }
+  # shellcheck disable=SC2086 # the four words of the PEM line
+  _run_lo s s -n app KEY ${PEM_HEAD} < /dev/null
+  [ "$status" -ne 0 ] && [ "$output" = "${want}" ] || {
+    echo "s s <PEM words>: rc ${status}: ${output}" >&2; return 1; }
+  _run_lo secrets set -n tls tls.crt "${cert}" < /dev/null
+  [[ "$output" != *"looks like a private key"* ]] || { echo "set <certificate>: refused: ${output}" >&2; return 1; }
+}
+
 @test "the help of remove-key carries the revocation caveat" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
   _run_lo secrets remove-key --help

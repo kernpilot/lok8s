@@ -24,6 +24,19 @@ import (
 
 // ── Init ─────────────────────────────────────────────────
 
+// publicKeyHint is the hint of Init for a missing public key file. When the
+// private key of that .pub exists, the hint writes the .pub from it: a
+// `ssh-keygen -t ed25519` there asks to overwrite the key that decrypt
+// reads. The private key is checked with a stat only; it is never read. Each
+// path goes through shownKeyPath. Bash twin: the hint of secrets::init.
+func publicKeyHint(sshKey string) string {
+	if private, ok := strings.CutSuffix(sshKey, ".pub"); ok && private != "" && fsutil.IsRegular(private) {
+		shown := shownKeyPath(private)
+		return fmt.Sprintf("Write it from the private key with: ssh-keygen -y -f %s > %s.pub", shown, shown)
+	}
+	return "Generate one with: ssh-keygen -t ed25519"
+}
+
 // Init configures SOPS/age encryption from an SSH public key (bash:
 // secrets::init). The bash `command -v ssh-to-age/sops` gates disappear —
 // both are libraries in the Go build. The cli passes --ssh-key, else
@@ -31,7 +44,7 @@ import (
 func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
 		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", shownKeyPath(sshKey))
-		ui.ErrorTo(c.ErrOut, "Generate one with: ssh-keygen -t ed25519")
+		ui.ErrorTo(c.ErrOut, "%s", publicKeyHint(sshKey))
 		return ErrHandled
 	}
 

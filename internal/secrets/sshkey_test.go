@@ -512,3 +512,41 @@ func TestRealHomeLeakNamesTheLookup(t *testing.T) {
 		t.Errorf("the guard did not name HOME: %q", msg)
 	}
 }
+
+// The argv checks refuse the first line of a private key block in each
+// form, a paste of it split into words (joined with spaces), an age
+// identity and the PuTTY lines. Another PEM block (a certificate, a public
+// key) and a bare "-----BEGIN" pass: lo secrets set takes a certificate as a
+// value. The check of the key-path commands (LooksLikeKeyArg) refuses every
+// PEM block. Bash twin: "secrets set: a certificate passes the argv checks, a
+// private key is refused with the stdin line".
+func TestLooksLikePrivateKeyArgvMarkers(t *testing.T) {
+	for _, arg := range []string{
+		"-----BEGIN OPENSSH " + privKey + "-----",
+		strings.Join([]string{"-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"}, " "),
+		"-----BEGIN RSA " + privKey + "-----\n" + keyCanary,
+		"-----BEGIN " + privKey + "-----",
+		"-----BEGIN PGP " + privKey + " BLOCK-----",
+		"---- BEGIN SSH2 ENCRYPTED " + privKey + " ----",
+		"AGE-SECRET-KEY-1" + keyCanary,
+		"age-secret-key-1" + keyCanary,
+		"PuTTY-User-Key-File-3: ssh-ed25519",
+		"Private-Lines: 1",
+	} {
+		if !LooksLikePrivateKey(arg) || !LooksLikeKeyArg(arg) {
+			t.Errorf("not refused: %q", arg)
+		}
+	}
+	for _, arg := range []string{
+		"-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----",
+		"-----BEGIN PUBLIC KEY-----\nMCowfake\n-----END PUBLIC KEY-----",
+		"-----BEGIN",
+		"/k/id_ed25519.pub",
+		"age1" + strings.Repeat("q", 58),
+	} {
+		pem := strings.Contains(arg, "-----BEGIN")
+		if LooksLikePrivateKey(arg) || LooksLikeKeyArg(arg) != pem {
+			t.Errorf("%q: LooksLikePrivateKey %v, LooksLikeKeyArg %v", arg, LooksLikePrivateKey(arg), LooksLikeKeyArg(arg))
+		}
+	}
+}

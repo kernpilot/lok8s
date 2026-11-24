@@ -2034,6 +2034,13 @@ _path_refusal() {
     '[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)'
 }
 
+# _value_refusal: the refusal of lo secrets set, whose argument is a value:
+# its second line names stdin (Go twin: privateKeyValueRefusal).
+_value_refusal() {
+  printf '%s\n' '[error] an argument looks like a private key: it is not printed' \
+    '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
+}
+
 # _refused_path_arg <cmd> <arg>...: runs secrets::<cmd> with the arguments,
 # and fails unless it refused them with _path_refusal and printed no canary.
 _refused_path_arg() {
@@ -2085,6 +2092,42 @@ _refused_path_arg() {
   [ "$status" -eq 1 ] && [[ "${output}" == *"[error] SSH private key not found: ${shown}" ]] || {
     echo "decrypt: status $status: $output" >&2; return 1; }
   [[ "${output}" != *"${KEY_CANARY}"* && "${output}" != *BEGIN* ]] || { echo "decrypt printed the value" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+}
+
+# A missing public key file gets a hint. When the private key of that .pub
+# exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
+# ed25519 there asks to overwrite the key that decrypt reads. The private key
+# is not read: its file holds the canary only, and ssh-to-age never runs.
+# Each path goes through secrets::_shown_path. Without the private key (no
+# file, or a directory) the hint is ssh-keygen -t ed25519. The key comes
+# from LOK8S_SSH_KEY: :args is a stub here (the --ssh-key form runs in
+# hack/parity-test.sh). Go twin: TestInitMissingKey.
+@test "secrets init: a missing .pub beside its private key gets the ssh-keygen -y hint" {
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
+  local dir="${BATS_TEST_TMPDIR}/keys" shown="(not printed: it looks like a private key)" key want
+  local generate="[error] Generate one with: ssh-keygen -t ed25519"
+  local fake="${dir}/AGE-SECRET-KEY-1${KEY_CANARY}"
+  mkdir -p "${dir}/adir"
+  printf '%s\n' "${KEY_CANARY}" > "${dir}/id"
+  printf '%s\n' "${KEY_CANARY}" > "${fake}"
+  _hint() {
+    export LOK8S_SSH_KEY="${1}"
+    run secrets::init
+    [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: $(secrets::_shown_path "${key}")
+${want}" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "${1//${KEY_CANARY}/<canary>}: status ${status}: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  }
+  key="${dir}/id.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${dir}/id > ${dir}/id.pub"
+  _hint "${dir}/id"
+  _hint "${dir}/id.pub"
+  key="${fake}.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${shown} > ${shown}.pub"
+  _hint "${fake}"
+  want="${generate}"
+  for key in "${dir}/none.pub" "${dir}/adir.pub"; do
+    _hint "${key%.pub}"
+  done
   [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
 }
 
@@ -2342,4 +2385,52 @@ _path_without() {
   _root_passes u "${id}"
   _root_passes hooks "${id}"
   _root_passes secrets init --ssh-key /k/id_ed25519.pub
+}
+
+# lo secrets set takes a secret value as its argument. A certificate, or
+# another PEM block that is not a private key, passes the checks of main of
+# lo and of main::secrets (its first character is "-", so :args of set then
+# reads it as a flag: such a value goes on stdin). A private key is refused,
+# also as a paste split into words, through each alias and with --domain on
+# either side, and the refusal of set names stdin. The other commands keep
+# the refusal that names a key file, and the key-path commands also refuse
+# any PEM block (secrets::_is_key_arg). Go twin:
+# TestGuardPrivateKeyArgvSetTakesACertificate, TestLooksLikePrivateKeyArgvMarkers.
+@test "secrets set: a certificate passes the argv checks, a private key is refused with the stdin line" {
+  _init_fakes
+  local -a usage=('up|u@destructive' 'Start cluster' 'secrets|s' 'Manage secrets')
+  local -a args=('-' 'Global flags:' 'verbose|v:+' 'Verbose' 'cluster|s' 'Cluster name' 'domain|' 'Domain')
+  local cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIBfake"$'\n'"-----END CERTIFICATE-----"
+  local pub="-----BEGIN PUBLIC KEY-----"$'\n'"MCowfake"$'\n'"-----END PUBLIC KEY-----"
+  local pem="-----BEGIN OPENSSH PRIVATE ""KEY-----" id="AGE-SECRET-KEY-1${KEY_CANARY}" value
+  _passes() {
+    run "${@}"
+    [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "${*}: status ${status}: ${output}" >&2; return 1; }
+  }
+  _refused_as() {
+    local want="${1}"
+    shift
+    run "${@}" < /dev/null
+    [ "$status" -eq 1 ] && [ "$output" = "$("${want}")" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "${1} (${#} words): status ${status}: ${output}" >&2; return 1; }
+  }
+  for value in "${cert}" "${pub}" "-----BEGIN"; do
+    _passes secrets::_guard_lo_argv secrets set -n tls tls.crt "${value}"
+    _passes secrets::_guard_lo_argv s s --domain alpha.dev -n tls tls.crt "${value}"
+    _passes secrets::_no_private_argv set -n tls tls.crt "${value}"
+  done
+  _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY "${pem}"$'\n'"${KEY_CANARY}"
+  _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _value_refusal secrets::_guard_lo_argv s s -n app KEY "${id}"
+  _refused_as _value_refusal secrets::_guard_lo_argv --domain alpha.dev secrets set -n app KEY "${id}"
+  _refused_as _value_refusal secrets::_guard_lo_argv secrets --domain alpha.dev set KEY "${id}"
+  _refused_as _value_refusal secrets::_no_private_argv set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _value_refusal secrets::_no_private_argv s KEY "${id}"
+  _refused_as _value_refusal main::secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _path_refusal secrets::_guard_lo_argv secrets add-key -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
+  _refused_as _path_refusal secrets::_guard_lo_argv secrets list set "${id}"
+  _refused_as _path_refusal secrets::_no_private_argv list set "${id}"
+  # The key-path commands refuse any PEM block in their own check.
+  _refused_as _path_refusal secrets::add-key "${cert}"
+  _refused_as _path_refusal secrets::init --ssh-key "${cert}"
 }

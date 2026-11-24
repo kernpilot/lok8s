@@ -137,12 +137,14 @@ func sshKeyCommand(c *cobra.Command) *cobra.Command {
 // refuse an argument or a flag value with the shape of a private key
 // (secrets.RefusePrivateKey), before arity or the flag error prints it. The
 // positionals are checked joined with spaces, as the guard of main checks
-// the argv: a paste split into words is one key.
+// the argv: a paste split into words is one key. Each command here takes a
+// path or an age public key, never a PEM block, so the check is
+// secrets.LooksLikeKeyArg: the first word of a PEM block counts too.
 func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Command {
 	c.Args = func(cmd *cobra.Command, args []string) error {
-		private := secrets.LooksLikePrivateKey(strings.Join(args, " "))
+		private := secrets.LooksLikeKeyArg(strings.Join(args, " "))
 		cmd.Flags().Visit(func(f *pflag.Flag) {
-			private = private || secrets.LooksLikePrivateKey(f.Value.String())
+			private = private || secrets.LooksLikeKeyArg(f.Value.String())
 		})
 		if private {
 			secrets.RefusePrivateKey(cmd.ErrOrStderr())
@@ -151,7 +153,7 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 		return arity(cmd, args)
 	}
 	c.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
-		if secrets.LooksLikePrivateKey(err.Error()) {
+		if secrets.LooksLikeKeyArg(err.Error()) {
 			secrets.RefusePrivateKey(cmd.ErrOrStderr())
 			return ErrHandled
 		}
@@ -169,8 +171,9 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // under it, and fails closed: when cobra cannot resolve a command, it
 // refuses too. That is a Find error, or an argv that resolves to the root
 // itself, whose unknown-command error prints the first word. It prints the
-// refusal (never the argument) and reports whether it refused. A resolved
-// command outside `lo secrets` is left to cobra. Bash twin:
+// refusal (never the argument) and reports whether it refused: for `lo
+// secrets set` the refusal names stdin (secrets.RefusePrivateKeyValue). A
+// resolved command outside `lo secrets` is left to cobra. Bash twin:
 // secrets::_guard_lo_argv in main of lo, before its parser (the same scope
 // and the same fail-closed rule), and secrets::_no_private_key in
 // main::secrets.
@@ -178,11 +181,71 @@ func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) b
 	if !secrets.LooksLikePrivateKey(strings.Join(argv, " ")) {
 		return false
 	}
-	if cmd, _, err := root.Find(argv); err == nil && cmd.HasParent() && !underSecrets(cmd) {
+	cmd, rest, err := root.Find(argv)
+	if err == nil && cmd.HasParent() && !underSecrets(cmd) {
 		return false
+	}
+	if err == nil && (isSecretsSet(cmd) || isSecretsGroup(cmd) && isSetWord(secretsSubcommand(cmd, rest))) {
+		secrets.RefusePrivateKeyValue(errOut)
+		return true
 	}
 	secrets.RefusePrivateKey(errOut)
 	return true
+}
+
+// isSecretsSet reports whether cmd is `lo secrets set`: its argument is a
+// secret value, so its refusal names stdin, not a key file.
+func isSecretsSet(cmd *cobra.Command) bool {
+	return cmd.Name() == "set" && isSecretsGroup(cmd.Parent())
+}
+
+// isSecretsGroup reports whether cmd is `lo secrets` itself: the group, or
+// the shim of a project that routes it to the bash tree (the shim parses no
+// flag and has no subcommand, so Find stops there).
+func isSecretsGroup(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Name() == "secrets" && cmd.HasParent() && !cmd.Parent().HasParent()
+}
+
+// isSetWord reports whether word names set in the usage table of the bash
+// `lo secrets` (set and its alias s).
+func isSetWord(word string) bool {
+	return word == "set" || word == "s"
+}
+
+// secretsSubcommand is the first word of rest that is not a flag or the
+// value of a flag that takes one: the subcommand of `lo secrets` when Find
+// stops at the group. A flag that cmd does not know is a switch, and a
+// cluster of short flags is not split, as in secrets::_argv_words.
+func secretsSubcommand(cmd *cobra.Command, rest []string) string {
+	lookup := func(word string) *pflag.Flag {
+		if strings.HasPrefix(word, "--") {
+			if f := cmd.Flags().Lookup(word[2:]); f != nil {
+				return f
+			}
+			return cmd.InheritedFlags().Lookup(word[2:])
+		}
+		if len(word) != 2 {
+			return nil
+		}
+		if f := cmd.Flags().ShorthandLookup(word[1:]); f != nil {
+			return f
+		}
+		return cmd.InheritedFlags().ShorthandLookup(word[1:])
+	}
+	skip := false
+	for _, word := range rest {
+		switch {
+		case skip:
+			skip = false
+		case strings.HasPrefix(word, "-") && strings.Contains(word, "="):
+		case strings.HasPrefix(word, "-"):
+			f := lookup(word)
+			skip = f != nil && f.NoOptDefVal == ""
+		default:
+			return word
+		}
+	}
+	return ""
 }
 
 // underSecrets reports whether cmd is `lo secrets` or a command under it.

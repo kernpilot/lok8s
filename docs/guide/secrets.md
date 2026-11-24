@@ -88,6 +88,14 @@ lo secrets set --domain app.example.com --name myapp --namespace default API_TOK
 To store the literal string `-` as a value, use the pipe form:
 `printf %s - | lo secrets set … API_TOKEN`.
 
+A value that starts with `-`, for example a certificate (a PEM block), goes on
+stdin too: the flag parser reads such an argument as a flag. A private key as
+the value argument stops the command (see below):
+
+```bash
+lo secrets set --domain app.example.com --name tls tls.crt < cert.pem
+```
+
 It's then cached like any generated value and can be encrypted + committed.
 
 Pass **`--encrypt`** (short `-e`; the alias `--enc` also works) to SOPS-encrypt the
@@ -181,7 +189,10 @@ lo secrets --domain app.example.com decrypt     # restore plaintext from the .en
 `init` reads the public key: `--ssh-key`, else the `.pub` file of
 `LOK8S_SSH_KEY` (by default `~/.ssh/id_ed25519.pub`). `LOK8S_SSH_KEY` names
 the private key that `decrypt` reads. When its value ends in `.pub`, `init`
-reads that path.
+reads that path. When the `.pub` file is missing and its private key is
+there, the error shows the command that writes the `.pub` from the private
+key (`ssh-keygen -y -f <key> > <key>.pub`). Do not run `ssh-keygen -t
+ed25519` there: it asks to overwrite the key that `decrypt` reads.
 
 A key file that holds a private key stops `init`, `add-key` and `remove-key`
 before any tool reads it. The error names the path and the fix, and shows
@@ -195,9 +206,12 @@ can quote the key file. It shows the exit status of the tool instead.
 Every `lo secrets` command refuses an argument that looks like a private
 key, and does not print it. That includes a key pasted into `--ssh-key` or
 `--domain`, a key in place of a command, and a paste that the shell splits
-into words. When the value of
-`LOK8S_SSH_KEY` looks like a private key, each message that names the key
-file shows a placeholder instead of the value.
+into words. For `set`, the error says to pass the value on stdin. A PEM
+block that is not a private key (a certificate, a public key) is not
+refused as a private key. `init`, `decrypt`, `add-key` and `remove-key`
+take a path or an age public key, so they refuse any PEM block. When the
+value of `LOK8S_SSH_KEY` looks like a private key, each message that names
+the key file shows a placeholder instead of the value.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

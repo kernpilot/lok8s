@@ -30,14 +30,14 @@ import (
 )
 
 // privateKeyMarkers are the spellings of a private key pasted as an
-// argument: an age identity (in either case, because bech32 allows both), a
-// PEM, OpenSSH or SSH.com private key block, the first line of any PEM block
-// (an unquoted paste splits the block into words, and the first one is
-// "-----BEGIN"), and a PuTTY key file (its first line, and the line before
-// its private part). The argv checks join the words with spaces, so "PRIVATE
-// KEY" also matches a paste split into words. Bash twin:
-// secrets::_is_private_key.
-var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "-----BEGIN", "PuTTY-User-Key-File-", "Private-Lines:"}
+// argument: an age identity (in either case, because bech32 allows both),
+// the first line of a PEM, OpenSSH, PGP or SSH.com private key block (each
+// form holds "PRIVATE KEY"), and a PuTTY key file (its first line, and the
+// line before its private part). The argv checks join the words with spaces,
+// so "PRIVATE KEY" also matches a paste split into words. Another PEM block
+// (a certificate, a public key) does not match: `lo secrets set` takes a
+// certificate as a value. Bash twin: secrets::_is_private_key.
+var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "PuTTY-User-Key-File-", "Private-Lines:"}
 
 // LooksLikePrivateKey reports whether arg has the shape of a private key.
 func LooksLikePrivateKey(arg string) bool {
@@ -49,6 +49,16 @@ func LooksLikePrivateKey(arg string) bool {
 	return false
 }
 
+// LooksLikeKeyArg is LooksLikePrivateKey for an argument of a command that
+// takes the path of a key file or an age public key (init, decrypt, add-key,
+// remove-key). No such argument is a PEM block, so the first word of any PEM
+// block ("-----BEGIN") counts too: a paste split into words reaches cobra's
+// flag parser as the flag "-----BEGIN", and its error prints that word. Bash
+// twin: secrets::_is_key_arg.
+func LooksLikeKeyArg(arg string) bool {
+	return LooksLikePrivateKey(arg) || strings.Contains(arg, "-----BEGIN")
+}
+
 // RefusePrivateKey prints the refusal for an argument of lo secrets that has
 // the shape of a private key. It never prints the argument. Every argv check
 // of lo secrets prints it: the guard of main for the whole argv, and the
@@ -57,6 +67,15 @@ func LooksLikePrivateKey(arg string) bool {
 func RefusePrivateKey(w io.Writer) {
 	ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
 	ui.ErrorTo(w, "pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)")
+}
+
+// RefusePrivateKeyValue is the refusal of `lo secrets set`: its argument is
+// a secret value, not the path of a key file, and set reads the value from
+// stdin when the argument is left out. The guard of main prints it for an
+// argv that resolves to set. Bash twin: secrets::_no_private_value.
+func RefusePrivateKeyValue(w io.Writer) {
+	ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")
 }
 
 // shownKeyPath is path for a message, or a placeholder when it has the shape
@@ -87,7 +106,7 @@ func QuoteArg(arg string) string {
 func (c *Context) recipientArg(key string) (string, error) {
 	// Before any message that prints the argument: the not-a-file error
 	// below echoes it, and for a pasted private key that is key material.
-	if LooksLikePrivateKey(key) {
+	if LooksLikeKeyArg(key) {
 		RefusePrivateKey(c.ErrOut)
 		return "", ErrHandled
 	}

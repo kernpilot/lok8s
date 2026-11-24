@@ -380,6 +380,31 @@ for cmd in init decrypt; do
   sec_check secrets "${cmd}" -k ${PEM_HEAD}
   sec_no_echo "OPENSSH" "secrets ${cmd} -k <PEM words>"
 done
+# lo secrets set takes a value: a private key there is refused with the
+# line that names stdin, also as a paste split into words. The key-path
+# commands refuse any PEM block (here a certificate line).
+sec_check secrets set -n app KEY "${FAKE_ID}"
+sec_no_echo "${FAKE_ID}" "secrets set <private key>"
+# shellcheck disable=SC2086 # the four words of the PEM line
+sec_check s s -n app KEY ${PEM_HEAD}
+sec_no_echo "OPENSSH" "secrets s <PEM words>"
+if ! grep -qF "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>" "${WORK}/go.err"; then
+  fail "secrets set <PEM words>: the refusal does not name stdin"
+fi
+sec_check secrets add-key "-----BEGIN CERTIFICATE-----"
+# init: a .pub that is missing beside its private key gets the hint that
+# writes the .pub from the private key. The private key is not read: a
+# filler file. Without a private key, the hint is ssh-keygen -t ed25519.
+printf 'filler\n' > "${WORK}/home/lonely"
+sec_check secrets init --ssh-key "${WORK}/home/lonely.pub"
+# check prints the work dir as WORK.
+if ! grep -qF "[error] Write it from the private key with: ssh-keygen -y -f WORK/home/lonely > WORK/home/lonely.pub" "${WORK}/go.err"; then
+  fail "secrets init <missing .pub beside its private key>: no ssh-keygen -y hint"
+fi
+sec_check secrets init --ssh-key "${WORK}/home/absent.pub"
+if ! grep -qF "[error] Generate one with: ssh-keygen -t ed25519" "${WORK}/go.err"; then
+  fail "secrets init <missing .pub>: no ssh-keygen -t hint"
+fi
 # The whole argv of lo secrets, before any parser: a key in the --domain
 # value (on either side of the command), in a flag that no parser knows, as
 # a command that lo does not know, and a PuTTY paste split into words.

@@ -28,6 +28,12 @@ var fixtureRcpt = "age1" + strings.Repeat("q", 57) + "z"
 const privateKeyRefusal = "[error] an argument looks like a private key: it is not printed\n" +
 	"[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
 
+// privateKeyValueRefusal is what the guard prints for lo secrets set, whose
+// argument is a value (secrets.RefusePrivateKeyValue; bash:
+// secrets::_no_private_value).
+const privateKeyValueRefusal = "[error] an argument looks like a private key: it is not printed\n" +
+	"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
+
 // privateKeyArgvs are the argvs of one key command with a private key shape
 // in each place a parser could print it: a flag-like PEM line, the PEM block
 // split into words, an extra argument, a bool flag value, and a --domain

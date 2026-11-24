@@ -104,14 +104,43 @@ func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 	sameStates(t, before, fileStates(t, c.Paths.Base))
 }
 
+// A missing public key file gets a hint. When the private key of that .pub
+// exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
+// ed25519 there asks to overwrite the key that decrypt reads. The private
+// key is not read: its file holds the canary only. Each path goes through
+// shownKeyPath. Without the private key (no file, a directory, or a path
+// that does not end in .pub) the hint is ssh-keygen -t ed25519. Bash twin:
+// "secrets init: a missing .pub beside its private key gets the ssh-keygen
+// -y hint".
 func TestInitMissingKey(t *testing.T) {
 	c, _, errOut := testEnv(t)
-	if err := c.Init(c.Paths.Base + "/nope"); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
+	base := c.Paths.Base
+	if err := os.Mkdir(base+"/adir", 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(errOut.String(), "SSH public key not found:") ||
-		!strings.Contains(errOut.String(), "Generate one with: ssh-keygen -t ed25519") {
-		t.Errorf("stderr: %s", errOut.String())
+	fake := base + "/AGE-SECRET-KEY-1" + keyCanary
+	for _, private := range []string{base + "/id", fake} {
+		if err := os.WriteFile(private, []byte(keyCanary+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const generate = "[error] Generate one with: ssh-keygen -t ed25519\n"
+	const shown = "(not printed: it looks like a private key)"
+	for key, hint := range map[string]string{
+		base + "/id.pub":   "[error] Write it from the private key with: ssh-keygen -y -f " + base + "/id > " + base + "/id.pub\n",
+		fake + ".pub":      "[error] Write it from the private key with: ssh-keygen -y -f " + shown + " > " + shown + ".pub\n",
+		base + "/nope":     generate,
+		base + "/none.pub": generate,
+		base + "/adir.pub": generate,
+	} {
+		errOut.Reset()
+		if err := c.Init(key); !errors.Is(err, ErrHandled) {
+			t.Fatalf("%s: want ErrHandled, got %v", key, err)
+		}
+		want := "[error] SSH public key not found: " + shownKeyPath(key) + "\n" + hint
+		if errOut.String() != want || strings.Contains(errOut.String(), keyCanary) {
+			t.Errorf("%s:\n got %q\nwant %q", key, errOut.String(), want)
+		}
 	}
 }
 

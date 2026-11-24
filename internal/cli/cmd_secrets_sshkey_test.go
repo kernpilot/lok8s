@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/kernpilot/lok8s/internal/config"
 )
 
 // writeKeyPair writes a private key fixture (a header and a canary, no key)
@@ -251,6 +253,59 @@ func TestGuardPrivateKeyArgvCoversTheSecretsTree(t *testing.T) {
 		var guard bytes.Buffer
 		if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
 			t.Errorf("%q: refused, or printed %q", argv, guard.String())
+		}
+	}
+}
+
+// lo secrets set takes a secret value as its argument: a certificate, or
+// another PEM block that is not a private key, passes the guard. (Its first
+// character is "-", so the flag parser of set then reads it as a flag: such
+// a value goes on stdin.) A private key is refused, also as a paste split
+// into words, through the alias and with --domain on either side, and the
+// refusal of set names stdin. Another command of lo secrets keeps the
+// refusal that names a key file. The same in a project that routes lo
+// secrets to the bash tree (Find stops at the shim). Bash twin: "secrets
+// set: a certificate passes the argv checks, a private key is refused with
+// the stdin line" in tests/unit/secrets_test.bats.
+func TestGuardPrivateKeyArgvSetTakesACertificate(t *testing.T) {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	cert := "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----"
+	pub := "-----BEGIN PUBLIC KEY-----\nMCowfake\n-----END PUBLIC KEY-----"
+	roots := map[string]*config.Paths{
+		"go":             secretsProject(t),
+		"default bash":   routedProject(t, "    default: bash\n", true),
+		"secrets routed": routedProject(t, "    bash:\n      commands: [secrets]\n", true),
+	}
+	for name, paths := range roots {
+		for _, value := range []string{cert, pub, "-----BEGIN"} {
+			argv := []string{"secrets", "set", "--domain", "alpha.dev", "-n", "tls", "tls.crt", value}
+			var guard bytes.Buffer
+			if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
+				t.Errorf("%s, %q: refused, or printed %q", name, value, guard.String())
+			}
+		}
+		for i, argv := range [][]string{
+			{"secrets", "set", "-n", "app", "KEY", pemLine + "\n" + canary},
+			{"secrets", "set", "-n", "app", "KEY", "-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"},
+			{"s", "s", "-n", "app", "KEY", fillerIdentity},
+			{"--domain", "alpha.dev", "secrets", "set", "-n", "app", "KEY", fillerIdentity},
+			{"secrets", "--domain", "alpha.dev", "set", "KEY", fillerIdentity},
+			{"secrets", "-v", "--domain=alpha.dev", "s", "KEY", fillerIdentity},
+		} {
+			var guard bytes.Buffer
+			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyValueRefusal {
+				t.Errorf("%s, set argv %d: not refused, or printed %q", name, i, guard.String())
+			}
+		}
+		for i, argv := range [][]string{
+			{"secrets", "add-key", "-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"},
+			{"secrets", "list", "set", fillerIdentity},
+			{"secrets", "--domain", "set", "list", fillerIdentity},
+		} {
+			var guard bytes.Buffer
+			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyRefusal {
+				t.Errorf("%s, argv %d: not refused, or printed %q", name, i, guard.String())
+			}
 		}
 	}
 }
