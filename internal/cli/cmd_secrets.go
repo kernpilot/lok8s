@@ -181,7 +181,8 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // resolve a command, it refuses too. That is a Find error, or an argv that
 // resolves to the root itself, whose unknown-command error prints the first
 // word. It prints the refusal (never the argument) and reports whether it
-// refused. A resolved command outside `lo secrets` is left to cobra.
+// refused. A resolved command outside `lo secrets` is left to cobra, unless
+// the first word of the argv by the bash rule is `secrets` (namesSecrets).
 //
 // The first line of the refusal names a private key or the PEM block. For
 // `lo secrets set` (and its alias) the second line names stdin
@@ -199,11 +200,28 @@ func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) b
 		secrets.RefusePrivateKeyValue(errOut, joined)
 		return true
 	}
-	if err == nil && cmd.HasParent() && !underSecrets(cmd) {
+	if err == nil && cmd.HasParent() && !underSecrets(cmd) && !namesSecrets(root, secretsSubcommand(root, argv)) {
 		return false
 	}
 	secrets.RefusePrivateKey(errOut, joined)
 	return true
+}
+
+// namesSecrets reports whether word names `lo secrets` under root (its name
+// or an alias). The guard asks it for the first word of the argv by the
+// rule of secrets::_argv_words, where a flag that root does not know is a
+// switch. cobra's Find reads an unknown flag with no "=" as a flag that
+// takes the next word: for `lo <block> secrets l` it takes "secrets" as the
+// value of the flag "<block>" and resolves to `lo lint`, whose flag parser
+// then prints the block. The bash tree reads "secrets" as the command
+// there, so the guard refuses too.
+func namesSecrets(root *cobra.Command, word string) bool {
+	for _, c := range root.Commands() {
+		if c.Name() == "secrets" {
+			return word == c.Name() || c.HasAlias(word)
+		}
+	}
+	return false
 }
 
 // isSecretsSet reports whether cmd is `lo secrets set`: its argument is a

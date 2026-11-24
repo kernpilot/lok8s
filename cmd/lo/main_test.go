@@ -367,17 +367,17 @@ func TestKeysOnlyRefusesAnOldPluginExec(t *testing.T) {
 // of the refusal, and nothing of the value on either stream. Its first
 // line names the PEM block; its second line names stdin for set, else the
 // key file. Without the guard, pflag's "bad flag syntax: <arg>" prints the
-// whole value. In a project that routes lo secrets to the bash tree, the
-// guard runs in front of the shim: the tree (a stub that leaves a mark)
-// never runs.
+// whole value. The same for a block (or a private key) as one word before
+// secrets, where cobra takes "secrets" as the value of that flag and
+// resolves `lo lint` or `lo init`. In a project that routes lo secrets to
+// the bash tree, the guard runs in front of the shim: the tree (a stub
+// that leaves a mark) never runs.
 func TestSecretsRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
 	const pemFirst = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n"
-	refusals := map[string]string{
-		"set":  pemFirst + "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n",
-		"list": pemFirst + "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n",
-		"st":   pemFirst + "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n",
-	}
+	const keyFirst = "[error] an argument looks like a private key: it is not printed\n"
+	const stdinLine = "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
+	const keyFileLine = "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -385,6 +385,32 @@ func TestSecretsRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 	values := map[string]string{
 		"openvpn":     "-----BEGIN OpenVPN Static key V1-----\n" + canary + "\n-----END OpenVPN Static key V1-----",
 		"certificate": "-----BEGIN CERTIFICATE-----\nMIIB" + canary + "\n-----END CERTIFICATE-----",
+	}
+	type call struct {
+		name string
+		argv []string
+		want string
+	}
+	var calls []call
+	for kind, value := range values {
+		calls = append(calls,
+			call{"set " + kind, []string{"secrets", "set", "--domain", "d.dev", "-n", "vpn", "ta.key", value}, pemFirst + stdinLine},
+			call{"list " + kind, []string{"secrets", "list", "--domain", "d.dev", "-n", "vpn", "ta.key", value}, pemFirst + keyFileLine},
+			call{"st " + kind, []string{"secrets", "st", "--domain", "d.dev", "-n", "vpn", "ta.key", value}, pemFirst + keyFileLine},
+		)
+	}
+	before := map[string]string{
+		"openvpn":     values["openvpn"],
+		"private key": "-----BEGIN OPENSSH PRIVATE " + "KEY-----\n" + canary,
+	}
+	for kind, value := range before {
+		first := pemFirst
+		if kind == "private key" {
+			first = keyFirst
+		}
+		for _, sub := range []string{"l", "init"} {
+			calls = append(calls, call{kind + " before secrets " + sub, []string{value, "secrets", sub}, first + keyFileLine})
+		}
 	}
 	for _, impl := range []string{"go", "bash"} {
 		proj := t.TempDir()
@@ -403,32 +429,30 @@ func TestSecretsRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for sub, refusal := range refusals {
-			for kind, value := range values {
-				home := t.TempDir()
-				cmd := exec.CommandContext(t.Context(), self, "secrets", sub, "--domain", "d.dev", "-n", "vpn", "ta.key", value)
-				cmd.Dir = proj
-				cmd.Env = []string{
-					loMainExec + "=1",
-					"PATH=/usr/bin:/bin",
-					"HOME=" + home,
-					"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
-					"KUBECONFIG=" + filepath.Join(home, "no-such-kubeconfig"),
-				}
-				var stdout, stderr bytes.Buffer
-				cmd.Stdout, cmd.Stderr = &stdout, &stderr
-				err := cmd.Run()
-				rc := -1
-				if cmd.ProcessState != nil {
-					rc = cmd.ProcessState.ExitCode()
-				}
-				if rc != 1 || stderr.String() != refusal || stdout.Len() != 0 {
-					t.Errorf("%s, %s %s: rc %d (%v), stdout %q, stderr %q", impl, sub, kind, rc, err,
-						strings.ReplaceAll(stdout.String(), canary, "<canary>"), strings.ReplaceAll(stderr.String(), canary, "<canary>"))
-				}
-				if _, err := os.Stat(mark); err == nil {
-					t.Errorf("%s, %s %s: the bash tree ran", impl, sub, kind)
-				}
+		for _, c := range calls {
+			home := t.TempDir()
+			cmd := exec.CommandContext(t.Context(), self, c.argv...)
+			cmd.Dir = proj
+			cmd.Env = []string{
+				loMainExec + "=1",
+				"PATH=/usr/bin:/bin",
+				"HOME=" + home,
+				"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
+				"KUBECONFIG=" + filepath.Join(home, "no-such-kubeconfig"),
+			}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			rc := -1
+			if cmd.ProcessState != nil {
+				rc = cmd.ProcessState.ExitCode()
+			}
+			if rc != 1 || stderr.String() != c.want || stdout.Len() != 0 {
+				t.Errorf("%s, %s: rc %d (%v), stdout %q, stderr %q", impl, c.name, rc, err,
+					strings.ReplaceAll(stdout.String(), canary, "<canary>"), strings.ReplaceAll(stderr.String(), canary, "<canary>"))
+			}
+			if _, err := os.Stat(mark); err == nil {
+				t.Errorf("%s, %s: the bash tree ran", impl, c.name)
 			}
 		}
 	}

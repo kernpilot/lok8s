@@ -2073,6 +2073,18 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
         echo "${sub} <${value%%$'\n'*}>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
     done
   done
+  # The block (or a private key) as one word before secrets: an unknown flag
+  # is a switch, so secrets is the command.
+  local key_path_want="[error] an argument looks like a private key: it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
+  for sub in l init; do
+    _run_lo "${ovpn}" secrets "${sub}" < /dev/null
+    [ "$status" -eq 1 ] && [ "$output" = "${pem_path_want}" ] && [[ "$output" != *"${canary}"* ]] || {
+      echo "<OpenVPN block> secrets ${sub}: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+    _run_lo "${PEM_HEAD}"$'\n'"${canary}" secrets "${sub}" < /dev/null
+    [ "$status" -eq 1 ] && [ "$output" = "${key_path_want}" ] && [[ "$output" != *"${canary}"* ]] || {
+      echo "<private key> secrets ${sub}: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+  done
 }
 
 @test "the help of remove-key carries the revocation caveat" {

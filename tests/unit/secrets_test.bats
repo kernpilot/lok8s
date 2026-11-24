@@ -2502,8 +2502,15 @@ _path_without() {
     _refused_as _pem_path_refusal secrets::_no_private_argv list "${value}"
     _refused_as _pem_path_refusal secrets::_no_private_argv st ta.key "${value}"
     _refused_as _pem_path_refusal main::secrets list "${value}"
-    # A command outside lo secrets is left to that command.
+    # The block as one word before secrets: an unknown flag is a switch, so
+    # secrets is the command (Go twin: namesSecrets).
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv "${value}" secrets l
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv "${value}" secrets init
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv "${value}" s init
+    # A command outside lo secrets is left to that command, also when
+    # secrets is the value of --domain.
     _passes secrets::_guard_lo_argv up "${value}"
+    _passes secrets::_guard_lo_argv --domain secrets up "${value}"
   done
   _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY "${pem}"$'\n'"${KEY_CANARY}"
   _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
@@ -2515,6 +2522,8 @@ _path_without() {
   _refused_as _value_refusal main::secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
   _refused_as _path_refusal secrets::_guard_lo_argv secrets add-key -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
   _refused_as _path_refusal secrets::_guard_lo_argv secrets list set "${id}"
+  _refused_as _path_refusal secrets::_guard_lo_argv "${pem}"$'\n'"${KEY_CANARY}" secrets l
+  _refused_as _path_refusal secrets::_guard_lo_argv "${pem}"$'\n'"${KEY_CANARY}" secrets init
   _refused_as _path_refusal secrets::_no_private_argv list set "${id}"
   # The key-path commands refuse any PEM block in their own check.
   _refused_as _pem_path_refusal secrets::add-key "${cert}"

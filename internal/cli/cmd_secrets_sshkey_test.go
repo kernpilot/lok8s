@@ -277,8 +277,11 @@ func TestGuardPrivateKeyArgvCoversTheSecretsTree(t *testing.T) {
 // and with an unknown flag before the subcommand. For another command of
 // lo secrets (list, a typo of set) it names the key file, and so it does
 // when cobra cannot resolve the command (an unknown flag before secrets,
-// "--" before secrets: fail closed). A command outside lo secrets is left
-// to cobra. A private key is refused the same way, also as a paste split
+// "--" before secrets: fail closed), and when the block is one word before
+// secrets: cobra then takes "secrets" as the value of that flag and
+// resolves `lo lint` or `lo init`, while the words of the argv by the bash
+// rule (an unknown flag is a switch) start with secrets. A command outside
+// lo secrets is left to cobra. A private key is refused the same way, also as a paste split
 // into words (whose words hold "-----BEGIN" too), and the first line names
 // a private key. The same in a project that routes lo secrets to the bash
 // tree, where Find stops at the shim (checked below, so that each root
@@ -318,15 +321,23 @@ func TestGuardPrivateKeyArgvRefusesAPEMBlock(t *testing.T) {
 				{"secrets", "st", "ta.key", value},
 				{"--no-such-flag", "secrets", "set", "-n", "vpn", "ta.key", value},
 				{"--", "secrets", "set", "-n", "vpn", "ta.key", value},
+				{value, "secrets", "l"},
+				{value, "secrets", "init"},
+				{value, "s", "init"},
 			} {
 				var guard bytes.Buffer
 				if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != pemPathRefusal {
 					t.Errorf("%s, argv %d with %.20q: not refused, or printed %q", name, i, value, guard.String())
 				}
 			}
-			var guard bytes.Buffer
-			if GuardPrivateKeyArgv(NewRoot(paths), []string{"version", value}, &guard) || guard.Len() != 0 {
-				t.Errorf("%s, version: refused, or printed %q", name, guard.String())
+			for _, argv := range [][]string{
+				{"version", value},
+				{"--domain", "secrets", "lint", value},
+			} {
+				var guard bytes.Buffer
+				if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
+					t.Errorf("%s, %q: refused, or printed %q", name, argv[:len(argv)-1], guard.String())
+				}
 			}
 		}
 		for i, argv := range [][]string{
@@ -346,6 +357,8 @@ func TestGuardPrivateKeyArgvRefusesAPEMBlock(t *testing.T) {
 			{"secrets", "add-key", "-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"},
 			{"secrets", "list", "set", fillerIdentity},
 			{"secrets", "--domain", "set", "list", fillerIdentity},
+			{pemLine + "\n" + canary, "secrets", "l"},
+			{pemLine + "\n" + canary, "secrets", "init"},
 		} {
 			var guard bytes.Buffer
 			if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyRefusal {
