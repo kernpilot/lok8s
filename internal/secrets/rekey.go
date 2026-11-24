@@ -62,13 +62,28 @@ func LooksLikeKeyArg(arg string) bool {
 	return LooksLikePrivateKey(arg) || strings.Contains(arg, "-----BEGIN")
 }
 
+// refusedArgLine prints the first line of a refusal of lo secrets: it names
+// a private key when argv (the refused words, joined with spaces) has the
+// shape of one (LooksLikePrivateKey), else the PEM block (a certificate, a
+// public key, a static key of OpenVPN). Bash twin:
+// secrets::_refused_arg_line.
+func refusedArgLine(w io.Writer, argv string) {
+	if LooksLikePrivateKey(argv) {
+		ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+		return
+	}
+	ui.ErrorTo(w, "a value starts a PEM block (-----BEGIN): it is not printed")
+}
+
 // RefusePrivateKey prints the refusal for an argument of lo secrets that has
-// the shape of a private key. It never prints the argument. Every argv check
-// of lo secrets prints it: the guard of main for the whole argv, and the
-// checks of add-key, remove-key, init and decrypt. Bash twin:
+// the shape of a private key or holds a PEM block (LooksLikeKeyArg). It
+// never prints the argument. argv is the refused words, joined with spaces:
+// they choose the first line (refusedArgLine). Every argv check of lo
+// secrets prints it: the guard of main for the whole argv, and the checks
+// of add-key, remove-key, init and decrypt. Bash twin:
 // secrets::_no_private_key.
-func RefusePrivateKey(w io.Writer) {
-	ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
+func RefusePrivateKey(w io.Writer, argv string) {
+	refusedArgLine(w, argv)
 	ui.ErrorTo(w, "pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)")
 }
 
@@ -76,16 +91,10 @@ func RefusePrivateKey(w io.Writer) {
 // a secret value, not the path of a key file, and set reads the value from
 // stdin when the argument is left out. The guard of main prints it for an
 // argv that resolves to set and has a private key or a PEM block in it
-// (LooksLikeKeyArg). argv is that argv, joined with spaces. The first line
-// names a private key when argv has the shape of one (LooksLikePrivateKey),
-// else the PEM block (a certificate, a public key, a static key of
-// OpenVPN). Bash twin: secrets::_no_private_value.
+// (LooksLikeKeyArg). argv is that argv, joined with spaces: it chooses the
+// first line (refusedArgLine). Bash twin: secrets::_no_private_value.
 func RefusePrivateKeyValue(w io.Writer, argv string) {
-	if LooksLikePrivateKey(argv) {
-		ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
-	} else {
-		ui.ErrorTo(w, "a value starts a PEM block (-----BEGIN): it is not printed")
-	}
+	refusedArgLine(w, argv)
 	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")
 }
 
@@ -102,10 +111,14 @@ func shownKeyPath(path string) string {
 }
 
 // QuoteArg is arg in Go quotes for a message, or a placeholder when arg has
-// the shape of a private key.
+// the shape of a private key or holds a PEM block (LooksLikeKeyArg): a PEM
+// block can be key material, and a message must not print it.
 func QuoteArg(arg string) string {
 	if LooksLikePrivateKey(arg) {
 		return "(not printed: it looks like a private key)"
+	}
+	if LooksLikeKeyArg(arg) {
+		return "(not printed: it holds a PEM block)"
 	}
 	return strconv.Quote(arg)
 }
@@ -118,7 +131,7 @@ func (c *Context) recipientArg(key string) (string, error) {
 	// Before any message that prints the argument: the not-a-file error
 	// below echoes it, and for a pasted private key that is key material.
 	if LooksLikeKeyArg(key) {
-		RefusePrivateKey(c.ErrOut)
+		RefusePrivateKey(c.ErrOut, key)
 		return "", ErrHandled
 	}
 

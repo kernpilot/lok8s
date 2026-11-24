@@ -113,8 +113,10 @@ func TestInitRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 // directory, or a path that does not end in .pub) the hint is ssh-keygen -t
 // ed25519. When something that is not a regular file is at the path of the
 // .pub (a directory, a link to no file), there is no hint: a command that
-// writes the .pub would write through the link. Bash twin: "secrets init: a
-// missing .pub beside its private key gets the ssh-keygen -y hint".
+// writes the .pub would write through the link. When the path has the
+// shape of a private key, shownKeyPath replaces it, and there is no hint:
+// it would hold the placeholder. Bash twin: "secrets init: a missing .pub
+// beside its private key gets the ssh-keygen -y hint".
 func TestInitMissingKey(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a file of mode 000: the stat-only proof needs another user")
@@ -139,11 +141,11 @@ func TestInitMissingKey(t *testing.T) {
 		}
 	}
 	const generate = "[error] Generate one with: ssh-keygen -t ed25519\n"
-	const shown = "'(not printed: it looks like a private key)'"
 	for key, hint := range map[string]string{
 		base + "/id.pub":       "[error] Write it from the private key with: ssh-keygen -y -f " + base + "/id > " + base + "/id.pub\n",
 		base + "/work key.pub": "[error] Write it from the private key with: ssh-keygen -y -f '" + base + "/work key' > '" + base + "/work key.pub'\n",
-		fake + ".pub":          "[error] Write it from the private key with: ssh-keygen -y -f " + shown + " > " + shown + "\n",
+		fake + ".pub":          "",
+		fake + "-gone.pub":     "",
 		base + "/nope":         generate,
 		base + "/none.pub":     generate,
 		base + "/adir.pub":     generate,
@@ -162,9 +164,13 @@ func TestInitMissingKey(t *testing.T) {
 }
 
 // A path in the hint of Init stays as it is when the shell reads it as one
-// word with no expansion, else it goes into single quotes, with each ' as
-// '\”. Bash twin: "secrets::_shown_quoted gives the bytes of shellQuoted"
-// in tests/unit/secrets_test.bats (the same table).
+// word with no expansion, else it goes into single quotes, with each single
+// quote as these four bytes:
+//
+//	'\''
+//
+// Bash twin: "secrets::_shown_quoted gives the bytes of shellQuoted" in
+// tests/unit/secrets_test.bats (the same table).
 func TestShellQuoted(t *testing.T) {
 	for in, want := range map[string]string{
 		"/home/u/.ssh/id_ed25519": "/home/u/.ssh/id_ed25519",

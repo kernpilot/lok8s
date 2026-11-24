@@ -142,19 +142,24 @@ func sshKeyCommand(c *cobra.Command) *cobra.Command {
 // secrets.LooksLikeKeyArg: the first word of a PEM block counts too.
 func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Command {
 	c.Args = func(cmd *cobra.Command, args []string) error {
-		private := secrets.LooksLikeKeyArg(strings.Join(args, " "))
+		var refused []string
+		if joined := strings.Join(args, " "); secrets.LooksLikeKeyArg(joined) {
+			refused = append(refused, joined)
+		}
 		cmd.Flags().Visit(func(f *pflag.Flag) {
-			private = private || secrets.LooksLikeKeyArg(f.Value.String())
+			if v := f.Value.String(); secrets.LooksLikeKeyArg(v) {
+				refused = append(refused, v)
+			}
 		})
-		if private {
-			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+		if len(refused) > 0 {
+			secrets.RefusePrivateKey(cmd.ErrOrStderr(), strings.Join(refused, " "))
 			return ErrHandled
 		}
 		return arity(cmd, args)
 	}
 	c.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		if secrets.LooksLikeKeyArg(err.Error()) {
-			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+			secrets.RefusePrivateKey(cmd.ErrOrStderr(), err.Error())
 			return ErrHandled
 		}
 		return argshErrorf(cmd.ErrOrStderr(), "%s", argshFlagError(cmd, err.Error()))
@@ -163,27 +168,27 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 }
 
 // GuardPrivateKeyArgv refuses a `lo secrets` call whose raw argv, its words
-// joined with spaces, has the shape of a private key: a positional, a flag
+// joined with spaces, has the shape of a private key or holds the start of
+// a PEM block, "-----BEGIN" (secrets.LooksLikeKeyArg): a positional, a flag
 // value (`--ssh-key X`, `--ssh-key=X`, `--domain X`), a flag that cobra does
-// not know (`--unknown=X`), or a paste split into words. main runs it before
-// Execute: cobra's flag parser, its unknown-command error and the argument
-// checks print what they reject. It covers `lo secrets` and every command
-// under it, and fails closed: when cobra cannot resolve a command, it
-// refuses too. That is a Find error, or an argv that resolves to the root
-// itself, whose unknown-command error prints the first word. It prints the
-// refusal (never the argument) and reports whether it refused. A resolved
-// command outside `lo secrets` is left to cobra.
+// not know (`--unknown=X`), or a paste split into words. No command of lo
+// secrets takes a PEM block as an argument (a certificate, a public key, a
+// static key of OpenVPN): such a word starts with "-", so pflag reads it as
+// a flag, and its error ("bad flag syntax: <arg>") prints all of it. main
+// runs the guard before Execute: cobra's flag parser, its unknown-command
+// error and the argument checks print what they reject. It covers `lo
+// secrets` and every command under it, and fails closed: when cobra cannot
+// resolve a command, it refuses too. That is a Find error, or an argv that
+// resolves to the root itself, whose unknown-command error prints the first
+// word. It prints the refusal (never the argument) and reports whether it
+// refused. A resolved command outside `lo secrets` is left to cobra.
 //
-// `lo secrets set` (and its alias) is refused also for any word that holds
-// the start of a PEM block, "-----BEGIN" (secrets.LooksLikeKeyArg): a
-// certificate, a public key or a static key of OpenVPN. Such a value starts
-// with "-", so no parser of set can take it as an argument, and the flag
-// error of pflag ("bad flag syntax: <arg>") prints all of it. Its refusal
-// names stdin, and its first line names the PEM block when the argv has no
-// private key (secrets.RefusePrivateKeyValue). Bash twin:
-// secrets::_guard_lo_argv in main of lo, before its parser (the same scope
-// and the same fail-closed rule), and secrets::_no_private_argv in
-// main::secrets.
+// The first line of the refusal names a private key or the PEM block. For
+// `lo secrets set` (and its alias) the second line names stdin
+// (secrets.RefusePrivateKeyValue), else the key file
+// (secrets.RefusePrivateKey). Bash twin: secrets::_guard_lo_argv in main of
+// lo, before its parser (the same scope and the same fail-closed rule), and
+// secrets::_no_private_argv in main::secrets.
 func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) bool {
 	joined := strings.Join(argv, " ")
 	if !secrets.LooksLikeKeyArg(joined) {
@@ -194,10 +199,10 @@ func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) b
 		secrets.RefusePrivateKeyValue(errOut, joined)
 		return true
 	}
-	if !secrets.LooksLikePrivateKey(joined) || err == nil && cmd.HasParent() && !underSecrets(cmd) {
+	if err == nil && cmd.HasParent() && !underSecrets(cmd) {
 		return false
 	}
-	secrets.RefusePrivateKey(errOut)
+	secrets.RefusePrivateKey(errOut, joined)
 	return true
 }
 

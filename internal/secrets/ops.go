@@ -34,9 +34,13 @@ import (
 // file, the hint writes the .pub from it: a `ssh-keygen -t ed25519` there
 // asks to overwrite the key that decrypt reads. The private key is checked
 // with a stat only; it is never read. Each path goes through shownKeyPath,
-// then shellQuoted. Bash twin: the hint of secrets::init.
+// then shellQuoted. When shownKeyPath replaces the path (it has the shape of
+// a private key), there is no hint either: the hint would hold the
+// placeholder, and a paste of it makes a file of that name. The private key
+// path is a prefix of the .pub path, so the test of the .pub path covers
+// both. Bash twin: the hint of secrets::init.
 func publicKeyHint(sshKey string) string {
-	if _, err := os.Lstat(sshKey); err == nil {
+	if _, err := os.Lstat(sshKey); err == nil || shownKeyPath(sshKey) != sshKey {
 		return ""
 	}
 	if private, ok := strings.CutSuffix(sshKey, ".pub"); ok && private != "" && fsutil.IsRegular(private) {
@@ -48,9 +52,14 @@ func publicKeyHint(sshKey string) string {
 
 // shellQuoted is word for a command line in a hint that the user pastes
 // into a shell: as it is when each byte is an ASCII letter, a digit or one
-// of _@%+=:,./- (and word is not empty), else in single quotes, with each '
-// as '\”. A ~ is quoted too: at the start of a word, the shell expands it.
-// Bash twin: secrets::_shown_quoted.
+// of _@%+=:,./- (and word is not empty), else in single quotes. Each single
+// quote in word becomes these four bytes (close the quote, an escaped
+// quote, open the quote again):
+//
+//	'\''
+//
+// A ~ is quoted too: at the start of a word, the shell expands it. Bash
+// twin: secrets::_shown_quoted.
 func shellQuoted(word string) string {
 	plain := word != ""
 	for i := 0; i < len(word) && plain; i++ {

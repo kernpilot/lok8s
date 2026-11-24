@@ -118,12 +118,19 @@ func sshKeyArgvs(cmd string) [][]string {
 // init and decrypt take the path of a key file: a key pasted into their
 // argv is refused before any parser prints it, through cobra Execute and
 // through the argv guard of main (bash twin: secrets::_no_private_key).
+// Through cobra Execute the flag-error func sees the first word of a paste
+// split into words only, so its first line names the PEM block; the guard
+// of main sees the whole argv.
 func TestSecretsSSHKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
 	paths := secretsProject(t)
 	for _, cmd := range []string{"init", "decrypt"} {
 		for i, argv := range sshKeyArgvs(cmd) {
 			out, errOut, err := runSecrets(t, paths, argv...)
-			if err == nil || out != "" || errOut != privateKeyRefusal {
+			want := privateKeyRefusal
+			if argv[2] == "-----BEGIN" {
+				want = pemPathRefusal
+			}
+			if err == nil || out != "" || errOut != want {
 				t.Errorf("%s argv %d: err %v, stdout %d bytes, stderr %q", cmd, i, err, len(out), errOut)
 			}
 			var guard bytes.Buffer
@@ -146,12 +153,13 @@ func TestSecretsSSHKeyCommandsDoNotEchoAPrivateKey(t *testing.T) {
 
 // A key pasted into LOK8S_SSH_KEY reaches no argv guard: the not-found lines
 // of init and decrypt print a placeholder instead of the value (bash twin:
-// secrets::_shown_path).
+// secrets::_shown_path). init then prints no hint: a hint would hold the
+// placeholder.
 func TestSecretsKeyNotFoundHidesAPrivateKeyShape(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
 	const shown = "(not printed: it looks like a private key)"
 	for cmd, want := range map[string]string{
-		"init":    "[error] SSH public key not found: " + shown + "\n[error] Generate one with: ssh-keygen -t ed25519\n",
+		"init":    "[error] SSH public key not found: " + shown + "\n",
 		"decrypt": "[error] SSH private key not found: " + shown + "\n",
 	} {
 		t.Run(cmd, func(t *testing.T) {
@@ -171,6 +179,9 @@ func TestSecretsKeyNotFoundHidesAPrivateKeyShape(t *testing.T) {
 			}
 			if strings.Contains(out+errOut, canary) || strings.Contains(out+errOut, "BEGIN") {
 				t.Error("the value of LOK8S_SSH_KEY reached the output")
+			}
+			if strings.Contains(errOut, "ssh-keygen") {
+				t.Error("a hint with the placeholder was printed")
 			}
 		})
 	}
@@ -257,22 +268,23 @@ func TestGuardPrivateKeyArgvCoversTheSecretsTree(t *testing.T) {
 	}
 }
 
-// lo secrets set takes a secret value as its argument, and a value that
-// starts with "-" can never be one: the flag parser reads it as a flag, and
-// pflag's error ("bad flag syntax: <arg>") prints all of it. So the guard
-// refuses any word of set that holds "-----BEGIN" (a certificate, a public
-// key, a static key of OpenVPN) with the stdin line, before cobra parses,
-// through the alias, with --domain on either side and with an unknown flag
-// before the subcommand, and the first line names the PEM block. A private
-// key is refused the same way, also as a paste split into words (whose
-// words hold "-----BEGIN" too), and the first line names a private key. Another command of lo secrets keeps its rule: a
-// PEM block that is not a private key passes the guard there, and a private
-// key gets the refusal that names a key file. The same in a project that
-// routes lo secrets to the bash tree, where Find stops at the shim (checked
-// below, so that each root covers its own path). Bash twin: "secrets set:
-// a PEM block or a private key is refused with the stdin line" in
-// tests/unit/secrets_test.bats.
-func TestGuardPrivateKeyArgvSetRefusesAPEMBlock(t *testing.T) {
+// No command of lo secrets takes a PEM block as an argument, and a word
+// that holds "-----BEGIN" starts with "-": the flag parser reads it as a
+// flag, and pflag's error ("bad flag syntax: <arg>") prints all of it. So
+// the guard refuses such a word (a certificate, a public key, a static key
+// of OpenVPN) before cobra parses, and the first line names the PEM block.
+// For set it names stdin: through the alias, with --domain on either side
+// and with an unknown flag before the subcommand. For another command of
+// lo secrets (list, a typo of set) it names the key file, and so it does
+// when cobra cannot resolve the command (an unknown flag before secrets,
+// "--" before secrets: fail closed). A command outside lo secrets is left
+// to cobra. A private key is refused the same way, also as a paste split
+// into words (whose words hold "-----BEGIN" too), and the first line names
+// a private key. The same in a project that routes lo secrets to the bash
+// tree, where Find stops at the shim (checked below, so that each root
+// covers its own path). Bash twin: "secrets: a PEM block or a private key
+// is refused, for set with the stdin line" in tests/unit/secrets_test.bats.
+func TestGuardPrivateKeyArgvRefusesAPEMBlock(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
 	cert := "-----BEGIN CERTIFICATE-----\nMIIBfake" + canary + "\n-----END CERTIFICATE-----"
 	pub := "-----BEGIN PUBLIC KEY-----\nMCowfake" + canary + "\n-----END PUBLIC KEY-----"
@@ -300,15 +312,21 @@ func TestGuardPrivateKeyArgvSetRefusesAPEMBlock(t *testing.T) {
 					t.Errorf("%s, set argv %d with %.20q: not refused, or printed %q", name, i, value, guard.String())
 				}
 			}
-			for _, argv := range [][]string{
+			for i, argv := range [][]string{
 				{"secrets", "list", value},
 				{"secrets", "--domain", "set", "list", value},
-				{"version", value},
+				{"secrets", "st", "ta.key", value},
+				{"--no-such-flag", "secrets", "set", "-n", "vpn", "ta.key", value},
+				{"--", "secrets", "set", "-n", "vpn", "ta.key", value},
 			} {
 				var guard bytes.Buffer
-				if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
-					t.Errorf("%s, %q: refused, or printed %q", name, argv[:len(argv)-1], guard.String())
+				if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != pemPathRefusal {
+					t.Errorf("%s, argv %d with %.20q: not refused, or printed %q", name, i, value, guard.String())
 				}
+			}
+			var guard bytes.Buffer
+			if GuardPrivateKeyArgv(NewRoot(paths), []string{"version", value}, &guard) || guard.Len() != 0 {
+				t.Errorf("%s, version: refused, or printed %q", name, guard.String())
 			}
 		}
 		for i, argv := range [][]string{

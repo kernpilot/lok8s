@@ -391,6 +391,8 @@ SET_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
 [error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
 SET_KEY_REFUSAL="[error] an argument looks like a private key: it is not printed
 [error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
+PEM_PATH_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
 sec_check secrets set -n app KEY "${FAKE_ID}"
 sec_no_echo "${FAKE_ID}" "secrets set <private key>"
 if [[ "$(cat "${WORK}/go.err")" != "${SET_KEY_REFUSAL}" ]]; then
@@ -411,6 +413,19 @@ for pem in "OpenVPN Static key V1" "CERTIFICATE"; do
   fi
 done
 sec_check secrets add-key "-----BEGIN CERTIFICATE-----"
+if [[ "$(cat "${WORK}/go.err")" != "${PEM_PATH_REFUSAL}" ]]; then
+  fail "secrets add-key <certificate line>: not the refusal that names the PEM block and the key file"
+fi
+# Another command of lo secrets (list, a typo of set) refuses a PEM block
+# too: no command of lo secrets takes one as an argument. The second line
+# names the key file.
+for sub in list st; do
+  sec_check secrets "${sub}" ta.key "-----BEGIN OpenVPN Static key V1-----"$'\n'"${PEM_BODY}"$'\n'"-----END OpenVPN Static key V1-----"
+  sec_no_echo "${PEM_BODY}" "secrets ${sub} <OpenVPN block>"
+  if [[ "$(cat "${WORK}/go.err")" != "${PEM_PATH_REFUSAL}" ]]; then
+    fail "secrets ${sub} <OpenVPN block>: not the refusal that names the PEM block and the key file"
+  fi
+done
 # init: a .pub that is missing beside its private key gets the hint that
 # writes the .pub from the private key. The private key is not read: a
 # filler file. Without a private key, the hint is ssh-keygen -t ed25519.

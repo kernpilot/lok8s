@@ -91,7 +91,10 @@ To store the literal string `-` as a value, use the pipe form:
 A value that starts with `-`, for example a certificate (a PEM block), goes on
 stdin too: the flag parser reads such an argument as a flag. `set` refuses any
 PEM block or private key as the value argument before a parser reads it, does
-not print it, and says to use stdin (see below):
+not print it, and says to use stdin (see below). A value that holds a PEM
+block at a later position also goes on stdin, for example a JSON document
+with a certificate in it: `set` refuses each argument that holds
+`-----BEGIN`.
 
 ```bash
 lo secrets set --domain app.example.com --name tls tls.crt < cert.pem
@@ -210,18 +213,17 @@ The bash implementation never shows the output of `ssh-to-age`, because it
 can quote the key file. It shows the exit status of the tool instead.
 
 Every `lo secrets` command refuses an argument that looks like a private
-key, and does not print it. That includes a key pasted into `--ssh-key` or
+key or holds a PEM block (a certificate, a public key, a static key of
+OpenVPN), and does not print it. No command of `lo secrets` takes a PEM
+block as an argument: it starts with `-`, so the flag parser reads it as a
+flag and prints it. The refusal includes a key pasted into `--ssh-key` or
 `--domain`, a key in place of a command, and a paste that the shell splits
-into words. For `set`, the error says to pass the value on stdin, and `set`
-also refuses any PEM block (a certificate, a public key, a static key of
-OpenVPN): such a value starts with `-`, so it cannot be an argument. For a
-PEM block that is not a private key, the first line of the error is `a
-value starts a PEM block (-----BEGIN): it is not printed`.
-`init`, `decrypt`, `add-key` and `remove-key` take a path or an age public
-key, so they refuse any PEM block too. The other commands refuse only a
-private key. When the
-value of `LOK8S_SSH_KEY` looks like a private key, each message that names
-the key file shows a placeholder instead of the value.
+into words. For a PEM block that is not a private key, the first line of
+the error is `a value starts a PEM block (-----BEGIN): it is not printed`.
+For `set`, the error says to pass the value on stdin. When the value of
+`LOK8S_SSH_KEY` looks like a private key, each message that names the key
+file shows a placeholder instead of the value, and `init` shows no command
+to write the `.pub` file.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

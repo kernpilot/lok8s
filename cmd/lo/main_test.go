@@ -361,17 +361,23 @@ func TestKeysOnlyRefusesAnOldPluginExec(t *testing.T) {
 	}
 }
 
-// The real entrypoint, for lo secrets set with a PEM block as its value (a
-// static key of OpenVPN, a certificate): the guard refuses it before cobra
-// parses, exit status 1, with the two lines of the refusal that names
-// the PEM block and stdin, and nothing of the value on either stream. Without the guard,
-// pflag's "bad flag syntax: <arg>" prints the whole value. In a project
-// that routes lo secrets to the bash tree, the guard runs in front of the
-// shim: the tree (a stub that leaves a mark) never runs.
-func TestSetRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
+// The real entrypoint, for lo secrets set, list and a typo of set with a
+// PEM block as an argument (a static key of OpenVPN, a certificate): the
+// guard refuses it before cobra parses, exit status 1, with the two lines
+// of the refusal, and nothing of the value on either stream. Its first
+// line names the PEM block; its second line names stdin for set, else the
+// key file. Without the guard, pflag's "bad flag syntax: <arg>" prints the
+// whole value. In a project that routes lo secrets to the bash tree, the
+// guard runs in front of the shim: the tree (a stub that leaves a mark)
+// never runs.
+func TestSecretsRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
-	const refusal = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n" +
-		"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
+	const pemFirst = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n"
+	refusals := map[string]string{
+		"set":  pemFirst + "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n",
+		"list": pemFirst + "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n",
+		"st":   pemFirst + "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n",
+	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -397,30 +403,32 @@ func TestSetRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for kind, value := range values {
-			home := t.TempDir()
-			cmd := exec.CommandContext(t.Context(), self, "secrets", "set", "--domain", "d.dev", "-n", "vpn", "ta.key", value)
-			cmd.Dir = proj
-			cmd.Env = []string{
-				loMainExec + "=1",
-				"PATH=/usr/bin:/bin",
-				"HOME=" + home,
-				"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
-				"KUBECONFIG=" + filepath.Join(home, "no-such-kubeconfig"),
-			}
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &stdout, &stderr
-			err := cmd.Run()
-			rc := -1
-			if cmd.ProcessState != nil {
-				rc = cmd.ProcessState.ExitCode()
-			}
-			if rc != 1 || stderr.String() != refusal || stdout.Len() != 0 {
-				t.Errorf("%s, %s: rc %d (%v), stdout %q, stderr %q", impl, kind, rc, err,
-					strings.ReplaceAll(stdout.String(), canary, "<canary>"), strings.ReplaceAll(stderr.String(), canary, "<canary>"))
-			}
-			if _, err := os.Stat(mark); err == nil {
-				t.Errorf("%s, %s: the bash tree ran", impl, kind)
+		for sub, refusal := range refusals {
+			for kind, value := range values {
+				home := t.TempDir()
+				cmd := exec.CommandContext(t.Context(), self, "secrets", sub, "--domain", "d.dev", "-n", "vpn", "ta.key", value)
+				cmd.Dir = proj
+				cmd.Env = []string{
+					loMainExec + "=1",
+					"PATH=/usr/bin:/bin",
+					"HOME=" + home,
+					"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
+					"KUBECONFIG=" + filepath.Join(home, "no-such-kubeconfig"),
+				}
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				err := cmd.Run()
+				rc := -1
+				if cmd.ProcessState != nil {
+					rc = cmd.ProcessState.ExitCode()
+				}
+				if rc != 1 || stderr.String() != refusal || stdout.Len() != 0 {
+					t.Errorf("%s, %s %s: rc %d (%v), stdout %q, stderr %q", impl, sub, kind, rc, err,
+						strings.ReplaceAll(stdout.String(), canary, "<canary>"), strings.ReplaceAll(stderr.String(), canary, "<canary>"))
+				}
+				if _, err := os.Stat(mark); err == nil {
+					t.Errorf("%s, %s %s: the bash tree ran", impl, sub, kind)
+				}
 			}
 		}
 	}

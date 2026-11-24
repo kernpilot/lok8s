@@ -1981,15 +1981,21 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   # not a key.
   _load
   _stub_encrypt
-  local fake arg; fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
+  # The first line names a private key, or the PEM block when the argument
+  # has no private key ("-----BEGIN" alone). That line holds the marker
+  # "-----BEGIN" itself, so the echo check runs on the output without it.
+  local fake arg first want; fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
   local before; before="$(cat "${CFG}")"
   for arg in "${fake}" "${PEM_HEAD}" "-----BEGIN"; do
+    first="[error] an argument looks like a private key: it is not printed"
+    [ "${arg}" != "-----BEGIN" ] || first="[error] a value starts a PEM block (-----BEGIN): it is not printed"
+    want="${first}
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
     DOMAIN=a.dev run _rm "${arg}"
     [ "$status" -eq 1 ]
-    [ "$output" = "[error] an argument looks like a private key: it is not printed
-[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)" ] || {
+    [ "$output" = "${want}" ] || {
       echo "unexpected output (${#output} bytes)" >&2; return 1; }
-    [[ "$output" != *"${arg}"* ]]
+    [[ "${output/"${want}"/}" != *"${arg}"* ]]
   done
   [ "$(cat "${CFG}")" = "${before}" ]
 }
@@ -2034,10 +2040,11 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
 # split into words too. So is a PEM block that is not a private key (a
 # static key of OpenVPN, a certificate): its first character is "-", so
 # :args of set would read it as a flag and print it. Its first line names
-# the PEM block. Exit status 1, and nothing of the value in the output.
-@test "the real entrypoint refuses a private key or a PEM block as the value of set with the stdin line" {
+# the PEM block. Exit status 1, and nothing of the value in the output. For
+# list and a typo of set, the second line names the key file.
+@test "the real entrypoint refuses a private key or a PEM block, for set with the stdin line" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
-  local canary=CANARY_SECRET_MATERIAL_DO_NOT_LEAK fake cert ovpn want pem_want value
+  local canary=CANARY_SECRET_MATERIAL_DO_NOT_LEAK fake cert ovpn want pem_want pem_path_want value sub
   fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
   cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIB${canary}"$'\n'"-----END CERTIFICATE-----"
   ovpn="-----BEGIN OpenVPN Static key V1-----"$'\n'"${canary}"$'\n'"-----END OpenVPN Static key V1-----"
@@ -2056,6 +2063,15 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
     _run_lo secrets set -n vpn ta.key "${value}" < /dev/null
     [ "$status" -eq 1 ] && [ "$output" = "${pem_want}" ] && [[ "$output" != *"${canary}"* ]] || {
       echo "set <${value%%$'\n'*}>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+  done
+  pem_path_want="[error] a value starts a PEM block (-----BEGIN): it is not printed
+[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
+  for sub in list st; do
+    for value in "${ovpn}" "${cert}"; do
+      _run_lo secrets "${sub}" ta.key "${value}" < /dev/null
+      [ "$status" -eq 1 ] && [ "$output" = "${pem_path_want}" ] && [[ "$output" != *"${canary}"* ]] || {
+        echo "${sub} <${value%%$'\n'*}>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+    done
   done
 }
 

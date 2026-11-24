@@ -2042,6 +2042,14 @@ _value_refusal() {
     '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
 }
 
+# _pem_path_refusal: the refusal of an argument of lo secrets other than set
+# that holds a PEM block with no private key: its first line names the PEM
+# block (Go twin: pemPathRefusal).
+_pem_path_refusal() {
+  printf '%s\n' '[error] a value starts a PEM block (-----BEGIN): it is not printed' \
+    '[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)'
+}
+
 # _pem_value_refusal: the refusal of lo secrets set for a PEM block that is
 # not a private key: its first line names the PEM block (Go twin:
 # pemValueRefusal).
@@ -2087,16 +2095,17 @@ _refused_path_arg() {
 }
 
 # A key pasted into LOK8S_SSH_KEY reaches no argument check: the not-found
-# lines of init and decrypt print a placeholder instead of the value (Go
-# twin: TestSecretsKeyNotFoundHidesAPrivateKeyShape).
+# lines of init and decrypt print a placeholder instead of the value, and
+# init prints no hint, which would hold the placeholder (Go twin:
+# TestSecretsKeyNotFoundHidesAPrivateKeyShape).
 @test "secrets init and decrypt: the not-found line does not print a private key from LOK8S_SSH_KEY" {
   ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
   sops() { :; }
   local shown="(not printed: it looks like a private key)"
   export LOK8S_SSH_KEY="-----BEGIN OPENSSH PRIVATE ""KEY-----"$'\n'"${KEY_CANARY}"
   run secrets::init
-  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}
-[error] Generate one with: ssh-keygen -t ed25519" ] || { echo "init: status $status: $output" >&2; return 1; }
+  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}" ] || {
+    echo "init: status $status: $output" >&2; return 1; }
   run secrets::decrypt < /dev/null
   [ "$status" -eq 1 ] && [[ "${output}" == *"[error] SSH private key not found: ${shown}" ]] || {
     echo "decrypt: status $status: $output" >&2; return 1; }
@@ -2113,14 +2122,16 @@ _refused_path_arg() {
 # Without the private key (no file, or a directory) the hint is ssh-keygen
 # -t ed25519. When something that is not a regular file is at the path of
 # the .pub (a directory, a link to no file), there is no hint: a command
-# that writes the .pub would write through the link. The key comes from
+# that writes the .pub would write through the link. When the path has the
+# shape of a private key, secrets::_shown_path replaces it, and there is no
+# hint either: it would hold the placeholder. The key comes from
 # LOK8S_SSH_KEY: :args is a stub here (the --ssh-key form runs in
 # hack/parity-test.sh). Go twin: TestInitMissingKey.
 @test "secrets init: a missing .pub beside its private key gets the ssh-keygen -y hint" {
   (( EUID != 0 )) || skip "root reads a file of mode 000: the test -f proof needs another user"
   ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
   sops() { :; }
-  local dir="${BATS_TEST_TMPDIR}/keys" shown="'(not printed: it looks like a private key)'" key want private
+  local dir="${BATS_TEST_TMPDIR}/keys" key want private
   local generate="[error] Generate one with: ssh-keygen -t ed25519"
   local fake="${dir}/AGE-SECRET-KEY-1${KEY_CANARY}"
   mkdir -p "${dir}/adir" "${dir}/dirpub.pub"
@@ -2142,8 +2153,10 @@ _refused_path_arg() {
   _hint "${dir}/id.pub"
   key="${dir}/work key.pub" want="[error] Write it from the private key with: ssh-keygen -y -f '${dir}/work key' > '${dir}/work key.pub'"
   _hint "${dir}/work key"
-  key="${fake}.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${shown} > ${shown}"
+  key="${fake}.pub" want=""
   _hint "${fake}"
+  key="${fake}-gone.pub"
+  _hint "${fake}-gone"
   want="${generate}"
   for key in "${dir}/none.pub" "${dir}/adir.pub"; do
     _hint "${key%.pub}"
@@ -2438,21 +2451,22 @@ _path_without() {
   _root_passes secrets init --ssh-key /k/id_ed25519.pub
 }
 
-# lo secrets set takes a secret value as its argument, and a value that
-# starts with "-" can never be one: :args of set reads it as a flag and
-# prints it. So the checks of main of lo and of main::secrets refuse any word
-# of set that holds "-----BEGIN" (a certificate, a public key, a static key
-# of OpenVPN) with the stdin line, through each alias, with --domain on
-# either side and with an unknown flag before the subcommand, and the first
-# line names the PEM block. A private key is refused the same way, also as
-# a paste split into words (whose words hold "-----BEGIN" too), and the
-# first line names a private key. The other
-# commands keep their rule: a PEM block that is not a private key passes
-# these checks, a private key gets the refusal that names a key file, and
-# the key-path commands refuse any PEM block in their own check
-# (secrets::_is_key_arg). Go twin: TestGuardPrivateKeyArgvSetRefusesAPEMBlock,
+# No command of lo secrets takes a PEM block as an argument, and a word that
+# holds "-----BEGIN" starts with "-": :args reads it as a flag and prints
+# it. So the checks of main of lo and of main::secrets refuse such a word (a
+# certificate, a public key, a static key of OpenVPN), and the first line
+# names the PEM block. For set it names stdin: through each alias, with
+# --domain on either side, and with an unknown flag or "--" before secrets
+# or before set (the words of the argv find set there; the binary refuses
+# those with the line that names the key file, see the residual of the Go
+# twin). For another command of lo secrets (list, a typo of set) it names
+# the key file. A command outside lo secrets is left to that command. A
+# private key is refused the same way, also as a paste split into words
+# (whose words hold "-----BEGIN" too), and the first line names a private
+# key. The key-path commands refuse any PEM block in their own check
+# (secrets::_is_key_arg). Go twin: TestGuardPrivateKeyArgvRefusesAPEMBlock,
 # TestLooksLikePrivateKeyArgvMarkers.
-@test "secrets set: a PEM block or a private key is refused with the stdin line" {
+@test "secrets: a PEM block or a private key is refused, for set with the stdin line" {
   _init_fakes
   local -a usage=('up|u@destructive' 'Start cluster' 'secrets|s' 'Manage secrets')
   local -a args=('-' 'Global flags:' 'verbose|v:+' 'Verbose' 'cluster|s' 'Cluster name' 'domain|' 'Domain')
@@ -2479,12 +2493,17 @@ _path_without() {
     _refused_as _pem_value_refusal secrets::_no_private_argv set -n tls tls.crt "${value}"
     _refused_as _pem_value_refusal secrets::_no_private_argv --no-such-flag s ta.key "${value}"
     _refused_as _pem_value_refusal main::secrets set -n vpn ta.key "${value}"
-    # Another command keeps its rule: a PEM block that is not a private key
-    # passes these checks.
-    _passes secrets::_guard_lo_argv secrets list "${value}"
-    _passes secrets::_guard_lo_argv secrets --domain set list "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv --no-such-flag secrets set -n vpn ta.key "${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv -- secrets set -n vpn ta.key "${value}"
+    # Another command of lo secrets: the refusal names the key file.
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets list "${value}"
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets --domain set list "${value}"
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets st ta.key "${value}"
+    _refused_as _pem_path_refusal secrets::_no_private_argv list "${value}"
+    _refused_as _pem_path_refusal secrets::_no_private_argv st ta.key "${value}"
+    _refused_as _pem_path_refusal main::secrets list "${value}"
+    # A command outside lo secrets is left to that command.
     _passes secrets::_guard_lo_argv up "${value}"
-    _passes secrets::_no_private_argv list "${value}"
   done
   _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY "${pem}"$'\n'"${KEY_CANARY}"
   _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"
@@ -2498,6 +2517,6 @@ _path_without() {
   _refused_as _path_refusal secrets::_guard_lo_argv secrets list set "${id}"
   _refused_as _path_refusal secrets::_no_private_argv list set "${id}"
   # The key-path commands refuse any PEM block in their own check.
-  _refused_as _path_refusal secrets::add-key "${cert}"
-  _refused_as _path_refusal secrets::init --ssh-key "${cert}"
+  _refused_as _pem_path_refusal secrets::add-key "${cert}"
+  _refused_as _pem_path_refusal secrets::init --ssh-key "${cert}"
 }
