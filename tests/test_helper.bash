@@ -361,6 +361,25 @@ vendor_lo_utils() {
   done
 }
 
+# no_mint_plugin <plugin home> <caps>: a Secret plugin in <plugin home> for
+# the no-mint check (build::_no_mint_capable). On each run it appends the
+# name of its working directory to ${BATS_TEST_TMPDIR}/plugin-runs: the
+# probe runs in a new lok8s-no-mint-* directory. It prints <caps> for
+# --capabilities and nothing for other arguments. Requires setup_tmpdir.
+no_mint_plugin() {
+  local plugin="${1}/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${plugin%/*}" || return 1
+  printf '#!%s\nprintf "%%s\\n" "${PWD##*/}" >> %q\n[[ "${1:-}" != --capabilities ]] || printf %%s %q\n' \
+    "${BASH}" "${BATS_TEST_TMPDIR}/plugin-runs" "${2}" > "${plugin}" || return 1
+  chmod +x "${plugin}"
+}
+
+# no_mint_probes: the number of no-mint probes that the no_mint_plugin saw.
+no_mint_probes() {
+  [[ -f "${BATS_TEST_TMPDIR}/plugin-runs" ]] || { echo 0; return 0; }
+  grep -c '^lok8s-no-mint-' "${BATS_TEST_TMPDIR}/plugin-runs" || true
+}
+
 # Mock a command by creating a bash function that overrides it.
 # Usage: mock_command <name> [exit_code] [stdout_output]
 mock_command() {

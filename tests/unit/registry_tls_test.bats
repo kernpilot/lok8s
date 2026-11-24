@@ -16,6 +16,9 @@ setup() {
   export -f import
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  # The registry TLS mint runs the no-mint check of libs/build (its import
+  # is stubbed too).
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
@@ -274,11 +277,18 @@ YAML
 # Write a fake Secret-plugin exec into a plugin home and export KUSTOMIZE_PLUGIN_HOME.
 # It captures the manifest on stdin (to assert cert.hosts) and emits a k8s Secret
 # with dummy base64 tls.crt/tls.key — what lo::registries_tls_cert extracts.
+# For --capabilities it counts the probe in plugin-probes and prints
+# ${STUB_CAPS} (the no-mint check).
 _stub_secret_plugin() {
   local plugin_home="${BATS_TEST_TMPDIR}/.kustomize"
   mkdir -p "${plugin_home}/secrets.lok8s.dev/v1/secret"
   cat > "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret" <<STUB
 #!/usr/bin/env bash
+if [[ "\${1:-}" == --capabilities ]]; then
+  echo probe >> "${BATS_TEST_TMPDIR}/plugin-probes"
+  printf '%s' "\${STUB_CAPS-}"
+  exit 0
+fi
 cat > "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
 printf 'keys-only=%s\n' "\${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" > "${BATS_TEST_TMPDIR}/plugin-env"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: %s\n  tls.key: %s\n' "\$(printf -- '-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n' "\$(printf FAKECRT | base64)" | base64 -w0)" "\$(printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' "\$(printf FAKEKEY | base64)" | base64 -w0)"
@@ -440,6 +450,48 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   assert_success
   run cat "${BATS_TEST_TMPDIR}/plugin-env"
   assert_output "keys-only=0"
+}
+
+# With LOK8S_SECRETS_NO_MINT set, the mint refuses a Secret plugin without
+# the no-mint run before it runs the plugin: an older plugin ignores the
+# switch and mints (the leaf, and a CA in CAROOT when there is none). Go:
+# TestRegistriesTLSMintChecksTheNoMintPlugin.
+@test "lo::registry_tls_mint with no-mint refuses a Secret plugin without the no-mint run" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  export LOK8S_SECRETS_NO_MINT=1
+  local caps
+  for caps in $'dry-run\nkeys-only\n' ""; do
+    rm -f "${BATS_TEST_TMPDIR}/plugin-probes"
+    STUB_CAPS="${caps}" run lo::registries_tls_cert test.lok8s.dev
+    assert_failure
+    assert_output "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+    [ "$(cat "${BATS_TEST_TMPDIR}/plugin-probes")" = "probe" ]
+    [ ! -e "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ] || { echo "the plugin minted"; return 1; }
+    [ ! -e "${FAKE_VOL}/volumes/lok8s-registry-tls" ] || { echo "the volume was created"; return 1; }
+  done
+  # A plugin with the no-mint run mints.
+  STUB_CAPS=$'dry-run\nkeys-only\nno-mint\n' run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  [ -s "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ]
+}
+
+# With the switch off, the mint does not probe the plugin. Go:
+# TestRegistriesTLSMintNoMintOffDoesNotProbe.
+@test "lo::registry_tls_mint with no-mint off does not probe the Secret plugin" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  export LOK8S_SECRETS_NO_MINT=false
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  [ ! -e "${BATS_TEST_TMPDIR}/plugin-probes" ] || { echo "the plugin was probed"; return 1; }
+  [ -s "${BATS_TEST_TMPDIR}/plugin-manifest.yaml" ]
 }
 
 @test "registries_tls_cert: re-mint is skipped when the SAN set is unchanged; the key is never read out" {

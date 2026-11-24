@@ -122,6 +122,19 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 		ui.ErrorTo(stderr, "addons::render: env: may not set %s", v)
 		return "", fmt.Errorf("addons render: env: may not set %s", v)
 	}
+	// With LOK8S_SECRETS_NO_MINT set, a real render needs a Secret plugin
+	// that has the no-mint run, and kustomize gets the home that the check
+	// probed (build.CheckNoMintPlugin). A dry run does not check: its
+	// plugin has the dry run (the boundary checks it), and a dry run writes
+	// nothing to the store.
+	checkedHome := ""
+	if dry == nil {
+		home, err := build.CheckNoMintPlugin(ctx, paths, runner, stderr, "addons::render")
+		if err != nil {
+			return "", fmt.Errorf("addons render: %s: %w", addonDir, err)
+		}
+		checkedHome = home
+	}
 	buildDir, cleanup, err := stageBuildDir(paths, stderr, addonDir, kind, providerName, inlineValues, dry)
 	defer cleanup()
 	if err != nil {
@@ -139,6 +152,9 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 	sort.Strings(envNames)
 	for _, k := range envNames {
 		cmdEnv = append(cmdEnv, k+"="+env[k])
+	}
+	if checkedHome != "" {
+		cmdEnv = append(cmdEnv, KustomizePluginHomeEnv+"="+checkedHome)
 	}
 	// A real run passes --enable-exec (KRM exec functions). A dry run does
 	// not: the built-in plugins are legacy exec plugins, which

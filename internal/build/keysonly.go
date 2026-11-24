@@ -342,7 +342,7 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 		return ErrHandled
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	switch probeCapability(ctx, o, plugin, dir, keysOnlyCapability) {
+	switch probeCapability(ctx, o.runner(), plugin, dir, keysOnlyCapability) {
 	case capabilityFound:
 		return nil
 	case capabilityInterrupted:
@@ -371,10 +371,11 @@ const (
 // line want (bash: build::_probe_capability). The run is the one that
 // checkKeysOnlyPlugin describes: an empty stdin, PATH_SECRETS at a path
 // in dir that does not exist, the store-free switch on and the keys-only
-// setting off, so no plugin version can do anything with it.
-func probeCapability(ctx context.Context, o *Options, plugin, dir, want string) capabilityProbe {
+// setting off, so no plugin version can do anything with it. runner runs
+// the probe.
+func probeCapability(ctx context.Context, runner execx.Runner, plugin, dir, want string) capabilityProbe {
 	var out strings.Builder
-	err := o.runner().Run(ctx, execx.Cmd{
+	err := runner.Run(ctx, execx.Cmd{
 		Name: plugin,
 		Args: []string{"--capabilities"},
 		Dir:  dir,

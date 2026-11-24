@@ -15,6 +15,7 @@ import ^utils/domain
 import ^utils/verbose
 import ^utils/template
 import ^utils/spec
+import ^libs/build
 
 main::addons() {
   local domain="${domain:-${DOMAIN_NAME:-}}" detail=0
@@ -938,6 +939,15 @@ addons::render() {
     [[ "${_kv%%=*}" != "PATH" ]] || _path="${_kv#*=}"
     [[ ! "${_kv%%=*}" =~ ^LOK8S_(SPEC|USER)_ ]] || _wl_extra+="\${${_kv%%=*}} "
   done <<< "${env_lines}"
+  # With LOK8S_SECRETS_NO_MINT set, a real render needs a Secret plugin that
+  # has the no-mint run (Go: build.CheckNoMintPlugin in addons.Render). The
+  # check reads the home that _kenv below gives kustomize, after the entry's
+  # env. A dry run does not check: its plugin has the dry run
+  # (addons::dry_run_boundary checks it), and a dry run writes nothing to
+  # the store.
+  if (( ! _dry )) && build::_no_mint_requested; then
+    build::_no_mint_capable "${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" "addons::render" || return 1
+  fi
   local build_dir="${addon_dir}" _cleanup=""
   if [[ -f "${addon_dir}/chart.yaml" ]]; then
     # Stack values: base < driver < provider < inline (later wins). Facts

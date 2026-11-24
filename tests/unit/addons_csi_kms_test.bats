@@ -20,6 +20,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
 
   KMS_SRC="${_PROJECT_ROOT}/.lok8s/addons/rook-ceph-csi-kms"

@@ -243,6 +243,7 @@ _render_addons_setup() {
   command -v yq &>/dev/null || skip "yq not available"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   local addon="${BATS_TEST_TMPDIR}/addon"
   mkdir -p "${addon}"
   printf 'resources: []\n' > "${addon}/kustomization.yaml"
@@ -382,6 +383,7 @@ _require_crypto() {
 # without one stops before the render.
 @test "k8s::infrastructure: renders with the domain store; refuses a domain without one" {
   source "${_PROJECT_ROOT}/.lok8s/libs/k8s"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   export KLOG="${BATS_TEST_TMPDIR}/kustomize.log"
   kustomize() { echo "${PATH_SECRETS:-<unset>}" >> "${KLOG}"; echo "kind: ConfigMap"; }
   export -f kustomize
@@ -404,6 +406,7 @@ _require_crypto() {
 
 @test "k8s::platform: a domain without a store stops before the render" {
   source "${_PROJECT_ROOT}/.lok8s/libs/k8s"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   export KLOG="${BATS_TEST_TMPDIR}/kustomize.log"
   kustomize() { : > "${KLOG}"; echo "kind: ConfigMap"; }
   export -f kustomize
@@ -414,4 +417,69 @@ _require_crypto() {
   assert_failure
   assert_line --partial "$(_refusal)"
   [ ! -e "${KLOG}" ] || { echo "kustomize ran"; return 1; }
+}
+
+# _k8s_no_mint_setup: libs/k8s with a domain that has its own store, a
+# targets dir and a legacy overlay, and a kustomize first on PATH that
+# records the plugin home it gets. It is a program, not a shell function,
+# so it sees only the exported environment, as the real kustomize does.
+# KUSTOMIZE_PLUGIN_HOME is unset: the home is <project>/.kustomize, as for
+# every other render.
+_k8s_no_mint_setup() {
+  source "${_PROJECT_ROOT}/.lok8s/libs/k8s"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
+  export KLOG="${BATS_TEST_TMPDIR}/kustomize.log"
+  mkdir -p "${BATS_TEST_TMPDIR}/kbin"
+  printf '#!%s\necho "home=${KUSTOMIZE_PLUGIN_HOME-<unset>}" >> %q\necho "kind: ConfigMap"\n' \
+    "${BASH}" "${KLOG}" > "${BATS_TEST_TMPDIR}/kbin/kustomize"
+  chmod +x "${BATS_TEST_TMPDIR}/kbin/kustomize"
+  export PATH="${BATS_TEST_TMPDIR}/kbin:${PATH}"
+  unset -f kustomize
+  mkdir -p "${PATH_CLUSTERS}/new.dev/secrets" "${PATH_CLUSTERS}/new.dev/targets" "${PATH_BASE}/.k8s/overlays/new.dev"
+  unset KUSTOMIZE_PLUGIN_HOME
+}
+
+# With LOK8S_SECRETS_NO_MINT set, `lo k8s` refuses a Secret plugin without
+# the no-mint run before the render, and kustomize gets the plugin home that
+# the check probed. Go: TestK8sArtifactChecksTheNoMintPlugin.
+@test "k8s::infrastructure and k8s::platform with no-mint check the Secret plugin" {
+  _k8s_no_mint_setup
+  export LOK8S_SECRETS_NO_MINT=1
+  local domain=new.dev fn
+  for fn in k8s::infrastructure k8s::platform; do
+    rm -f "${KLOG}" "${BATS_TEST_TMPDIR}/plugin-runs"
+    no_mint_plugin "${PATH_BASE}/.kustomize" $'dry-run\nkeys-only\n'
+    run "${fn}"
+    assert_failure
+    assert_line "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
+    [ "$(no_mint_probes)" = 1 ]
+    [ ! -e "${KLOG}" ] || { echo "${fn}: kustomize ran"; return 1; }
+
+    no_mint_plugin "${PATH_BASE}/.kustomize" $'dry-run\nkeys-only\nno-mint\n'
+    run "${fn}"
+    assert_success
+    run cat "${KLOG}"
+    assert_output "home=${PATH_BASE}/.kustomize"
+  done
+}
+
+# Without the plugin, the line names `lo k8s`. With the switch off, the
+# plugin is not probed. Go:
+# TestK8sArtifactNoMintNamesTheCommandAndIsOffByDefault.
+@test "k8s::infrastructure with no-mint names lo k8s; the switch off does not probe" {
+  _k8s_no_mint_setup
+  export LOK8S_SECRETS_NO_MINT=1
+  mkdir -p "${PATH_BASE}/.kustomize"
+  local domain=new.dev
+  run k8s::infrastructure
+  assert_failure
+  assert_output "[error] lo k8s: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+  [ ! -e "${KLOG}" ] || { echo "kustomize ran"; return 1; }
+
+  no_mint_plugin "${PATH_BASE}/.kustomize" ""
+  export LOK8S_SECRETS_NO_MINT=0
+  run k8s::infrastructure
+  assert_success
+  [ "$(no_mint_probes)" = 0 ]
+  [ -e "${KLOG}" ]
 }

@@ -52,6 +52,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+  source "${_PROJECT_ROOT}/.lok8s/libs/build"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   source "${_PROJECT_ROOT}/.lok8s/libs/doctor"
 

@@ -555,23 +555,27 @@ build::_no_mint_requested() {
   return 0
 }
 
-# build::_no_mint_capable <plugin home>: refuse a Secret plugin that does
-# not have the no-mint run (Go: checkNoMintPlugin). build::artifacts calls
-# it when LOK8S_SECRETS_NO_MINT is requested (build::_no_mint_requested)
-# and the build reads the store (not --no-secrets). A plugin older than
-# the no-mint run ignores the variable and generates values into the
-# store, which is the failure that the switch exists to stop. The checks
-# are those of build::_keys_only_capable: the home must exist, the Secret
-# executable must be in it, and the probe must print "no-mint". Each
-# failure is one line that names the plugin path.
+# build::_no_mint_capable <plugin home> [<caller>]: refuse a Secret plugin
+# that does not have the no-mint run (Go: build.CheckNoMintPlugin). Each
+# caller that runs the plugin against a store calls it when
+# LOK8S_SECRETS_NO_MINT is requested (build::_no_mint_requested):
+# build::artifacts when the build reads the store (not --no-secrets),
+# addons::render on a real run (not a dry run), k8s::infrastructure,
+# k8s::platform and lo::registry_tls_mint. <caller> names the caller at the
+# start of each error line (default: lo build). A plugin older than the
+# no-mint run ignores the variable and generates values, which is the
+# failure that the switch exists to stop. The checks are those of
+# build::_keys_only_capable: the home must exist, the Secret executable
+# must be in it, and the probe must print "no-mint". Each failure is one
+# line that names the plugin path.
 build::_no_mint_capable() {
-  local home="${1}" plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" rc=0
+  local home="${1}" plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" who="${2:-lo build}" rc=0
   if [[ ! -d "${home}" ]]; then
-    error "lo build: LOK8S_SECRETS_NO_MINT is set, but the kustomize plugin home ${home#"${PATH_BASE}/"} does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+    error "${who}: LOK8S_SECRETS_NO_MINT is set, but the kustomize plugin home ${home#"${PATH_BASE}/"} does not exist, so kustomize would load plugins from other directories that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
   if [[ ! -f "${plugin}" ]]; then
-    error "lo build: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin ${plugin#"${PATH_BASE}/"} does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+    error "${who}: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin ${plugin#"${PATH_BASE}/"} does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
   build::_probe_capability "${plugin}" no-mint lok8s-no-mint || rc=$?
@@ -579,11 +583,11 @@ build::_no_mint_capable() {
     return 0
   fi
   if (( rc == 2 )); then
-    error "lo build: cannot make a temporary directory for the check of the Secret plugin ${plugin#"${PATH_BASE}/"}"
+    error "${who}: cannot make a temporary directory for the check of the Secret plugin ${plugin#"${PATH_BASE}/"}"
     return 1
   fi
   if (( rc == 3 )); then
-    error "lo build: the check of the Secret plugin ${plugin#"${PATH_BASE}/"} was interrupted"
+    error "${who}: the check of the Secret plugin ${plugin#"${PATH_BASE}/"} was interrupted"
     return 1
   fi
   error "the Secret plugin ${plugin#"${PATH_BASE}/"} does not have the no-mint run (LOK8S_SECRETS_NO_MINT is set, and an older plugin ignores it and generates values): run 'lo toolchain install' to install the plugin of this lo"
