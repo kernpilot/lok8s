@@ -607,9 +607,10 @@ build::_no_mint_requested() {
 # build::artifacts when the build reads the store (not --no-secrets),
 # addons::render (a dry run too), k8s::infrastructure,
 # k8s::platform and lo::registry_tls_mint. <caller> names the caller at the
-# start of each error line (default: lo build). A plugin older than the
-# no-mint run ignores the variable and generates values, which is the
-# failure that the switch exists to stop. The checks are those of
+# start of each error line but the last (the refusal of a plugin without
+# the no-mint run keeps the text of lo build), default: lo build. A plugin
+# older than the no-mint run ignores the variable and generates values,
+# which is the failure that the switch exists to stop. The checks are those of
 # build::_keys_only_capable: the home must exist, the Secret executable
 # must be in it, and the probe must print "no-mint". Each failure is one
 # line that names the plugin path.

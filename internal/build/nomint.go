@@ -38,7 +38,8 @@ func checkNoMintPlugin(ctx context.Context, o *Options, stderr io.Writer) error 
 // addon staging does not call it: it runs the bash render through the
 // provider bridge (internal/provider/bridge, kubeonePrepareApplyScript),
 // and build::_no_mint_capable checks there. who names the caller at the
-// start of each error line.
+// start of each error line but the last (the refusal of a plugin without
+// the no-mint run keeps the text of `lo build`).
 // secret.NoMintRequested is true for any value of secret.NoMintEnv that is
 // not an off value, an unknown value too. A plugin older than the no-mint
 // run ignores the variable and generates values, which is the failure that

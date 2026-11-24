@@ -1,7 +1,8 @@
 package addons
 
 // nomint_test.go: with LOK8S_SECRETS_NO_MINT set, the addon render (lo
-// bootstrap, the KubeOne addon staging and the doctor call Render) refuses
+// bootstrap and the doctor call Render; the KubeOne addon staging runs the
+// bash render through the provider bridge, which checks there) refuses
 // a Secret plugin that does not have the no-mint run before kustomize runs
 // (build.CheckNoMintPlugin), and kustomize gets the plugin home that the
 // check probed. A dry run checks too. bats: the addons::render no-mint
