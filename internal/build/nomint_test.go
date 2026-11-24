@@ -404,7 +404,7 @@ func TestAbsPluginHomeMatchesFilepathAbs(t *testing.T) {
 	}
 	t.Chdir(cwd)
 	rows := 0
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}

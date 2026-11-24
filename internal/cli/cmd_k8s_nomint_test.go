@@ -152,7 +152,7 @@ func TestK8sArtifactChecksTheNoMintPlugin(t *testing.T) {
 // A missing plugin is refused with the name of the command, and with the
 // switch off the plugin is not probed.
 func TestK8sArtifactNoMintNamesTheCommandAndIsOffByDefault(t *testing.T) {
-	p, r, log := k8sNoMintProject(t, "dry-run\\nkeys-only\\n")
+	p, r, _ := k8sNoMintProject(t, "dry-run\\nkeys-only\\n")
 	if err := os.Remove(filepath.Join(p.Base, ".kustomize", "secrets.lok8s.dev", "v1", "secret", "Secret")); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestK8sArtifactNoMintNamesTheCommandAndIsOffByDefault(t *testing.T) {
 		t.Error("the render ran")
 	}
 
-	p, r, log = k8sNoMintProject(t, "dry-run\\nkeys-only\\n")
+	p, r, log := k8sNoMintProject(t, "dry-run\\nkeys-only\\n")
 	t.Setenv(secret.NoMintEnv, "0")
 	if err := k8sKustomizeArtifact(t.Context(), p, "alpha.dev", filepath.Join(p.Clusters, "alpha.dev", "targets"), t.TempDir(), "platform.yaml", &stderr); err != nil {
 		t.Fatalf("k8sKustomizeArtifact: %v", err)
