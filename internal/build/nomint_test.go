@@ -336,3 +336,27 @@ func TestKeysOnlyCheckAsksForItsOwnLine(t *testing.T) {
 		})
 	}
 }
+
+// A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory of
+// lo, as it does for kustomize: the probe runs the plugin by its absolute
+// path, not from the probe directory, and the check returns the home as
+// the environment names it. bats: "build::_no_mint_capable resolves a
+// relative plugin home from the working directory".
+func TestNoMintCheckResolvesARelativeHome(t *testing.T) {
+	p, _, probeLog, _, _ := noMintProject(t, "printf 'dry-run\\nkeys-only\\nno-mint\\n'")
+	t.Setenv(secret.NoMintEnv, "1")
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	t.Chdir(p.Base)
+	t.Setenv(config.KustomizePluginHomeEnv, ".kustomize")
+	var stderr bytes.Buffer
+	home, err := CheckNoMintPlugin(t.Context(), p, nil, &stderr, "lo build")
+	if err != nil {
+		t.Fatalf("CheckNoMintPlugin: %v\n%s", err, stderr.String())
+	}
+	if home != ".kustomize" {
+		t.Errorf("home = %q, want .kustomize", home)
+	}
+	if raw, err := os.ReadFile(probeLog); err != nil || !strings.Contains(string(raw), "args=--capabilities") {
+		t.Errorf("the probe did not run the plugin: %v %q", err, raw)
+	}
+}

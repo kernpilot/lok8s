@@ -839,6 +839,21 @@ YAML
   [[ ! -e "${KENV}" && ! -e "${BATS_TEST_TMPDIR}/old-plugin-ran" ]] || { echo "the render or the old plugin ran"; return 1; }
 }
 
+# A relative KUSTOMIZE_PLUGIN_HOME resolves from the working directory, as it
+# does for kustomize: the probe runs the plugin by its absolute path, not
+# from the probe directory. Go: TestNoMintCheckResolvesARelativeHome.
+@test "build::_no_mint_capable resolves a relative plugin home from the working directory" {
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  _secret_plugin 'dry-run\nkeys-only\nno-mint\n'
+  cd "${BATS_TEST_TMPDIR}"
+  run build::_no_mint_capable .kustomize "lo k8s"
+  assert_success
+  assert_output ""
+  run cat "${PROBE_LOG}"
+  assert_line --index 0 "args=--capabilities"
+}
+
 # The output guard: a render that holds an object with the keys-only marker
 # is never written into the domain's artifacts (Go: hasKeysOnlyMarker). The
 # prior artifacts.yaml stays, no split is made, no temp file is left.

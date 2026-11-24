@@ -372,8 +372,14 @@ const (
 // checkKeysOnlyPlugin describes: an empty stdin, PATH_SECRETS at a path
 // in dir that does not exist, the store-free switch on and the keys-only
 // setting off, so no plugin version can do anything with it. runner runs
-// the probe.
+// the probe. A relative plugin path resolves from the working directory of
+// lo, as a relative KUSTOMIZE_PLUGIN_HOME does for kustomize: the run in
+// dir would resolve it from dir, find no plugin and report a plugin without
+// the capability.
 func probeCapability(ctx context.Context, runner execx.Runner, plugin, dir, want string) capabilityProbe {
+	if abs, err := filepath.Abs(plugin); err == nil {
+		plugin = abs
+	}
 	var out strings.Builder
 	err := runner.Run(ctx, execx.Cmd{
 		Name: plugin,

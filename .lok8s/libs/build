@@ -518,6 +518,11 @@ build::_render_kubeconfig() {
 # it (an exit status of 129 to 192) and 1 otherwise (Go: probeCapability).
 build::_probe_capability() {
   local plugin="${1}" want="${2}" prefix="${3}" caps="" rc=0
+  # A relative plugin path resolves from the working directory, as a
+  # relative KUSTOMIZE_PLUGIN_HOME does for kustomize. The run in the probe
+  # directory would not find it and would report a plugin without the
+  # capability (Go: filepath.Abs in probeCapability).
+  [[ "${plugin}" == /* ]] || plugin="${PWD}/${plugin}"
   caps=$(
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}-XXXXXX") || { echo "lok8s:no-probe-dir"; exit 1; }
     trap 'rm -rf "${probe_dir}"' EXIT

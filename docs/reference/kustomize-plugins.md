@@ -487,7 +487,8 @@ print `keys-only`. Each command of the list above runs it too when
 value too) and the command reads the store (not `lo build --no-secrets`),
 and refuses a plugin that does not print `no-mint`. The error
 line names the command, for example `lo k8s:` or `addons::render:`, when
-the plugin home or the plugin is missing. lo runs the check so that an older plugin can do nothing with it: in an empty
+the plugin home or the plugin is missing. A relative `KUSTOMIZE_PLUGIN_HOME`
+resolves from the working directory of `lo`, as it does for kustomize. lo runs the check so that an older plugin can do nothing with it: in an empty
 temporary directory, with an empty stdin, `PATH_SECRETS` at a path that does
 not exist, `LOK8S_SECRETS_DISABLE=1` and `LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0`.
 The check is a compatibility check. It is not isolation and not
