@@ -360,3 +360,29 @@ func TestNoMintCheckResolvesARelativeHome(t *testing.T) {
 		t.Errorf("the probe did not run the plugin: %v %q", err, raw)
 	}
 }
+
+// Without a project there is no plugin home to check. With the switch on,
+// the check refuses with one line that names the caller. With the switch
+// off, it does not check and needs no project.
+func TestNoMintCheckWithoutAProject(t *testing.T) {
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	t.Setenv(secret.NoMintEnv, "1")
+	var stderr bytes.Buffer
+	home, err := CheckNoMintPlugin(t.Context(), nil, nil, &stderr, "lo k8s")
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("CheckNoMintPlugin = %v, want ErrHandled\n%s", err, stderr.String())
+	}
+	if home != "" {
+		t.Errorf("home = %q, want none", home)
+	}
+	want := "[error] lo k8s: LOK8S_SECRETS_NO_MINT is set, but there is no project to find the kustomize plugin home in, so lo cannot check the Secret plugin\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q\nwant %q", stderr.String(), want)
+	}
+
+	t.Setenv(secret.NoMintEnv, "0")
+	stderr.Reset()
+	if home, err := CheckNoMintPlugin(t.Context(), nil, nil, &stderr, "lo k8s"); err != nil || home != "" || stderr.Len() != 0 {
+		t.Errorf("switch off: home %q, err %v, stderr %q; want none", home, err, stderr.String())
+	}
+}

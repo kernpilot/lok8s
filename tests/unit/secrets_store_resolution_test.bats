@@ -463,18 +463,20 @@ _k8s_no_mint_setup() {
   done
 }
 
-# Without the plugin, the line names `lo k8s`. With the switch off, the
-# plugin is not probed. Go:
+# Without the plugin, the line of each command names `lo k8s`. With the
+# switch off, the plugin is not probed. Go:
 # TestK8sArtifactNoMintNamesTheCommandAndIsOffByDefault.
-@test "k8s::infrastructure with no-mint names lo k8s; the switch off does not probe" {
+@test "k8s::infrastructure and k8s::platform with no-mint name lo k8s; the switch off does not probe" {
   _k8s_no_mint_setup
   export LOK8S_SECRETS_NO_MINT=1
   mkdir -p "${PATH_BASE}/.kustomize"
-  local domain=new.dev
-  run k8s::infrastructure
-  assert_failure
-  assert_output "[error] lo k8s: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
-  [ ! -e "${KLOG}" ] || { echo "kustomize ran"; return 1; }
+  local domain=new.dev fn
+  for fn in k8s::infrastructure k8s::platform; do
+    run "${fn}"
+    assert_failure
+    assert_line "[error] lo k8s: LOK8S_SECRETS_NO_MINT is set, but the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check: run 'lo toolchain install' to install the plugin of this lo"
+    [ ! -e "${KLOG}" ] || { echo "${fn}: kustomize ran"; return 1; }
+  done
 
   no_mint_plugin "${PATH_BASE}/.kustomize" ""
   export LOK8S_SECRETS_NO_MINT=0
