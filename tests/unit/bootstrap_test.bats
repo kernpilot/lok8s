@@ -4853,6 +4853,24 @@ CASES
   [ ! -e "${BATS_TEST_TMPDIR}/ran" ]
 }
 
+# A ".." after a symlinked directory in the plugin home: the boundary links
+# and checks the plugin of the clean home, the home that the no-mint check
+# probes, not the plugin next to the target of the link (Go: filepath.Join
+# in DryRunBoundary.build cleans the path).
+@test "the dry run links the plugin of the clean home when a .. follows a symlink" {
+  local b="${BATS_TEST_TMPDIR}/boundary" t="${BATS_TEST_TMPDIR}/h" rel="secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${b}" "${t}/real/sub" "${t}/home/${rel%/*}" "${t}/real/home/${rel%/*}"
+  ln -s "${t}/real/sub" "${t}/link"
+  printf '#!/bin/sh\ntouch "%s"\necho dry-run\n' "${t}/ran-clean" > "${t}/home/${rel}"
+  printf '#!/bin/sh\ntouch "%s"\necho dry-run\n' "${t}/ran-other" > "${t}/real/home/${rel}"
+  chmod +x "${t}/home/${rel}" "${t}/real/home/${rel}"
+  KUSTOMIZE_PLUGIN_HOME="${t}/link/../home" run addons::dry_run_boundary "${b}"
+  assert_success
+  [ "$(readlink "${b}/plugins/${rel}")" = "${t}/home/${rel}" ]
+  [ -e "${t}/ran-clean" ]
+  [ ! -e "${t}/ran-other" ]
+}
+
 # With a Secret plugin in the project, a link of the boundary that does not
 # resolve is refused, not skipped (Go:
 # TestDryRunBoundaryRefusesAPluginLinkThatDoesNotResolve).

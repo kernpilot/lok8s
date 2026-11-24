@@ -516,6 +516,11 @@ addons::dry_run_boundary() {
     error "bootstrap dry-run: the kustomize plugin home ${_home} is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path"
     return 1
   fi
+  # The links use the clean home, the home that the no-mint check probes
+  # (build::_abs_plugin_home; Go: filepath.Join in DryRunBoundary.build). With
+  # the home as typed, a ".." after a symlinked directory would make the
+  # kernel follow the link first, and the dry run would run another plugin.
+  _home="$(build::_abs_plugin_home "${_home}")"
   for _d in plugins bin helm-plugins store tmp; do
     mkdir -p "${_dir}/${_d}" && chmod 700 "${_dir}/${_d}" || return 1
   done
