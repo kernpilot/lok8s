@@ -257,31 +257,57 @@ func TestGuardPrivateKeyArgvCoversTheSecretsTree(t *testing.T) {
 	}
 }
 
-// lo secrets set takes a secret value as its argument: a certificate, or
-// another PEM block that is not a private key, passes the guard. (Its first
-// character is "-", so the flag parser of set then reads it as a flag: such
-// a value goes on stdin.) A private key is refused, also as a paste split
-// into words, through the alias and with --domain on either side, and the
-// refusal of set names stdin. Another command of lo secrets keeps the
-// refusal that names a key file. The same in a project that routes lo
-// secrets to the bash tree (Find stops at the shim). Bash twin: "secrets
-// set: a certificate passes the argv checks, a private key is refused with
-// the stdin line" in tests/unit/secrets_test.bats.
-func TestGuardPrivateKeyArgvSetTakesACertificate(t *testing.T) {
+// lo secrets set takes a secret value as its argument, and a value that
+// starts with "-" can never be one: the flag parser reads it as a flag, and
+// pflag's error ("bad flag syntax: <arg>") prints all of it. So the guard
+// refuses any word of set that holds "-----BEGIN" (a certificate, a public
+// key, a static key of OpenVPN) with the stdin line, before cobra parses,
+// through the alias, with --domain on either side and with an unknown flag
+// before the subcommand. A private key is refused the same way, also as a
+// paste split into words. Another command of lo secrets keeps its rule: a
+// PEM block that is not a private key passes the guard there, and a private
+// key gets the refusal that names a key file. The same in a project that
+// routes lo secrets to the bash tree, where Find stops at the shim (checked
+// below, so that each root covers its own path). Bash twin: "secrets set:
+// a PEM block or a private key is refused with the stdin line" in
+// tests/unit/secrets_test.bats.
+func TestGuardPrivateKeyArgvSetRefusesAPEMBlock(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
-	cert := "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----"
-	pub := "-----BEGIN PUBLIC KEY-----\nMCowfake\n-----END PUBLIC KEY-----"
+	cert := "-----BEGIN CERTIFICATE-----\nMIIBfake" + canary + "\n-----END CERTIFICATE-----"
+	pub := "-----BEGIN PUBLIC KEY-----\nMCowfake" + canary + "\n-----END PUBLIC KEY-----"
+	ovpn := "-----BEGIN OpenVPN Static key V1-----\n" + canary + "\n-----END OpenVPN Static key V1-----"
 	roots := map[string]*config.Paths{
 		"go":             secretsProject(t),
 		"default bash":   routedProject(t, "    default: bash\n", true),
 		"secrets routed": routedProject(t, "    bash:\n      commands: [secrets]\n", true),
 	}
 	for name, paths := range roots {
-		for _, value := range []string{cert, pub, "-----BEGIN"} {
-			argv := []string{"secrets", "set", "--domain", "alpha.dev", "-n", "tls", "tls.crt", value}
-			var guard bytes.Buffer
-			if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
-				t.Errorf("%s, %q: refused, or printed %q", name, value, guard.String())
+		group, _, err := NewRoot(paths).Find([]string{"secrets"})
+		shim := err == nil && group.DisableFlagParsing && !group.HasSubCommands()
+		if err != nil || shim != (name != "go") {
+			t.Fatalf("%s: lo secrets is the shim: %v, want %v (err %v)", name, shim, name != "go", err)
+		}
+		for _, value := range []string{cert, pub, ovpn, "-----BEGIN"} {
+			for i, argv := range [][]string{
+				{"secrets", "set", "--domain", "alpha.dev", "-n", "tls", "tls.crt", value},
+				{"s", "s", "-n", "vpn", "ta.key", value},
+				{"--domain", "alpha.dev", "secrets", "set", "-n", "vpn", "ta.key", value},
+				{"secrets", "--no-such-flag", "set", "-n", "vpn", "ta.key", value},
+			} {
+				var guard bytes.Buffer
+				if !GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.String() != privateKeyValueRefusal {
+					t.Errorf("%s, set argv %d with %.20q: not refused, or printed %q", name, i, value, guard.String())
+				}
+			}
+			for _, argv := range [][]string{
+				{"secrets", "list", value},
+				{"secrets", "--domain", "set", "list", value},
+				{"version", value},
+			} {
+				var guard bytes.Buffer
+				if GuardPrivateKeyArgv(NewRoot(paths), argv, &guard) || guard.Len() != 0 {
+					t.Errorf("%s, %q: refused, or printed %q", name, argv[:len(argv)-1], guard.String())
+				}
 			}
 		}
 		for i, argv := range [][]string{

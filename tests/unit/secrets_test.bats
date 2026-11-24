@@ -2098,37 +2098,79 @@ _refused_path_arg() {
 # A missing public key file gets a hint. When the private key of that .pub
 # exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
 # ed25519 there asks to overwrite the key that decrypt reads. The private key
-# is not read: its file holds the canary only, and ssh-to-age never runs.
-# Each path goes through secrets::_shown_path. Without the private key (no
-# file, or a directory) the hint is ssh-keygen -t ed25519. The key comes
-# from LOK8S_SSH_KEY: :args is a stub here (the --ssh-key form runs in
+# gets a test -f only: its file has mode 000 and holds the canary, and
+# ssh-to-age never runs. Each path goes through secrets::_shown_path, then
+# into single quotes when the shell would split or expand it (a space).
+# Without the private key (no file, or a directory) the hint is ssh-keygen
+# -t ed25519. When something that is not a regular file is at the path of
+# the .pub (a directory, a link to no file), there is no hint: a command
+# that writes the .pub would write through the link. The key comes from
+# LOK8S_SSH_KEY: :args is a stub here (the --ssh-key form runs in
 # hack/parity-test.sh). Go twin: TestInitMissingKey.
 @test "secrets init: a missing .pub beside its private key gets the ssh-keygen -y hint" {
+  (( EUID != 0 )) || skip "root reads a file of mode 000: the test -f proof needs another user"
   ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
   sops() { :; }
-  local dir="${BATS_TEST_TMPDIR}/keys" shown="(not printed: it looks like a private key)" key want
+  local dir="${BATS_TEST_TMPDIR}/keys" shown="'(not printed: it looks like a private key)'" key want private
   local generate="[error] Generate one with: ssh-keygen -t ed25519"
   local fake="${dir}/AGE-SECRET-KEY-1${KEY_CANARY}"
-  mkdir -p "${dir}/adir"
-  printf '%s\n' "${KEY_CANARY}" > "${dir}/id"
-  printf '%s\n' "${KEY_CANARY}" > "${fake}"
+  mkdir -p "${dir}/adir" "${dir}/dirpub.pub"
+  ln -s "${dir}/no-such-file" "${dir}/linkpub.pub"
+  for private in "${dir}/id" "${dir}/work key" "${dir}/dirpub" "${dir}/linkpub" "${fake}"; do
+    printf '%s\n' "${KEY_CANARY}" > "${private}"
+    chmod 000 "${private}"
+  done
   _hint() {
+    local first
     export LOK8S_SSH_KEY="${1}"
     run secrets::init
-    [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: $(secrets::_shown_path "${key}")
-${want}" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+    first="[error] SSH public key not found: $(secrets::_shown_path "${key}")"
+    [ "$status" -eq 1 ] && [ "$output" = "${first}${want:+$'\n'}${want}" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
       echo "${1//${KEY_CANARY}/<canary>}: status ${status}: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
   }
   key="${dir}/id.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${dir}/id > ${dir}/id.pub"
   _hint "${dir}/id"
   _hint "${dir}/id.pub"
-  key="${fake}.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${shown} > ${shown}.pub"
+  key="${dir}/work key.pub" want="[error] Write it from the private key with: ssh-keygen -y -f '${dir}/work key' > '${dir}/work key.pub'"
+  _hint "${dir}/work key"
+  key="${fake}.pub" want="[error] Write it from the private key with: ssh-keygen -y -f ${shown} > ${shown}"
   _hint "${fake}"
   want="${generate}"
   for key in "${dir}/none.pub" "${dir}/adir.pub"; do
     _hint "${key%.pub}"
   done
+  want=""
+  for key in "${dir}/dirpub.pub" "${dir}/linkpub.pub"; do
+    _hint "${key%.pub}"
+  done
   [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+}
+
+# A path in the hint of init stays as it is when the shell reads it as one
+# word with no expansion, else it goes into single quotes, with each ' as
+# '\''. The x keeps a newline at the end. Go twin: TestShellQuoted (the same
+# table).
+@test "secrets::_shown_quoted gives the bytes of shellQuoted" {
+  local -A table=(
+    ['/home/u/.ssh/id_ed25519']='/home/u/.ssh/id_ed25519'
+    ['a-b_c@d%e+f=g:h,i./j']='a-b_c@d%e+f=g:h,i./j'
+    ['/home/u/.ssh/work key']="'/home/u/.ssh/work key'"
+    ["it's"]="'it'\\''s'"
+    ['~/id']="'~/id'"
+    ['$HOME/id']="'\$HOME/id'"
+    [$'a\nb']=$'\'a\nb\''
+    [$'key\n']=$'\'key\n\''
+    [$'/k/\xc3\xa9']=$'\'/k/\xc3\xa9\''
+    ['(not printed: it looks)']="'(not printed: it looks)'"
+    ['back\slash']="'back\\slash'"
+  )
+  local in got
+  for in in "${!table[@]}"; do
+    got="$(secrets::_shown_quoted "${in}"; printf x)"
+    [ "${got%x}" = "${table[${in}]}" ] || { echo "$(printf '%q' "${in}"): got $(printf '%q' "${got%x}")" >&2; return 1; }
+  done
+  got="$(secrets::_shown_quoted ""; printf x)"
+  [ "${got%x}" = "''" ] || { echo "empty: got ${got%x}" >&2; return 1; }
 }
 
 # The key file is read once and at most 64 KiB: a bigger file, a file that
@@ -2387,21 +2429,25 @@ _path_without() {
   _root_passes secrets init --ssh-key /k/id_ed25519.pub
 }
 
-# lo secrets set takes a secret value as its argument. A certificate, or
-# another PEM block that is not a private key, passes the checks of main of
-# lo and of main::secrets (its first character is "-", so :args of set then
-# reads it as a flag: such a value goes on stdin). A private key is refused,
-# also as a paste split into words, through each alias and with --domain on
-# either side, and the refusal of set names stdin. The other commands keep
-# the refusal that names a key file, and the key-path commands also refuse
-# any PEM block (secrets::_is_key_arg). Go twin:
-# TestGuardPrivateKeyArgvSetTakesACertificate, TestLooksLikePrivateKeyArgvMarkers.
-@test "secrets set: a certificate passes the argv checks, a private key is refused with the stdin line" {
+# lo secrets set takes a secret value as its argument, and a value that
+# starts with "-" can never be one: :args of set reads it as a flag and
+# prints it. So the checks of main of lo and of main::secrets refuse any word
+# of set that holds "-----BEGIN" (a certificate, a public key, a static key
+# of OpenVPN) with the stdin line, through each alias, with --domain on
+# either side and with an unknown flag before the subcommand. A private key
+# is refused the same way, also as a paste split into words. The other
+# commands keep their rule: a PEM block that is not a private key passes
+# these checks, a private key gets the refusal that names a key file, and
+# the key-path commands refuse any PEM block in their own check
+# (secrets::_is_key_arg). Go twin: TestGuardPrivateKeyArgvSetRefusesAPEMBlock,
+# TestLooksLikePrivateKeyArgvMarkers.
+@test "secrets set: a PEM block or a private key is refused with the stdin line" {
   _init_fakes
   local -a usage=('up|u@destructive' 'Start cluster' 'secrets|s' 'Manage secrets')
   local -a args=('-' 'Global flags:' 'verbose|v:+' 'Verbose' 'cluster|s' 'Cluster name' 'domain|' 'Domain')
-  local cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIBfake"$'\n'"-----END CERTIFICATE-----"
-  local pub="-----BEGIN PUBLIC KEY-----"$'\n'"MCowfake"$'\n'"-----END PUBLIC KEY-----"
+  local cert="-----BEGIN CERTIFICATE-----"$'\n'"MIIB${KEY_CANARY}"$'\n'"-----END CERTIFICATE-----"
+  local pub="-----BEGIN PUBLIC KEY-----"$'\n'"MCow${KEY_CANARY}"$'\n'"-----END PUBLIC KEY-----"
+  local ovpn="-----BEGIN OpenVPN Static key V1-----"$'\n'"${KEY_CANARY}"$'\n'"-----END OpenVPN Static key V1-----"
   local pem="-----BEGIN OPENSSH PRIVATE ""KEY-----" id="AGE-SECRET-KEY-1${KEY_CANARY}" value
   _passes() {
     run "${@}"
@@ -2414,10 +2460,20 @@ _path_without() {
     [ "$status" -eq 1 ] && [ "$output" = "$("${want}")" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
       echo "${1} (${#} words): status ${status}: ${output}" >&2; return 1; }
   }
-  for value in "${cert}" "${pub}" "-----BEGIN"; do
-    _passes secrets::_guard_lo_argv secrets set -n tls tls.crt "${value}"
-    _passes secrets::_guard_lo_argv s s --domain alpha.dev -n tls tls.crt "${value}"
-    _passes secrets::_no_private_argv set -n tls tls.crt "${value}"
+  for value in "${cert}" "${pub}" "${ovpn}" "-----BEGIN"; do
+    _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n tls tls.crt "${value}"
+    _refused_as _value_refusal secrets::_guard_lo_argv s s --domain alpha.dev -n vpn ta.key "${value}"
+    _refused_as _value_refusal secrets::_guard_lo_argv --domain alpha.dev secrets set -n vpn ta.key "${value}"
+    _refused_as _value_refusal secrets::_guard_lo_argv secrets --no-such-flag set -n vpn ta.key "${value}"
+    _refused_as _value_refusal secrets::_no_private_argv set -n tls tls.crt "${value}"
+    _refused_as _value_refusal secrets::_no_private_argv --no-such-flag s ta.key "${value}"
+    _refused_as _value_refusal main::secrets set -n vpn ta.key "${value}"
+    # Another command keeps its rule: a PEM block that is not a private key
+    # passes these checks.
+    _passes secrets::_guard_lo_argv secrets list "${value}"
+    _passes secrets::_guard_lo_argv secrets --domain set list "${value}"
+    _passes secrets::_guard_lo_argv up "${value}"
+    _passes secrets::_no_private_argv list "${value}"
   done
   _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY "${pem}"$'\n'"${KEY_CANARY}"
   _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY -----BEGIN OPENSSH "PRIVATE" "KEY""-----"

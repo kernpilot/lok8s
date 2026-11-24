@@ -24,17 +24,44 @@ import (
 
 // ── Init ─────────────────────────────────────────────────
 
-// publicKeyHint is the hint of Init for a missing public key file. When the
-// private key of that .pub exists, the hint writes the .pub from it: a
-// `ssh-keygen -t ed25519` there asks to overwrite the key that decrypt
-// reads. The private key is checked with a stat only; it is never read. Each
-// path goes through shownKeyPath. Bash twin: the hint of secrets::init.
+// publicKeyHint is the hint of Init for a public key file that is not a
+// regular file, or "" for no hint. There is a hint only when nothing is at
+// that path (its lstat fails). When something else is there (a directory, a
+// FIFO, a link to no file), a command that writes the file writes through
+// the link or stops at that entry, and "Generate one" names a new key where
+// there is already a file: the line before the hint, which names the path,
+// is the whole message. When the private key of that .pub is a regular
+// file, the hint writes the .pub from it: a `ssh-keygen -t ed25519` there
+// asks to overwrite the key that decrypt reads. The private key is checked
+// with a stat only; it is never read. Each path goes through shownKeyPath,
+// then shellQuoted. Bash twin: the hint of secrets::init.
 func publicKeyHint(sshKey string) string {
+	if _, err := os.Lstat(sshKey); err == nil {
+		return ""
+	}
 	if private, ok := strings.CutSuffix(sshKey, ".pub"); ok && private != "" && fsutil.IsRegular(private) {
-		shown := shownKeyPath(private)
-		return fmt.Sprintf("Write it from the private key with: ssh-keygen -y -f %s > %s.pub", shown, shown)
+		return fmt.Sprintf("Write it from the private key with: ssh-keygen -y -f %s > %s",
+			shellQuoted(shownKeyPath(private)), shellQuoted(shownKeyPath(sshKey)))
 	}
 	return "Generate one with: ssh-keygen -t ed25519"
+}
+
+// shellQuoted is word for a command line in a hint that the user pastes
+// into a shell: as it is when each byte is an ASCII letter, a digit or one
+// of _@%+=:,./- (and word is not empty), else in single quotes, with each '
+// as '\”. A ~ is quoted too: at the start of a word, the shell expands it.
+// Bash twin: secrets::_shown_quoted.
+func shellQuoted(word string) string {
+	plain := word != ""
+	for i := 0; i < len(word) && plain; i++ {
+		b := word[i]
+		plain = 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' ||
+			strings.IndexByte("_@%+=:,./-", b) >= 0
+	}
+	if plain {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 // Init configures SOPS/age encryption from an SSH public key (bash:
@@ -44,7 +71,9 @@ func publicKeyHint(sshKey string) string {
 func (c *Context) Init(sshKey string) error {
 	if !fsutil.IsRegular(sshKey) {
 		ui.ErrorTo(c.ErrOut, "SSH public key not found: %s", shownKeyPath(sshKey))
-		ui.ErrorTo(c.ErrOut, "%s", publicKeyHint(sshKey))
+		if hint := publicKeyHint(sshKey); hint != "" {
+			ui.ErrorTo(c.ErrOut, "%s", hint)
+		}
 		return ErrHandled
 	}
 

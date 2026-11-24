@@ -35,8 +35,9 @@ import (
 // form holds "PRIVATE KEY"), and a PuTTY key file (its first line, and the
 // line before its private part). The argv checks join the words with spaces,
 // so "PRIVATE KEY" also matches a paste split into words. Another PEM block
-// (a certificate, a public key) does not match: `lo secrets set` takes a
-// certificate as a value. Bash twin: secrets::_is_private_key.
+// (a certificate, a public key) does not match: a call outside the argv of
+// `lo secrets set` and of the key-path commands passes with one
+// (LooksLikeKeyArg). Bash twin: secrets::_is_private_key.
 var privateKeyMarkers = []string{"AGE-SECRET-KEY-", "age-secret-key-", "PRIVATE KEY", "PuTTY-User-Key-File-", "Private-Lines:"}
 
 // LooksLikePrivateKey reports whether arg has the shape of a private key.
@@ -51,10 +52,12 @@ func LooksLikePrivateKey(arg string) bool {
 
 // LooksLikeKeyArg is LooksLikePrivateKey for an argument of a command that
 // takes the path of a key file or an age public key (init, decrypt, add-key,
-// remove-key). No such argument is a PEM block, so the first word of any PEM
-// block ("-----BEGIN") counts too: a paste split into words reaches cobra's
-// flag parser as the flag "-----BEGIN", and its error prints that word. Bash
-// twin: secrets::_is_key_arg.
+// remove-key), and for the argv of `lo secrets set`. No such argument is a
+// PEM block, so the first word of any PEM block ("-----BEGIN") counts too: a
+// paste split into words reaches cobra's flag parser as the flag
+// "-----BEGIN", and its error prints that word. The value of set goes on
+// stdin: as an argument, a PEM block starts with "-", and the flag error
+// prints all of it. Bash twin: secrets::_is_key_arg.
 func LooksLikeKeyArg(arg string) bool {
 	return LooksLikePrivateKey(arg) || strings.Contains(arg, "-----BEGIN")
 }
@@ -72,7 +75,8 @@ func RefusePrivateKey(w io.Writer) {
 // RefusePrivateKeyValue is the refusal of `lo secrets set`: its argument is
 // a secret value, not the path of a key file, and set reads the value from
 // stdin when the argument is left out. The guard of main prints it for an
-// argv that resolves to set. Bash twin: secrets::_no_private_value.
+// argv that resolves to set and has a private key or a PEM block in it
+// (LooksLikeKeyArg). Bash twin: secrets::_no_private_value.
 func RefusePrivateKeyValue(w io.Writer) {
 	ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
 	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")

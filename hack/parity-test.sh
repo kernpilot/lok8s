@@ -381,8 +381,12 @@ for cmd in init decrypt; do
   sec_no_echo "OPENSSH" "secrets ${cmd} -k <PEM words>"
 done
 # lo secrets set takes a value: a private key there is refused with the
-# line that names stdin, also as a paste split into words. The key-path
-# commands refuse any PEM block (here a certificate line).
+# line that names stdin, also as a paste split into words. So is any PEM
+# block (a static key of OpenVPN, a certificate): its first character is
+# "-", so the flag parser of set would read it as a flag and print it. The
+# key-path commands refuse any PEM block (here a certificate line).
+SET_REFUSAL="[error] an argument looks like a private key: it is not printed
+[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
 sec_check secrets set -n app KEY "${FAKE_ID}"
 sec_no_echo "${FAKE_ID}" "secrets set <private key>"
 # shellcheck disable=SC2086 # the four words of the PEM line
@@ -391,6 +395,14 @@ sec_no_echo "OPENSSH" "secrets s <PEM words>"
 if ! grep -qF "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>" "${WORK}/go.err"; then
   fail "secrets set <PEM words>: the refusal does not name stdin"
 fi
+PEM_BODY="c2VjcmV0LWJvZHktbm90LWEta2V5"
+for pem in "OpenVPN Static key V1" "CERTIFICATE"; do
+  sec_check secrets set -n vpn ta.key "-----BEGIN ${pem}-----"$'\n'"${PEM_BODY}"$'\n'"-----END ${pem}-----"
+  sec_no_echo "${PEM_BODY}" "secrets set <${pem} block>"
+  if [[ "$(cat "${WORK}/go.err")" != "${SET_REFUSAL}" ]]; then
+    fail "secrets set <${pem} block>: not the refusal that names stdin"
+  fi
+done
 sec_check secrets add-key "-----BEGIN CERTIFICATE-----"
 # init: a .pub that is missing beside its private key gets the hint that
 # writes the .pub from the private key. The private key is not read: a
@@ -404,6 +416,21 @@ fi
 sec_check secrets init --ssh-key "${WORK}/home/absent.pub"
 if ! grep -qF "[error] Generate one with: ssh-keygen -t ed25519" "${WORK}/go.err"; then
   fail "secrets init <missing .pub>: no ssh-keygen -t hint"
+fi
+# A path that the shell would split goes into single quotes in the hint.
+printf 'filler\n' > "${WORK}/home/work key"
+sec_check secrets init --ssh-key "${WORK}/home/work key.pub"
+if ! grep -qF "[error] Write it from the private key with: ssh-keygen -y -f 'WORK/home/work key' > 'WORK/home/work key.pub'" "${WORK}/go.err"; then
+  fail "secrets init <missing .pub, a path with a space>: the hint does not quote the paths"
+fi
+# Something that is not a regular file at the path of the .pub (here a
+# directory) gets no hint: a command that writes the .pub would write
+# through a link or stop at that entry.
+printf 'filler\n' > "${WORK}/home/dirpub"
+mkdir -p "${WORK}/home/dirpub.pub"
+sec_check secrets init --ssh-key "${WORK}/home/dirpub.pub"
+if [[ "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: WORK/home/dirpub.pub" ]]; then
+  fail "secrets init <a directory at the .pub>: not the one line with no hint"
 fi
 # The whole argv of lo secrets, before any parser: a key in the --domain
 # value (on either side of the command), in a flag that no parser knows, as

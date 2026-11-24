@@ -171,23 +171,30 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // under it, and fails closed: when cobra cannot resolve a command, it
 // refuses too. That is a Find error, or an argv that resolves to the root
 // itself, whose unknown-command error prints the first word. It prints the
-// refusal (never the argument) and reports whether it refused: for `lo
-// secrets set` the refusal names stdin (secrets.RefusePrivateKeyValue). A
-// resolved command outside `lo secrets` is left to cobra. Bash twin:
+// refusal (never the argument) and reports whether it refused. A resolved
+// command outside `lo secrets` is left to cobra.
+//
+// `lo secrets set` (and its alias) is refused also for any word that holds
+// the start of a PEM block, "-----BEGIN" (secrets.LooksLikeKeyArg): a
+// certificate, a public key or a static key of OpenVPN. Such a value starts
+// with "-", so no parser of set can take it as an argument, and the flag
+// error of pflag ("bad flag syntax: <arg>") prints all of it. Its refusal
+// names stdin (secrets.RefusePrivateKeyValue). Bash twin:
 // secrets::_guard_lo_argv in main of lo, before its parser (the same scope
-// and the same fail-closed rule), and secrets::_no_private_key in
+// and the same fail-closed rule), and secrets::_no_private_argv in
 // main::secrets.
 func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) bool {
-	if !secrets.LooksLikePrivateKey(strings.Join(argv, " ")) {
+	joined := strings.Join(argv, " ")
+	if !secrets.LooksLikeKeyArg(joined) {
 		return false
 	}
 	cmd, rest, err := root.Find(argv)
-	if err == nil && cmd.HasParent() && !underSecrets(cmd) {
-		return false
-	}
 	if err == nil && (isSecretsSet(cmd) || isSecretsGroup(cmd) && isSetWord(secretsSubcommand(cmd, rest))) {
 		secrets.RefusePrivateKeyValue(errOut)
 		return true
+	}
+	if !secrets.LooksLikePrivateKey(joined) || err == nil && cmd.HasParent() && !underSecrets(cmd) {
+		return false
 	}
 	secrets.RefusePrivateKey(errOut)
 	return true
