@@ -169,7 +169,7 @@ func TestInitMissingKey(t *testing.T) {
 //
 //	'\''
 //
-// Bash twin: "secrets::_shown_quoted gives the bytes of shellQuoted" in
+// Bash twin: "secrets::_shell_quoted gives the bytes of shellQuoted" in
 // tests/unit/secrets_test.bats (the same table).
 func TestShellQuoted(t *testing.T) {
 	for in, want := range map[string]string{

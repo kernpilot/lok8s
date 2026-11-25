@@ -2388,6 +2388,11 @@ _synthetic_pem() {
   )
   local -a want=("${pem}" "${pem}" "${pem}" "" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "" "")
   for loc in C C.UTF-8; do
+    # Without the locale, bash stays in C and the second half proves
+    # nothing: skip it with a reason, after the C half ran.
+    if [[ "${loc}" != C ]] && ! locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$'; then
+      skip "no C.UTF-8 locale on this host: only the C half ran"
+    fi
     for i in "${!names[@]}"; do
       got="$(export LC_ALL="${loc}"; secrets::_shown_path "${inputs[i]}"; printf x)"
       got="${got%$'\n'x}"

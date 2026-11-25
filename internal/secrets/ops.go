@@ -60,7 +60,7 @@ func publicKeyHint(sshKey string) string {
 //	'\''
 //
 // A ~ is quoted too: at the start of a word, the shell expands it. Bash
-// twin: secrets::_shown_quoted.
+// twin: secrets::_shell_quoted.
 func shellQuoted(word string) string {
 	plain := word != ""
 	for i := 0; i < len(word) && plain; i++ {
