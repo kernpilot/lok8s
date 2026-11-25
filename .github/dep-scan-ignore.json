@@ -1,0 +1,4 @@
+{
+  "_comment": "Findings of .github/workflows/dep-scan.yml that are accepted until a date. An entry has exactly: id (GHSA-, GO- or CVE-), package (the npm name, the Go module path, or stdlib), reason (why the finding does not reach us) and expires (YYYY-MM-DD, about 30 days out). An expired entry makes the run red. Remove an entry when a fixed version is in use.",
+  "ignore": []
+}

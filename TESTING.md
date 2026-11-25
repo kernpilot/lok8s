@@ -40,7 +40,12 @@ runs on every push to `main`, once a night (03:17 UTC) and on
 not require its checks and a pull request keeps its current cost. `.github/workflows/security.yml` adds
 `govulncheck` and `gosec` (every PR, and daily, over all three Go modules
 with the root toolchain — the one the release builds with), plus the trivy
-and ShellCheck-SARIF scans. `ci.yml` and `security.yml` run on pull requests into `main`
+and ShellCheck-SARIF scans. `.github/workflows/dep-scan.yml` runs `osv-scanner`
+daily on every `go.mod` and `yarn.lock`, offline against a downloaded archive of
+advisories: it sends nothing about the dependencies. On a pull request it runs
+only when the scan or a lock file changes, so the ruleset must not require it.
+An accepted finding is an entry with an expiry date in
+`.github/dep-scan-ignore.json`. `ci.yml` and `security.yml` run on pull requests into `main`
 and into `feat/**`. `hack/e2e-go-roundtrip.sh` is deliberately not wired
 in.
 
