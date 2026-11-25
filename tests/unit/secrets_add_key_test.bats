@@ -222,10 +222,10 @@ _add() { # <key> [all] [skip_orphans]
 }
 
 # An argument that holds a line break (a key body pasted without its BEGIN
-# line) has no marker of a private key, so the argv check lets it pass: the
-# not-a-file line prints the placeholder of secrets::_shown_path, never a
-# line of the paste. Go twin: TestRecipientArgHidesAPasteWithNoMarker (not a
-# file).
+# line) has no marker of a private key, so the check of add-key lets it pass
+# (main of lo refuses it first: secrets::_no_control_byte). The not-a-file
+# line prints the placeholder of secrets::_shown_path, never a line of the
+# paste. Go twin: TestRecipientArgHidesAPasteWithNoMarker (not a file).
 @test "a pasted key body with no BEGIN line is refused and not echoed" {
   _load
   local canary="CANARY_SECRET_MATERIAL_DO_NOT_LEAK" body line

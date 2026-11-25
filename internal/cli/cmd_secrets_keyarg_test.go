@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/config"
 )
 
 // fillerIdentity has the shape of an age identity, made of a filler
@@ -46,6 +48,12 @@ const pemPathRefusal = "[error] a value holds a PEM line (-----BEGIN or -----END
 // static key of OpenVPN): the first line names the PEM block.
 const pemValueRefusal = "[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed\n" +
 	"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
+
+// controlByteRefusal is what the guard prints for an argv of lo secrets that
+// holds a control byte and no key (secrets.RefuseControlByte; bash:
+// secrets::_no_control_byte).
+const controlByteRefusal = "[error] an argument holds a line break or a control character: it is not printed\n" +
+	"[error] in lo secrets, only the value of set can hold one: check the command, and pass the path of a key file, not the key\n"
 
 // privateKeyArgvs are the argvs of one key command with a private key shape
 // in each place a parser could print it: a flag-like PEM line, the PEM block
@@ -125,6 +133,119 @@ func TestGuardPrivateKeyArgv(t *testing.T) {
 		var errOut bytes.Buffer
 		if GuardPrivateKeyArgv(NewRoot(paths), argv, &errOut) || errOut.Len() != 0 {
 			t.Errorf("%q: refused, or printed %q", argv[:2], errOut.String())
+		}
+	}
+}
+
+// A key body pasted without its BEGIN line has no marker of a key, and the
+// parsers print it: as an extra argument, as a command that they do not
+// know. The guard refuses an argv of lo secrets that holds a control byte
+// (a line break first of all), before cobra parses: as a positional, a flag
+// value of the command, of the group and of the root, a command, the first
+// word of the argv, and with a command that cobra cannot resolve. A key or
+// a PEM line in the argv keeps its own refusal. The value of set is any
+// text: set passes, and a key in it is still refused. A command outside lo
+// secrets is left to cobra. The rule reads bytes: a C1 character (U+0085)
+// is no control byte. The same in a project that routes lo secrets to the
+// bash tree. Bash twin: "secrets: an argument with a control byte is
+// refused, for set it is not" in tests/unit/secrets_test.bats.
+func TestGuardPrivateKeyArgvRefusesAControlByte(t *testing.T) {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	roots := map[string]*config.Paths{
+		"go":             secretsProject(t),
+		"default bash":   routedProject(t, "    default: bash\n", true),
+		"secrets routed": routedProject(t, "    bash:\n      commands: [secrets]\n", true),
+	}
+	values := []string{
+		strings.Repeat("Ab0", 8) + "\n" + canary,
+		canary + "\r",
+		canary + "\tx",
+		"\x1b[31m" + canary,
+		canary + "\x7f",
+		"\x01" + canary,
+		"\x1f" + canary,
+	}
+	for name, paths := range roots {
+		guard := func(argv []string) (bool, string) {
+			var errOut bytes.Buffer
+			refused := GuardPrivateKeyArgv(NewRoot(paths), argv, &errOut)
+			return refused, errOut.String()
+		}
+		for _, value := range values {
+			for i, argv := range [][]string{
+				{"secrets", "add-key", value},
+				{"secrets", "remove-key", value},
+				{"secrets", "add-key", fixtureRcpt, value},
+				{"secrets", "init", "--ssh-key", value},
+				{"secrets", "decrypt", "--ssh-key=" + value},
+				{"secrets", value},
+				{"secrets", value, "list"},
+				{"secrets", "list", value},
+				{"secrets", "print", value},
+				{"secrets", "--domain", value, "list"},
+				{"secrets", "--domain", "set", "list", value},
+				{"secrets", "st", "KEY", value},
+				{"s", "l", value},
+				{"--domain", value, "secrets", "list"},
+				{value},
+				{value, "secrets", "list"},
+				{value, "up"},
+				{"no-such-command", value},
+				// Find does not reach set (fail closed).
+				{"--no-such-flag", "secrets", "set", "KEY", value},
+				{"--", "secrets", "set", "KEY", value},
+			} {
+				if refused, errOut := guard(argv); !refused || errOut != controlByteRefusal {
+					t.Errorf("%s, argv %d with %q: refused %v, printed %q", name, i, value, refused, errOut)
+				}
+			}
+			// An unknown flag before set: Find stops at the shim of a project
+			// that routes secrets to the bash tree, and the words of the argv
+			// name set there, so it is left to that parser. Else Find does not
+			// reach set (fail closed).
+			want := name == "go"
+			refused, errOut := guard([]string{"secrets", "-z", "set", "list", value})
+			if refused != want || (errOut == controlByteRefusal) != want {
+				t.Errorf("%s, -z before set with %q: refused %v, printed %q, want refused %v", name, value, refused, errOut, want)
+			}
+			for i, argv := range [][]string{
+				{"secrets", "set", "-n", "app", "KEY", value},
+				{"s", "s", "-n", "app", "KEY", value},
+				{"--domain", "alpha.dev", "secrets", "set", "-n", "app", "KEY", value},
+				{"secrets", "--domain", "alpha.dev", "set", "KEY", value},
+				{"secrets", "--no-such-flag", "set", "KEY", value},
+				{"version", value},
+				{"--domain", "secrets", "lint", value},
+				{"--domain", value, "version"},
+			} {
+				if refused, errOut := guard(argv); refused || errOut != "" {
+					t.Errorf("%s, argv %d with %q: refused %v, printed %q, want it left to cobra", name, i, value, refused, errOut)
+				}
+			}
+			// A key or a PEM line beside the control byte: its own refusal.
+			for i, tc := range []struct {
+				argv []string
+				want string
+			}{
+				{[]string{"secrets", "add-key", fillerIdentity, value}, privateKeyRefusal},
+				{[]string{"secrets", "add-key", "-----BEGIN CERTIFICATE-----", value}, pemPathRefusal},
+				{[]string{"secrets", "set", "-n", "app", "KEY", fillerIdentity + value}, privateKeyValueRefusal},
+				{[]string{"secrets", "set", "-n", "app", "KEY", "-----END CERTIFICATE-----" + value}, pemValueRefusal},
+			} {
+				if refused, errOut := guard(tc.argv); !refused || errOut != tc.want {
+					t.Errorf("%s, key argv %d with %q: refused %v, printed %q", name, i, value, refused, errOut)
+				}
+			}
+		}
+		for _, argv := range [][]string{
+			{"secrets", "add-key", "/k/a b.pub"},
+			{"secrets", "list", "a\u0085b"},
+			{"secrets", "add-key", "/k/schl\u00fcssel.pub"},
+			{"secrets", "list", ""},
+		} {
+			if refused, errOut := guard(argv); refused || errOut != "" {
+				t.Errorf("%s, %q: refused %v, printed %q", name, argv, refused, errOut)
+			}
 		}
 	}
 }

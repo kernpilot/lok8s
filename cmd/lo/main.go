@@ -77,8 +77,7 @@ func run(ctx context.Context, interrupted func() int) int {
 	// printed on top.
 	root := cli.NewRoot(paths)
 	// Before cobra parses: its flag and argument errors print the value, and
-	// a private key pasted into an argument of lo secrets must not be
-	// printed.
+	// a key pasted into an argument of lo secrets must not be printed.
 	if cli.GuardPrivateKeyArgv(root, os.Args[1:], os.Stderr) {
 		return 1
 	}
