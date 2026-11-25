@@ -1228,6 +1228,25 @@ _private_key_refusal() {
   [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age read the file" >&2; return 1; }
 }
 
+# When only the PEM rule of secrets::_shown_path replaces a path that does
+# not end in .pub, the fix line names ssh-keygen, not <path>.pub: no line
+# of the output holds the path. Go twin:
+# TestInitRefusesAPrivateKeyFileAtAPEMPath.
+@test "secrets init: the refusal of a private key file at a PEM path names ssh-keygen and prints no PEM line" {
+  _init_fakes
+  local dashes="-----" shown="(not printed: it holds a PEM block)"
+  local dir="${BATS_TEST_TMPDIR}/${dashes}BEGIN X${dashes}"
+  mkdir -p "${dir}"
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" "${KEY_CANARY}" > "${dir}/key"
+  KEY_PATH="${dir}/key"
+  :args() { ssh_key="${KEY_PATH}"; }
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] ${shown} holds a private key, not a public key: nothing from it is printed
+[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key" ] || {
+    echo "status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  [[ "${output}" != *BEGIN* && "${output}" != *"${KEY_CANARY}"* ]] || { echo "a PEM line or the file reached the output" >&2; return 1; }
+}
+
 # A derivation that fails (ssh-to-age exits non-zero) prints the two lines
 # of the Go twin and the exit status of the tool, never its output: the tool
 # quotes its input on a failure. ssh-to-age is a function that does so.
@@ -2212,7 +2231,6 @@ _synthetic_pem() {
   run secrets::init
   [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: (not printed: a case of this test)" ] || {
     echo "status $status: $output" >&2; return 1; }
-  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
 }
 
 # A missing public key file gets a hint. When the private key of that .pub

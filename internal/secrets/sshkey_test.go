@@ -158,6 +158,28 @@ func TestInitRefusesAPrivateKeyFile(t *testing.T) {
 	}
 }
 
+// When only the PEM rule of shownKeyPath replaces a path that does not end
+// in .pub, the fix line of the refusal names ssh-keygen, not <path>.pub: no
+// line of the output holds the path (bash twin: the refusal test of a
+// private key file at a PEM path).
+func TestInitRefusesAPrivateKeyFileAtAPEMPath(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	dir := mkdir(t, filepath.Join(t.TempDir(), pemLine("X")))
+	path := filepath.Join(dir, "key")
+	write(t, path, privateKeyForms["openssh"])
+	if err := c.Init(path); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v", err)
+	}
+	want := "[error] (not printed: it holds a PEM block) holds a private key, not a public key: nothing from it is printed\n" +
+		"[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key\n"
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+	}
+	if strings.Contains(out.String()+errOut.String(), "BEGIN") {
+		t.Error("a PEM line reached the output")
+	}
+}
+
 // add-key and remove-key refuse a key file that holds a private key the
 // same way, before any write.
 func TestKeyCommandsRefuseAPrivateKeyFile(t *testing.T) {
