@@ -1010,7 +1010,7 @@ bootstrap::_csa_race_only() {
 bootstrap::_csa_docs() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
-  local -a _rc
+  local -a _csa_pipe
   printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null) | select(kind != "map" or tag == "!!map" or error("a map with a tag of its own")) | select(tag == "!!map")' 2>/dev/null | jq -c '
     def str: if type == "string" then . else "" end;
     def names: if type == "object" then keys else [] end;
@@ -1020,8 +1020,8 @@ bootstrap::_csa_docs() {
        v: (.apiVersion | str), g: (.apiVersion | str | split("/") | if length > 1 then .[0] else "" end),
        k: (.kind | str), n: ($m.name | str), s: $ns,
        lk: ($m.labels | names), ak: ($m.annotations | names)}' 2>/dev/null
-  _rc=("${PIPESTATUS[@]}")
-  (( _rc[0] == 0 && _rc[1] == 0 && _rc[2] == 0 ))
+  _csa_pipe=("${PIPESTATUS[@]}")
+  (( _csa_pipe[0] == 0 && _csa_pipe[1] == 0 && _csa_pipe[2] == 0 ))
 }
 
 # bootstrap::_csa_objects <manifest> <read>
