@@ -13,7 +13,12 @@ Status 1 (red):
     entry names it. An advisory without a severity counts as HIGH.
   - an advisory says that the package is malware (a MAL id), fix or not, or
   - an ignore entry is past its expiry date (also when its finding is gone).
-Every other advisory is listed and is not red.
+Every other advisory is listed and is not red. That includes "at or past the
+named fix": every fixed version that the advisory names is the version in use
+or a lower one, so no update can help. The export of an advisory loses the
+upper end of a range that has no fix ("3.0.0 up to 4.0.0, no fix" becomes
+"3.0.0 and up"), so the fixed version 4.6.4 of the other range matches too. A
+version that does not read counts as below the fix.
 
 Status 2 (the scan is not proven, so it is not a clean scan):
   - the repo has no lock file, or one without a rule here,
@@ -287,16 +292,43 @@ def severity(vuln, vulns, groups):
     return "UNKNOWN"
 
 
-def fixed_versions(vuln, package):
-    """Every fixed version that the advisory names for the package."""
-    found = []
+VERSION = re.compile(r"v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def order(version):
+    """The sort key of a version (semver precedence), None when it does not read."""
+    match = VERSION.fullmatch(version)
+    if not match:
+        return None
+    core = tuple(int(part or 0) for part in match.group(1, 2, 3))
+    if match.group(4) is None:
+        return core, (1,)
+    parts = match.group(4).split(".")
+    return core, (0, tuple((0, int(p), "") if re.fullmatch("[0-9]+", p) else (1, 0, p) for p in parts))
+
+
+def past_fix(version, fixed):
+    """True when the advisory names a fix and no fix is above the version."""
+    used = order(version)
+    if used is None or not fixed:
+        return False
+    return all(order(f) is not None and order(f) <= used for f in fixed)
+
+
+def named_ranges(vuln, package):
+    """Return (every fixed version, the start of every range without an end) that
+    the advisory names for the package."""
+    fixed, unbounded = [], []
     for affected in vuln.get("affected") or []:
         named = affected.get("package") or {}
         if named.get("name") != package["name"] or named.get("ecosystem") != package["ecosystem"]:
             continue
         for span in affected.get("ranges") or []:
-            found += [event["fixed"] for event in span.get("events") or [] if event.get("fixed")]
-    return found
+            events = span.get("events") or []
+            fixed += [event["fixed"] for event in events if event.get("fixed")]
+            if events and events[-1].get("introduced"):
+                unbounded.append(events[-1]["introduced"])
+    return fixed, unbounded
 
 
 def findings(sources):
@@ -306,6 +338,7 @@ def findings(sources):
         for item in sources[name]:
             package, vulns = item["package"], item.get("vulnerabilities") or []
             for vuln in vulns:
+                fixed, unbounded = named_ranges(vuln, package)
                 key = (package["name"], package["version"], vuln["id"])
                 entry = found.setdefault(key, {
                     "ids": {vuln["id"], *(vuln.get("aliases") or [])},
@@ -313,7 +346,9 @@ def findings(sources):
                     "package": package["name"],
                     "version": package["version"],
                     "severity": severity(vuln, vulns, item.get("groups") or []),
-                    "fixed": fixed_versions(vuln, package),
+                    "fixed": fixed,
+                    "unbounded": unbounded,
+                    "past": past_fix(package["version"], fixed),
                     "summary": vuln.get("summary", ""),
                     "in": [],
                 })
@@ -325,6 +360,8 @@ def counts(finding):
     """True for a finding that makes the run red."""
     if finding["id"].startswith("MAL-"):
         return True
+    if finding["past"]:
+        return False
     return finding["severity"] in ("HIGH", "CRITICAL", "UNKNOWN") and bool(finding["fixed"])
 
 
@@ -333,13 +370,15 @@ def verdict(valid, expired, found, out):
     red, used = False, []
     for item in found:
         fix = f"fixed in {', '.join(item['fixed'])}" if item["fixed"] else "no fixed version"
+        if item["fixed"] and item["unbounded"]:
+            fix += f"; also affected: {', '.join('>= ' + v for v in item['unbounded'])}, no fix"
         line = one_line(
             f"{item['severity']} {item['id']} {item['package']} {item['version']} ({fix};"
             f" {', '.join(item['in'])}): {item['summary']}"
         )
         entry = find_ignore(valid, item["ids"], item["package"])
         if not counts(item):
-            print(f"listed: {line}", file=out)
+            print(f"{'at or past the named fix' if item['past'] else 'listed'}: {line}", file=out)
         elif entry:
             used.append(entry)
             print(f"ignored: {line}; until {entry['expires']}: {one_line(entry['reason'])}", file=out)

@@ -533,6 +533,69 @@ class Verdict(Case):
         self.finds([advisory("GHSA-1", "left", "PyPI", "HIGH", "2.0.0")])
         self.assertIn("no fixed version", self.green())
 
+    def two_ranges(self, severity, fixed, start, ident="GHSA-1"):
+        vuln = advisory(ident, "left", "npm", severity, fixed)
+        vuln["affected"].append({
+            "package": {"name": "left", "ecosystem": "npm"}, "ranges": [{"events": [{"introduced": start}]}],
+        })
+        return vuln
+
+    def test_at_or_past_the_named_fix_is_printed_and_not_red(self):
+        for version in ("4.6.4", "4.6.5", "4.10.0", "5.0.0-rc.1", "v4.6.4", "4.6.4+build.1"):
+            with self.subTest(version):
+                self.plan["packages"]["yarn.lock"] = []
+                self.finds([self.two_ranges("CRITICAL", "4.6.4", "3.0.0")], "left", version)
+                self.assertIn(
+                    f"at or past the named fix: CRITICAL GHSA-1 left {version} (fixed in 4.6.4; also affected: >= 3.0.0, no fix; yarn.lock)",
+                    self.green())
+
+    def test_below_the_fix_is_red_also_with_a_second_range(self):
+        for version in ("4.6.3", "3.0.0", "4.5.10", "4.6.4-rc.1", "0.9.9"):
+            with self.subTest(version):
+                self.plan["packages"]["yarn.lock"] = []
+                self.finds([self.two_ranges("HIGH", "4.6.4", "3.0.0")], "left", version)
+                self.assertIn(f"::error::HIGH GHSA-1 left {version} (fixed in 4.6.4; also affected: >= 3.0.0, no fix;", self.red())
+
+    def test_below_one_of_two_fixes_is_red(self):
+        vuln = advisory("GHSA-1", "left", "npm", "HIGH", "3.9.0")
+        vuln["affected"] += advisory("GHSA-1", "left", "npm", "HIGH", "4.6.4")["affected"]
+        self.finds([vuln], "left", "4.0.0")
+        self.assertIn("::error::HIGH GHSA-1 left 4.0.0 (fixed in 3.9.0, 4.6.4; yarn.lock)", self.red())
+
+    def test_a_version_that_does_not_read_is_red(self):
+        for version, fixed in (("latest", "4.6.4"), ("5.0.0", "0123abcd"), ("5.0.0", "9"), ("5.0.0.1", "4.6.4")):
+            with self.subTest(version=version, fixed=fixed):
+                self.plan["packages"]["yarn.lock"] = []
+                self.finds([self.two_ranges("HIGH", fixed, "3.0.0")], "left", version)
+                self.assertIn("::error::HIGH GHSA-1 left", self.red())
+
+    def test_malware_past_a_fix_is_red(self):
+        self.finds([self.two_ranges("HIGH", "4.6.4", "3.0.0", "MAL-1")], "left", "5.0.0")
+        self.assertIn("::error::HIGH MAL-1 left 5.0.0", self.red())
+
+    def test_a_range_with_an_end_is_not_named(self):
+        vuln = self.two_ranges("LOW", "4.6.4", "3.0.0")
+        vuln["affected"][1]["ranges"][0]["events"].append({"last_affected": "3.9.9"})
+        self.finds([vuln], "left", "3.1.0")
+        self.assertIn("listed: LOW GHSA-1 left 3.1.0 (fixed in 4.6.4; yarn.lock)", self.green())
+
+    def test_a_range_that_opens_again_is_named(self):
+        vuln = advisory("GHSA-1", "left", "npm", "LOW", "2.0.0")
+        vuln["affected"][0]["ranges"][0]["events"].append({"introduced": "2.5.0"})
+        self.finds([vuln], "left", "2.6.0")
+        self.assertIn("at or past the named fix: LOW GHSA-1 left 2.6.0 (fixed in 2.0.0; also affected: >= 2.5.0, no fix;", self.green())
+
+    def test_the_order_of_versions(self):
+        versions = [
+            "0.9.0", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0",
+            "1.0.1", "1.2.0", "1.10.0", "2.0.0-20210101000000-abcdef012345", "2.0.0",
+        ]
+        keys = [dep_scan.order(v) for v in versions]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(len(set(keys)), len(keys))
+        for text in ("", "1", "1.0.0.0", "x", "1.0.0-", "1.0.0 ", "\u0661.0.0"):
+            self.assertIsNone(dep_scan.order(text), text)
+
     def test_no_severity_counts_as_high(self):
         self.finds([advisory("GHSA-1", "left", "npm", None, "2.0.0")])
         self.assertIn("::error::UNKNOWN GHSA-1", self.red())
