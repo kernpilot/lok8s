@@ -1518,7 +1518,7 @@ func TestNodeErrorVocabulary(t *testing.T) {
 		{409, `{"ok":false,"data":{"code":"POOL_NOT_STATIC","message":"metal is a machineDeployment pool"}}`, []string{"kind: static"}},
 		{403, `{"ok":false,"data":{"code":"STEP_UP_REQUIRED","message":"fresh sign-in required"}}`, []string{"KUBEHZ_TOKEN"}},
 		{418, `{"ok":false,"data":{"code":"SOMETHING_NEW","message":"the api knows best","help":"read the docs"}}`, []string{"the api knows best", "read the docs"}},
-		{503, `{"ok":false,"data":{"code":"JOIN_TICKET_BUSY","message":"Other join tickets of this account are being minted now","help":"Retry after the Retry-After interval.","retryAfterSeconds":5}}`, []string{"(HTTP 503): Other join tickets of this account are being minted now", "busy with other join changes of this account. Run this command again in 5 seconds."}},
+		{503, `{"ok":false,"data":{"code":"JOIN_TICKET_BUSY","message":"Other join tickets of this account are being minted now","help":"Retry after the Retry-After interval.","retryAfterSeconds":5}}`, []string{"(HTTP 503): Other join tickets of this account are being minted now", "busy with other join changes of this account.\n  Run this command again in 5 seconds.\n"}},
 	}
 	for _, tc := range cases {
 		s := defaultNodeStubs()
@@ -1533,18 +1533,21 @@ func TestNodeErrorVocabulary(t *testing.T) {
 
 // A 503 of the join mint names the wait of the body in seconds:
 // JOIN_TICKET_NOT_MINTED says that no ticket was minted,
-// JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist and
-// that the next mint revokes it, and JOIN_TICKET_BUSY says that other join
-// changes of the account hold the platform. A wait that is absent gives
-// "shortly". The help of the api (it names a header that lo does not show)
-// is not printed. Bash twin: "join: a 503 of the mint names the wait of
-// the body, and a ticket that can exist".
+// JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist,
+// that it holds a node slot, that the next mint revokes it and how to free
+// the slot, and JOIN_TICKET_BUSY says that other join changes of the
+// account hold the platform. A wait that is absent gives "shortly". The
+// help of the api (it names a header that lo does not show) is not
+// printed. Bash twin: "join: a 503 of the mint names the wait of the body,
+// and a ticket that can exist".
 func TestNodeJoinRetryLater(t *testing.T) {
 	const head = "[error] Failed to mint a join ticket for 'box-1' (HTTP 503): m\n"
-	const none = head + "  No join ticket was minted for this node. Run this command again "
-	const open = head + "  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it.\n  Run this command again "
-	const end = ". The next mint for this node name revokes that ticket, if the platform kept it.\n"
-	const busy = head + "  The platform is busy with other join changes of this account. Run this command again "
+	const none = head + "  No join ticket was minted for this node.\n  Run this command again "
+	const open = head + "  The platform did not confirm the join ticket. A ticket for this node can\n" +
+		"  exist, but lo did not get it. It holds a node slot for about ten minutes.\n" +
+		"  The next mint for this node name revokes that ticket.\n  Run this command again "
+	const end = ", or free the slot now:\n    lo kubehz node remove --name <node-name>\n"
+	const busy = head + "  The platform is busy with other join changes of this account.\n  Run this command again "
 	body := func(code, wait string) string {
 		return `{"statusCode":503,"data":{"code":"` + code + `","message":"m","help":"Mint a new ticket after the Retry-After interval."` + wait + `}}`
 	}
@@ -1616,7 +1619,7 @@ func TestNodeRemoveRetryLater(t *testing.T) {
 	const head = "[error] Failed to remove node 'box-1' (HTTP 503): m\n"
 	const gone = head + "  The node is still in the cluster. Run this command again "
 	const open = head + "  Read the node list before a retry:  lo kubehz node status\n  If the node is still there, run this command again "
-	const busy = head + "  The platform is busy with other join changes of this account. Run this command again "
+	const busy = head + "  The platform is busy with other join changes of this account.\n  Run this command again "
 	body := func(code, wait string) string {
 		return `{"statusCode":503,"data":{"code":"` + code + `","message":"m","help":"Retry after the Retry-After interval."` + wait + `}}`
 	}

@@ -240,19 +240,25 @@ node::api_error() {
       # account hold the lock of the platform, and the same call can
       # succeed after the wait of the body.
       kubehz::space_api_error_line "${context}"
-      echo "  The platform is busy with other join changes of this account. Run this command again $(node::retry_wait)." >&2 ;;
+      echo "  The platform is busy with other join changes of this account." >&2
+      echo "  Run this command again $(node::retry_wait)." >&2 ;;
     JOIN_TICKET_NOT_MINTED)
       # A 503 of a join mint: the platform minted no ticket, and the same
       # call can succeed after the wait of the body.
       kubehz::space_api_error_line "${context}"
-      echo "  No join ticket was minted for this node. Run this command again $(node::retry_wait)." >&2 ;;
+      echo "  No join ticket was minted for this node." >&2
+      echo "  Run this command again $(node::retry_wait)." >&2 ;;
     JOIN_TICKET_RESULT_UNKNOWN)
       # A 503 of a join mint: the platform does not know if it kept the
-      # ticket. A ticket can exist that lo did not get. The next mint for
-      # the name revokes it, so the text says both.
+      # ticket. A ticket can exist that lo did not get, and it holds a node
+      # slot until it expires. The next mint for the name revokes it, and a
+      # remove frees the slot, so the text says all three.
       kubehz::space_api_error_line "${context}"
-      echo "  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it." >&2
-      echo "  Run this command again $(node::retry_wait). The next mint for this node name revokes that ticket, if the platform kept it." >&2 ;;
+      echo "  The platform did not confirm the join ticket. A ticket for this node can" >&2
+      echo "  exist, but lo did not get it. It holds a node slot for about ten minutes." >&2
+      echo "  The next mint for this node name revokes that ticket." >&2
+      echo "  Run this command again $(node::retry_wait), or free the slot now:" >&2
+      echo "    lo kubehz node remove --name <node-name>" >&2 ;;
     *)
       kubehz::space_api_error "${context}" ;;
   esac

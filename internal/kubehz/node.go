@@ -221,19 +221,25 @@ func (c *Context) nodeAPIError(what string, res *httpResult) {
 		// account hold the lock of the platform, and the same call can
 		// succeed after the wait of the body.
 		c.apiErrorLine(what, res)
-		c.echoErr("  The platform is busy with other join changes of this account. Run this command again %s.", retryWait(res.Body))
+		c.echoErr("  The platform is busy with other join changes of this account.")
+		c.echoErr("  Run this command again %s.", retryWait(res.Body))
 	case "JOIN_TICKET_NOT_MINTED":
 		// A 503 of a join mint: the platform minted no ticket, and the
 		// same call can succeed after the wait of the body.
 		c.apiErrorLine(what, res)
-		c.echoErr("  No join ticket was minted for this node. Run this command again %s.", retryWait(res.Body))
+		c.echoErr("  No join ticket was minted for this node.")
+		c.echoErr("  Run this command again %s.", retryWait(res.Body))
 	case "JOIN_TICKET_RESULT_UNKNOWN":
 		// A 503 of a join mint: the platform does not know if it kept the
-		// ticket. A ticket can exist that lo did not get. The next mint
-		// for the name revokes it, so the text says both.
+		// ticket. A ticket can exist that lo did not get, and it holds a
+		// node slot until it expires. The next mint for the name revokes
+		// it, and a remove frees the slot, so the text says all three.
 		c.apiErrorLine(what, res)
-		c.echoErr("  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it.")
-		c.echoErr("  Run this command again %s. The next mint for this node name revokes that ticket, if the platform kept it.", retryWait(res.Body))
+		c.echoErr("  The platform did not confirm the join ticket. A ticket for this node can")
+		c.echoErr("  exist, but lo did not get it. It holds a node slot for about ten minutes.")
+		c.echoErr("  The next mint for this node name revokes that ticket.")
+		c.echoErr("  Run this command again %s, or free the slot now:", retryWait(res.Body))
+		c.echoErr("    lo kubehz node remove --name <node-name>")
 	default:
 		c.spaceAPIError(what, res)
 	}

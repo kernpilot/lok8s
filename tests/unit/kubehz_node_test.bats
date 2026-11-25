@@ -1690,24 +1690,26 @@ _refuse_flag() {
   run node::join --name box-1 --pool metal
   assert_failure
   assert_output --partial "(HTTP 503): Other join tickets of this account are being minted now"
-  assert_output --partial "busy with other join changes of this account. Run this command again in 5 seconds."
+  assert_output --partial "busy with other join changes of this account."$'\n'"  Run this command again in 5 seconds."
   refute_output --partial "Retry-After"
 }
 
 # A 503 of the join mint names the wait of the body in seconds:
 # JOIN_TICKET_NOT_MINTED says that no ticket was minted,
-# JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist and
-# that the next mint revokes it, and JOIN_TICKET_BUSY says that other join
-# changes of the account hold the platform. A wait that is absent gives
-# "shortly". The help of the api is not printed. Go twin:
-# TestNodeJoinRetryLater.
+# JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist,
+# that it holds a node slot, that the next mint revokes it and how to free
+# the slot, and JOIN_TICKET_BUSY says that other join changes of the
+# account hold the platform. A wait that is absent gives "shortly". The
+# help of the api is not printed. Go twin: TestNodeJoinRetryLater.
 @test "join: a 503 of the mint names the wait of the body, and a ticket that can exist" {
   _stub_all
   local head="[error] Failed to mint a join ticket for 'box-1' (HTTP 503): m"$'\n' i
-  local none="${head}  No join ticket was minted for this node. Run this command again "
-  local open="${head}  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it."$'\n'"  Run this command again "
-  local end=". The next mint for this node name revokes that ticket, if the platform kept it."
-  local busy="${head}  The platform is busy with other join changes of this account. Run this command again "
+  local none="${head}  No join ticket was minted for this node."$'\n'"  Run this command again "
+  local open="${head}  The platform did not confirm the join ticket. A ticket for this node can"$'\n'
+  open+="  exist, but lo did not get it. It holds a node slot for about ten minutes."$'\n'
+  open+="  The next mint for this node name revokes that ticket."$'\n'"  Run this command again "
+  local end=", or free the slot now:"$'\n'"    lo kubehz node remove --name <node-name>"
+  local busy="${head}  The platform is busy with other join changes of this account."$'\n'"  Run this command again "
   local -a codes=(JOIN_TICKET_NOT_MINTED JOIN_TICKET_NOT_MINTED JOIN_TICKET_RESULT_UNKNOWN JOIN_TICKET_RESULT_UNKNOWN
     JOIN_TICKET_BUSY JOIN_TICKET_BUSY)
   local -a waits=(',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '')
@@ -1827,7 +1829,7 @@ _refuse_flag() {
   local head="[error] Failed to remove node 'box-1' (HTTP 503): m"$'\n' i
   local gone="${head}  The node is still in the cluster. Run this command again "
   local open="${head}  Read the node list before a retry:  lo kubehz node status"$'\n'"  If the node is still there, run this command again "
-  local busy="${head}  The platform is busy with other join changes of this account. Run this command again "
+  local busy="${head}  The platform is busy with other join changes of this account."$'\n'"  Run this command again "
   local -a codes=(NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED
     NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_REMOVE_RESULT_UNKNOWN NODE_REMOVE_RESULT_UNKNOWN
     JOIN_TICKET_BUSY JOIN_TICKET_BUSY

@@ -1203,18 +1203,24 @@ EOF
   check_api - kubehz node remove --name remove-9 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, a fraction" "The node is still in the cluster. Run this command again shortly."
   check_api - kubehz node remove --name remove-7 --domain hstub.dev --cluster-id cl-1a2b3c4d
-  kc_reason "remove, join changes busy" "busy with other join changes of this account. Run this command again in 5 seconds."
+  kc_reason "remove, join changes busy" "The platform is busy with other join changes of this account."
+  kc_reason "remove, join changes busy, the wait" "  Run this command again in 5 seconds."
   # The 503 refusals of a hosted join mint: JOIN_TICKET_NOT_MINTED names the
   # wait of the body, JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the
-  # node can exist and that the next mint revokes it, and JOIN_TICKET_BUSY
-  # with no wait gives "shortly".
+  # node can exist, that it holds a node slot, that the next mint revokes
+  # it and how to free the slot, and JOIN_TICKET_BUSY with no wait gives
+  # "shortly".
   check_api - kubehz node join --print-only --name mint-1 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
-  kc_reason "join, not minted, 5 seconds" "No join ticket was minted for this node. Run this command again in 5 seconds."
+  kc_reason "join, not minted" "No join ticket was minted for this node."
+  kc_reason "join, not minted, the wait" "  Run this command again in 5 seconds."
   check_api - kubehz node join --print-only --name mint-2 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
-  kc_reason "join, result unknown" "A ticket for this node can exist, but lo did not get it."
-  kc_reason "join, result unknown, the revoke" "Run this command again in 5 seconds. The next mint for this node name revokes that ticket, if the platform kept it."
+  kc_reason "join, result unknown" "exist, but lo did not get it. It holds a node slot for about ten minutes."
+  kc_reason "join, result unknown, the revoke" "The next mint for this node name revokes that ticket."
+  kc_reason "join, result unknown, the wait" "Run this command again in 5 seconds, or free the slot now:"
+  kc_reason "join, result unknown, the remove" "    lo kubehz node remove --name <node-name>"
   check_api - kubehz node join --print-only --name mint-3 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
-  kc_reason "join, busy, no wait" "busy with other join changes of this account. Run this command again shortly."
+  kc_reason "join, busy" "The platform is busy with other join changes of this account."
+  kc_reason "join, busy, no wait" "  Run this command again shortly."
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev
