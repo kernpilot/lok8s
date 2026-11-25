@@ -7219,7 +7219,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   run csa "$(_csa_ns_read)" "${ns}"
   assert_success; assert_output "${head}: label team; annotation note"
   run bootstrap::_csa_objects "${ns}" "$(_csa_ns_read)"
-  assert_output "${head}: label team; annotation note"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"Namespace","s":"","n":"demo","obj":"Namespace demo","ul":["team"],"ua":["note"]}\tv1 Namespace demo'
+  assert_output "${head}: label team; annotation note"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"Namespace","s":"","n":"demo","obj":"Namespace demo","ul":["team"],"ua":["note"]}\t"v1 Namespace demo"'
   # No live object.
   run csa "" "${ns}"
   assert_success; assert_output ""
@@ -7228,7 +7228,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_output ""
   # The target sets every key: no key named, and no check after the apply.
   run bootstrap::_csa_objects "${ns}" "${o}${w}"'{"f:app":{}}'$'\t{'"${la}"$'}\n'
-  assert_output "${head}"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t-\tv1 Namespace demo'
+  assert_output "${head}"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t-\t"v1 Namespace demo"'
   # A key that another manager owns too stays.
   run csa "${o}${w}"'{"f:team":{},"f:tier":{}}'$'\t{'"${la}"$'}\nM\tkubectl-label\tUpdate\t\tv1\t{"f:team":{}}\t\n' "${ns}"
   assert_output "${head}: label tier"
@@ -7243,7 +7243,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_output "Namespace demo: client-side writers (kubectl-client-side-apply, tilt) own fields; the apply moves them to lo and drops what the target does not set: labels a, b"
   # A namespaced object matches a manifest object with no namespace.
   run bootstrap::_csa_objects $'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n' $'O\tv1\tConfigMap\tdemo\tcm\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n'
-  assert_output $'ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team\tConfigMap demo/cm: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"ConfigMap","s":"demo","n":"cm","obj":"ConfigMap demo/cm","ul":["team"],"ua":[]}\tv1 ConfigMap cm'
+  assert_output $'ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team\tConfigMap demo/cm: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"ConfigMap","s":"demo","n":"cm","obj":"ConfigMap demo/cm","ul":["team"],"ua":[]}\t"v1 ConfigMap cm"'
   # An object of another group is not the manifest object.
   run csa $'O\tapps/v1\tNamespace\t\tdemo\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n' "${ns}"
   assert_output ""
@@ -7383,6 +7383,13 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_failure
   run bootstrap::_csa_race_only "${re}" 'Warning: v1 ComponentStatus is deprecated in v1.19+'
   assert_failure
+  # A line that is not valid UTF-8 is the line of another error, also under
+  # a UTF-8 locale: lo reads bytes.
+  if locale -a 2>/dev/null | grep -qi -E '^c\.utf-?8$'; then
+    export LC_ALL=C.UTF-8
+    run bootstrap::_csa_race_only "${re}" $'error: resource mapping not found for name: x: no matches for kind\n\xff Forbidden'
+    assert_failure
+  fi
 }
 
 # A manifest that lo cannot read: under --skip-client-side-owned the entry
@@ -7425,6 +7432,38 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   [ "${_csa_left_out}" -eq 1 ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
   [[ "${_csa_manifest}" != *Namespace* && "${_csa_manifest}" == *$'  name: cm\n  name: cm\n'* ]] || { echo "${_csa_manifest}"; return 1; }
   [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields" ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+}
+
+# bootstrap::_csa_after prints no message of jq: it can quote a name. The
+# Go twin runs no jq (clientSideAfter).
+@test "bootstrap::_csa_after prints no message of jq" {
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  jq() { cat > /dev/null; echo "jq: error: CANARY-MANIFEST-VALUE" >&2; return 5; }
+  run bootstrap::_csa_after testcni "${BATS_TEST_TMPDIR}/kc" $'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n' \
+    '{"g":"","k":"Namespace","s":"","n":"demo","obj":"Namespace demo","ul":["team"],"ua":[]}'
+  assert_success
+  assert_output ""
+  [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
+}
+
+# A Namespace of the manifest with a namespace that holds a line break:
+# kubectl reads it (a Namespace has no namespace), and the label of its
+# manifest object holds the line break. --skip-client-side-owned leaves it
+# out, and lo prints no value of the manifest. Go:
+# TestClientSideBeforeAStrayNamespaceWithALineBreak.
+@test "bootstrap::_csa_before: a stray namespace with a line break" {
+  local -r m=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  namespace: "x\\nevil"\n  labels:\n    app: y\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n'
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_skip_csa=1 _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0
+  local -a _csa_checks=()
+  bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${m}" > "${BATS_TEST_TMPDIR}/out" 2>&1
+  [ "${_csa_left_out}" -eq 1 ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+  [[ "${_csa_manifest}" != *Namespace* && "${_csa_manifest}" == *"name: cm"* ]] || { echo "${_csa_manifest}"; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields" ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+  bootstrap_skip_csa=0
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${m}" > "${BATS_TEST_TMPDIR}/out" 2>&1
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "[warn] bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note" ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
 }
 
 # A real run names each object of a client-side writer before the apply,

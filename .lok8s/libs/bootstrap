@@ -933,7 +933,7 @@ _BOOTSTRAP_CSA_BEFORE_JQ='
 | [ $obj + ": " + ($w | writers) + "; the apply moves them to lo and drops what the target does not set" + (keytext($dl; $da) | if . != "" then ": " + . else "" end),
     $obj + ": left out of the apply (--skip-client-side-owned): " + ($w | writers),
     (if ($ul | length) + ($ua | length) > 0 then {g: .g, k: .k, s: .s, n: .n, obj: $obj, ul: $ul, ua: $ua} | tojson else "-" end),
-    $d.l ]
+    ($d.l | tojson) ]
 | join("\t")
 '
 
@@ -983,12 +983,14 @@ bootstrap::_csa_read() {
 # line matches it too, is empty, or is a warning of the API server
 # ("Warning: "). A line of another error fails the read, also next to the
 # line of a missing CRD. The stderr goes to grep through a pipe, as in
-# kapply::output_matches.
+# kapply::output_matches. grep reads bytes (LC_ALL=C, -a), as the Go twin
+# does: under a UTF-8 locale grep drops a line that is not valid UTF-8,
+# and the line of another error would not count.
 bootstrap::_csa_race_only() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   kapply::output_matches "${1}" "${2}" || return 1
-  ! printf '%s\n' "${2}" | grep -v -E '^(Warning: |$)' | grep -v -E "${1}" >/dev/null
+  ! printf '%s\n' "${2}" | LC_ALL=C grep -a -v -E '^(Warning: |$)' | LC_ALL=C grep -a -v -E "${1}" >/dev/null
 }
 
 # bootstrap::_csa_docs <manifest>
@@ -1021,7 +1023,9 @@ bootstrap::_csa_docs() {
 # owns (the Go twin: clientSideObjects), in the order of the read: its warn
 # text, its skip text, its check (the JSON that bootstrap::_csa_after reads,
 # or - when the writers own no label or annotation that the target does not
-# set) and the label of its manifest object, separated by tabs. Returns 1
+# set) and the label of its manifest object as a JSON string (a namespace
+# of the manifest can hold a tab or a line break), separated by tabs.
+# Returns 1
 # when the manifest does not parse or jq fails (the Go twin:
 # manifestObjects gives ok false): lo then cannot find the objects. No
 # message of jq: it can quote a name.
@@ -1083,6 +1087,10 @@ bootstrap::_csa_before() {
     [[ -n "${_w}" ]] || continue
     if (( ${bootstrap_skip_csa:-0} )); then
       warn "bootstrap: ${_entry}: ${_s}"
+      _l="$(printf '%s' "${_l}" | jq -r . 2>/dev/null)" || {
+        error "bootstrap: ${_entry}: cannot take the objects of a client-side writer out of the manifest"
+        return 1
+      }
       _drop+=("${_l}")
       continue
     fi
@@ -1104,7 +1112,8 @@ bootstrap::_csa_before() {
 # The Go twin: Engine.clientSideAfter. Reads the field managers again after
 # the apply, and prints a [warn] line for each object of a check that lost
 # labels or annotations: the keys of the check that no manager owns now. No
-# read without a check. A read that fails gives a [debug] line only.
+# read without a check. A read that fails gives a [debug] line only. No
+# message of jq: it can quote a name.
 bootstrap::_csa_after() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
@@ -1119,7 +1128,7 @@ bootstrap::_csa_after() {
   while IFS= read -r _line; do
     [[ -z "${_line}" ]] || warn "bootstrap: ${_entry}: ${_line}"
   done < <(printf '%s' "${_read}" \
-    | jq -R -s -r --slurpfile c <(printf '%s\n' "${@}") "${_BOOTSTRAP_CSA_JQ_DEFS}${_BOOTSTRAP_CSA_AFTER_JQ}")
+    | jq -R -s -r --slurpfile c <(printf '%s\n' "${@}") "${_BOOTSTRAP_CSA_JQ_DEFS}${_BOOTSTRAP_CSA_AFTER_JQ}" 2>/dev/null)
 }
 
 # ── Topological-parallel scheduler ───────────────────────
@@ -2135,12 +2144,15 @@ bootstrap::_nd_objects() {
 # documents that are maps stay, as in bootstrap::_object_lines: an empty
 # document, a document with only a comment, a scalar or a list is not in the
 # output. --header-preprocess=false keeps the comments and the --- before
-# the first document out of the output too.
+# the first document out of the output too. The labels go to yq as a JSON
+# list (NUL-separated on the way in), so a label can hold a line break: a
+# namespace of the manifest can. No message of yq: it can quote the
+# manifest.
 bootstrap::_without_objects() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _stream="${1}"; shift
-  printf '%s\n' "${_stream}" | BOOTSTRAP_DROP_LABELS="$(printf '%s\n' "${@}")" yq --header-preprocess=false '
+  printf '%s\n' "${_stream}" | BOOTSTRAP_DROP_LABELS="$(printf '%s\0' "${@}" | jq -R -s -c 'split("\u0000")[:-1]')" yq --header-preprocess=false '
     select(. != null and tag == "!!map")
     | select(
         ((to_json(0) | from_json) as $j
@@ -2148,7 +2160,7 @@ bootstrap::_without_objects() {
           | (($m.namespace | select(tag == "!!str")) // "") as $ns
           | (($j.apiVersion | select(tag == "!!str")) // "") + " " + (($j.kind | select(tag == "!!str")) // "") + " "
             + (if $ns != "" then $ns + "/" else "" end) + (($m.name | select(tag == "!!str")) // "")) as $l
-        | strenv(BOOTSTRAP_DROP_LABELS) | split("\n") | any_c(. == $l) | not)'
+        | strenv(BOOTSTRAP_DROP_LABELS) | from_json | any_c(. == $l) | not)' 2>/dev/null
 }
 
 # bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label> [diff-input] [without]

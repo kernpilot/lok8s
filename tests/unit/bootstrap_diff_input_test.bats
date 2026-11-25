@@ -254,9 +254,9 @@ YAML
 
 # A failed yq pass fails bootstrap::_without_objects with the status of yq,
 # so that its caller can tell a failure from an empty diff input (nothing
-# left to diff).
+# left to diff). lo prints no message of yq: it can quote the manifest.
 @test "diff input: a failed yq pass fails bootstrap::_without_objects with its status" {
-  yq() { cat > /dev/null; return 7; }
+  yq() { cat > /dev/null; echo "Error: bad document: CANARY-MANIFEST-VALUE" >&2; return 7; }
   run bootstrap::_without_objects "$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n')" "v1 Secret none"
   [ "${status}" -eq 7 ] || fail "the status is ${status}, not 7: ${output}"
   [ -z "${output}" ] || fail "the output is: ${output}"

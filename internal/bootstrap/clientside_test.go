@@ -502,6 +502,9 @@ func TestCSARaceOnly(t *testing.T) {
 		{"Error from server (Forbidden): namespaces is forbidden\nerror: resource mapping not found for name: x: no matches for kind", false},
 		{"", false},
 		{"Warning: v1 ComponentStatus is deprecated in v1.19+", false},
+		// A line that is not valid UTF-8: lo reads bytes, as the bash twin
+		// does under LC_ALL=C.
+		{"error: resource mapping not found for name: x: no matches for kind\n\xff Forbidden", false},
 	} {
 		if got := raceOnly(tc.stderr); got != tc.want {
 			t.Errorf("raceOnly(%q) = %v, want %v", tc.stderr, got, tc.want)
@@ -592,5 +595,35 @@ func TestClientSideBeforeAKeyTwice(t *testing.T) {
 	}
 	if docs, ok := manifestObjects("!thing\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n"); !ok || len(docs) != 0 {
 		t.Errorf("a map with a tag of its own: ok %v, objects %+v", ok, docs)
+	}
+}
+
+// A Namespace of the manifest with a namespace that holds a line break:
+// kubectl reads it (a Namespace has no namespace), and the label of its
+// manifest object holds the line break. --skip-client-side-owned leaves it
+// out, and lo prints no value of the manifest. bats:
+// "bootstrap::_csa_before: a stray namespace with a line break".
+func TestClientSideBeforeAStrayNamespaceWithALineBreak(t *testing.T) {
+	const m = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  namespace: \"x\\nevil\"\n  labels:\n    app: y\n---\n" +
+		"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n"
+	for _, tc := range []struct {
+		skip bool
+		want string
+	}{
+		{true, "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\n"},
+		{false, "[warn] bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note\n"},
+	} {
+		e, f, job := csaJob(t)
+		e.Options.SkipClientSideOwned = tc.skip
+		h := &csaHandler{reads: []string{nsLines}}
+		f.handler = h.handle
+		var errOut bytes.Buffer
+		c, ok := e.clientSideBefore(t.Context(), &errOut, job.Name, job.Kubeconfig, m)
+		if !ok || errOut.String() != tc.want {
+			t.Errorf("skip %v: ok %v, stderr:\n%s\nwant %q", tc.skip, ok, errOut.String(), tc.want)
+		}
+		if tc.skip && (c.leftOut != 1 || strings.Contains(c.manifest, "Namespace") || !strings.Contains(c.manifest, "name: cm")) {
+			t.Errorf("left out %d, manifest:\n%s", c.leftOut, c.manifest)
+		}
 	}
 }
