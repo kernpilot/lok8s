@@ -26,6 +26,6 @@ metadata:
 kubeVersion: "1.35.5"
 repository: https://fluxcd-community.github.io/helm-charts
 chart: flux2
-version: 2.19.0
+version: 2.19.1
 valueFiles:
   - values.yaml

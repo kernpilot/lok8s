@@ -88,13 +88,13 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
       amd64) \
         KUBECTL_SHA256=1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82 \
         CLUSTERCTL_SHA256=a6b94e0da68df254191480b11c0b50019a7a5df87560d6f70a76d3453116f21e \
-        FLUX_SHA256=6e984c92aa02250ea3f907367dc7829411e31d667b100ce2005cb87d5509e5b3 \
+        FLUX_SHA256=b853df82adfd7736f580692f9f734473d571606307139f8fd20c2a80dd1ff473 \
         KIND_SHA256=50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54 \
         KHELM_SHA256=ab507f6ac1dd4e5c2d68b570a0722c8129d06a12919c912b3a26bf9cb7cf0593 ;; \
       arm64) \
         KUBECTL_SHA256=c957eb8c4bea27a3bb35b269edd9082e27f027f7b76b20b5bf4afebc726c6d3e \
         CLUSTERCTL_SHA256=a9b32e0179cdbb66ba67ebdb45be818c983dedcc827f6d31bca72277250df52c \
-        FLUX_SHA256=16409df2fbd40b23458d81c22dd57abd39e82450831bdf522716d9d1030976c6 \
+        FLUX_SHA256=f3e159af616ec0b9bd0a405c2185cf09d06b74652c1de3c7f377e8166826651a \
         KIND_SHA256=b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d \
         KHELM_SHA256=166dc045819c224f64db235f189bd70337be61dd49ed95d8ea90da99722124d7 ;; \
       *) echo "operator image: no download checksums for ${ARCH}" >&2; exit 1 ;; \
@@ -110,7 +110,7 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
     && echo "${CLUSTERCTL_SHA256}  /tmp/dl/clusterctl" | sha256sum -c - \
     && install -m 0755 /tmp/dl/clusterctl /usr/local/bin/clusterctl \
     && wget -qO /tmp/dl/flux.tar.gz \
-      "https://github.com/fluxcd/flux2/releases/download/v2.9.1/flux_2.9.1_linux_${ARCH}.tar.gz" \
+      "https://github.com/fluxcd/flux2/releases/download/v2.9.5/flux_2.9.5_linux_${ARCH}.tar.gz" \
     && echo "${FLUX_SHA256}  /tmp/dl/flux.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/dl/flux.tar.gz -C /usr/local/bin flux \
     && chmod +x /usr/local/bin/flux \
