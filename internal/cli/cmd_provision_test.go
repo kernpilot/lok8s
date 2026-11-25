@@ -118,6 +118,7 @@ func TestBootstrapModeFlagDependencies(t *testing.T) {
 		{[]string{"provision", "--only", "cilium", "--domain", "alpha.dev"}, "--only requires --bootstrap"},
 		{[]string{"provision", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --bootstrap"},
 		{[]string{"provision", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --bootstrap"},
+		{[]string{"provision", "--skip-client-side-owned", "--domain", "alpha.dev"}, "--skip-client-side-owned requires --bootstrap"},
 		{[]string{"provision", "-b", "--no-diff", "--domain", "alpha.dev"}, "--no-diff requires --dry-run"},
 		{[]string{"provision", "-b", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --dry-run"},
 		{[]string{"bootstrap", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --dry-run"},

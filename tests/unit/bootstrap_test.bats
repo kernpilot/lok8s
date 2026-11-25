@@ -2866,8 +2866,9 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
 
 # The kubectl of PATH (kubectl_path_stub) is a child process: its log holds
 # the KUBERC that lo gave it, with a KUBERC of the user set. The restore.d
-# apply and the entry's apply (a real run), and the diffs of the entry and
-# of restore.d (a dry run) read stdin and run with KUBERC=off.
+# apply and the entry's apply (a real run), the diffs of the entry and of
+# restore.d (a dry run), and the read of the field managers of the entry
+# before its apply and before its diff read stdin and run with KUBERC=off.
 @test "kuberc: a kubectl on PATH runs the restore.d apply, the entry apply and the dry-run diffs with KUBERC=off" {
   write_cluster_spec "testcni"
   local d="${PATH_CLUSTERS}/test.lok8s.dev" log
@@ -2887,7 +2888,8 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spe
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_success
   [ "$(grep -c $'^KUBERC=off\t--kubeconfig .* diff --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
-  [ "$(kubectl_path_file_calls | grep -c .)" -eq 4 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=off\t--kubeconfig .* get -f - --ignore-not-found --show-managed-fields -o jsonpath=' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  [ "$(kubectl_path_file_calls | grep -c .)" -eq 6 ] || { cat "${log}"; return 1; }
   [ -z "$(kubectl_path_file_calls | grep -v $'^KUBERC=off\t')" ] || { cat "${log}"; return 1; }
   [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
 }
@@ -3415,6 +3417,8 @@ _dry_kubectl_stub() {
     # Drain the manifest — only a `-f -` call has one: a stub that reads
     # stdin unconditionally hangs on a terminal (or an open pipe).
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    # The read of the field managers finds no live object.
+    [[ " $* " != *" --show-managed-fields "* ]] || return 0
     if [[ " $* " != *" diff "* ]]; then
       echo "parity stub: kubectl $* must not be reached by a dry run" >&2
       return 9
@@ -3501,6 +3505,8 @@ _dry_text_stub() {
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    # The read of the field managers finds no live object.
+    [[ " $* " != *" --show-managed-fields "* ]] || return 0
     if [[ " $* " != *" diff "* ]]; then
       echo "parity stub: kubectl $* must not be reached by a dry run" >&2
       return 9
@@ -3555,7 +3561,7 @@ _dry_assert_diff_file() {
 bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'
 TEXT
 )"
-  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni 0
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni ""
   assert_success
   assert_output "${want}"
   cd "${BATS_TEST_TMPDIR}"
@@ -3570,7 +3576,7 @@ TEXT
 bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '<dir>/01-testcni.yaml'
 TEXT
 )"
-  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "" 01-testcni 0
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "" 01-testcni ""
   assert_success
   assert_output "${want}"
 
@@ -3578,7 +3584,15 @@ TEXT
 bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run (this diff can show more: the dry run diffed the render without its non-deterministic objects): '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'
 TEXT
 )"
-  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni 1
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni "its non-deterministic objects"
+  assert_success
+  assert_output "${want}"
+
+  want="$(cat <<'TEXT'
+bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run (this diff can show more: the dry run diffed the render without its non-deterministic objects and the objects of a client-side writer): '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'
+TEXT
+)"
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni "its non-deterministic objects and the objects of a client-side writer"
   assert_success
   assert_output "${want}"
 }
@@ -6505,6 +6519,13 @@ SH
   assert_failure; assert_output --partial "--ignore-nondeterministic requires --dry-run"
   dry_run=1; run bootstrap::mode_check 1 0
   assert_success
+  # --skip-client-side-owned needs --bootstrap, in a real run and a dry run.
+  ignore_nondeterministic=0 dry_run=0 skip_client_side_owned=1; run bootstrap::mode_check 0 0
+  assert_failure; assert_output --partial "--skip-client-side-owned requires --bootstrap"
+  run bootstrap::mode_check 1 0
+  assert_success
+  dry_run=1; run bootstrap::mode_check 1 0
+  assert_success
 }
 
 # --only GIVEN but blank (every comma-separated value whitespace/empty, OR
@@ -7120,4 +7141,259 @@ SH
   [ -f "${d}/restore.d.diff" ] && [ ! -s "${d}/restore.d.diff" ]
   [ ! -e "${d}/05-stale.yaml" ] && [ ! -e "${d}/05-stale.diff" ]
   [ -f "${d}/01-testcni.yaml" ]
+}
+
+# --- The check of the field managers (the Go twin: clientside_test.go) ------
+
+# The read of the field managers of a live Namespace demo (the Go twin:
+# nsLines): a client-side apply (kubectl-client-side-apply, an Update entry
+# that owns the last-applied annotation) set the labels app and team and
+# the annotation note; the API server set its own label.
+_csa_ns_read() {
+  printf 'O\tv1\tNamespace\t\tdemo\n'
+  printf 'M\tkubectl-client-side-apply\tUpdate\t\t{".":{},"f:app":{},"f:team":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\n'
+  printf 'M\tkube-apiserver\tUpdate\t\t{"f:kubernetes.io/metadata.name":{}}\t\n'
+}
+
+# The render of the entry (the Go twin: csaManifest): the Namespace of the
+# read, and a ConfigMap with no client-side writer.
+_csa_render() {
+  export CSA_RENDER="${1:-both}"
+  kustomize() {
+    printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  labels:\n    app: y\n'
+    [[ "${CSA_RENDER}" != both ]] || printf -- '---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n'
+  }
+  export -f kustomize
+}
+
+# _csa_kubectl_stub [read-1] [read-2]: a kubectl for the check. Read n (a
+# call with --show-managed-fields) prints read-n (nothing past the last);
+# with CSA_READ_ERR set, it prints that on stderr and exits 1. A diff exits
+# ${CSA_DIFF_RC:-0}, an apply 0. KCALLS gets each verb (and the KUBERC of a
+# read); stdin.<verb>.<n> keeps the stdin of each diff and apply.
+_csa_kubectl_stub() {
+  export KCALLS="${BATS_TEST_TMPDIR}/kubectl.calls"; : > "${KCALLS}"
+  export CSA_READ_1="${1-}" CSA_READ_2="${2-}"
+  kubectl() {
+    local in="" n v verb=other
+    [[ " $* " != *" -f - "* ]] || in="$(cat)"
+    if [[ " $* " == *" --show-managed-fields "* ]]; then
+      echo "read KUBERC=${KUBERC-}" >> "${KCALLS}"
+      n="$(grep -c '^read ' "${KCALLS}")"
+      v="CSA_READ_${n}"
+      printf '%s' "${!v-}"
+      if [[ -n "${CSA_READ_ERR:-}" ]]; then echo "${CSA_READ_ERR}" >&2; return 1; fi
+      return 0
+    fi
+    case " $* " in *" diff "*) verb=diff ;; *" apply "*) verb=apply ;; esac
+    echo "${verb}" >> "${KCALLS}"
+    n="$(grep -c "^${verb}\$" "${KCALLS}")"
+    printf '%s\n' "${in}" > "${BATS_TEST_TMPDIR}/stdin.${verb}.${n}"
+    if [[ "${verb}" == diff && "${CSA_DIFF_RC:-0}" != 0 ]]; then
+      echo "error: the server could not be reached" >&2
+      return "${CSA_DIFF_RC}"
+    fi
+    return 0
+  }
+  export -f kubectl
+}
+_csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
+
+# Which objects the check names, and the keys it names: the ones that a
+# client-side writer owns and the target does not set, without the keys of
+# another manager and without the last-applied annotation. Each name that lo
+# prints is escaped. Go: TestClientSideObjectsNamesTheDroppedKeys.
+@test "bootstrap::_csa_objects names the writers and the keys that the apply drops" {
+  local -r la='"f:kubectl.kubernetes.io/last-applied-configuration":{}'
+  local -r w=$'M\tkubectl-client-side-apply\tUpdate\t\t'
+  local -r o=$'O\tv1\tNamespace\t\tdemo\n'
+  local -r ns=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  labels:\n    app: y\n'
+  local -r head='Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set'
+  csa() { bootstrap::_csa_objects "${2}" "${1}" | cut -f1; }
+
+  run csa "$(_csa_ns_read)" "${ns}"
+  assert_success; assert_output "${head}: label team; annotation note"
+  run bootstrap::_csa_objects "${ns}" "$(_csa_ns_read)"
+  assert_output "${head}: label team; annotation note"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"Namespace","s":"","n":"demo","obj":"Namespace demo","ul":["team"],"ua":["note"]}\tv1 Namespace demo'
+  # No live object.
+  run csa "" "${ns}"
+  assert_success; assert_output ""
+  # An Apply entry that owns the annotation is no client-side writer.
+  run csa "${o}"$'M\tkubectl-last-applied\tApply\t\t\t{'"${la}"$'}\n' "${ns}"
+  assert_output ""
+  # The target sets every key: no key named, and no check after the apply.
+  run bootstrap::_csa_objects "${ns}" "${o}${w}"'{"f:app":{}}'$'\t{'"${la}"$'}\n'
+  assert_output "${head}"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t-\tv1 Namespace demo'
+  # A key that another manager owns too stays.
+  run csa "${o}${w}"'{"f:team":{},"f:tier":{}}'$'\t{'"${la}"$'}\nM\tkubectl-label\tUpdate\t\t{"f:team":{}}\t\n' "${ns}"
+  assert_output "${head}: label tier"
+  # lo's own Apply entry keeps no key.
+  run csa "${o}${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl\tApply\t\t{"f:team":{}}\t\n' "${ns}"
+  assert_output "${head}: label team"
+  # An entry of the writer with a subresource keeps its keys.
+  run csa "${o}${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl-client-side-apply\tUpdate\tstatus\t{"f:team":{}}\t\n' "${ns}"
+  assert_output "${head}"
+  # Two writers, in order.
+  run csa "${o}"$'M\ttilt\tUpdate\t\t{"f:b":{},"f:a":{}}\t{'"${la}"$'}\n'"${w}"$'\t{'"${la}"$'}\n' "${ns}"
+  assert_output "Namespace demo: client-side writers (kubectl-client-side-apply, tilt) own fields; the apply moves them to lo and drops what the target does not set: labels a, b"
+  # A namespaced object matches a manifest object with no namespace.
+  run bootstrap::_csa_objects $'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n' $'O\tv1\tConfigMap\tdemo\tcm\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n'
+  assert_output $'ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team\tConfigMap demo/cm: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"ConfigMap","s":"demo","n":"cm","obj":"ConfigMap demo/cm","ul":["team"],"ua":[]}\tv1 ConfigMap cm'
+  # An object of another group is not the manifest object.
+  run csa $'O\tapps/v1\tNamespace\t\tdemo\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n' "${ns}"
+  assert_output ""
+  # The name label of a Namespace is set by the API server; the same label
+  # of another kind is named.
+  run csa "${o}${w}"'{"f:kubernetes.io/metadata.name":{},"f:team":{}}'$'\t{'"${la}"$'}\n' "${ns}"
+  assert_output "${head}: label team"
+  run csa $'O\tv1\tConfigMap\tdemo\tcm\n'"${w}"'{"f:kubernetes.io/metadata.name":{}}'$'\t{'"${la}"$'}\n' $'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n'
+  assert_output "ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label kubernetes.io/metadata.name"
+  # Control bytes and backslashes are escaped.
+  run csa "${o}"$'M\tevil\e[31m\\\tUpdate\t\t{"f:k\\u0007x":{}}\t{'"${la}"$'}\n' "${ns}"
+  assert_output 'Namespace demo: a client-side writer (evil\x1b[31m\\) owns fields; the apply moves them to lo and drops what the target does not set: label k\x07x'
+  # A line of another shape is ignored.
+  run csa $'O\tv1\tNamespace\tdemo\nM\tx\tUpdate\t\t\t{'"${la}"$'}\n'"${o}"$'M\tshort\tUpdate\n'"${w}"$'not json\t{'"${la}"$'}\n' "${ns}"
+  assert_output "${head}"
+}
+
+# A dry run names each object of a client-side writer, and the entry counts
+# as "differs" although kubectl diff finds no change: the diff does not
+# show what the apply drops. The read runs with KUBERC=off. Go:
+# TestDryRunNamesTheObjectsOfAClientSideWriter, TestDryRunClientSideExitCode.
+@test "bootstrap::apply --dry-run: a client-side writer makes the entry differ" {
+  write_cluster_spec "testcni"
+  _csa_render
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 1 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: testcni: differs (client-side owned: 1)"
+  assert_output --partial " differs=1 "
+  assert_line "[warn] bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note"
+  [ "$(_csa_calls)" = "read diff" ] || { cat "${KCALLS}"; return 1; }
+  grep -qx 'read KUBERC=off' "${KCALLS}"
+}
+
+# --skip-client-side-owned: the dry run diffs without the objects of a
+# client-side writer, as the real run applies without them, and names each
+# object. An entry with no other change is unchanged. Go:
+# TestDryRunSkipClientSideOwnedDiffsWithoutThem.
+@test "bootstrap::apply --dry-run --skip-client-side-owned diffs without them" {
+  write_cluster_spec "testcni"
+  _csa_render
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_dry_run=1 bootstrap_skip_csa=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: testcni: unchanged (client-side owned, left out: 1)"
+  assert_line "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields"
+  run grep -q Namespace "${BATS_TEST_TMPDIR}/stdin.diff.1"
+  assert_failure
+  grep -q 'name: cm' "${BATS_TEST_TMPDIR}/stdin.diff.1"
+}
+
+# A read that fails: a dry run names it only when its diff worked (a diff
+# that failed reports the cluster error itself); a missing CRD is no
+# failure. Under --skip-client-side-owned the entry is an error. lo never
+# prints the kubectl message of the read. Go: TestDryRunReadFailure.
+@test "bootstrap::apply --dry-run: a read of the field managers that fails" {
+  write_cluster_spec "testcni"
+  local -r failed="[warn] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so it cannot name the fields that the apply drops"
+  local bootstrap_dry_run=1
+  _csa_kubectl_stub
+  export CSA_READ_ERR="Error from server (Forbidden): namespaces is forbidden"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: testcni: unchanged"
+  assert_line "${failed}"
+  refute_output --partial "Forbidden"
+
+  CSA_READ_ERR="error: resource mapping not found for name: x: no matches for kind"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: testcni: unchanged"
+  refute_output --partial "lo cannot read the field managers"
+
+  CSA_READ_ERR="Error from server (Forbidden): namespaces is forbidden"
+  local bootstrap_skip_csa=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: testcni: error"
+  assert_line "[error] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so --skip-client-side-owned cannot find the objects to leave out"
+  refute_output --partial "Forbidden"
+
+  # A diff that fails too: the read failure is not named.
+  bootstrap_skip_csa=0
+  export CSA_DIFF_RC=2
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: testcni: error"
+  refute_output --partial "lo cannot read the field managers"
+}
+
+# A real run names each object of a client-side writer before the apply,
+# and after the apply reads again and names the keys that the apply
+# dropped. No object of a client-side writer: one read, no line. Go:
+# TestApplyOneNamesTheDroppedKeys, TestApplyOneWithoutAClientSideWriterReadsOnce.
+@test "bootstrap::_apply_one: a client-side writer is named before the apply and the dropped keys after it" {
+  write_cluster_spec "testcni"
+  _csa_render
+  _csa_kubectl_stub "$(_csa_ns_read)" $'O\tv1\tNamespace\t\tdemo\nM\tkubectl\tApply\t\t{"f:app":{}}\t\nM\tkubectl-last-applied\tApply\t\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\n'
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "[warn] bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note"
+  assert_output --partial "[warn] bootstrap: testcni: Namespace demo: the apply dropped label team; annotation note"
+  [ "$(_csa_calls)" = "read apply read" ] || { cat "${KCALLS}"; return 1; }
+  [ "$(grep -c '^read KUBERC=off$' "${KCALLS}")" -eq 2 ]
+  grep -q 'kind: Namespace' "${BATS_TEST_TMPDIR}/stdin.apply.1"
+
+  _csa_kubectl_stub $'O\tv1\tConfigMap\tdemo\tcm\nM\tkubectl\tApply\t\t\t\n'
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  refute_output --partial "client-side"
+  [ "$(_csa_calls)" = "read apply" ] || { cat "${KCALLS}"; return 1; }
+}
+
+# --skip-client-side-owned: the apply gets the render without the objects
+# of a client-side writer, each named. With no object left there is no
+# apply. A read that fails stops the entry before the apply. Without the
+# flag, a read that fails is a [warn] line, and the apply runs. Go:
+# TestApplyOneSkipClientSideOwned.
+@test "bootstrap::_apply_one --skip-client-side-owned leaves them out of the apply" {
+  write_cluster_spec "testcni"
+  _csa_render
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_skip_csa=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields"
+  [ "$(_csa_calls)" = "read apply" ] || { cat "${KCALLS}"; return 1; }
+  run grep -q Namespace "${BATS_TEST_TMPDIR}/stdin.apply.1"
+  assert_failure
+  grep -q 'name: cm' "${BATS_TEST_TMPDIR}/stdin.apply.1"
+
+  # Nothing is left.
+  _csa_render ns
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
+
+  # The read fails.
+  _csa_render
+  _csa_kubectl_stub
+  export CSA_READ_ERR="Error from server (Forbidden)"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "[error] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so --skip-client-side-owned cannot find the objects to leave out"
+  refute_output --partial "Forbidden"
+  [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
+
+  # The read fails without the flag.
+  bootstrap_skip_csa=0
+  _csa_kubectl_stub
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "[warn] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so it cannot name the fields that the apply drops"
+  [ "$(_csa_calls)" = "read apply" ] || { cat "${KCALLS}"; return 1; }
 }

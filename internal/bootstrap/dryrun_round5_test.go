@@ -46,6 +46,9 @@ func TestDryRunListsAnObjectOnlyTheSecondRenderHas(t *testing.T) {
 				fmt.Fprint(c.Stdout, "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: late\n  namespace: kube-system\n")
 			}
 		case "kubectl":
+			if isFieldManagerRead(c) {
+				return nil
+			}
 			raw, _ := io.ReadAll(c.Stdin)
 			diffIn = append(diffIn, string(raw))
 		}

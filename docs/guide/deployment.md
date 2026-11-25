@@ -664,9 +664,10 @@ lines come in the order of the run; only the `--render-dir` files carry the
   the kubectl that the dry run used. Each path in the command is in single
   quotes, so you can paste it into a shell. Without `--render-dir`, the
   line tells you to do the dry run again with `--render-dir <dir>`: `<dir>`
-  is a directory that you choose. With `--ignore-nondeterministic`, the dry
-  run diffed the render without its non-deterministic objects, but the file
-  holds the full render: the diff by hand can show more. When kubectl did
+  is a directory that you choose. With `--ignore-nondeterministic` or
+  `--skip-client-side-owned`, the dry run diffed the render without some of
+  its objects, but the file holds the full render: the diff by hand can
+  show more. When kubectl did
   not start (it is not installed), or an interrupt or a SIGTERM stopped it
   (exit 130 or 143), the line says so and gives no command.
 - `inconclusive (needs-crd)`: the server-side diff failed because the CRD
@@ -702,6 +703,25 @@ lines come in the order of the run; only the `--render-dir` files carry the
   changes them. The result includes these objects: the entry differs, and
   the run exits 1. `--ignore-nondeterministic` diffs the entry without them.
   The run still lists them, and `--render-dir` keeps them.
+- `(client-side owned: N)`, with one `[warn]` line for each object: a
+  client-side writer owns fields of these live objects. A client-side
+  writer is a `managedFields` entry with the operation `Update` that owns
+  the `kubectl.kubernetes.io/last-applied-configuration` annotation, for
+  example from a `kubectl apply` without `--server-side`. The server-side
+  apply of lo moves the fields of these writers to lo. Then it removes each
+  of these fields that the entry does not set, if no other manager owns it.
+  `kubectl diff` does not show this removal, thus the entry differs (exit 1)
+  also when its diff has no change. The `[warn]` line names the writers,
+  and the labels and annotations that the apply removes. lo does not name
+  other fields (for example the keys under `data`). A real run prints the
+  same lines before the apply, and after the apply a line with the labels
+  and annotations that it removed. `--skip-client-side-owned` leaves these
+  objects out of the diff and out of the apply: the mark is then
+  `(client-side owned, left out: N)`. lo never removes the last-applied
+  annotation. When lo cannot read the field managers (for example, RBAC
+  does not allow `get`), it prints a `[warn]` line and continues. With
+  `--skip-client-side-owned` the entry is then an error, because lo cannot
+  find the objects to leave out.
 - `(non-repeatable)`: the render generated secret material that the store
   does not hold yet (a password, a key, a certificate, or a CA because
   `CAROOT` has none), or it updated a value of the store. The dry run keeps

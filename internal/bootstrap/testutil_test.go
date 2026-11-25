@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -74,6 +75,14 @@ func (f *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 	default:
 		return nil
 	}
+}
+
+// isFieldManagerRead reports the read of the field managers
+// (clientside.go). A dry run makes it before each diff, a real run before
+// and after each apply. A handler that scripts only the diff or the apply
+// answers it with no live object (return nil, no output).
+func isFieldManagerRead(c execx.Cmd) bool {
+	return c.Name == "kubectl" && slices.Contains(c.Args, "--show-managed-fields")
 }
 
 func (f *fakeRunner) log() string {

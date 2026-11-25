@@ -36,6 +36,9 @@ func (r *alternatingRunner) Run(_ context.Context, c execx.Cmd) error {
 		fmt.Fprintf(c.Stdout, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stable\n  namespace: kube-system\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: cilium-ca\n  namespace: kube-system\ndata:\n  ca.crt: Q0Et%d\n", r.renders)
 		return nil
 	case "kubectl":
+		if isFieldManagerRead(c) {
+			return nil
+		}
 		raw, _ := io.ReadAll(c.Stdin)
 		r.diffIn = append(r.diffIn, string(raw))
 		if rc := r.diffRC(string(raw)); rc != 0 {

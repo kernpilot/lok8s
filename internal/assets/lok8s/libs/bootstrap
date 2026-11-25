@@ -50,6 +50,7 @@ import ^utils/spec
 main::bootstrap() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0 ignore_nondeterministic=0
+  local skip_client_side_owned=0
   # Review round 2, item E: whether --only was GIVEN at all, read from the
   # RAW argv before :args ever touches it — :args alone cannot tell
   # "--only ''" apart from "--only never given" (both leave `only` empty).
@@ -64,6 +65,7 @@ main::bootstrap() {
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'   'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
+    'skip-client-side-owned|:+' "Leave each live object whose fields a client-side writer owns out of the apply (a dry run: out of the diff). Default: apply it, and name the fields that the apply drops"
     "${args[@]:-}"
   )
   :args "Apply bootstrap addons" "${@}"
@@ -81,6 +83,7 @@ main::bootstrap() {
   local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
   local bootstrap_allow_generators="${allow_generators}" bootstrap_with_restore="${with_restore}"
   local bootstrap_ignore_nondet="${ignore_nondeterministic}"
+  local bootstrap_skip_csa="${skip_client_side_owned}"
   local _rc=0
   bootstrap::dispatch "${domain}" || _rc=$?
   bootstrap::_dry_run_exit "${_rc}"
@@ -128,7 +131,8 @@ bootstrap::_flag_given() {
 # bootstrap::mode_check <bootstrap_only> <only_given>
 # Validate the run-mode flags of main::bootstrap and main::provision (read
 # through dynamic scoping: dry_run, render_dir, no_diff, only,
-# allow_generators, with_restore). only_given is bootstrap::_flag_given's
+# allow_generators, with_restore, ignore_nondeterministic,
+# skip_client_side_owned). only_given is bootstrap::_flag_given's
 # result (item E — see above), NOT `[[ -n "${only:-}" ]]`. On provision
 # every mode flag needs --bootstrap; --render-dir, --no-diff and
 # --allow-generators need --dry-run; --with-restore needs --only. Prints
@@ -143,6 +147,7 @@ bootstrap::mode_check() {
     if (( ${allow_generators:-0} )); then error "--allow-generators requires --bootstrap"; return 1; fi
     if (( ${with_restore:-0} )); then error "--with-restore requires --bootstrap"; return 1; fi
     if (( ${ignore_nondeterministic:-0} )); then error "--ignore-nondeterministic requires --bootstrap"; return 1; fi
+    if (( ${skip_client_side_owned:-0} )); then error "--skip-client-side-owned requires --bootstrap"; return 1; fi
   fi
   if (( ! ${dry_run:-0} )); then
     if [[ -n "${render_dir:-}" ]]; then error "--render-dir requires --dry-run"; return 1; fi
@@ -731,6 +736,19 @@ bootstrap::_apply_one() {
   # of the bootstrap (lo up, lo provision, lo bootstrap) passes here.
   printf '%s' "${rendered}" | keysonly::refuse_stream bootstrap "${addon_name}" - || return 1
 
+  # The check of the field managers (bootstrap::_csa_before): a [warn] line
+  # for each live object whose fields a client-side writer owns, or, under
+  # --skip-client-side-owned, the object is left out of the apply.
+  local _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0
+  local -a _csa_checks=()
+  bootstrap::_csa_before "${addon_name}" "${kubeconfig}" "${rendered}" || return 1
+  (( _csa_failed == 0 )) || warn "$(bootstrap::_csa_read_failed_text "${addon_name}" "${_csa_failed}")"
+  if [[ -z "${_csa_manifest//[[:space:]]/}" ]]; then
+    debug "bootstrap: ${addon_name}: nothing is left to apply"
+    bootstrap::_wait_asked "${addon_name}" "${kubeconfig}" "${do_wait}" "${rendered}"
+    return 0
+  fi
+
   # Apply with server-side + CRD retry. kapply::apply renders its own
   # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating conflicts
   # (interactive prompt, or --force-recreate), and passes CRD-not-installed /
@@ -739,7 +757,7 @@ bootstrap::_apply_one() {
   # shell so KAPPLY_LAST_OUTPUT is readable here; it is not a here-string,
   # which can put the render in a file (utils/keysonly.sh).
   local fp_rc=0
-  kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}") || fp_rc=$?
+  kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" < <(printf '%s' "${_csa_manifest}") || fp_rc=$?
 
   # Unrecoverable conflict that wasn't healed (declined the prompt, or
   # non-interactive without --force-recreate) — fail fast rather than
@@ -780,7 +798,7 @@ bootstrap::_apply_one() {
     for (( _attempt = 1; _attempt <= _max; _attempt++ )); do
       _rc=0
       kapply::apply --label "${addon_name} (retry ${_attempt}/${_max})" \
-        --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}") || _rc=$?
+        --kubeconfig "${kubeconfig}" < <(printf '%s' "${_csa_manifest}") || _rc=$?
       if (( _rc == 0 )) && ! kapply::output_matches "${_race}" "${KAPPLY_LAST_OUTPUT}"; then
         break
       fi
@@ -793,18 +811,270 @@ bootstrap::_apply_one() {
     fi
   fi
 
-  # Post-apply health wait — run it only when the scheduler asks (do_wait set),
-  # i.e. when something depends on THIS entry being Ready: a dep-target (someone's
-  # dependsOn / a later entry behind a gate) or the entry is itself a wait-gate. A
-  # pure leaf skips it (that serial wait was the whole point of the refactor): the
-  # scheduler gates readiness only where a dependency edge needs it. _apply_one
-  # just honors the flag. Best-effort: a timeout is a ⚠, not fatal — the caller
-  # decides whether to care.
-  if [[ -n "${do_wait}" ]]; then
-    debug "bootstrap: waiting for ${addon_name} workloads to become ready"
-    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}")
+  bootstrap::_csa_after "${addon_name}" "${kubeconfig}" "${_csa_manifest}" ${_csa_checks[@]+"${_csa_checks[@]}"}
+  bootstrap::_wait_asked "${addon_name}" "${kubeconfig}" "${do_wait}" "${rendered}"
+  return 0
+}
+
+# bootstrap::_wait_asked <addon_name> <kubeconfig> <do_wait> <rendered>
+# The health wait after the apply. It runs only when the scheduler asks
+# (do_wait set): when something depends on THIS entry being Ready, a
+# dep-target (the dependsOn of another entry, or a later entry behind a
+# gate) or an entry that is itself a wait-gate. A pure leaf skips it: the
+# scheduler gates readiness only where a dependency edge needs it. A
+# timeout is a warning, not a failure: the caller decides. The Go twin:
+# Engine.waitAsked.
+bootstrap::_wait_asked() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  [[ -n "${3}" ]] || return 0
+  debug "bootstrap: waiting for ${1} workloads to become ready"
+  kapply::wait_ready "${1}" 180 --kubeconfig "${2}" < <(printf '%s' "${4}")
+}
+
+# ── The check of the field managers ─────────────────────────────────────
+# The Go twin: internal/bootstrap/clientside.go. kubectl apply --server-side
+# moves the fields of a client-side writer to its own field manager when a
+# managedFields entry of the live object has the operation Update and owns
+# the last-applied annotation (the move of kubectl from a client-side to a
+# server-side apply). In the same apply, kubectl then drops each of these
+# fields that the target does not set, unless another manager owns the
+# field too. kubectl diff --server-side does not do the move, so a diff does
+# not show the drop. kubectl keeps the last-applied annotation under a
+# manager of its own (kubectl-last-applied) when the apply uses the default
+# manager, as lo does.
+#
+# The check reads the field managers of the live objects, with the stdin of
+# the diff or of the apply, and gives a [warn] line for each object whose
+# fields a client-side writer owns: the writers, and the labels and
+# annotations that the apply drops. A dry run counts such an entry as
+# "differs". A real run reads again after the apply and names each label and
+# annotation that the apply dropped. --skip-client-side-owned leaves such
+# objects out of the apply (a dry run: out of the diff). The check never
+# removes the last-applied annotation.
+#
+# The read gets no value of an object: only its apiVersion, kind, namespace
+# and name, and for each managedFields entry the manager, the operation, the
+# subresource and the key names of its labels and annotations. lo escapes
+# each name before it prints it (as kapply::escape does): a client can write
+# any manager name and any key name into managedFields.
+
+# The jsonpath of the read (the Go twin: csaTemplate). One object: a line
+# "O<TAB>apiVersion<TAB>kind<TAB>namespace<TAB>name", then for each
+# managedFields entry a line "M<TAB>manager<TAB>operation<TAB>subresource
+# <TAB>labels<TAB>annotations" (the JSON of the f:labels and f:annotations
+# sets: key names, no values). kubectl prints a List for the objects of a
+# stdin, also for one object: the first part reads its items. The second
+# part reads one object that is not in a List; for a List it prints an O
+# line with no name, which the parse skips.
+_BOOTSTRAP_CSA_OBJECT='{"O\t"}{.apiVersion}{"\t"}{.kind}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{range .metadata.managedFields[*]}{"M\t"}{.manager}{"\t"}{.operation}{"\t"}{.subresource}{"\t"}{.fieldsV1.f:metadata.f:labels}{"\t"}{.fieldsV1.f:metadata.f:annotations}{"\n"}{end}'
+_BOOTSTRAP_CSA_TEMPLATE="{range .items[*]}${_BOOTSTRAP_CSA_OBJECT}{end}${_BOOTSTRAP_CSA_OBJECT}"
+
+# The jq functions of the two programs below (the Go twins): esc
+# (kapply.EscapeText: a control byte as \xNN, a backslash as \\), fkeys
+# (fieldKeys), group (apiGroup), parse (parseFieldManagers), names and
+# keytext (csaKeys), writers (csaWriters), obj (objectName).
+_BOOTSTRAP_CSA_JQ_DEFS='
+def esc: explode | map(if . == 92 then "\\\\" elif (. < 32 or . == 127) then "\\x" + ("0123456789abcdef" as $h | $h[(. / 16 | floor):((. / 16 | floor) + 1)] + $h[(. % 16):((. % 16) + 1)]) else ([.] | implode) end) | join("");
+def fkeys: if . == "" then [] else (try (fromjson | if type == "object" then keys | map(select(startswith("f:")) | .[2:]) else [] end) catch []) end;
+def group: split("/") | if length > 1 then .[0] else "" end;
+def parse: split("\n") | reduce .[] as $line ({objs: [], cur: null};
+    ($line | split("\t")) as $f
+    | if ($f[0] // "") == "O" and ($f | length) == 5 then
+        (if .cur != null then .objs += [.cur] else . end)
+        | .cur = (if $f[4] == "" then null else {g: ($f[1] | group), k: $f[2], s: $f[3], n: $f[4], e: []} end)
+      elif ($f[0] // "") == "M" and ($f | length) == 6 and .cur != null then
+        .cur.e += [{m: $f[1], o: $f[2], r: $f[3], l: ($f[4] | fkeys), a: ($f[5] | fkeys)}]
+      else . end)
+  | if .cur != null then .objs + [.cur] else .objs end;
+def names($what): if length == 0 then empty elif length == 1 then "\($what) \(.[0] | esc)" else "\($what)s \(map(esc) | join(", "))" end;
+def keytext($l; $a): [($l | names("label")), ($a | names("annotation"))] | join("; ");
+def writers: if length == 1 then "a client-side writer (\(.[0] | esc)) owns fields" else "client-side writers (\(map(esc) | join(", "))) own fields" end;
+def obj: (.k | esc) + " " + (if .s != "" then (.s | esc) + "/" else "" end) + (.n | esc);
+'
+
+# The program of bootstrap::_csa_objects (the Go twin: clientSideObjects
+# with warnText and skipText): over the read (the input, one string) and
+# the manifest objects ($docs). The label kubernetes.io/metadata.name of a
+# Namespace is not one that the apply drops: the API server sets it on each
+# write (the Go twin: serverSetLabels).
+_BOOTSTRAP_CSA_BEFORE_JQ='
+"kubectl.kubernetes.io/last-applied-configuration" as $la
+| parse[]
+| . as $o
+| ([.e[] | select(.o == "Update" and any(.a[]; . == $la)) | .m] | unique) as $w
+| select($w | length > 0)
+| [$docs[] | select(.g == $o.g and .k == $o.k and .n == $o.n)] as $c
+| (first($c[] | select(.s == $o.s)) // first($c[] | select(.s == "")) // $c[0]) as $d
+| select($d != null)
+| [.e[] | select((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "")] as $own
+| [.e[] | select(((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "") or (.m == "kubectl" and .o == "Apply" and .r == "") | not)] as $other
+| (([$own[].l[]] | unique) - $d.lk - (if $o.g == "" and $o.k == "Namespace" then ["kubernetes.io/metadata.name"] else [] end)) as $ul
+| (([$own[].a[]] | unique) - [$la] - $d.ak) as $ua
+| ($ul - [$other[].l[]]) as $dl
+| ($ua - [$other[].a[]]) as $da
+| obj as $obj
+| [ $obj + ": " + ($w | writers) + "; the apply moves them to lo and drops what the target does not set" + (keytext($dl; $da) | if . != "" then ": " + . else "" end),
+    $obj + ": left out of the apply (--skip-client-side-owned): " + ($w | writers),
+    (if ($ul | length) + ($ua | length) > 0 then {g: .g, k: .k, s: .s, n: .n, obj: $obj, ul: $ul, ua: $ua} | tojson else "-" end),
+    $d.l ]
+| join("\t")
+'
+
+# The program of bootstrap::_csa_after (the Go twin: clientSideAfter): over
+# the read after the apply (the input) and the checks ($c).
+_BOOTSTRAP_CSA_AFTER_JQ='
+parse as $live
+| $c[]
+| . as $x
+| first($live[] | select(.g == $x.g and .k == $x.k and .s == $x.s and .n == $x.n)) as $o
+| keytext($x.ul - ([$o.e[].l[]] | unique); $x.ua - ([$o.e[].a[]] | unique))
+| select(. != "")
+| $x.obj + ": the apply dropped " + .
+'
+
+# bootstrap::_csa_read <kubeconfig> <manifest>
+# The read of the field managers of the live objects of <manifest> (the Go
+# twin: Engine.readFieldManagers): KUBERC=off kubectl --kubeconfig
+# <kubeconfig> get -f - --ignore-not-found --show-managed-fields -o
+# jsonpath=<template>, with the manifest on stdin. Prints its output.
+# Returns 0 when the read worked, or failed only for a missing CRD (an
+# object whose CRD is not there cannot be live, and kubectl reads the other
+# objects), else the exit code of kubectl. Its stderr goes to a temp file
+# that only the classification reads: lo never prints it.
+bootstrap::_csa_read() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  local kubeconfig="${1}" manifest="${2}" _err _out _emsg _rc=0
+  _err="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || return 1
+  _out=$(printf '%s\n' "${manifest}" \
+    | KUBERC=off kubectl --kubeconfig "${kubeconfig}" get -f - --ignore-not-found --show-managed-fields \
+        -o "jsonpath=${_BOOTSTRAP_CSA_TEMPLATE}" 2>"${_err}") || _rc=$?
+  _emsg="$(cat "${_err}" 2>/dev/null || true)"
+  rm -f "${_err}"
+  local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
+  if (( _rc != 0 )) && kapply::output_matches "${_race}" "${_emsg}"; then
+    _rc=0
+  fi
+  printf '%s' "${_out}"
+  return "${_rc}"
+}
+
+# bootstrap::_csa_docs <manifest>
+# One JSON line for each object of <manifest> (the Go twin:
+# manifestObjects): its label (l, the label of bootstrap::_object_lines,
+# what bootstrap::_without_objects drops), group (g), kind (k), name (n),
+# namespace (s), and the key names of its labels (lk) and annotations (ak).
+# No value. A document that is not a map is not an object.
+bootstrap::_csa_docs() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  local -a _rc
+  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' | jq -c '
+    def str: if type == "string" then . else "" end;
+    def names: if type == "object" then keys else [] end;
+    (.metadata | if type == "object" then . else {} end) as $m
+    | ($m.namespace | str) as $ns
+    | {l: "\(.apiVersion | str) \(.kind | str) \(if $ns != "" then $ns + "/" else "" end)\($m.name | str)",
+       g: (.apiVersion | str | split("/") | if length > 1 then .[0] else "" end),
+       k: (.kind | str), n: ($m.name | str), s: $ns,
+       lk: ($m.labels | names), ak: ($m.annotations | names)}'
+  _rc=("${PIPESTATUS[@]}")
+  (( _rc[0] == 0 && _rc[1] == 0 && _rc[2] == 0 ))
+}
+
+# bootstrap::_csa_objects <manifest> <read>
+# One line for each live object of <read> whose fields a client-side writer
+# owns (the Go twin: clientSideObjects), in the order of the read: its warn
+# text, its skip text, its check (the JSON that bootstrap::_csa_after reads,
+# or - when the writers own no label or annotation that the target does not
+# set) and the label of its manifest object, separated by tabs. A manifest
+# that does not parse gives no objects: the check then names no object.
+bootstrap::_csa_objects() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  local _docs
+  _docs="$(bootstrap::_csa_docs "${1}")" || _docs=""
+  printf '%s' "${2}" \
+    | jq -R -s -r --slurpfile docs <(printf '%s\n' "${_docs}") "${_BOOTSTRAP_CSA_JQ_DEFS}${_BOOTSTRAP_CSA_BEFORE_JQ}"
+}
+
+# bootstrap::_csa_read_failed_text <addon_name> <rc>
+# The [warn] line of a read that failed (the Go twin: csaReadFailedText).
+bootstrap::_csa_read_failed_text() {
+  printf 'bootstrap: %s: lo cannot read the field managers of the live objects (kubectl get exited %s), so it cannot name the fields that the apply drops' "${1}" "${2}"
+}
+
+# bootstrap::_csa_before <addon_name> <kubeconfig> <manifest>
+# The Go twin: Engine.clientSideBefore. Reads the field managers of the live
+# objects of <manifest> and prints a [warn] line for each object whose
+# fields a client-side writer owns. Under --skip-client-side-owned each line
+# says that the object is left out, and the manifest of the check is without
+# these objects. Sets in the scope of the caller: _csa_manifest (what the
+# entry diffs or applies), _csa_named (the count of the objects of a
+# client-side writer that the apply takes), _csa_checks (the check of each
+# of them that has keys to check after the apply), _csa_left_out (the count
+# of the objects left out) and _csa_failed (the exit code of a read that
+# failed, 0 when it worked). Returns 1 when the entry fails: under
+# --skip-client-side-owned when the read failed (lo cannot find the objects
+# to leave out) or when the objects cannot be taken out of the manifest. The
+# caller prints the line of a read that failed otherwise
+# (bootstrap::_csa_read_failed_text): a dry run only when its diff worked.
+bootstrap::_csa_before() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  local _entry="${1}" _kc="${2}" _read _rc=0 _lines _w _s _j _l
+  local -a _drop=()
+  _csa_manifest="${3}" _csa_named=0 _csa_left_out=0 _csa_failed=0 _csa_checks=()
+  _read="$(bootstrap::_csa_read "${_kc}" "${3}")" || _rc=$?
+  if (( _rc != 0 )); then
+    if (( ${bootstrap_skip_csa:-0} )); then
+      error "bootstrap: ${_entry}: lo cannot read the field managers of the live objects (kubectl get exited ${_rc}), so --skip-client-side-owned cannot find the objects to leave out"
+      return 1
+    fi
+    _csa_failed="${_rc}"
+  fi
+  _lines="$(bootstrap::_csa_objects "${3}" "${_read}")" || _lines=""
+  while IFS=$'\t' read -r _w _s _j _l; do
+    [[ -n "${_w}" ]] || continue
+    if (( ${bootstrap_skip_csa:-0} )); then
+      warn "bootstrap: ${_entry}: ${_s}"
+      _drop+=("${_l}")
+      continue
+    fi
+    warn "bootstrap: ${_entry}: ${_w}"
+    _csa_named=$(( _csa_named + 1 ))
+    [[ "${_j}" == - ]] || _csa_checks+=("${_j}")
+  done < <(printf '%s\n' "${_lines}")
+  if (( ${#_drop[@]} > 0 )); then
+    if ! _csa_manifest="$(bootstrap::_without_objects "${3}" "${_drop[@]}")"; then
+      error "bootstrap: ${_entry}: cannot take the objects of a client-side writer out of the manifest"
+      return 1
+    fi
+    _csa_left_out="${#_drop[@]}"
   fi
   return 0
+}
+
+# bootstrap::_csa_after <addon_name> <kubeconfig> <manifest> [check...]
+# The Go twin: Engine.clientSideAfter. Reads the field managers again after
+# the apply, and prints a [warn] line for each object of a check that lost
+# labels or annotations: the keys of the check that no manager owns now. No
+# read without a check. A read that fails gives a [debug] line only.
+bootstrap::_csa_after() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  local _entry="${1}" _kc="${2}" _manifest="${3}" _read _rc=0 _line
+  shift 3
+  (( $# > 0 )) || return 0
+  _read="$(bootstrap::_csa_read "${_kc}" "${_manifest}")" || _rc=$?
+  if (( _rc != 0 )); then
+    debug "bootstrap: ${_entry}: the read of the field managers after the apply failed (kubectl get exited ${_rc})"
+    return 0
+  fi
+  while IFS= read -r _line; do
+    [[ -z "${_line}" ]] || warn "bootstrap: ${_entry}: ${_line}"
+  done < <(printf '%s' "${_read}" \
+    | jq -R -s -r --slurpfile c <(printf '%s\n' "${@}") "${_BOOTSTRAP_CSA_JQ_DEFS}${_BOOTSTRAP_CSA_AFTER_JQ}")
 }
 
 # ── Topological-parallel scheduler ───────────────────────
@@ -1627,7 +1897,7 @@ bootstrap::_dry_run_one() {
     return 0
   fi
   [[ -z "${_ndout}" ]] || mapfile -t _nd <<< "${_ndout}"
-  local _diff_input="${rendered}"
+  local _diff_input="${rendered}" _without=""
   if (( ${bootstrap_ignore_nondet:-0} )) && (( ${#_nd[@]} > 0 )); then
     # A failed pass can leave an empty diff input, which would read as
     # unchanged: the entry is an error (the Go twin returns an error too).
@@ -1636,10 +1906,43 @@ bootstrap::_dry_run_one() {
       echo "error${_tail}"
       return 0
     fi
+    _without="its non-deterministic objects"
+  fi
+  # Before the diff, the check of the field managers (bootstrap::_csa_before)
+  # names each live object whose fields a client-side writer owns: kubectl
+  # diff does not show what the apply drops of these fields, so the entry
+  # counts as "differs" when the diff finds no change.
+  # --skip-client-side-owned diffs without these objects, as the real run
+  # applies without them. The check reads the cluster: not with --no-diff,
+  # and not for an input with no object.
+  local _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0
+  local -a _csa_checks=()
+  if (( ! ${bootstrap_no_diff:-0} )) && [[ -n "${_diff_input//[[:space:]]/}" ]]; then
+    if ! bootstrap::_csa_before "${addon_name}" "${kubeconfig}" "${_diff_input}"; then
+      echo "error${_tail}"
+      return 0
+    fi
+    if (( _csa_left_out > 0 )); then
+      _diff_input="${_csa_manifest}"
+      _without="${_without:+${_without} and }the objects of a client-side writer"
+    fi
   fi
   local _status
-  _status="$(bootstrap::_diff_manifest "${rendered}" "${stem}" "${kubeconfig}" "${addon_name}" "${_diff_input}")"
+  _status="$(bootstrap::_diff_manifest "${rendered}" "${stem}" "${kubeconfig}" "${addon_name}" "${_diff_input}" "${_without}")"
+  # A read that failed is news only when the diff worked: a diff that failed
+  # reports the cluster error itself.
+  if (( _csa_failed != 0 )) && [[ "${_status}" == unchanged* || "${_status}" == differs* ]]; then
+    warn "$(bootstrap::_csa_read_failed_text "${addon_name}" "${_csa_failed}")"
+  fi
+  if (( _csa_named > 0 )) && [[ "${_status}" == unchanged* ]]; then
+    _status="differs${_status#unchanged}"
+  fi
   (( ${#_nd[@]} == 0 )) || _status+=" (non-deterministic: ${#_nd[@]})"
+  if (( _csa_left_out > 0 )); then
+    _status+=" (client-side owned, left out: $(( _csa_named + _csa_left_out )))"
+  elif (( _csa_named > 0 )); then
+    _status+=" (client-side owned: ${_csa_named})"
+  fi
   echo "${_status}${_tail}"
   (( ${#_nd[@]} == 0 )) || printf '%s\n' "${_nd[@]}"
 }
@@ -1803,19 +2106,20 @@ bootstrap::_without_objects() {
         | strenv(BOOTSTRAP_DROP_LABELS) | split("\n") | any_c(. == $l) | not)'
 }
 
-# bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label> [diff-input]
+# bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label> [diff-input] [without]
 # Writes <stem>.yaml to --render-dir (unless already written for a NoDiff
 # caller), then (unless --no-diff) a server-side `kubectl diff`, classified
 # into the report's status vocabulary — unchanged | differs [changed=N
 # new=M] | inconclusive (needs-crd) | rendered | error. Shared by
 # bootstrap::_dry_run_one (an addon) and bootstrap::_dry_run_restore_d (the
 # restore.d pseudo-entry). Prints the status word (and only that) on
-# stdout; always returns 0.
+# stdout; always returns 0. <without> names what <diff-input> is without
+# (bootstrap::_diff_failed_text), empty for the full render.
 bootstrap::_diff_manifest() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local rendered="${1}" stem="${2}" kubeconfig="${3}" label="${4}"
-  local diff_input="${5-${1}}"
+  local diff_input="${5-${1}}" without="${6-}"
   # umask 077 for the duration of the writes below: these are RENDERED
   # Secrets (restore.d, or an addon carrying one) — never world/group
   # readable, even transiently.
@@ -1929,10 +2233,9 @@ bootstrap::_diff_manifest() {
   esac
   # rc > 1, no race pattern: kubectl/diff genuinely failed. The hint names
   # the kubectl that ran (the project's .bin is first on PATH).
-  local _kubectl _filtered=0
+  local _kubectl
   _kubectl="$(command -v kubectl 2>/dev/null)" || _kubectl=kubectl
-  [[ "${diff_input}" == "${rendered}" ]] || _filtered=1
-  error "$(bootstrap::_diff_failed_text "${label}" "${_drc}" "${_kubectl}" "${kubeconfig}" "${bootstrap_render_dir:-}" "${stem}" "${_filtered}")"
+  error "$(bootstrap::_diff_failed_text "${label}" "${_drc}" "${_kubectl}" "${kubeconfig}" "${bootstrap_render_dir:-}" "${stem}" "${without}")"
   echo error
   return 0
 }
@@ -2106,9 +2409,10 @@ bootstrap::_diff_keys() {
 # tells the operator how to see the message: run the diff by hand on the
 # rendered file under --render-dir. Without --render-dir (an empty
 # <render-dir>), do the dry run again with it: <dir> is a placeholder.
-# <filtered> 1 (--ignore-nondeterministic removed objects from the diff
-# input) adds that the diff by hand can show more, because the file holds
-# the full render. Each argument that lo puts into the command is quoted
+# A <without> that is not empty (what the dry run took out of the diff
+# input: its non-deterministic objects for --ignore-nondeterministic, the
+# objects of a client-side writer for --skip-client-side-owned) adds that
+# the diff by hand can show more, because the file holds the full render. Each argument that lo puts into the command is quoted
 # for a POSIX shell (bootstrap::_sh_quote), so a path with a space, a quote
 # or `$(...)` pastes as one word and runs nothing. The Go twin:
 # diffFailedText (the same bytes).
@@ -2117,8 +2421,8 @@ bootstrap::_diff_failed_text() {
   if [[ -z "${_dir}" ]]; then
     _dir="<dir>" _again="do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then "
   fi
-  if [[ "${7}" == 1 ]]; then
-    _more=" (this diff can show more: the dry run diffed the render without its non-deterministic objects)"
+  if [[ -n "${7-}" ]]; then
+    _more=" (this diff can show more: the dry run diffed the render without ${7})"
   fi
   printf '%s' "bootstrap: kubectl diff failed for ${1} (rc=${2}). lo does not show the kubectl message: it can quote a value of the manifest. To see it, ${_again}run${_more}: $(bootstrap::_sh_quote "${3}") --kubeconfig $(bootstrap::_sh_quote "${4}") diff --server-side --force-conflicts -f $(bootstrap::_sh_quote "${_dir}/${6}.yaml")"
 }

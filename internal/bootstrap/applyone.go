@@ -31,7 +31,11 @@ var raceRe = regexp.MustCompile(`ensure CRDs are installed first|failed calling 
 // envsubst), the kapply apply, the immutable/terminating fail-fast, the
 // CRD/webhook race-retry (the 6-retry class), and — only when job.Wait
 // is non-empty — the post-apply WaitReady. Returns 0 on success, 1 on an
-// unrecoverable render/apply error.
+// unrecoverable render/apply error. Before the apply, the check of the
+// field managers (clientside.go) names each live object whose fields a
+// client-side writer owns, or leaves it out (--skip-client-side-owned);
+// after an apply that worked, it names the labels and annotations that the
+// apply dropped.
 //
 // The bash MUST-run-in-a-subshell rule (KAPPLY_LAST_OUTPUT isolation across
 // concurrent jobs) maps to the Applier being function-local here: each
@@ -72,11 +76,24 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	applier := e.newApplier(job, stdout, stderr)
 	kcFlags := []string{"--kubeconfig", job.Kubeconfig}
 
+	csa, ok := e.clientSideBefore(ctx, stderr, job.Name, job.Kubeconfig, rendered)
+	if !ok {
+		return 1
+	}
+	if csa.readFailed != 0 {
+		ui.WarnTo(stderr, "%s", csaReadFailedText(job.Name, csa.readFailed))
+	}
+	manifest := csa.manifest
+	if strings.TrimSpace(manifest) == "" {
+		ui.DebugTo(stderr, "bootstrap: %s: nothing is left to apply", job.Name)
+		return e.waitAsked(ctx, job, applier, rendered, kcFlags, stderr)
+	}
+
 	// Apply with server-side + CRD retry. The applier heals immutable /
 	// stuck-Terminating conflicts (interactive prompt, or force-recreate),
 	// and passes CRD-not-installed / webhook-not-ready errors through
 	// unchanged so the transient-race retry below still fires.
-	out, rc := applier.Apply(ctx, job.Name, rendered, kcFlags...)
+	out, rc := applier.Apply(ctx, job.Name, manifest, kcFlags...)
 
 	// Unrecoverable conflict that wasn't healed (declined the prompt, or
 	// non-interactive without force-recreate) — fail fast rather than
@@ -119,7 +136,7 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 		retryRC := 1
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			label := fmt.Sprintf("%s (retry %d/%d)", job.Name, attempt, maxRetries)
-			out, retryRC = applier.Apply(ctx, label, rendered, kcFlags...)
+			out, retryRC = applier.Apply(ctx, label, manifest, kcFlags...)
 			if retryRC == 0 && !raceRe.MatchString(out) {
 				break
 			}
@@ -136,11 +153,16 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 		}
 	}
 
-	// Post-apply health wait — run it only when the scheduler asks
-	// (Wait set), i.e. when something depends on THIS entry being
-	// Ready: a dep-target or a wait-gate. A pure leaf skips it (that
-	// serial wait was the whole point of the refactor). Best-effort: a
-	// timeout is a ⚠, not fatal — the caller decides whether to care.
+	e.clientSideAfter(ctx, stderr, job.Name, job.Kubeconfig, csa)
+	return e.waitAsked(ctx, job, applier, rendered, kcFlags, stderr)
+}
+
+// waitAsked is the health wait after the apply. It runs only when the
+// scheduler asks (Wait set): when something depends on THIS entry being
+// Ready, a dep-target or a wait-gate. A pure leaf skips it. A timeout is a
+// warning, not a failure: the caller decides. Returns 0. The bash twin:
+// bootstrap::_wait_asked.
+func (e *Engine) waitAsked(ctx context.Context, job Job, applier *kapply.Applier, rendered string, kcFlags []string, stderr io.Writer) int {
 	if job.Wait {
 		ui.DebugTo(stderr, "bootstrap: waiting for %s workloads to become ready", job.Name)
 		_ = applier.WaitReady(ctx, job.Name, 180, rendered, kcFlags...)

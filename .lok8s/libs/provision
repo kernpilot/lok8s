@@ -19,6 +19,7 @@ main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
   local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0 ignore_nondeterministic=0
+  local skip_client_side_owned=0
   # --print-token goes down to kubehz::register_cluster as an argument of
   # provision::dispatch, not through dynamic scope.
   local print_token=0
@@ -36,6 +37,7 @@ main::provision() {
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'    'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
+    'skip-client-side-owned|:+' "Leave each live object whose fields a client-side writer owns out of the apply (a dry run: out of the diff). Default: apply it, and name the fields that the apply drops"
     'print-token|:+'     'Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret'
     "${args[@]:-}"
   )
@@ -53,6 +55,7 @@ main::provision() {
   local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
   local bootstrap_allow_generators="${allow_generators}" bootstrap_with_restore="${with_restore}"
   local bootstrap_ignore_nondet="${ignore_nondeterministic}"
+  local bootstrap_skip_csa="${skip_client_side_owned}"
   # Same reason as `lo build` (see the note there): the domain can come from
   # clusters/.active — state a `lo use` persisted hours ago — and provision
   # reconciles THAT domain's infrastructure. Cloud drivers additionally gate on

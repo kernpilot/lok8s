@@ -446,6 +446,7 @@ lo bootstrap [flags]
       --no-diff[=true|false]                   Dry run without the kubectl diff: render only, no cluster access
       --only strings                           Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
       --render-dir string                      Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --skip-client-side-owned[=true|false]    Leave each live object whose fields a client-side writer owns out of the apply (a dry run: out of the diff). Default: apply it, and name the fields that the apply drops
       --with-restore[=true|false]              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
@@ -3444,6 +3445,7 @@ lo provision [flags]
       --only strings                           Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
       --print-token[=true|false]               Also print the one-time claim ticket when stdout is not a terminal, or in a CI run (LOK8S_NONINTERACTIVE nonempty, or CI nonempty and not "false"): that output then holds a secret
       --render-dir string                      Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --skip-client-side-owned[=true|false]    Leave each live object whose fields a client-side writer owns out of the apply (a dry run: out of the diff). Default: apply it, and name the fields that the apply drops
       --with-restore[=true|false]              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
