@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main, 'feat/**']
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '12 5 * * *'
 
 permissions:
   contents: read
@@ -16,8 +16,8 @@ jobs:
   govulncheck:
     name: govulncheck (Go stdlib + modules)
     runs-on: ubuntu-latest
-    # Runs on every PR and weekly (the schedule above): the vulnerability
-    # database moves without a commit, so a green PR run can turn red a week
+    # Runs on every PR and daily (the schedule above): the vulnerability
+    # database moves without a commit, so a green PR run can turn red a day
     # later — that is the finding this job exists for. Every module is
     # scanned with the ROOT go.mod toolchain because that is what the release
     # builds all three with (release.yml); a stdlib fix reaches the released
