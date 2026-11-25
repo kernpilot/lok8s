@@ -1531,6 +1531,47 @@ func TestNodeErrorVocabulary(t *testing.T) {
 	}
 }
 
+// A 503 of the join mint names the wait of the body in seconds:
+// JOIN_TICKET_NOT_MINTED says that no ticket was minted,
+// JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist and
+// that the next mint revokes it, and JOIN_TICKET_BUSY says that other join
+// changes of the account hold the platform. A wait that is absent gives
+// "shortly". The help of the api (it names a header that lo does not show)
+// is not printed. Bash twin: "join: a 503 of the mint names the wait of
+// the body, and a ticket that can exist".
+func TestNodeJoinRetryLater(t *testing.T) {
+	const head = "[error] Failed to mint a join ticket for 'box-1' (HTTP 503): m\n"
+	const none = head + "  No join ticket was minted for this node. Run this command again "
+	const open = head + "  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it.\n  Run this command again "
+	const end = ". The next mint for this node name revokes that ticket, if the platform kept it.\n"
+	const busy = head + "  The platform is busy with other join changes of this account. Run this command again "
+	body := func(code, wait string) string {
+		return `{"statusCode":503,"data":{"code":"` + code + `","message":"m","help":"Mint a new ticket after the Retry-After interval."` + wait + `}}`
+	}
+	for name, tc := range map[string]struct{ body, want string }{
+		"not minted, 5":      {body("JOIN_TICKET_NOT_MINTED", `,"retryAfterSeconds":5`), none + "in 5 seconds.\n"},
+		"not minted, absent": {body("JOIN_TICKET_NOT_MINTED", ""), none + "shortly.\n"},
+		"unknown, 5":         {body("JOIN_TICKET_RESULT_UNKNOWN", `,"retryAfterSeconds":5`), open + "in 5 seconds" + end},
+		"unknown, absent":    {body("JOIN_TICKET_RESULT_UNKNOWN", ""), open + "shortly" + end},
+		"busy, 5":            {body("JOIN_TICKET_BUSY", `,"retryAfterSeconds":5`), busy + "in 5 seconds.\n"},
+		"busy, absent":       {body("JOIN_TICKET_BUSY", ""), busy + "shortly.\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := defaultNodeStubs()
+			s.mintCode, s.mintBody = 503, tc.body
+			h := nodeHarness(t, s, "hosted", "")
+			mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+			got := h.errOut.String()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("stderr %q\nwant it to hold %q", got, tc.want)
+			}
+			if strings.Contains(h.output(), "Retry-After") {
+				t.Errorf("the help of the api is printed: %q", h.output())
+			}
+		})
+	}
+}
+
 // ── remove ───────────────────────────────────────────────
 
 func TestNodeRemove(t *testing.T) {

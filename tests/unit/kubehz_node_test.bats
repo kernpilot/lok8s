@@ -1694,6 +1694,36 @@ _refuse_flag() {
   refute_output --partial "Retry-After"
 }
 
+# A 503 of the join mint names the wait of the body in seconds:
+# JOIN_TICKET_NOT_MINTED says that no ticket was minted,
+# JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist and
+# that the next mint revokes it, and JOIN_TICKET_BUSY says that other join
+# changes of the account hold the platform. A wait that is absent gives
+# "shortly". The help of the api is not printed. Go twin:
+# TestNodeJoinRetryLater.
+@test "join: a 503 of the mint names the wait of the body, and a ticket that can exist" {
+  _stub_all
+  local head="[error] Failed to mint a join ticket for 'box-1' (HTTP 503): m"$'\n' i
+  local none="${head}  No join ticket was minted for this node. Run this command again "
+  local open="${head}  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it."$'\n'"  Run this command again "
+  local end=". The next mint for this node name revokes that ticket, if the platform kept it."
+  local busy="${head}  The platform is busy with other join changes of this account. Run this command again "
+  local -a codes=(JOIN_TICKET_NOT_MINTED JOIN_TICKET_NOT_MINTED JOIN_TICKET_RESULT_UNKNOWN JOIN_TICKET_RESULT_UNKNOWN
+    JOIN_TICKET_BUSY JOIN_TICKET_BUSY)
+  local -a waits=(',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '')
+  local -a want=("${none}in 5 seconds." "${none}shortly." "${open}in 5 seconds${end}" "${open}shortly${end}"
+    "${busy}in 5 seconds." "${busy}shortly.")
+  STUB_MINT_CODE="503"
+  for i in "${!waits[@]}"; do
+    STUB_MINT_BODY='{"statusCode":503,"data":{"code":"'"${codes[i]}"'","message":"m","help":"Mint a new ticket after the Retry-After interval."'"${waits[i]}"'}}'
+    run node::join --name box-1 --pool metal
+    [ "$status" -ne 0 ] || { echo "row ${i}: status 0: $output" >&2; return 1; }
+    # The wanted lines, and each one ends its line.
+    [[ "$output" == *"${want[i]}" || "$output" == *"${want[i]}"$'\n'* ]] || { echo "row ${i}: $output" >&2; return 1; }
+    [[ "$output" != *"Retry-After"* ]] || { echo "row ${i}: the help of the api is printed: $output" >&2; return 1; }
+  done
+}
+
 @test "error: CONTROL_PLANE_NOT_READY explains what has not happened yet" {
   _stub_all
   STUB_MINT_CODE="409"

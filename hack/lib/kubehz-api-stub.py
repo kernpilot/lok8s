@@ -281,6 +281,19 @@ REMOVES = {
     "remove-7": retry_later("JOIN_TICKET_BUSY", "Other join tickets of this account are being minted or removed now", REMOVE_HELP, 5),
 }
 
+# POST /api/clusters/cl-1a2b3c4d/nodes/join-token, by the node name in the
+# body: the 503 refusals of a join mint on a hosted cluster.
+MINT_PATH = "/api/clusters/cl-1a2b3c4d/nodes/join-token"
+MINT_HELP = "Mint a new ticket for this node name after the Retry-After interval."
+MINTS = {
+    "mint-1": retry_later("JOIN_TICKET_NOT_MINTED", "No join ticket was minted: the ticket of this request is not live",
+                          MINT_HELP, 5),
+    "mint-2": retry_later("JOIN_TICKET_RESULT_UNKNOWN", "The result of this mint is not known",
+                          MINT_HELP + " The new mint revokes the ticket of this request if it was kept.", 5),
+    "mint-3": retry_later("JOIN_TICKET_BUSY", "Other join tickets of this account are being minted now",
+                          "Nothing was minted. Retry after the Retry-After interval.", None),
+}
+
 ROUTES = {
     **{("DELETE", REMOVE_PREFIX + name): answer for name, answer in REMOVES.items()},
     ("GET", "/api/spaces"): (200, ok([SPACE, ODD_SPACE], {"pagination": {"page": 1, "perPage": 500, "total": 2, "pages": 1}})),
@@ -416,6 +429,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.close_connection = True
                 return None
             return self.answer(*found)
+        if self.command == "POST" and path == MINT_PATH and isinstance(body, dict):
+            return self.answer(*MINTS.get(body.get("nodeName"), refusal(404, "NOT_FOUND", "Cluster not found")))
         if self.command == "POST" and path == JOIN_PATH and isinstance(body, dict):
             ticket = TICKETS.get(body.get("nodeName"))
             if ticket is None:

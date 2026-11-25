@@ -560,6 +560,12 @@ A join or a removal can also fail with `HTTP 503` while other join changes
 of your account run on the platform. The command then tells you when to
 run it again.
 
+A join also fails with `HTTP 503` when the platform did not mint the join
+ticket, or when it does not know if it kept the ticket. In the second case,
+a ticket for the node can exist, but the command did not get it. The next
+join with the same node name revokes that ticket. In both cases the command
+tells you when to run it again.
+
 ### When a join is refused
 
 Every refusal names what to do next. The four you are most likely to meet:

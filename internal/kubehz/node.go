@@ -221,6 +221,18 @@ func (c *Context) nodeAPIError(what string, res *httpResult) {
 		// succeed after the wait of the body.
 		c.apiErrorLine(what, res)
 		c.echoErr("  The platform is busy with other join changes of this account. Run this command again %s.", retryWait(res.Body))
+	case "JOIN_TICKET_NOT_MINTED":
+		// A 503 of a join mint: the platform minted no ticket, and the
+		// same call can succeed after the wait of the body.
+		c.apiErrorLine(what, res)
+		c.echoErr("  No join ticket was minted for this node. Run this command again %s.", retryWait(res.Body))
+	case "JOIN_TICKET_RESULT_UNKNOWN":
+		// A 503 of a join mint: the platform does not know if it kept the
+		// ticket. A ticket can exist that lo did not get. The next mint
+		// for the name revokes it, so the text says both.
+		c.apiErrorLine(what, res)
+		c.echoErr("  The platform did not confirm the join ticket. A ticket for this node can exist, but lo did not get it.")
+		c.echoErr("  Run this command again %s. The next mint for this node name revokes that ticket, if the platform kept it.", retryWait(res.Body))
 	default:
 		c.spaceAPIError(what, res)
 	}

@@ -1197,6 +1197,17 @@ EOF
   kc_reason "remove, a wait above an hour" "Run this command again shortly."
   check_api - kubehz node remove --name remove-7 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, join changes busy" "busy with other join changes of this account. Run this command again in 5 seconds."
+  # The 503 refusals of a hosted join mint: JOIN_TICKET_NOT_MINTED names the
+  # wait of the body, JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the
+  # node can exist and that the next mint revokes it, and JOIN_TICKET_BUSY
+  # with no wait gives "shortly".
+  check_api - kubehz node join --print-only --name mint-1 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+  kc_reason "join, not minted, 5 seconds" "No join ticket was minted for this node. Run this command again in 5 seconds."
+  check_api - kubehz node join --print-only --name mint-2 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+  kc_reason "join, result unknown" "A ticket for this node can exist, but lo did not get it."
+  kc_reason "join, result unknown, the revoke" "Run this command again in 5 seconds. The next mint for this node name revokes that ticket, if the platform kept it."
+  check_api - kubehz node join --print-only --name mint-3 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+  kc_reason "join, busy, no wait" "busy with other join changes of this account. Run this command again shortly."
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev
