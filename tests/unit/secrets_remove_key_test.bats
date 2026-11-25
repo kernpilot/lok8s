@@ -2106,6 +2106,48 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   done
 }
 
+# The real entrypoint: a key body pasted without its BEGIN line has no marker
+# of a key, only a line break. The refusal comes before :usage and :args can
+# print it: as an extra argument, as a command that no parser knows, in a
+# --domain value. The value of set is any text: set writes it.
+@test "the real entrypoint refuses an argument with a line break, for set it does not" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  local canary=CANARY_SECRET_MATERIAL_DO_NOT_LEAK body want
+  body="$(printf 'Ab0%.0s' {1..8})"$'\n'"${canary}"
+  want="[error] an argument holds a line break or a control character: it is not printed
+[error] in lo secrets, only the value of set can hold one: check the command, and pass the path of a key file, not the key"
+  _lo_refused() {
+    _run_lo "${@}" < /dev/null
+    [ "$status" -eq 1 ] && [ "$output" = "${want}" ] || {
+      echo "lo ${*//"${body}"/<body>}: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+  }
+  _lo_refused secrets add-key "${RCPT_A}" "${body}"
+  _lo_refused secrets add-key "${body}"
+  _lo_refused secrets "${body}"
+  _lo_refused secrets list "${body}"
+  _lo_refused secrets --domain "${body}" list
+  _lo_refused --domain "${body}" secrets list
+  _lo_refused "${body}"
+  # The words of the argv find set, so the checks leave these to the parsers.
+  # They stop at the unknown flag and do not print the value.
+  local flag
+  for flag in "--no-such-flag secrets set -n app OTHER" "secrets -z set list"; do
+    # shellcheck disable=SC2086 # the words of the argv
+    _run_lo ${flag} "${body}" < /dev/null
+    [ "$status" -ne 0 ] && [[ "$output" != *"${canary}"* ]] || {
+      echo "lo ${flag} <body>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+  done
+  # "--" ends no flags here: set runs, and the value is not printed.
+  _run_lo -- secrets set -n app OTHER "${body}" < /dev/null
+  [ "$status" -eq 0 ] && [[ "$output" != *"${canary}"* ]] || {
+    echo "lo -- secrets set <body>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+  _run_lo secrets set -n app KEY "${body}" < /dev/null
+  [ "$status" -eq 0 ] && [[ "$output" != *"${canary}"* ]] || {
+    echo "set <body>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/proj/.secrets/Secret.app.default.KEY")" = "${body}" ] || {
+    echo "set did not write the value" >&2; return 1; }
+}
+
 @test "the help of remove-key carries the revocation caveat" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
   _run_lo secrets remove-key --help

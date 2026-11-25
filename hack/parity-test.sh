@@ -369,15 +369,37 @@ for cmd in add-key remove-key; do
   sec_check secrets "${cmd}" "${KEY2}" "${FAKE_ID}"
   sec_no_echo "${FAKE_ID}" "secrets ${cmd} <age key> <private key>"
 done
-# A value with a line break or an escape but no marker passes the argv
-# guard: the not-a-valid-age-key line (age1...) and the not-a-file line
-# print the placeholder, never the value.
-for cmd in add-key remove-key; do
-  for arg in $'age1canary\nCANARYTAIL' $'age1canary\x1b[31mCANARYTAIL' $'Ab0Ab0Ab0\nCANARYTAIL'; do
-    sec_check secrets "${cmd}" "${arg}"
-    sec_no_echo "CANARYTAIL" "secrets ${cmd} <a value with a line break or an escape>"
+# A value with a control byte but no marker of a key (a key body pasted
+# without its BEGIN line) is refused before any parser can print it: as the
+# argument, an extra argument, a command of lo secrets and of lo, and a flag
+# value. Exit status 1, and the refusal has its own lines.
+CONTROL_REFUSAL="[error] an argument holds a line break or a control character: it is not printed
+[error] in lo secrets, only the value of set can hold one: check the command, and pass the path of a key file, not the key"
+# sec_control <argv...>: both sides refuse the argv with CONTROL_REFUSAL.
+sec_control() {
+  local label="${*@Q}"
+  sec_check "$@"
+  sec_no_echo "CANARYTAIL" "${label}"
+  (( go_rc == 1 && bash_rc == 1 )) || fail "${label}: rc go=${go_rc} bash=${bash_rc}, want 1"
+  [[ "$(cat "${WORK}/go.err")" == "${CONTROL_REFUSAL}" ]] || fail "${label}: not the refusal of a control byte"
+}
+for arg in $'age1canary\nCANARYTAIL' $'age1canary\x1b[31mCANARYTAIL' $'Ab0Ab0Ab0\nCANARYTAIL' $'CANARYTAIL\x7f'; do
+  for cmd in add-key remove-key; do
+    sec_control secrets "${cmd}" "${arg}"
+    sec_control secrets "${cmd}" "${KEY2}" "${arg}"
   done
+  sec_control secrets init --ssh-key "${arg}"
+  sec_control secrets list "${arg}"
+  sec_control secrets "${arg}"
+  sec_control secrets st KEY "${arg}"
+  sec_control secrets --domain "${arg}" list
+  sec_control --domain "${arg}" secrets list
+  sec_control "${arg}"
 done
+# The value of set is any text: both write it.
+sec_check secrets set -n app MULTILINE $'one\ntwo\tthree'
+(( go_rc == 0 && bash_rc == 0 )) || fail "secrets set <a value with a line break>: rc go=${go_rc} bash=${bash_rc}, want 0"
+sec_state .secrets/Secret.app.default.MULTILINE
 # init and decrypt take the path of a key file: a key pasted into --ssh-key,
 # in both flag forms and split into words, is refused the same way.
 for cmd in init decrypt; do
