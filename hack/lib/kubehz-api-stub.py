@@ -256,6 +256,7 @@ TICKET = ".".join(("a1b2c3", "d4e5f6g7h8i9j0k1"))
 TICKETS = {"worker-1": TICKET, "worker-nl": TICKET + "\n", "worker-nul": TICKET + "\x00",
            "worker-cr": TICKET + "\r"}
 
+
 def retry_later(code, message, help_text, seconds):
     """A 503 refusal with retryAfterSeconds in its data and a Retry-After
     header, or neither when seconds is None."""

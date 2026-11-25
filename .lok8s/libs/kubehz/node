@@ -236,11 +236,11 @@ node::api_error() {
       echo "  Read the node list before a retry:  lo kubehz node status" >&2
       echo "  If the node is still there, run this command again $(node::retry_wait)." >&2 ;;
     JOIN_TICKET_BUSY)
-      # A 503 of a join mint or a node remove: other join changes of the
-      # account hold the lock of the platform, and the same call can
-      # succeed after the wait of the body.
+      # A 503 of a join mint or a node remove: other join changes hold the
+      # platform (the lock of the account, or the cap of the whole API),
+      # and the same call can succeed after the wait of the body.
       kubehz::space_api_error_line "${context}"
-      echo "  The platform is busy with other join changes of this account." >&2
+      echo "  The platform is busy with other join changes." >&2
       echo "  Run this command again $(node::retry_wait)." >&2 ;;
     JOIN_TICKET_NOT_MINTED)
       # A 503 of a join mint: the platform minted no ticket, and the same

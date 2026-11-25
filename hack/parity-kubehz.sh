@@ -1214,7 +1214,7 @@ EOF
   check_api - kubehz node remove --name remove-13 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, 1e400" "The node is still in the cluster. Run this command again shortly."
   check_api - kubehz node remove --name remove-7 --domain hstub.dev --cluster-id cl-1a2b3c4d
-  kc_reason "remove, join changes busy" "The platform is busy with other join changes of this account."
+  kc_reason "remove, join changes busy" "The platform is busy with other join changes."
   kc_reason "remove, join changes busy, the wait" "  Run this command again in 5 seconds."
   # The 503 refusals of a hosted join mint: JOIN_TICKET_NOT_MINTED names the
   # wait of the body, JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the
@@ -1230,7 +1230,7 @@ EOF
   kc_reason "join, result unknown, the wait" "Run this command again in 5 seconds, or free the slot now:"
   kc_reason "join, result unknown, the remove" "    lo kubehz node remove --name <node-name>"
   check_api - kubehz node join --print-only --name mint-3 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
-  kc_reason "join, busy" "The platform is busy with other join changes of this account."
+  kc_reason "join, busy" "The platform is busy with other join changes."
   kc_reason "join, busy, no wait" "  Run this command again shortly."
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).

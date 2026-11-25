@@ -1690,7 +1690,7 @@ _refuse_flag() {
   run node::join --name box-1 --pool metal
   assert_failure
   assert_output --partial "(HTTP 503): Other join tickets of this account are being minted now"
-  assert_output --partial "busy with other join changes of this account."$'\n'"  Run this command again in 5 seconds."
+  assert_output --partial "busy with other join changes."$'\n'"  Run this command again in 5 seconds."
   refute_output --partial "Retry-After"
 }
 
@@ -1698,8 +1698,8 @@ _refuse_flag() {
 # JOIN_TICKET_NOT_MINTED says that no ticket was minted,
 # JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist,
 # that it holds a node slot, that the next mint revokes it and how to free
-# the slot, and JOIN_TICKET_BUSY says that other join changes of the
-# account hold the platform. A wait that is absent gives "shortly". The
+# the slot, and JOIN_TICKET_BUSY says that other join changes hold the
+# platform. A wait that is absent gives "shortly". The
 # help of the api is not printed. Go twin: TestNodeJoinRetryLater.
 @test "join: a 503 of the mint names the wait of the body, and a ticket that can exist" {
   _stub_all
@@ -1709,7 +1709,7 @@ _refuse_flag() {
   open+="  exist, but lo did not get it. It holds a node slot for about ten minutes."$'\n'
   open+="  The next mint for this node name revokes that ticket."$'\n'"  Run this command again "
   local end=", or free the slot now:"$'\n'"    lo kubehz node remove --name <node-name>"
-  local busy="${head}  The platform is busy with other join changes of this account."$'\n'"  Run this command again "
+  local busy="${head}  The platform is busy with other join changes."$'\n'"  Run this command again "
   local -a codes=(JOIN_TICKET_NOT_MINTED JOIN_TICKET_NOT_MINTED JOIN_TICKET_RESULT_UNKNOWN JOIN_TICKET_RESULT_UNKNOWN
     JOIN_TICKET_BUSY JOIN_TICKET_BUSY)
   local -a waits=(',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '')
@@ -1814,11 +1814,11 @@ _refuse_flag() {
   assert_output --partial "lo kubehz node status"
 }
 
-# A 503 of the remove names the wait of the body (retryAfterSeconds, in
-# data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
+# A 503 of the remove names the wait of the body (retryAfterSeconds of
+# data, else of the top level) in seconds: NODE_NOT_REMOVED says that the node
 # is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
-# list before a retry. JOIN_TICKET_BUSY says that other join changes of
-# the account hold the platform. The value of the wait counts, not its
+# list before a retry. JOIN_TICKET_BUSY says that other join changes
+# hold the platform. The value of the wait counts, not its
 # form (5.0, 5e0, 1E3). A wait that is absent, a string, a fraction, 0,
 # negative, above an hour, of five digits or too large for a float gives
 # "shortly". The help of the api is not printed. Go twin:
@@ -1828,7 +1828,7 @@ _refuse_flag() {
   local head="[error] Failed to remove node 'box-1' (HTTP 503): m"$'\n' i
   local gone="${head}  The node is still in the cluster. Run this command again "
   local open="${head}  Read the node list before a retry:  lo kubehz node status"$'\n'"  If the node is still there, run this command again "
-  local busy="${head}  The platform is busy with other join changes of this account."$'\n'"  Run this command again "
+  local busy="${head}  The platform is busy with other join changes."$'\n'"  Run this command again "
   local -a codes=(NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED
     NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_REMOVE_RESULT_UNKNOWN NODE_REMOVE_RESULT_UNKNOWN
     JOIN_TICKET_BUSY JOIN_TICKET_BUSY
@@ -1852,6 +1852,10 @@ _refuse_flag() {
   STUB_REMOVE_BODY='{"code":"NODE_NOT_REMOVED","message":"m","retryAfterSeconds":7}'
   run node::remove --name box-1
   [ "$status" -ne 0 ] && [ "$output" = "${gone}in 7 seconds." ] || { echo "top level: status $status: $output" >&2; return 1; }
+  # A wait in data and at the top level: the one in data counts.
+  STUB_REMOVE_BODY='{"statusCode":503,"data":{"code":"NODE_NOT_REMOVED","message":"m","retryAfterSeconds":5},"retryAfterSeconds":7}'
+  run node::remove --name box-1
+  [ "$status" -ne 0 ] && [ "$output" = "${gone}in 5 seconds." ] || { echo "data first: status $status: $output" >&2; return 1; }
 }
 
 # ── status ───────────────────────────────────────────────
