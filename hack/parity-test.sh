@@ -455,26 +455,37 @@ if [[ "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: WORK/home/
   fail "secrets init <a directory at the .pub>: not the one line with no hint"
 fi
 # A PEM block in LOK8S_SSH_KEY reaches no argv guard. A block that is not a
-# private key (a static key of OpenVPN, a certificate) can be key material
-# too: the not-found lines of init and decrypt print the PEM placeholder,
-# never the block, and init prints no hint, which would hold the
-# placeholder.
+# private key (a static key of OpenVPN, a certificate, a block with any
+# other label) can be key material too: the not-found lines of init and
+# decrypt print the PEM placeholder, never a line of the block (the END line
+# too), and init prints no hint, which would hold the placeholder.
 PEM_SHOWN="(not printed: it holds a PEM block)"
-for pem in "OpenVPN Static key V1" "CERTIFICATE"; do
+for pem in "OpenVPN Static key V1" "CERTIFICATE" "SOME DATA"; do
   export LOK8S_SSH_KEY="-----BEGIN ${pem}-----"$'\n'"${PEM_BODY}"$'\n'"-----END ${pem}-----"
-  sec_check secrets init
-  sec_no_echo "${PEM_BODY}" "secrets init <${pem} block in LOK8S_SSH_KEY>"
-  sec_no_echo "BEGIN ${pem}" "secrets init <${pem} block in LOK8S_SSH_KEY>"
-  if [[ "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: ${PEM_SHOWN}" ]]; then
-    fail "secrets init <${pem} block in LOK8S_SSH_KEY>: not the one line with the placeholder"
-  fi
-  sec_check secrets decrypt
-  sec_no_echo "${PEM_BODY}" "secrets decrypt <${pem} block in LOK8S_SSH_KEY>"
-  sec_no_echo "BEGIN ${pem}" "secrets decrypt <${pem} block in LOK8S_SSH_KEY>"
-  if ! grep -qxF "[error] SSH private key not found: ${PEM_SHOWN}" "${WORK}/go.err"; then
-    fail "secrets decrypt <${pem} block in LOK8S_SSH_KEY>: no not-found line with the placeholder"
-  fi
+  for cmd in init decrypt; do
+    sec_check secrets "${cmd}"
+    while IFS= read -r pem_line; do
+      sec_no_echo "${pem_line}" "secrets ${cmd} <${pem} block in LOK8S_SSH_KEY>"
+    done <<< "${LOK8S_SSH_KEY}"
+    if [[ "${cmd}" == init && "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: ${PEM_SHOWN}" ]]; then
+      fail "secrets init <${pem} block in LOK8S_SSH_KEY>: not the one line with the placeholder"
+    fi
+    if [[ "${cmd}" == decrypt ]] && ! grep -qxF "[error] SSH private key not found: ${PEM_SHOWN}" "${WORK}/go.err"; then
+      fail "secrets decrypt <${pem} block in LOK8S_SSH_KEY>: no not-found line with the placeholder"
+    fi
+  done
 done
+# BEGIN without the dashes is no PEM line: both print the path, and init
+# prints its hint.
+export LOK8S_SSH_KEY="${WORK}/home/BEGIN CERTIFICATE/id"
+sec_check secrets init
+if [[ "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: WORK/home/BEGIN CERTIFICATE/id.pub"$'\n'"[error] Generate one with: ssh-keygen -t ed25519" ]]; then
+  fail "secrets init <BEGIN without the dashes in LOK8S_SSH_KEY>: not the path and the hint"
+fi
+sec_check secrets decrypt
+if ! grep -qxF "[error] SSH private key not found: WORK/home/BEGIN CERTIFICATE/id" "${WORK}/go.err"; then
+  fail "secrets decrypt <BEGIN without the dashes in LOK8S_SSH_KEY>: no not-found line with the path"
+fi
 export LOK8S_SSH_KEY="${WORK}/home/key"
 # The whole argv of lo secrets, before any parser: a key in the --domain
 # value (on either side of the command), in a flag that no parser knows, as

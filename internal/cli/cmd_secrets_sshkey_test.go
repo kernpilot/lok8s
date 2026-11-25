@@ -196,15 +196,18 @@ func syntheticPEM(label, body string) string {
 }
 
 // A PEM block in LOK8S_SSH_KEY that is not a private key (a certificate, a
-// static key of OpenVPN) is not printed either: the not-found lines of init
-// and decrypt print the PEM placeholder (bash twin: secrets::_shown_path),
-// and init prints no hint, which would hold the placeholder.
+// static key of OpenVPN, a block with any other label) is not printed
+// either: the not-found lines of init and decrypt print the PEM placeholder
+// (bash twin: secrets::_shown_path), no line of the block (the END line too)
+// is in the output, and init prints no hint, which would hold the
+// placeholder.
 func TestSecretsKeyNotFoundHidesAPEMBlock(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
 	const shown = "(not printed: it holds a PEM block)"
 	blocks := map[string]string{
-		"certificate": syntheticPEM("CERTIFICATE", canary),
-		"static key":  syntheticPEM("OpenVPN Static key V1", strings.Repeat("0f", 8)+"\n"+canary),
+		"certificate":   syntheticPEM("CERTIFICATE", canary),
+		"static key":    syntheticPEM("OpenVPN Static key V1", strings.Repeat("0f", 8)+"\n"+canary),
+		"another label": syntheticPEM("SOME DATA", canary),
 	}
 	for form, block := range blocks {
 		for cmd, want := range map[string]string{
@@ -228,6 +231,11 @@ func TestSecretsKeyNotFoundHidesAPEMBlock(t *testing.T) {
 				}
 				if strings.Contains(out+errOut, canary) || strings.Contains(out+errOut, "BEGIN") {
 					t.Error("the value of LOK8S_SSH_KEY reached the output")
+				}
+				for i, line := range strings.Split(block, "\n") {
+					if strings.Contains(out+errOut, line) {
+						t.Errorf("line %d of the block reached the output", i+1)
+					}
 				}
 				if strings.Contains(errOut, "ssh-keygen") {
 					t.Error("a hint with the placeholder was printed")

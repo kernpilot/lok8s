@@ -507,9 +507,10 @@ func syntheticPEM(label, body string) string {
 }
 
 // A key path that holds a PEM block which is not a private key (a
-// certificate, a static key of OpenVPN) is not printed either: shownKeyPath
-// and QuoteArg give the PEM placeholder, never the block. A private key
-// keeps its own placeholder. A plain path, and a path with BEGIN in it but
+// certificate, a static key of OpenVPN, a block with any other label: the
+// rule is no list of labels) is not printed either: shownKeyPath and
+// QuoteArg give the PEM placeholder, never the block. A private key keeps
+// its own placeholder. A plain path, and a path with BEGIN in it but
 // no PEM line, print as they are. Bash twin: "secrets init and decrypt: the
 // not-found line does not print a PEM block from LOK8S_SSH_KEY".
 func TestShownKeyPathHidesAPEMBlock(t *testing.T) {
@@ -519,6 +520,7 @@ func TestShownKeyPathHidesAPEMBlock(t *testing.T) {
 		"a certificate":                  {syntheticPEM("CERTIFICATE", keyCanary), pem},
 		"a static key":                   {syntheticPEM("OpenVPN Static key V1", strings.Repeat("0f", 8)+"\n"+keyCanary), pem},
 		"a PEM line in a directory name": {"/keys/" + pemLine("CERTIFICATE") + "/id.pub", pem},
+		"another label":                  {syntheticPEM("SOME DATA", keyCanary), pem},
 		"a private key":                  {syntheticPEM("OPENSSH "+privKey, keyCanary), private},
 		"a plain path":                   {"/home/user/.ssh/id_ed25519.pub", "/home/user/.ssh/id_ed25519.pub"},
 		"BEGIN without the dashes":       {"/keys/BEGIN CERTIFICATE/id.pub", "/keys/BEGIN CERTIFICATE/id.pub"},
