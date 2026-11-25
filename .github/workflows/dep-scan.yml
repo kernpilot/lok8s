@@ -1,0 +1,103 @@
+# The daily scan of the dependencies: osv-scanner, offline, on every lock file.
+#
+# The advisories move without a commit. A green pull request can be red one day
+# later: that finding is the reason for this workflow.
+#
+# The scan sends nothing about the dependencies. The job downloads one whole
+# archive of advisories per ecosystem, and the scanner matches on the runner.
+#
+# Red: an advisory is HIGH or CRITICAL, has a fixed version, and has no valid
+# entry in .github/dep-scan-ignore.json, or an entry of that file is expired.
+# Also red: a scan that is not proven, like an archive that is missing or not
+# whole. The rules are in .github/scripts/dep_scan.py.
+#
+# govulncheck stays in security.yml. It says whether the code calls the
+# vulnerable symbol. This scan reads the npm packages of the docs too.
+#
+# The scan reads the standard library of the go line in go.mod: the release
+# builds every module with it.
+name: dep-scan
+
+on:
+  schedule:
+    - cron: '16 5 * * *'
+  workflow_dispatch:
+  # A pull request runs its own copy of this file. The job holds no secret,
+  # and its token can only read.
+  pull_request:
+    paths:
+      - '.github/workflows/dep-scan.yml'
+      - '.github/dep-scan-ignore.json'
+      - '.github/scripts/dep_scan*.py'
+      - '**/go.mod'
+      - '**/yarn.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dep-scan-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  osv-scanner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the tests of the scan script
+        run: python3 -B .github/scripts/dep_scan_test.py
+      - name: the Go version of the release build
+        id: go
+        run: |
+          set -euo pipefail
+          mapfile -t versions < <(sed -nE 's/^go ([0-9]+(\.[0-9]+)+)$/\1/p' go.mod)
+          if [ "${#versions[@]}" -ne 1 ]; then
+            echo "::error::no go line in go.mod, found: ${versions[*]:-none}"
+            exit 1
+          fi
+          echo "version=${versions[0]}" | tee -a "$GITHUB_OUTPUT"
+      - name: install osv-scanner (pinned release, checksum)
+        timeout-minutes: 3
+        env:
+          OSV_SCANNER_VERSION: v2.7.1
+          # From osv-scanner_SHA256SUMS of that release (osv-scanner_linux_amd64).
+          OSV_SCANNER_SHA256: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
+        run: |
+          set -euo pipefail
+          if [ "$(uname -m)" != x86_64 ]; then
+            echo "::error::the osv-scanner pin is for linux amd64 only, this runner is $(uname -m)"
+            exit 1
+          fi
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --max-time 120 -o "$RUNNER_TEMP/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+      - name: download the advisory archives
+        id: archives
+        timeout-minutes: 5
+        env:
+          # One for each kind of lock file in this repo.
+          ECOSYSTEMS: Go npm
+        run: |
+          set -euo pipefail
+          # The scan refuses an archive that is older than this second.
+          echo "since=$(date +%s)" | tee -a "$GITHUB_OUTPUT"
+          for ecosystem in $ECOSYSTEMS; do
+            dir="$RUNNER_TEMP/osv-db/osv-scalibr/$ecosystem"
+            mkdir -p "$dir"
+            # Every advisory of the ecosystem, for every user the same file.
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --max-time 120 -o "$dir/all.zip" \
+              "https://osv-vulnerabilities.storage.googleapis.com/$ecosystem/all.zip"
+            ls -l "$dir/all.zip"
+          done
+      - name: scan every lock file, offline
+        env:
+          SINCE: ${{ steps.archives.outputs.since }}
+          GO: ${{ steps.go.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/dep_scan.py --scanner "$RUNNER_TEMP/osv-scanner" --database "$RUNNER_TEMP/osv-db" \
+            --since "$SINCE" --ignore .github/dep-scan-ignore.json --go "$GO"
