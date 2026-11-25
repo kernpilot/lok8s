@@ -26,16 +26,15 @@ const csaCanary = "CANARY-VALUE-0451"
 
 // liveNamespace is a live Namespace as the API server returns it: a
 // client-side apply (kubectl-client-side-apply, an Update entry that owns
-// the last-applied annotation) set the labels team and app and the
-// annotation note, the namespace controller set its own label.
+// the last-applied annotation) created it with the labels team and app and
+// the annotation note. That entry owns the label kubernetes.io/metadata.name
+// too: the API server set it in the same write.
 const liveNamespace = `{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"demo",
  "labels":{"team":"x","app":"y","kubernetes.io/metadata.name":"demo"},
  "annotations":{"note":"` + csaCanary + `","kubectl.kubernetes.io/last-applied-configuration":"{\"metadata\":{\"annotations\":{\"note\":\"` + csaCanary + `\"}}}"},
  "managedFields":[
   {"manager":"kubectl-client-side-apply","operation":"Update","apiVersion":"v1","time":"2026-11-25T10:00:00Z","fieldsType":"FieldsV1",
-   "fieldsV1":{"f:metadata":{"f:annotations":{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}},"f:labels":{".":{},"f:app":{},"f:team":{}}}}},
-  {"manager":"kube-apiserver","operation":"Update","apiVersion":"v1","time":"2026-11-25T10:00:00Z","fieldsType":"FieldsV1",
-   "fieldsV1":{"f:metadata":{"f:labels":{"f:kubernetes.io/metadata.name":{}}}}}]},
+   "fieldsV1":{"f:metadata":{"f:annotations":{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}},"f:labels":{".":{},"f:app":{},"f:kubernetes.io/metadata.name":{},"f:team":{}}}}}]},
  "spec":{"finalizers":["kubernetes"]},"status":{"phase":"Active"}}`
 
 // liveConfigMap is a live ConfigMap with no client-side writer: only a
@@ -66,10 +65,9 @@ func evalCSATemplate(t *testing.T, object string) string {
 }
 
 const nsLines = "O\tv1\tNamespace\t\tdemo\n" +
-	"M\tkubectl-client-side-apply\tUpdate\t\t{\".\":{},\"f:app\":{},\"f:team\":{}}\t{\".\":{},\"f:kubectl.kubernetes.io/last-applied-configuration\":{},\"f:note\":{}}\n" +
-	"M\tkube-apiserver\tUpdate\t\t{\"f:kubernetes.io/metadata.name\":{}}\t\n"
+	"M\tkubectl-client-side-apply\tUpdate\t\tv1\t{\".\":{},\"f:app\":{},\"f:kubernetes.io/metadata.name\":{},\"f:team\":{}}\t{\".\":{},\"f:kubectl.kubernetes.io/last-applied-configuration\":{},\"f:note\":{}}\n"
 
-const cmLines = "O\tv1\tConfigMap\tdemo\tcm\nM\tkubectl\tApply\t\t\t\n"
+const cmLines = "O\tv1\tConfigMap\tdemo\tcm\nM\tkubectl\tApply\t\tv1\t\t\n"
 
 // The template, run by the jsonpath package of kubectl, reads a List (what
 // kubectl get -f - prints for a stdin, also with one object) and one
@@ -99,8 +97,8 @@ func TestCSATemplateReadsBothShapes(t *testing.T) {
 				t.Fatalf("parsed %d objects, want %d: %+v", len(objs), tc.objects, objs)
 			}
 			ns := objs[0]
-			if ns.kind != "Namespace" || ns.name != "demo" || len(ns.entries) != 2 ||
-				!slices.Equal(ns.entries[0].labels, []string{"app", "team"}) ||
+			if ns.kind != "Namespace" || ns.name != "demo" || len(ns.entries) != 1 || ns.entries[0].apiVersion != "v1" ||
+				!slices.Equal(ns.entries[0].labels, []string{"app", "kubernetes.io/metadata.name", "team"}) ||
 				!slices.Equal(ns.entries[0].annotations, []string{lastAppliedKey, "note"}) {
 				t.Errorf("parsed %+v", ns)
 			}
@@ -126,8 +124,10 @@ const nsManifest = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  
 // that lo prints is escaped. bats: "bootstrap::_csa_objects names the
 // writers and the keys that the apply drops".
 func TestClientSideObjectsNamesTheDroppedKeys(t *testing.T) {
-	const writer = "M\tkubectl-client-side-apply\tUpdate\t\t"
+	const writer = "M\tkubectl-client-side-apply\tUpdate\t\tv1\t"
 	const la = `"f:kubectl.kubernetes.io/last-applied-configuration":{}`
+	const writerApps = "M\tkubectl-client-side-apply\tUpdate\t\tapps/v1\t"
+	const depManifest = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n"
 	for _, tc := range []struct {
 		name, read, manifest string
 		warn                 []string
@@ -136,21 +136,21 @@ func TestClientSideObjectsNamesTheDroppedKeys(t *testing.T) {
 			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note"}},
 		{"no live object", "", nsManifest, nil},
 		{"an Apply entry that owns the annotation is no client-side writer",
-			"O\tv1\tNamespace\t\tdemo\nM\tkubectl-last-applied\tApply\t\t\t{" + la + "}\n", nsManifest, nil},
+			"O\tv1\tNamespace\t\tdemo\nM\tkubectl-last-applied\tApply\t\tv1\t\t{" + la + "}\n", nsManifest, nil},
 		{"the target sets every key: no key named",
 			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:app":{}}` + "\t{" + la + "}\n", nsManifest,
 			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set"}},
 		{"a key that another manager owns too stays",
-			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:team":{},"f:tier":{}}` + "\t{" + la + "}\nM\tkubectl-label\tUpdate\t\t{\"f:team\":{}}\t\n", nsManifest,
+			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:team":{},"f:tier":{}}` + "\t{" + la + "}\nM\tkubectl-label\tUpdate\t\tv1\t{\"f:team\":{}}\t\n", nsManifest,
 			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label tier"}},
 		{"lo's own Apply entry keeps no key",
-			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\nM\tkubectl\tApply\t\t{\"f:team\":{}}\t\n", nsManifest,
+			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\nM\tkubectl\tApply\t\tv1\t{\"f:team\":{}}\t\n", nsManifest,
 			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team"}},
 		{"an entry of the writer with a subresource keeps its keys",
-			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\nM\tkubectl-client-side-apply\tUpdate\tstatus\t{\"f:team\":{}}\t\n", nsManifest,
+			"O\tv1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\nM\tkubectl-client-side-apply\tUpdate\tstatus\tv1\t{\"f:team\":{}}\t\n", nsManifest,
 			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set"}},
 		{"two writers, in order",
-			"O\tv1\tNamespace\t\tdemo\nM\ttilt\tUpdate\t\t{\"f:b\":{},\"f:a\":{}}\t{" + la + "}\n" + writer + "\t{" + la + "}\n", nsManifest,
+			"O\tv1\tNamespace\t\tdemo\nM\ttilt\tUpdate\t\tv1\t{\"f:b\":{},\"f:a\":{}}\t{" + la + "}\n" + writer + "\t{" + la + "}\n", nsManifest,
 			[]string{"Namespace demo: client-side writers (kubectl-client-side-apply, tilt) own fields; the apply moves them to lo and drops what the target does not set: labels a, b"}},
 		{"a namespaced object matches a manifest object with no namespace",
 			"O\tv1\tConfigMap\tdemo\tcm\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\n",
@@ -165,11 +165,21 @@ func TestClientSideObjectsNamesTheDroppedKeys(t *testing.T) {
 			[]string{"ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label kubernetes.io/metadata.name"}},
 		{"an object of another group is not the manifest object",
 			"O\tapps/v1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\n", nsManifest, nil},
+		{"an entry of the writer with another apiVersion keeps its keys on the object",
+			"O\tapps/v1\tDeployment\tdemo\tweb\n" + writerApps + `{"f:team":{}}` + "\t{" + la + "}\n" +
+				"M\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{\"f:tier\":{}}\t\n", depManifest,
+			[]string{"Deployment demo/web: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team"}},
+		{"such an entry keeps no key of the moved entry",
+			"O\tapps/v1\tDeployment\tdemo\tweb\n" + writerApps + `{"f:team":{}}` + "\t{" + la + "}\n" +
+				"M\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{\"f:team\":{}}\t\n", depManifest,
+			[]string{"Deployment demo/web: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team"}},
+		{"a writer with no entry of the apiVersion of the target moves nothing",
+			"O\tapps/v1\tDeployment\tdemo\tweb\nM\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{\"f:team\":{}}\t{" + la + "}\n", depManifest, nil},
 		{"control bytes and backslashes are escaped",
-			"O\tv1\tNamespace\t\tdemo\nM\tevil\x1b[31m\\\tUpdate\t\t{\"f:k\\u0007x\":{}}\t{" + la + "}\n", nsManifest,
+			"O\tv1\tNamespace\t\tdemo\nM\tevil\x1b[31m\\\tUpdate\t\tv1\t{\"f:k\\u0007x\":{}}\t{" + la + "}\n", nsManifest,
 			[]string{`Namespace demo: a client-side writer (evil\x1b[31m\\) owns fields; the apply moves them to lo and drops what the target does not set: label k\x07x`}},
 		{"a line of another shape is ignored",
-			"O\tv1\tNamespace\tdemo\nM\tx\tUpdate\t\t\t{" + la + "}\nO\tv1\tNamespace\t\tdemo\nM\tshort\tUpdate\n" + writer + "not json\t{" + la + "}\n", nsManifest,
+			"O\tv1\tNamespace\tdemo\nM\tx\tUpdate\t\tv1\t\t{" + la + "}\nO\tv1\tNamespace\t\tdemo\nM\tshort\tUpdate\n" + writer + "not json\t{" + la + "}\n", nsManifest,
 			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -351,8 +361,8 @@ func csaJob(t *testing.T) (*Engine, *fakeRunner, Job) {
 func TestApplyOneNamesTheDroppedKeys(t *testing.T) {
 	e, f, job := csaJob(t)
 	after := "O\tv1\tNamespace\t\tdemo\n" +
-		"M\tkubectl\tApply\t\t{\"f:app\":{}}\t\n" +
-		"M\tkubectl-last-applied\tApply\t\t\t{\"f:kubectl.kubernetes.io/last-applied-configuration\":{}}\n"
+		"M\tkubectl\tApply\t\tv1\t{\"f:app\":{}}\t\n" +
+		"M\tkubectl-last-applied\tApply\t\tv1\t\t{\"f:kubectl.kubernetes.io/last-applied-configuration\":{}}\n"
 	h := &csaHandler{reads: []string{nsLines, after}}
 	f.handler = h.handle
 	var errOut bytes.Buffer

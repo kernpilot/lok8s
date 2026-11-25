@@ -7147,12 +7147,12 @@ SH
 
 # The read of the field managers of a live Namespace demo (the Go twin:
 # nsLines): a client-side apply (kubectl-client-side-apply, an Update entry
-# that owns the last-applied annotation) set the labels app and team and
-# the annotation note; the API server set its own label.
+# that owns the last-applied annotation) created it with the labels app and
+# team and the annotation note. That entry owns the label
+# kubernetes.io/metadata.name too: the API server set it in the same write.
 _csa_ns_read() {
   printf 'O\tv1\tNamespace\t\tdemo\n'
-  printf 'M\tkubectl-client-side-apply\tUpdate\t\t{".":{},"f:app":{},"f:team":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\n'
-  printf 'M\tkube-apiserver\tUpdate\t\t{"f:kubernetes.io/metadata.name":{}}\t\n'
+  printf 'M\tkubectl-client-side-apply\tUpdate\t\tv1\t{".":{},"f:app":{},"f:kubernetes.io/metadata.name":{},"f:team":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\n'
 }
 
 # The render of the entry (the Go twin: csaManifest): the Namespace of the
@@ -7205,7 +7205,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
 # prints is escaped. Go: TestClientSideObjectsNamesTheDroppedKeys.
 @test "bootstrap::_csa_objects names the writers and the keys that the apply drops" {
   local -r la='"f:kubectl.kubernetes.io/last-applied-configuration":{}'
-  local -r w=$'M\tkubectl-client-side-apply\tUpdate\t\t'
+  local -r w=$'M\tkubectl-client-side-apply\tUpdate\t\tv1\t'
   local -r o=$'O\tv1\tNamespace\t\tdemo\n'
   local -r ns=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  labels:\n    app: y\n'
   local -r head='Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set'
@@ -7219,22 +7219,22 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   run csa "" "${ns}"
   assert_success; assert_output ""
   # An Apply entry that owns the annotation is no client-side writer.
-  run csa "${o}"$'M\tkubectl-last-applied\tApply\t\t\t{'"${la}"$'}\n' "${ns}"
+  run csa "${o}"$'M\tkubectl-last-applied\tApply\t\tv1\t\t{'"${la}"$'}\n' "${ns}"
   assert_output ""
   # The target sets every key: no key named, and no check after the apply.
   run bootstrap::_csa_objects "${ns}" "${o}${w}"'{"f:app":{}}'$'\t{'"${la}"$'}\n'
   assert_output "${head}"$'\tNamespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t-\tv1 Namespace demo'
   # A key that another manager owns too stays.
-  run csa "${o}${w}"'{"f:team":{},"f:tier":{}}'$'\t{'"${la}"$'}\nM\tkubectl-label\tUpdate\t\t{"f:team":{}}\t\n' "${ns}"
+  run csa "${o}${w}"'{"f:team":{},"f:tier":{}}'$'\t{'"${la}"$'}\nM\tkubectl-label\tUpdate\t\tv1\t{"f:team":{}}\t\n' "${ns}"
   assert_output "${head}: label tier"
   # lo's own Apply entry keeps no key.
-  run csa "${o}${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl\tApply\t\t{"f:team":{}}\t\n' "${ns}"
+  run csa "${o}${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl\tApply\t\tv1\t{"f:team":{}}\t\n' "${ns}"
   assert_output "${head}: label team"
   # An entry of the writer with a subresource keeps its keys.
-  run csa "${o}${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl-client-side-apply\tUpdate\tstatus\t{"f:team":{}}\t\n' "${ns}"
+  run csa "${o}${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl-client-side-apply\tUpdate\tstatus\tv1\t{"f:team":{}}\t\n' "${ns}"
   assert_output "${head}"
   # Two writers, in order.
-  run csa "${o}"$'M\ttilt\tUpdate\t\t{"f:b":{},"f:a":{}}\t{'"${la}"$'}\n'"${w}"$'\t{'"${la}"$'}\n' "${ns}"
+  run csa "${o}"$'M\ttilt\tUpdate\t\tv1\t{"f:b":{},"f:a":{}}\t{'"${la}"$'}\n'"${w}"$'\t{'"${la}"$'}\n' "${ns}"
   assert_output "Namespace demo: client-side writers (kubectl-client-side-apply, tilt) own fields; the apply moves them to lo and drops what the target does not set: labels a, b"
   # A namespaced object matches a manifest object with no namespace.
   run bootstrap::_csa_objects $'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n' $'O\tv1\tConfigMap\tdemo\tcm\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n'
@@ -7248,11 +7248,25 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_output "${head}: label team"
   run csa $'O\tv1\tConfigMap\tdemo\tcm\n'"${w}"'{"f:kubernetes.io/metadata.name":{}}'$'\t{'"${la}"$'}\n' $'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n'
   assert_output "ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label kubernetes.io/metadata.name"
+  # Only the entry of the writer with the apiVersion of the target moves to
+  # lo, and the apply drops its keys. kubectl drops each other Update entry
+  # of the writer: its fields stay on the object, so its keys are not
+  # named, and it keeps no key of the moved entry. A writer with no entry
+  # of that apiVersion moves nothing.
+  local -r dep=$'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n'
+  local -r wa=$'M\tkubectl-client-side-apply\tUpdate\t\tapps/v1\t'
+  local -r dh='Deployment demo/web: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set'
+  run csa $'O\tapps/v1\tDeployment\tdemo\tweb\n'"${wa}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{"f:tier":{}}\t\n' "${dep}"
+  assert_output "${dh}: label team"
+  run csa $'O\tapps/v1\tDeployment\tdemo\tweb\n'"${wa}"'{"f:team":{}}'$'\t{'"${la}"$'}\nM\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{"f:team":{}}\t\n' "${dep}"
+  assert_output "${dh}: label team"
+  run csa $'O\tapps/v1\tDeployment\tdemo\tweb\nM\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{"f:team":{}}\t{'"${la}"$'}\n' "${dep}"
+  assert_output ""
   # Control bytes and backslashes are escaped.
-  run csa "${o}"$'M\tevil\e[31m\\\tUpdate\t\t{"f:k\\u0007x":{}}\t{'"${la}"$'}\n' "${ns}"
+  run csa "${o}"$'M\tevil\e[31m\\\tUpdate\t\tv1\t{"f:k\\u0007x":{}}\t{'"${la}"$'}\n' "${ns}"
   assert_output 'Namespace demo: a client-side writer (evil\x1b[31m\\) owns fields; the apply moves them to lo and drops what the target does not set: label k\x07x'
   # A line of another shape is ignored.
-  run csa $'O\tv1\tNamespace\tdemo\nM\tx\tUpdate\t\t\t{'"${la}"$'}\n'"${o}"$'M\tshort\tUpdate\n'"${w}"$'not json\t{'"${la}"$'}\n' "${ns}"
+  run csa $'O\tv1\tNamespace\tdemo\nM\tx\tUpdate\t\tv1\t\t{'"${la}"$'}\n'"${o}"$'M\tshort\tUpdate\n'"${w}"$'not json\t{'"${la}"$'}\n' "${ns}"
   assert_output "${head}"
 }
 
@@ -7338,7 +7352,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
 @test "bootstrap::_apply_one: a client-side writer is named before the apply and the dropped keys after it" {
   write_cluster_spec "testcni"
   _csa_render
-  _csa_kubectl_stub "$(_csa_ns_read)" $'O\tv1\tNamespace\t\tdemo\nM\tkubectl\tApply\t\t{"f:app":{}}\t\nM\tkubectl-last-applied\tApply\t\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\n'
+  _csa_kubectl_stub "$(_csa_ns_read)" $'O\tv1\tNamespace\t\tdemo\nM\tkubectl\tApply\t\tv1\t{"f:app":{}}\t\nM\tkubectl-last-applied\tApply\t\tv1\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\n'
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_success
   assert_output --partial "[warn] bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note"
@@ -7347,7 +7361,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   [ "$(grep -c '^read KUBERC=off$' "${KCALLS}")" -eq 2 ]
   grep -q 'kind: Namespace' "${BATS_TEST_TMPDIR}/stdin.apply.1"
 
-  _csa_kubectl_stub $'O\tv1\tConfigMap\tdemo\tcm\nM\tkubectl\tApply\t\t\t\n'
+  _csa_kubectl_stub $'O\tv1\tConfigMap\tdemo\tcm\nM\tkubectl\tApply\t\tv1\t\t\n'
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_success
   refute_output --partial "client-side"

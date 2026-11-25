@@ -1280,12 +1280,13 @@ dry_expect_rc 2 provision --domain beta.cloud --bootstrap --dry-run
 # cilium ConfigMap (Update entries that own the last-applied annotation),
 # with a backslash in a manager name and a control byte in a label key:
 # both sides send the same argv (the template included), escape the names
-# in the same way and print the same lines. A dry run counts the entry as
-# differs (rc 1) although its diff is unchanged; --skip-client-side-owned
-# leaves the object out. A read that fails is a warning, or under
+# in the same way and print the same lines. An entry of a writer with
+# another apiVersion (v1beta1) does not move to lo, so its label tier is
+# not named. A dry run counts the entry as differs (rc 1) although its
+# diff is unchanged; --skip-client-side-owned leaves the object out. A read that fails is a warning, or under
 # --skip-client-side-owned an error; lo never prints its kubectl message.
-printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl-client-side-apply\tUpdate\t\t{".":{},"f:team":{},"f:k\\u001bx":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\nM\tevil\\\tUpdate\t\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\nO\tv1\tList\t\t\n' > "${WORK}/csa.read"
-printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl\tApply\t\t{"f:team":{}}\t\nO\tv1\tList\t\t\n' > "${WORK}/csa.after"
+printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl-client-side-apply\tUpdate\t\tv1\t{".":{},"f:team":{},"f:k\\u001bx":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\nM\tkubectl-client-side-apply\tUpdate\t\tv1beta1\t{"f:tier":{}}\t\nM\tevil\\\tUpdate\t\tv1\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\nO\tv1\tList\t\t\n' > "${WORK}/csa.read"
+printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl\tApply\t\tv1\t{"f:team":{}}\t\nO\tv1\tList\t\t\n' > "${WORK}/csa.after"
 csa_pin() {  # <label> <file> <fixed text>: a line holds the text
   if grep -qF -- "${3}" "${2}"; then echo "ok: ${1}"; else
     echo "FAIL: ${1}: no line holds ${3} in ${2}:"; sed 's/^/  /' "${2}" | head -20

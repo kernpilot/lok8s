@@ -852,21 +852,27 @@ bootstrap::_wait_asked() {
 # objects out of the apply (a dry run: out of the diff). The check never
 # removes the last-applied annotation.
 #
+# kubectl moves only the Update entry of a writer that has the apiVersion of
+# its apply entry (the apiVersion of the target). It drops each other Update
+# entry of the writer with no subresource: the fields of such an entry stay
+# on the object with no manager, so the apply does not drop them.
+#
 # The read gets no value of an object: only its apiVersion, kind, namespace
 # and name, and for each managedFields entry the manager, the operation, the
-# subresource and the key names of its labels and annotations. lo escapes
-# each name before it prints it (as kapply::escape does): a client can write
-# any manager name and any key name into managedFields.
+# subresource, the apiVersion and the key names of its labels and
+# annotations. lo escapes each name before it prints it (as kapply::escape
+# does): a client can write any manager name and any key name into
+# managedFields.
 
 # The jsonpath of the read (the Go twin: csaTemplate). One object: a line
 # "O<TAB>apiVersion<TAB>kind<TAB>namespace<TAB>name", then for each
 # managedFields entry a line "M<TAB>manager<TAB>operation<TAB>subresource
-# <TAB>labels<TAB>annotations" (the JSON of the f:labels and f:annotations
-# sets: key names, no values). kubectl prints a List for the objects of a
-# stdin, also for one object: the first part reads its items. The second
-# part reads one object that is not in a List; for a List it prints an O
-# line with no name, which the parse skips.
-_BOOTSTRAP_CSA_OBJECT='{"O\t"}{.apiVersion}{"\t"}{.kind}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{range .metadata.managedFields[*]}{"M\t"}{.manager}{"\t"}{.operation}{"\t"}{.subresource}{"\t"}{.fieldsV1.f:metadata.f:labels}{"\t"}{.fieldsV1.f:metadata.f:annotations}{"\n"}{end}'
+# <TAB>apiVersion<TAB>labels<TAB>annotations" (the JSON of the f:labels and
+# f:annotations sets: key names, no values). kubectl prints a List for
+# the objects of a stdin, also for one object: the first part reads its
+# items. The second part reads one object that is not in a List; for a
+# List it prints an O line with no name, which the parse skips.
+_BOOTSTRAP_CSA_OBJECT='{"O\t"}{.apiVersion}{"\t"}{.kind}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{range .metadata.managedFields[*]}{"M\t"}{.manager}{"\t"}{.operation}{"\t"}{.subresource}{"\t"}{.apiVersion}{"\t"}{.fieldsV1.f:metadata.f:labels}{"\t"}{.fieldsV1.f:metadata.f:annotations}{"\n"}{end}'
 _BOOTSTRAP_CSA_TEMPLATE="{range .items[*]}${_BOOTSTRAP_CSA_OBJECT}{end}${_BOOTSTRAP_CSA_OBJECT}"
 
 # The jq functions of the two programs below (the Go twins): esc
@@ -882,8 +888,8 @@ def parse: split("\n") | reduce .[] as $line ({objs: [], cur: null};
     | if ($f[0] // "") == "O" and ($f | length) == 5 then
         (if .cur != null then .objs += [.cur] else . end)
         | .cur = (if $f[4] == "" then null else {g: ($f[1] | group), k: $f[2], s: $f[3], n: $f[4], e: []} end)
-      elif ($f[0] // "") == "M" and ($f | length) == 6 and .cur != null then
-        .cur.e += [{m: $f[1], o: $f[2], r: $f[3], l: ($f[4] | fkeys), a: ($f[5] | fkeys)}]
+      elif ($f[0] // "") == "M" and ($f | length) == 7 and .cur != null then
+        .cur.e += [{m: $f[1], o: $f[2], r: $f[3], v: $f[4], l: ($f[5] | fkeys), a: ($f[6] | fkeys)}]
       else . end)
   | if .cur != null then .objs + [.cur] else .objs end;
 def names($what): if length == 0 then empty elif length == 1 then "\($what) \(.[0] | esc)" else "\($what)s \(map(esc) | join(", "))" end;
@@ -894,9 +900,13 @@ def obj: (.k | esc) + " " + (if .s != "" then (.s | esc) + "/" else "" end) + (.
 
 # The program of bootstrap::_csa_objects (the Go twin: clientSideObjects
 # with warnText and skipText): over the read (the input, one string) and
-# the manifest objects ($docs). The label kubernetes.io/metadata.name of a
-# Namespace is not one that the apply drops: the API server sets it on each
-# write (the Go twin: serverSetLabels).
+# the manifest objects ($docs). Only the Update entry of a writer with the
+# apiVersion of the target moves to lo ($own); an object with none is not
+# named. Each other Update entry of a writer with no subresource is dropped
+# by kubectl, so it is not in $other either. The label
+# kubernetes.io/metadata.name of a Namespace is not one that the apply
+# drops: the API server sets it on each write (the Go twin:
+# serverSetLabels).
 _BOOTSTRAP_CSA_BEFORE_JQ='
 "kubectl.kubernetes.io/last-applied-configuration" as $la
 | parse[]
@@ -906,7 +916,8 @@ _BOOTSTRAP_CSA_BEFORE_JQ='
 | [$docs[] | select(.g == $o.g and .k == $o.k and .n == $o.n)] as $c
 | (first($c[] | select(.s == $o.s)) // first($c[] | select(.s == "")) // $c[0]) as $d
 | select($d != null)
-| [.e[] | select((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "")] as $own
+| [.e[] | select((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "" and .v == $d.v)] as $own
+| select($own | length > 0)
 | [.e[] | select(((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "") or (.m == "kubectl" and .o == "Apply" and .r == "") | not)] as $other
 | (([$own[].l[]] | unique) - $d.lk - (if $o.g == "" and $o.k == "Namespace" then ["kubernetes.io/metadata.name"] else [] end)) as $ul
 | (([$own[].a[]] | unique) - [$la] - $d.ak) as $ua
@@ -962,8 +973,9 @@ bootstrap::_csa_read() {
 # bootstrap::_csa_docs <manifest>
 # One JSON line for each object of <manifest> (the Go twin:
 # manifestObjects): its label (l, the label of bootstrap::_object_lines,
-# what bootstrap::_without_objects drops), group (g), kind (k), name (n),
-# namespace (s), and the key names of its labels (lk) and annotations (ak).
+# what bootstrap::_without_objects drops), apiVersion (v), group (g), kind
+# (k), name (n), namespace (s), and the key names of its labels (lk) and
+# annotations (ak).
 # No value. A document that is not a map is not an object.
 bootstrap::_csa_docs() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
@@ -975,7 +987,7 @@ bootstrap::_csa_docs() {
     (.metadata | if type == "object" then . else {} end) as $m
     | ($m.namespace | str) as $ns
     | {l: "\(.apiVersion | str) \(.kind | str) \(if $ns != "" then $ns + "/" else "" end)\($m.name | str)",
-       g: (.apiVersion | str | split("/") | if length > 1 then .[0] else "" end),
+       v: (.apiVersion | str), g: (.apiVersion | str | split("/") | if length > 1 then .[0] else "" end),
        k: (.kind | str), n: ($m.name | str), s: $ns,
        lk: ($m.labels | names), ak: ($m.annotations | names)}'
   _rc=("${PIPESTATUS[@]}")

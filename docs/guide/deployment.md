@@ -710,6 +710,9 @@ lines come in the order of the run; only the `--render-dir` files carry the
   example from a `kubectl apply` without `--server-side`. The server-side
   apply of lo moves the fields of these writers to lo. Then it removes each
   of these fields that the entry does not set, if no other manager owns it.
+  kubectl moves only the entry of a writer with the `apiVersion` of the
+  object in the entry. It removes the other entries of the writer, but
+  their fields stay on the object, with no manager.
   `kubectl diff` does not show this removal, thus the entry differs (exit 1)
   also when its diff has no change. The `[warn]` line names the writers,
   and the labels and annotations that the apply removes. lo does not name

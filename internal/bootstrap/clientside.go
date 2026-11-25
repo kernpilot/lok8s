@@ -23,10 +23,16 @@ package bootstrap
 // such objects out of the apply (a dry run: out of the diff). The check
 // never removes the last-applied annotation.
 //
+// kubectl moves only the Update entry of a writer that has the apiVersion
+// of its apply entry (the apiVersion of the target). It drops each other
+// Update entry of the writer with no subresource: the fields of such an
+// entry stay on the object with no manager, so the apply does not drop
+// them.
+//
 // The read gets no value of an object: only its apiVersion, kind,
 // namespace and name, and for each managedFields entry the manager, the
-// operation, the subresource and the key names of its labels and
-// annotations. lo escapes each name before it prints it
+// operation, the subresource, the apiVersion and the key names of its
+// labels and annotations. lo escapes each name before it prints it
 // (kapply.EscapeText): a client can write any manager name and any key
 // name into managedFields.
 
@@ -56,11 +62,11 @@ const (
 
 // csaObjectTemplate prints one object: a line "O<TAB>apiVersion<TAB>kind
 // <TAB>namespace<TAB>name", then for each managedFields entry a line
-// "M<TAB>manager<TAB>operation<TAB>subresource<TAB>labels<TAB>annotations".
-// labels and annotations are the JSON of the f:labels and f:annotations
-// sets of the entry: key names, no values.
+// "M<TAB>manager<TAB>operation<TAB>subresource<TAB>apiVersion<TAB>labels
+// <TAB>annotations". labels and annotations are the JSON of the f:labels
+// and f:annotations sets of the entry: key names, no values.
 const csaObjectTemplate = `{"O\t"}{.apiVersion}{"\t"}{.kind}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}` +
-	`{range .metadata.managedFields[*]}{"M\t"}{.manager}{"\t"}{.operation}{"\t"}{.subresource}{"\t"}` +
+	`{range .metadata.managedFields[*]}{"M\t"}{.manager}{"\t"}{.operation}{"\t"}{.subresource}{"\t"}{.apiVersion}{"\t"}` +
 	`{.fieldsV1.f:metadata.f:labels}{"\t"}{.fieldsV1.f:metadata.f:annotations}{"\n"}{end}`
 
 // csaTemplate is the jsonpath of the read (bash: _BOOTSTRAP_CSA_TEMPLATE).
@@ -72,7 +78,7 @@ const csaTemplate = `{range .items[*]}` + csaObjectTemplate + `{end}` + csaObjec
 
 // fieldsEntry is one managedFields entry of a live object.
 type fieldsEntry struct {
-	manager, operation, subresource string
+	manager, operation, subresource, apiVersion string
 	// labels and annotations are the key names the entry owns, sorted.
 	labels, annotations []string
 }
@@ -133,10 +139,10 @@ func parseFieldManagers(out string) []liveObject {
 				objs = append(objs, liveObject{group: apiGroup(f[1]), kind: f[2], namespace: f[3], name: f[4]})
 				cur = len(objs) - 1
 			}
-		case f[0] == "M" && len(f) == 6 && cur >= 0:
+		case f[0] == "M" && len(f) == 7 && cur >= 0:
 			objs[cur].entries = append(objs[cur].entries, fieldsEntry{
-				manager: f[1], operation: f[2], subresource: f[3],
-				labels: fieldKeys(f[4]), annotations: fieldKeys(f[5]),
+				manager: f[1], operation: f[2], subresource: f[3], apiVersion: f[4],
+				labels: fieldKeys(f[5]), annotations: fieldKeys(f[6]),
 			})
 		}
 	}
@@ -174,11 +180,12 @@ func apiGroup(apiVersion string) string {
 }
 
 // manifestObject is one object of the manifest of the read: its label
-// (objectLabel, what withoutObjects drops), its identity, and the key
-// names of the labels and annotations that it sets.
+// (objectLabel, what withoutObjects drops), its identity, its apiVersion
+// (the apiVersion of the apply entry of kubectl), and the key names of the
+// labels and annotations that it sets.
 type manifestObject struct {
-	label, group, kind, name, namespace string
-	labels, annotations                 []string
+	label, apiVersion, group, kind, name, namespace string
+	labels, annotations                             []string
 }
 
 // manifestObjects reads the objects of a manifest, in order. A document
@@ -215,7 +222,7 @@ func manifestObjects(stream string) []manifestObject {
 		}
 		meta, _ := m["metadata"].(map[string]any)
 		objs = append(objs, manifestObject{
-			label: objectLabel(m), group: apiGroup(str(m["apiVersion"])), kind: str(m["kind"]),
+			label: objectLabel(m), apiVersion: str(m["apiVersion"]), group: apiGroup(str(m["apiVersion"])), kind: str(m["kind"]),
 			name: str(meta["name"]), namespace: str(meta["namespace"]),
 			labels: keys(meta["labels"]), annotations: keys(meta["annotations"]),
 		})
@@ -272,11 +279,15 @@ type clientSideObject struct {
 // clientSideObjects finds the live objects whose fields a client-side
 // writer owns, in the order of the read, the way kubectl finds them: a
 // managedFields entry with the operation Update that owns the last-applied
-// annotation. kubectl moves every Update entry of these managers with no
-// subresource to its apply manager. An entry of another manager, or of the
-// same manager with another operation or a subresource, keeps its fields:
-// the apply does not drop a field that it owns too. lo's own Apply entry
-// does not keep a field. A label that the API server sets
+// annotation. kubectl moves the Update entry of each of these managers with
+// no subresource and with the apiVersion of the target to its apply
+// manager, and drops each other Update entry of the manager with no
+// subresource: those fields stay on the object with no manager, and they
+// keep no field of the moved entry. An object with no entry to move is not
+// named: the apply drops nothing of it. An entry of another manager, or of
+// the same manager with another operation or a subresource, keeps its
+// fields: the apply does not drop a field that it owns too. lo's own Apply
+// entry does not keep a field. A label that the API server sets
 // (serverSetLabels) is not named. A live object with no manifest object is
 // not named.
 func clientSideObjects(docs []manifestObject, live []liveObject) []clientSideObject {
@@ -296,14 +307,21 @@ func clientSideObjects(docs []manifestObject, live []liveObject) []clientSideObj
 			continue
 		}
 		owned, other := keySet{}, keySet{}
+		moved := false
 		for _, en := range o.entries {
 			switch {
 			case writers[en.manager] && en.operation == "Update" && en.subresource == "":
-				owned.add(en)
+				if en.apiVersion == doc.apiVersion {
+					owned.add(en)
+					moved = true
+				}
 			case en.manager == applyManager && en.operation == "Apply" && en.subresource == "":
 			default:
 				other.add(en)
 			}
+		}
+		if !moved {
+			continue
 		}
 		c := clientSideObject{
 			object: objectName(o), label: doc.label,
@@ -321,8 +339,8 @@ func clientSideObjects(docs []manifestObject, live []liveObject) []clientSideObj
 
 // serverSetLabels are the labels that the API server sets on each write of
 // the object, so an apply cannot drop them: the label
-// kubernetes.io/metadata.name (the name) of a Namespace. The manager that
-// created the Namespace owns it.
+// kubernetes.io/metadata.name (the name) of a Namespace. The manager of the
+// write that created the Namespace owns it (a client-side apply too).
 func serverSetLabels(o liveObject) []string {
 	if o.group == "" && o.kind == "Namespace" {
 		return []string{"kubernetes.io/metadata.name"}
