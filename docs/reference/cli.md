@@ -878,7 +878,7 @@ lo kubehz claim --nonce <v>   # place a dashboard-minted claim nonce for the age
 lo kubehz re-enroll           # re-enroll a regenerated agent token (heartbeats resume)
 lo kubehz join <node>         # mint a node join ticket (hosting: shared); the ticket goes to a private file; --print-token also prints it (without a join script: instead of the ticket file)
 lo kubehz assess              # platform assessment + handover feasibility
-lo kubehz handover            # control-plane handover (receive/preseed on the eject target)
+lo kubehz handover            # control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet
 lo kubehz node join           # join THIS machine to a hosted cluster (static pool)
 lo kubehz node status         # the nodes you brought, and the slot count
 lo kubehz node remove --name <n>  # remove one node and free its slot
