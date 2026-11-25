@@ -2288,11 +2288,11 @@ _synthetic_pem() {
   [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
 }
 
-# A path in the hint of init stays as it is when the shell reads it as one
+# A word in the hint of init stays as it is when the shell reads it as one
 # word with no expansion, else it goes into single quotes, with each ' as
 # '\''. The x keeps a newline at the end. Go twin: TestShellQuoted (the same
 # table).
-@test "secrets::_shown_quoted gives the bytes of shellQuoted" {
+@test "secrets::_shell_quoted gives the bytes of shellQuoted" {
   local -A table=(
     ['/home/u/.ssh/id_ed25519']='/home/u/.ssh/id_ed25519'
     ['a-b_c@d%e+f=g:h,i./j']='a-b_c@d%e+f=g:h,i./j'
@@ -2308,11 +2308,35 @@ _synthetic_pem() {
   )
   local in got
   for in in "${!table[@]}"; do
-    got="$(secrets::_shown_quoted "${in}"; printf x)"
+    got="$(secrets::_shell_quoted "${in}"; printf x)"
     [ "${got%x}" = "${table[${in}]}" ] || { echo "$(printf '%q' "${in}"): got $(printf '%q' "${got%x}")" >&2; return 1; }
   done
-  got="$(secrets::_shown_quoted ""; printf x)"
+  got="$(secrets::_shell_quoted ""; printf x)"
   [ "${got%x}" = "''" ] || { echo "empty: got ${got%x}" >&2; return 1; }
+}
+
+# secrets::_shown_quoted is secrets::_shell_quoted of secrets::_shown_path:
+# a path that it replaces gives its placeholder in single quotes. Go twin:
+# shellQuoted(shownKeyPath(path)) in publicKeyHint.
+@test "secrets::_shown_quoted quotes the output of secrets::_shown_path" {
+  local dashes="-----" i got
+  local -a names=(plain space pem-line private-key)
+  local -a inputs=(
+    "/home/u/.ssh/id_ed25519"
+    "/home/u/.ssh/work key"
+    "/k/${dashes}BEGIN CERTIFICATE${dashes}/id"
+    "AGE-SECRET-""KEY-1QUOTEDPATH"
+  )
+  local -a want=(
+    "/home/u/.ssh/id_ed25519"
+    "'/home/u/.ssh/work key'"
+    "'(not printed: it holds a PEM block)'"
+    "'(not printed: it looks like a private key)'"
+  )
+  for i in "${!names[@]}"; do
+    got="$(secrets::_shown_quoted "${inputs[i]}"; printf x)"
+    [ "${got%x}" = "${want[i]}" ] || { echo "${names[i]}: got ${got%x}" >&2; return 1; }
+  done
 }
 
 # secrets::_path_is_shown returns 0 when secrets::_shown_path prints the
