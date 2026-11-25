@@ -211,9 +211,12 @@ type manifestObject struct {
 }
 
 // manifestObjects reads the objects of a manifest, in order. A document
-// that is not a map is not an object. ok is false when the manifest does
-// not parse (bash: yq fails on the stream): lo then cannot find the
-// objects to name or to leave out.
+// that is not a map is not an object, and a key twice in a map keeps its
+// last value, as kubectl reads it (decodeObject). ok is false when the
+// manifest does not parse (bash: yq fails on the stream), or when a map
+// does not decode: lo then cannot find the objects to name or to leave
+// out. kubectl cannot read such a map either; the bash twin reads a key
+// that is a list as "".
 func manifestObjects(stream string) (objs []manifestObject, ok bool) {
 	str := func(v any) string {
 		s, _ := v.(string)
@@ -237,8 +240,11 @@ func manifestObjects(stream string) (objs []manifestObject, ok bool) {
 			}
 			return nil, false
 		}
-		var m map[string]any
-		if node.Decode(&m) != nil || m == nil {
+		m, isObject, err := decodeObject(&node)
+		if err != nil {
+			return nil, false
+		}
+		if !isObject {
 			continue
 		}
 		meta, _ := m["metadata"].(map[string]any)

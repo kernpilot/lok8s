@@ -558,3 +558,39 @@ func TestClientSideBeforeCancelledRead(t *testing.T) {
 		}
 	}
 }
+
+// A key twice in a map: the last value counts, as kubectl reads it and as
+// the bash twin reads it (yq, then jq). The object is named, and
+// --skip-client-side-owned leaves it out: the rest keeps its documents as
+// the render wrote them. A map that does not decode also so (a key that is
+// a list) gives ok false. bats: "bootstrap::_csa_before: a key twice in a
+// map".
+func TestClientSideBeforeAKeyTwice(t *testing.T) {
+	const twice = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: other\n  name: demo\n  labels:\n    app: y\n"
+	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  name: cm\n  namespace: demo\n"
+	docs, ok := manifestObjects(twice + "---\n" + cm)
+	if !ok || len(docs) != 2 || docs[0].label != "v1 Namespace demo" || !slices.Equal(docs[0].labels, []string{"app"}) || docs[1].label != "v1 ConfigMap demo/cm" {
+		t.Fatalf("ok %v, objects %+v", ok, docs)
+	}
+	if warn, _ := csaWarnings(nsLines, twice); !slices.Equal(warn, []string{strings.TrimSuffix(strings.TrimPrefix(warnNS, "[warn] bootstrap: testcni: "), "\n")}) {
+		t.Errorf("warn = %q", warn)
+	}
+	e, f, job := csaJob(t)
+	e.Options.SkipClientSideOwned = true
+	h := &csaHandler{reads: []string{nsLines}}
+	f.handler = h.handle
+	var errOut bytes.Buffer
+	c, ok := e.clientSideBefore(t.Context(), &errOut, job.Name, job.Kubeconfig, twice+"---\n"+cm)
+	if !ok || c.leftOut != 1 || strings.Contains(c.manifest, "Namespace") || !strings.Contains(c.manifest, "  name: cm\n  name: cm\n") {
+		t.Errorf("ok %v, left out %d, manifest:\n%s\nstderr:\n%s", ok, c.leftOut, c.manifest, errOut.String())
+	}
+	if want := "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\n"; errOut.String() != want {
+		t.Errorf("stderr:\n%s\nwant %q", errOut.String(), want)
+	}
+	if _, ok := manifestObjects("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n? [a]\n: b\n"); ok {
+		t.Error("a map with a key that is a list: ok true")
+	}
+	if docs, ok := manifestObjects("!thing\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n"); !ok || len(docs) != 0 {
+		t.Errorf("a map with a tag of its own: ok %v, objects %+v", ok, docs)
+	}
+}

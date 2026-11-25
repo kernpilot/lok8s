@@ -7404,6 +7404,29 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
 }
 
+# A key twice in a map: the last value counts, as kubectl reads it (the Go
+# twin decodes so too). The object is named, and --skip-client-side-owned
+# leaves it out: the rest keeps its documents as the render wrote them. A
+# map with a tag of its own is not an object. Go:
+# TestClientSideBeforeAKeyTwice.
+@test "bootstrap::_csa_before: a key twice in a map" {
+  local -r twice=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: other\n  name: demo\n  labels:\n    app: y\n'
+  local -r cm=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  name: cm\n  namespace: demo\n'
+  run bootstrap::_csa_docs "${twice}---"$'\n'"${cm}"
+  assert_success
+  assert_output '{"l":"v1 Namespace demo","v":"v1","g":"","k":"Namespace","n":"demo","s":"","lk":["app"],"ak":[]}
+{"l":"v1 ConfigMap demo/cm","v":"v1","g":"","k":"ConfigMap","n":"cm","s":"demo","lk":[],"ak":[]}'
+  run bootstrap::_csa_docs $'!thing\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n'
+  assert_success; assert_output ""
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_skip_csa=1 _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0
+  local -a _csa_checks=()
+  bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${twice}---"$'\n'"${cm}" > "${BATS_TEST_TMPDIR}/out" 2>&1
+  [ "${_csa_left_out}" -eq 1 ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+  [[ "${_csa_manifest}" != *Namespace* && "${_csa_manifest}" == *$'  name: cm\n  name: cm\n'* ]] || { echo "${_csa_manifest}"; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields" ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+}
+
 # A real run names each object of a client-side writer before the apply,
 # and after the apply reads again and names the keys that the apply
 # dropped. No object of a client-side writer: one read, no line. Go:

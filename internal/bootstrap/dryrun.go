@@ -515,7 +515,9 @@ func objectLabel(doc map[string]any) string {
 }
 
 // splitObjects decodes a rendered YAML stream into its objects, in order,
-// each with its label and its canonical (re-encoded) content.
+// each with its label and its canonical (re-encoded) content
+// (decodeObject: a key twice in a map keeps its last value). docs keeps
+// each document as the render wrote it.
 func splitObjects(stream string) (labels []string, content map[string]string, docs map[string]*yaml.Node, err error) {
 	content, docs = map[string]string{}, map[string]*yaml.Node{}
 	dec := yaml.NewDecoder(strings.NewReader(stream))
@@ -527,8 +529,11 @@ func splitObjects(stream string) (labels []string, content map[string]string, do
 			}
 			return nil, nil, nil, err
 		}
-		var m map[string]any
-		if node.Decode(&m) != nil || m == nil {
+		m, isObject, err := decodeObject(&node)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if !isObject {
 			continue
 		}
 		raw, err := yaml.Marshal(m)
@@ -543,6 +548,61 @@ func splitObjects(stream string) (labels []string, content map[string]string, do
 		n := node
 		docs[label] = &n
 	}
+}
+
+// errUnreadableObject is the error of a document that is a map that lo
+// cannot decode, also with the last value of each key (a key that is a
+// list, for example). kubectl cannot read it either. Fixed text: the error
+// of the YAML decoder can quote a value.
+var errUnreadableObject = errors.New("a document of the manifest is a map that lo cannot read")
+
+// decodeObject decodes one document of a rendered stream. isObject is
+// false for a document that is not a map with the plain map tag (an empty
+// document, a list, a scalar, a map with a tag of its own), as the bash
+// twin selects with yq (tag == "!!map"). A key that a map holds more than
+// once keeps its last value: kubectl reads a manifest so
+// (sigs.k8s.io/yaml), and the bash twin too (yq, then jq). yaml.v3 refuses
+// such a map when it decodes it.
+func decodeObject(doc *yaml.Node) (m map[string]any, isObject bool, err error) {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode || root.ShortTag() != "!!map" {
+		return nil, false, nil
+	}
+	if err := lastKeyWins(root).Decode(&m); err != nil {
+		return nil, false, errUnreadableObject
+	}
+	return m, true, nil
+}
+
+// lastKeyWins is a copy of n in which each map keeps only the last pair of
+// a key that it holds more than once. Two keys are the same when they
+// have the same kind and text: the rule by which yaml.v3 refuses a key.
+func lastKeyWins(n *yaml.Node) *yaml.Node {
+	type key struct {
+		kind  yaml.Kind
+		value string
+	}
+	last := map[key]int{}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			last[key{n.Content[i].Kind, n.Content[i].Value}] = i
+		}
+	}
+	c := *n
+	c.Content = make([]*yaml.Node, 0, len(n.Content))
+	for i, child := range n.Content {
+		if n.Kind == yaml.MappingNode {
+			k := n.Content[i-i%2]
+			if last[key{k.Kind, k.Value}] != i-i%2 {
+				continue
+			}
+		}
+		c.Content = append(c.Content, lastKeyWins(child))
+	}
+	return &c
 }
 
 // nondeterministicObjects lists the objects whose content differs between
