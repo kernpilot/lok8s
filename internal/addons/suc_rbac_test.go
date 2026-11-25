@@ -340,7 +340,8 @@ type sucImage struct {
 	Tag        string `yaml:"tag"`
 }
 
-var sucDigestTag = regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64}$`)
+// imageDigestTag is an image tag with a digest: the version, then the digest.
+var imageDigestTag = regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64}$`)
 
 // readSUCImages reads the two image pins from values.yaml.
 func readSUCImages(t *testing.T, root string) (ctrl, kubectl sucImage) {
@@ -369,7 +370,7 @@ func checkSUCImages(t *testing.T, root string, objs map[string]object, ns string
 	t.Helper()
 	ctrlImg, kubectlImg := readSUCImages(t, root)
 	for _, img := range []sucImage{ctrlImg, kubectlImg} {
-		if img.Repository == "" || !sucDigestTag.MatchString(img.Tag) {
+		if img.Repository == "" || !imageDigestTag.MatchString(img.Tag) {
 			t.Errorf("values.yaml: image %q tag %q is not `<version>@sha256:<64 hex>`", img.Repository, img.Tag)
 		}
 	}
@@ -672,7 +673,7 @@ func TestSystemUpgradeControllerFixtureMatchesChart(t *testing.T) {
 	// The upstream manifests of the pinned controller version use no RBAC
 	// name that upstream-rbac-names.yaml does not know.
 	ctrlImg, _ := readSUCImages(t, root)
-	m := sucDigestTag.FindStringSubmatch(ctrlImg.Tag)
+	m := imageDigestTag.FindStringSubmatch(ctrlImg.Tag)
 	if m == nil {
 		t.Fatalf("values.yaml: controller tag %q has no version", ctrlImg.Tag)
 	}

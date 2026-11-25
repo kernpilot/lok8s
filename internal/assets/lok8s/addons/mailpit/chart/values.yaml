@@ -4,8 +4,13 @@
 # of ./chart is valid and renders the workload WITHOUT a route.
 image:
   repository: axllent/mailpit
-  # Pinned; verified against the axllent/mailpit registry. Bump deliberately.
-  tag: v1.30.1
+  # Pinned by digest: the tag, then the digest of its multi-arch image index.
+  # The chart renders `<repository>:<tag>`, and the container runtime pulls by
+  # the digest. The tag is for the reader. On a bump, change the tag AND the
+  # digest here, and appVersion in Chart.yaml. A mirror that you set through
+  # image.repository must hold the image with this digest; for another image,
+  # set image.tag too.
+  tag: v1.34.0@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
 
 resources:
   requests:

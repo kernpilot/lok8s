@@ -10,4 +10,4 @@ description: >-
   from spec.cluster.domain at bootstrap), overridable inline.
 type: application
 version: 0.1.0
-appVersion: "v1.30.1"
+appVersion: "v1.34.0"
