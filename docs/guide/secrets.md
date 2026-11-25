@@ -228,7 +228,9 @@ the value: `(not printed: it looks like a private key)` for a private key,
 `(not printed: it holds a line break or a control character)` for a value
 with a line break, a tab or another control character. No key path holds
 a line break. For all three, `init` shows no hint after the error: no
-command to write the `.pub` file, and no command to make a new key.
+command to write the `.pub` file, and no command to make a new key. The
+key argument of `add-key` and `remove-key` gets the same placeholders in
+each message that names it, also an `age1…` key that is not valid.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

@@ -240,6 +240,22 @@ _add() { # <key> [all] [skip_orphans]
   done <<< "${body}"
 }
 
+# An argument that starts with age1 but holds a line break or an escape is
+# not a valid age key: the line prints the placeholder of
+# secrets::_shown_path, never the argument. Go twin:
+# TestRecipientArgHidesAPasteWithNoMarker (an age key with a line break,
+# with an escape).
+@test "an age key with a line break or an escape is refused and not echoed" {
+  _load
+  local canary="CANARY_SECRET_MATERIAL_DO_NOT_LEAK" key
+  for key in "age1abc"$'\n'"${canary}" "age1abc"$'\e[2J'"${canary}"; do
+    run _add "${key}"
+    [ "$status" -ne 0 ] || { echo "the key was accepted" >&2; return 1; }
+    [ "$output" = "[error] not a valid age public key: (not printed: it holds a line break or a control character)" ] || {
+      echo "${output//${canary}/<canary>}" >&2; return 1; }
+  done
+}
+
 # A key file at a path with a tab that ssh-to-age cannot read: the derive
 # line prints the placeholder of secrets::_shown_path, not the path. Go
 # twin: TestRecipientArgHidesAPasteWithNoMarker (derive).

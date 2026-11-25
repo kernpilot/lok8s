@@ -139,7 +139,8 @@ func sshKeyCommand(c *cobra.Command) *cobra.Command {
 // positionals are checked joined with spaces, as the guard of main checks
 // the argv: a paste split into words is one key. Each command here takes a
 // path or an age public key, never a PEM block, so the check is
-// secrets.LooksLikeKeyArg: the first word of a PEM block counts too.
+// secrets.LooksLikeKeyArg: a PEM line (BEGIN or END, in any case) counts
+// too.
 func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Command {
 	c.Args = func(cmd *cobra.Command, args []string) error {
 		var refused []string

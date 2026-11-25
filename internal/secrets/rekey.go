@@ -223,9 +223,10 @@ func (c *Context) recipientArg(key string) (string, error) {
 
 	// bech32 age public key. Validated because a typo here is silent: sops
 	// accepts the config and every later encrypt writes a recipient nobody
-	// holds.
+	// holds. The argument goes through shownKeyPath: it can hold a line
+	// break or a control byte after "age1".
 	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.ErrorTo(c.ErrOut, "not a valid age public key: %s", agePubkey)
+		ui.ErrorTo(c.ErrOut, "not a valid age public key: %s", shownKeyPath(agePubkey))
 		return "", ErrHandled
 	}
 	return agePubkey, nil

@@ -304,12 +304,13 @@ func TestKeyParseErrorsPrintNoLibraryError(t *testing.T) {
 }
 
 // An argument of add-key with no marker of a private key passes the argv
-// check, so the not-a-file and the derive lines print it through
-// shownKeyPath: a key body pasted without its BEGIN line (a line break) and
-// a key file at a path with a tab get the placeholder, never the value
-// (bash twins: "a pasted key body with no BEGIN line is refused and not
-// echoed", "a key file at a path with a tab that does not derive prints a
-// placeholder").
+// check, so the not-a-file, the derive and the age key lines print it
+// through shownKeyPath: a key body pasted without its BEGIN line (a line
+// break), a key file at a path with a tab and an age key with a line break
+// or an escape get the placeholder, never the value (bash twins: "a pasted
+// key body with no BEGIN line is refused and not echoed", "a key file at a
+// path with a tab that does not derive prints a placeholder", "an age key
+// with a line break or an escape is refused and not echoed").
 func TestRecipientArgHidesAPasteWithNoMarker(t *testing.T) {
 	const ctl = "(not printed: it holds a line break or a control character)"
 	t.Run("not a file", func(t *testing.T) {
@@ -335,10 +336,25 @@ func TestRecipientArgHidesAPasteWithNoMarker(t *testing.T) {
 		}
 		want := "[error] could not derive an age key from " + ctl + "\n" +
 			"[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
-		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(out.String()+errOut.String(), "\t") {
-			t.Errorf("stdout %q\nstderr %q\nwant the two lines first, and no tab", out.String(), errOut.String())
+		if all := out.String() + errOut.String(); !strings.HasPrefix(errOut.String(), want) || strings.Contains(all, "\t") || strings.Contains(all, keyCanary) {
+			t.Errorf("stdout %q\nstderr %q\nwant the two lines first, no tab and nothing of the file", out.String(), errOut.String())
 		}
 	})
+	for name, key := range map[string]string{
+		"an age key with a line break": "age1abc\n" + keyCanary,
+		"an age key with an escape":    "age1abc\x1b[2J" + keyCanary,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			sopsYAMLWith(t, c, keyA)
+			if err := c.AddKey(key, false, false); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v", err)
+			}
+			if want := "[error] not a valid age public key: " + ctl + "\n"; errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+			}
+		})
+	}
 }
 
 // The key file is read once and at most 64 KiB: a bigger file, a file that
