@@ -78,12 +78,12 @@ func (f *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 }
 
 // isFieldManagerRead reports the read of the field managers
-// (clientside.go): a kubectl get with --show-managed-fields. A dry run
+// (clientside.go): a kubectl get -f - with --show-managed-fields. A dry run
 // makes it before each diff, a real run before and after each apply. A
 // handler that scripts only the diff or the apply answers it with no live
 // object (return nil, no output).
 func isFieldManagerRead(c execx.Cmd) bool {
-	return c.Name == "kubectl" && len(c.Args) > 2 && c.Args[2] == "get" && slices.Contains(c.Args, "--show-managed-fields")
+	return c.Name == "kubectl" && len(c.Args) > 4 && slices.Equal(c.Args[2:5], []string{"get", "-f", "-"}) && slices.Contains(c.Args, "--show-managed-fields")
 }
 
 func (f *fakeRunner) log() string {

@@ -101,7 +101,9 @@ func diffHandler(t *testing.T, rc int, seen map[string]string) func(c execx.Cmd)
 			fmt.Fprint(c.Stdout, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n")
 			return nil
 		case "kubectl":
-			if slices.Contains(c.Args, "--show-managed-fields") {
+			// The read of the field managers: a get -f - with
+			// --show-managed-fields, and no live object.
+			if len(c.Args) > 4 && slices.Equal(c.Args[2:5], []string{"get", "-f", "-"}) && slices.Contains(c.Args, "--show-managed-fields") {
 				return nil
 			}
 			if len(c.Args) < 3 || c.Args[2] != "diff" {

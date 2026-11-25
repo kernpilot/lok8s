@@ -7214,7 +7214,9 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   local -r o=$'O\tv1\tNamespace\t\tdemo\n'
   local -r ns=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  labels:\n    app: y\n'
   local -r head='Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set'
-  csa() { bootstrap::_csa_objects "${2}" "${1}" | cut -f1; }
+  # The status of bootstrap::_csa_objects counts: a pipe into cut would
+  # hide it.
+  csa() { local out; out="$(bootstrap::_csa_objects "${2}" "${1}")" || return; printf '%s\n' "${out}" | cut -f1; }
 
   run csa "$(_csa_ns_read)" "${ns}"
   assert_success; assert_output "${head}: label team; annotation note"
@@ -7491,9 +7493,10 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
 
 # --skip-client-side-owned: the apply gets the render without the objects
 # of a client-side writer, each named. With no object left there is no
-# apply. A read that fails stops the entry before the apply. Without the
-# flag, a read that fails is a [warn] line, and the apply runs. Go:
-# TestApplyOneSkipClientSideOwned.
+# apply. A read that fails only for a missing CRD leaves out the objects
+# that it read. A read that fails stops the entry before the apply.
+# Without the flag, a read that fails is a [warn] line, and the apply
+# runs. Go: TestApplyOneSkipClientSideOwned.
 @test "bootstrap::_apply_one --skip-client-side-owned leaves them out of the apply" {
   write_cluster_spec "testcni"
   _csa_render
@@ -7513,6 +7516,18 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_success
   [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
+
+  # The read fails only for a missing CRD: the object that it read is left
+  # out.
+  _csa_render
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  export CSA_READ_ERR="error: resource mapping not found for name: x: no matches for kind"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields"
+  [ "$(_csa_calls)" = "read apply" ] || { cat "${KCALLS}"; return 1; }
+  run grep -q Namespace "${BATS_TEST_TMPDIR}/stdin.apply.1"
+  assert_failure
 
   # The read fails.
   _csa_render

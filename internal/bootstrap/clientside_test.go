@@ -333,8 +333,10 @@ func TestDryRunReadFailure(t *testing.T) {
 			if tc.wantErr != "" && !strings.Contains(stderrOf(e), tc.wantErr) {
 				t.Errorf("stderr:\n%s\nwant %q", stderrOf(e), tc.wantErr)
 			}
-			if strings.Contains(stderrOf(e), tc.readErr) {
-				t.Error("lo printed the kubectl message of the read")
+			for line := range strings.SplitSeq(tc.readErr, "\n") {
+				if line != "" && strings.Contains(stderrOf(e), line) {
+					t.Errorf("lo printed a line of the kubectl message of the read: %q", line)
+				}
 			}
 		})
 	}
@@ -416,8 +418,10 @@ func TestApplyOneWithoutAClientSideWriterReadsOnce(t *testing.T) {
 
 // --skip-client-side-owned: the apply gets the render without the objects
 // of a client-side writer, each named. With no object left there is no
-// apply. A read that fails stops the entry before the apply. Without the
-// flag, a read that fails is a [warn] line, and the apply runs.
+// apply. A read that fails only for a missing CRD leaves out the objects
+// that it read. A read that fails stops the entry before the apply.
+// Without the flag, a read that fails is a [warn] line, and the apply
+// runs.
 func TestApplyOneSkipClientSideOwned(t *testing.T) {
 	t.Run("the rest is applied", func(t *testing.T) {
 		e, f, job := csaJob(t)
@@ -446,6 +450,22 @@ func TestApplyOneSkipClientSideOwned(t *testing.T) {
 		}
 		if !slices.Equal(h.calls, []string{"read"}) {
 			t.Errorf("kubectl calls = %v, want the read only", h.calls)
+		}
+	})
+	t.Run("a missing CRD, and an object of a client-side writer", func(t *testing.T) {
+		e, f, job := csaJob(t)
+		e.Options.SkipClientSideOwned = true
+		h := &csaHandler{reads: []string{nsLines}, readErr: "error: resource mapping not found for name: x: no matches for kind"}
+		f.handler = h.handle
+		var errOut bytes.Buffer
+		if rc := e.applyOne(t.Context(), job, io.Discard, &errOut); rc != 0 {
+			t.Fatalf("rc = %d\n%s", rc, errOut.String())
+		}
+		if !slices.Equal(h.calls, []string{"read", "apply"}) || strings.Contains(h.stdins[0], "Namespace") || !strings.Contains(h.stdins[0], "name: cm") {
+			t.Errorf("calls %v, the apply got %q", h.calls, h.stdins)
+		}
+		if want := "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\n"; errOut.String() != want {
+			t.Errorf("stderr:\n%s\nwant %q", errOut.String(), want)
 		}
 	})
 	t.Run("the read fails", func(t *testing.T) {
