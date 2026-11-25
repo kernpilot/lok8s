@@ -556,6 +556,10 @@ wait. When the platform does not know if the removal happened, the command
 tells you to read the node list first. Run `lo kubehz node status`, and
 remove the node again only when it is still there.
 
+A join or a removal can also fail with `HTTP 503` while other join changes
+of your account run on the platform. The command then tells you when to
+run it again.
+
 ### When a join is refused
 
 Every refusal names what to do next. The four you are most likely to meet:

@@ -1679,6 +1679,21 @@ _refuse_flag() {
   assert_output --partial "lo kubehz node remove --name"
 }
 
+# JOIN_TICKET_BUSY on the mint: the api's message, and the wait of the
+# body in seconds. Go twin: the JOIN_TICKET_BUSY row of
+# TestNodeErrorVocabulary.
+@test "error: JOIN_TICKET_BUSY on the mint names the wait of the body" {
+  _stub_all
+  STUB_MINT_CODE="503"
+  STUB_MINT_BODY='{"ok":false,"data":{"code":"JOIN_TICKET_BUSY","message":"Other join tickets of this account are being minted now","help":"Retry after the Retry-After interval.","retryAfterSeconds":5}}'
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "(HTTP 503): Other join tickets of this account are being minted now"
+  assert_output --partial "busy with other join changes of this account. Run this command again in 5 seconds."
+  refute_output --partial "Retry-After"
+}
+
 @test "error: CONTROL_PLANE_NOT_READY explains what has not happened yet" {
   _stub_all
   STUB_MINT_CODE="409"
@@ -1771,22 +1786,25 @@ _refuse_flag() {
 # A 503 of the remove names the wait of the body (retryAfterSeconds, in
 # data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
 # is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
-# list before a retry. A wait that is absent, a string, a fraction, 0,
-# above an hour or of five digits gives "shortly". The help of the api is
-# not printed. Go twin: TestNodeRemoveRetryLater.
+# list before a retry. JOIN_TICKET_BUSY says that other join changes of
+# the account hold the platform. A wait that is absent, a string, a
+# fraction, 0, above an hour or of five digits gives "shortly". The help of
+# the api is not printed. Go twin: TestNodeRemoveRetryLater.
 @test "remove: a 503 names the wait of the body, and the node list for an open result" {
   _stub_all
   local head="[error] Failed to remove node 'box-1' (HTTP 503): m"$'\n' i
   local gone="${head}  The node is still in the cluster. Run this command again "
   local open="${head}  Read the node list before a retry:  lo kubehz node status"$'\n'"  If the node is still there, run this command again "
+  local busy="${head}  The platform is busy with other join changes of this account. Run this command again "
   local -a codes=(NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED
-    NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_REMOVE_RESULT_UNKNOWN NODE_REMOVE_RESULT_UNKNOWN)
+    NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_REMOVE_RESULT_UNKNOWN NODE_REMOVE_RESULT_UNKNOWN
+    JOIN_TICKET_BUSY JOIN_TICKET_BUSY)
   local -a waits=(',"retryAfterSeconds":5' ',"retryAfterSeconds":1' ',"retryAfterSeconds":3600' ',"retryAfterSeconds":3601'
     ',"retryAfterSeconds":10000' '' ',"retryAfterSeconds":"5"' ',"retryAfterSeconds":5.5' ',"retryAfterSeconds":0'
-    ',"retryAfterSeconds":5' '')
+    ',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '')
   local -a want=("${gone}in 5 seconds." "${gone}in 1 second." "${gone}in 3600 seconds." "${gone}shortly."
     "${gone}shortly." "${gone}shortly." "${gone}shortly." "${gone}shortly." "${gone}shortly."
-    "${open}in 5 seconds." "${open}shortly.")
+    "${open}in 5 seconds." "${open}shortly." "${busy}in 5 seconds." "${busy}shortly.")
   STUB_REMOVE_CODE="503"
   for i in "${!waits[@]}"; do
     STUB_REMOVE_BODY='{"statusCode":503,"data":{"code":"'"${codes[i]}"'","message":"m","help":"Retry after the Retry-After interval."'"${waits[i]}"'}}'

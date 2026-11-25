@@ -1518,6 +1518,7 @@ func TestNodeErrorVocabulary(t *testing.T) {
 		{409, `{"ok":false,"data":{"code":"POOL_NOT_STATIC","message":"metal is a machineDeployment pool"}}`, []string{"kind: static"}},
 		{403, `{"ok":false,"data":{"code":"STEP_UP_REQUIRED","message":"fresh sign-in required"}}`, []string{"KUBEHZ_TOKEN"}},
 		{418, `{"ok":false,"data":{"code":"SOMETHING_NEW","message":"the api knows best","help":"read the docs"}}`, []string{"the api knows best", "read the docs"}},
+		{503, `{"ok":false,"data":{"code":"JOIN_TICKET_BUSY","message":"Other join tickets of this account are being minted now","help":"Retry after the Retry-After interval.","retryAfterSeconds":5}}`, []string{"(HTTP 503): Other join tickets of this account are being minted now", "busy with other join changes of this account. Run this command again in 5 seconds."}},
 	}
 	for _, tc := range cases {
 		s := defaultNodeStubs()
@@ -1561,15 +1562,18 @@ func TestNodeRemove(t *testing.T) {
 // A 503 of the remove names the wait of the body (retryAfterSeconds, in
 // data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
 // is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
-// list before a retry. A wait that is absent, a string, a fraction, 0,
-// above an hour or of five digits gives "shortly". The help of the api (it
-// names a header that lo does not show) is not printed. Bash twin:
+// list before a retry. JOIN_TICKET_BUSY says that other join changes of
+// the account hold the platform. A wait that is absent, a string, a
+// fraction, 0, above an hour or of five digits gives "shortly". The help
+// of the api (it names a header that lo does not show) is not printed.
+// Bash twin:
 // "remove: a 503 names the wait of the body, and the node list for an open
 // result".
 func TestNodeRemoveRetryLater(t *testing.T) {
 	const head = "[error] Failed to remove node 'box-1' (HTTP 503): m\n"
 	const gone = head + "  The node is still in the cluster. Run this command again "
 	const open = head + "  Read the node list before a retry:  lo kubehz node status\n  If the node is still there, run this command again "
+	const busy = head + "  The platform is busy with other join changes of this account. Run this command again "
 	body := func(code, wait string) string {
 		return `{"statusCode":503,"data":{"code":"` + code + `","message":"m","help":"Retry after the Retry-After interval."` + wait + `}}`
 	}
@@ -1586,6 +1590,8 @@ func TestNodeRemoveRetryLater(t *testing.T) {
 		"not removed, top level":  {`{"code":"NODE_NOT_REMOVED","message":"m","retryAfterSeconds":7}`, gone + "in 7 seconds.\n"},
 		"unknown, 5":              {body("NODE_REMOVE_RESULT_UNKNOWN", `,"retryAfterSeconds":5`), open + "in 5 seconds.\n"},
 		"unknown, absent":         {body("NODE_REMOVE_RESULT_UNKNOWN", ""), open + "shortly.\n"},
+		"busy, 5":                 {body("JOIN_TICKET_BUSY", `,"retryAfterSeconds":5`), busy + "in 5 seconds.\n"},
+		"busy, absent":            {body("JOIN_TICKET_BUSY", ""), busy + "shortly.\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := defaultNodeStubs()

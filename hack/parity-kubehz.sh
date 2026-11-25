@@ -1181,8 +1181,8 @@ EOF
   done
   # The 503 refusals of a hosted node remove: NODE_NOT_REMOVED names the
   # wait of the body in seconds, NODE_REMOVE_RESULT_UNKNOWN sends the user
-  # to the node list first, and a wait that is absent, a string or above an
-  # hour gives "shortly". kc_reason: two equal outputs could both be wrong.
+  # to the node list first, JOIN_TICKET_BUSY names the wait too, and a wait
+  # that is absent, a string or above an hour gives "shortly". kc_reason: two equal outputs could both be wrong.
   check_api - kubehz node remove --name remove-1 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, not removed, 5 seconds" "Run this command again in 5 seconds."
   check_api - kubehz node remove --name remove-2 --domain hstub.dev --cluster-id cl-1a2b3c4d
@@ -1195,6 +1195,8 @@ EOF
   kc_reason "remove, a wait that is a string" "Run this command again shortly."
   check_api - kubehz node remove --name remove-6 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, a wait above an hour" "Run this command again shortly."
+  check_api - kubehz node remove --name remove-7 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, join changes busy" "busy with other join changes of this account. Run this command again in 5 seconds."
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev

@@ -215,6 +215,12 @@ func (c *Context) nodeAPIError(what string, res *httpResult) {
 		c.apiErrorLine(what, res)
 		c.echoErr("  Read the node list before a retry:  lo kubehz node status")
 		c.echoErr("  If the node is still there, run this command again %s.", retryWait(res.Body))
+	case "JOIN_TICKET_BUSY":
+		// A 503 of a join mint or a node remove: other join changes of the
+		// account hold the lock of the platform, and the same call can
+		// succeed after the wait of the body.
+		c.apiErrorLine(what, res)
+		c.echoErr("  The platform is busy with other join changes of this account. Run this command again %s.", retryWait(res.Body))
 	default:
 		c.spaceAPIError(what, res)
 	}

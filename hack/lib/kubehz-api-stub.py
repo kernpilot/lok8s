@@ -278,6 +278,7 @@ REMOVES = {
     "remove-4": retry_later("NODE_REMOVE_RESULT_UNKNOWN", "The result of this removal is not known", REMOVE_OPEN_HELP, 1),
     "remove-5": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "5"),
     "remove-6": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 3601),
+    "remove-7": retry_later("JOIN_TICKET_BUSY", "Other join tickets of this account are being minted or removed now", REMOVE_HELP, 5),
 }
 
 ROUTES = {
