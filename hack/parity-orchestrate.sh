@@ -1139,7 +1139,7 @@ echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
 manifest=""
 [[ " $* " != *" -f - "* ]] || manifest="$(cat)"
 case " $* " in
-  *" --show-managed-fields "*)
+  *" get -f - "*" --show-managed-fields "*)
     if [[ -n "${PARITY_CSA_FAIL:-}" ]]; then
       echo "Error from server (Forbidden): configmaps is forbidden: CSA-STDERR-CANARY" >&2
       exit 1
@@ -1287,9 +1287,12 @@ dry_expect_rc 2 provision --domain beta.cloud --bootstrap --dry-run
 # --skip-client-side-owned an error; lo never prints its kubectl message.
 printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl-client-side-apply\tUpdate\t\tv1\t{".":{},"f:team":{},"f:k\\u001bx":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\nM\tkubectl-client-side-apply\tUpdate\t\tv1beta1\t{"f:tier":{}}\t\nM\tevil\\\tUpdate\t\tv1\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\nO\tv1\tList\t\t\n' > "${WORK}/csa.read"
 printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl\tApply\t\tv1\t{"f:team":{}}\t\nO\tv1\tList\t\t\n' > "${WORK}/csa.after"
-csa_pin() {  # <label> <file> <fixed text>: a line holds the text
-  if grep -qF -- "${3}" "${2}"; then echo "ok: ${1}"; else
-    echo "FAIL: ${1}: no line holds ${3} in ${2}:"; sed 's/^/  /' "${2}" | head -20
+csa_pin() {  # <label> <file> <fixed text>: a line ends with the text
+  # ENVIRON, not -v: awk -v reads backslash escapes in the value.
+  if CSA_PIN_TEXT="${3}" awk 'BEGIN { t = ENVIRON["CSA_PIN_TEXT"] }
+      length($0) >= length(t) && substr($0, length($0) - length(t) + 1) == t { f = 1 }
+      END { exit !f }' "${2}"; then echo "ok: ${1}"; else
+    echo "FAIL: ${1}: no line ends with ${3} in ${2}:"; sed 's/^/  /' "${2}" | head -20
     failures=$((failures + 1))
   fi
 }
@@ -1339,8 +1342,10 @@ for side in bash go; do
 done
 PARITY_CSA_APPLY=1 PARITY_CSA_READ="${WORK}/csa.read" dry_check - bootstrap --domain dry.dev --only cilium --skip-client-side-owned
 for side in bash go; do
+  csa_pin "${side}: the real run names the left-out object" "${WORK}/${side}.out" '[warn] bootstrap: cilium: ConfigMap kube-system/cilium: left out of the apply (--skip-client-side-owned): client-side writers (evil\\, kubectl-client-side-apply) own fields'
   tls_absent "${side}: nothing is left to apply" "${WORK}/kubectl.${side}.log" " apply --server-side --force-conflicts -f -$"
 done
+PARITY_CSA_APPLY=1 PARITY_CSA_READ="${WORK}/csa.read" dry_expect_rc 0 bootstrap --domain dry.dev --only cilium --skip-client-side-owned
 
 # ── Review round 3: the in-place dry run ─────────────────────────────────────
 # A dry run renders IN PLACE, exactly as a real run does. The project now

@@ -3418,7 +3418,7 @@ _dry_kubectl_stub() {
     # stdin unconditionally hangs on a terminal (or an open pipe).
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
     # The read of the field managers finds no live object.
-    [[ " $* " != *" --show-managed-fields "* ]] || return 0
+    [[ " $* " != *" get -f - "*" --show-managed-fields "* ]] || return 0
     if [[ " $* " != *" diff "* ]]; then
       echo "parity stub: kubectl $* must not be reached by a dry run" >&2
       return 9
@@ -3506,7 +3506,7 @@ _dry_text_stub() {
     echo "kubectl $*" >> "${KLOG}"
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
     # The read of the field managers finds no live object.
-    [[ " $* " != *" --show-managed-fields "* ]] || return 0
+    [[ " $* " != *" get -f - "*" --show-managed-fields "* ]] || return 0
     if [[ " $* " != *" diff "* ]]; then
       echo "parity stub: kubectl $* must not be reached by a dry run" >&2
       return 9
@@ -7167,7 +7167,7 @@ _csa_render() {
 }
 
 # _csa_kubectl_stub [read-1] [read-2]: a kubectl for the check. Read n (a
-# call with --show-managed-fields) prints read-n (nothing past the last);
+# get -f - with --show-managed-fields) prints read-n (nothing past the last);
 # with CSA_READ_ERR set, it prints that on stderr and exits 1. A diff exits
 # ${CSA_DIFF_RC:-0}, an apply 0. KCALLS gets each verb (and the KUBERC of a
 # read); stdin.<verb>.<n> keeps the stdin of each diff and apply.
@@ -7177,7 +7177,7 @@ _csa_kubectl_stub() {
   kubectl() {
     local in="" n v verb=other
     [[ " $* " != *" -f - "* ]] || in="$(cat)"
-    if [[ " $* " == *" --show-managed-fields "* ]]; then
+    if [[ " $* " == *" get -f - "*" --show-managed-fields "* ]]; then
       echo "read KUBERC=${KUBERC-}" >> "${KCALLS}"
       n="$(grep -c '^read ' "${KCALLS}")"
       v="CSA_READ_${n}"
@@ -7349,11 +7349,14 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_line "[error] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so --skip-client-side-owned cannot find the objects to leave out"
   refute_output --partial "Forbidden"
 
-  # A diff that fails too: the read failure is not named.
+  # A diff that fails too: the read ran and failed, the entry is an
+  # error, and the read failure is not named.
   bootstrap_skip_csa=0
   export CSA_DIFF_RC=2
+  _csa_kubectl_stub
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [ "$(_csa_calls)" = "read diff" ] || { cat "${KCALLS}"; return 1; }
   assert_line "bootstrap dry-run: testcni: error"
   refute_output --partial "lo cannot read the field managers"
 }

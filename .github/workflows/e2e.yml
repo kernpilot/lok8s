@@ -222,7 +222,7 @@ jobs:
           EOF
           # For the record: the field managers that lo reads (key names only).
           kubectl get namespace lok8s-csa --show-managed-fields -o json \
-            | jq '.metadata.managedFields | map({manager, operation, subresource, fieldsV1})'
+            | jq '.metadata.managedFields | map({manager, operation, subresource, apiVersion, fieldsV1})'
 
           cd "${proj}"
           warn='[warn] bootstrap: ns: Namespace lok8s-csa: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note'
@@ -235,8 +235,12 @@ jobs:
           # The dry run changed nothing.
           test "$(kubectl get namespace lok8s-csa -o jsonpath='{.metadata.labels.team}')" = ci
 
-          "${lo}" bootstrap --domain csa.lok8s.dev > real.out 2> real.err
+          # Each run: the rc first, then the output, then the test of the rc
+          # (set -e would stop before the output).
+          rc=0
+          "${lo}" bootstrap --domain csa.lok8s.dev > real.out 2> real.err || rc=$?
           cat real.out real.err
+          test "${rc}" -eq 0
           grep -qF "${warn}" real.out real.err
           grep -qF '[warn] bootstrap: ns: Namespace lok8s-csa: the apply dropped label team; annotation note' real.out real.err
           # The label team and the annotation note are gone. The label app,
@@ -247,8 +251,10 @@ jobs:
             (.metadata.annotations | has("note") | not) and
             (.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration"))'
 
-          "${lo}" bootstrap --domain csa.lok8s.dev --dry-run > dry2.out 2> dry2.err
+          rc=0
+          "${lo}" bootstrap --domain csa.lok8s.dev --dry-run > dry2.out 2> dry2.err || rc=$?
           cat dry2.out dry2.err
+          test "${rc}" -eq 0
           grep -qx 'bootstrap dry-run: ns: unchanged' dry2.out
           if grep -q 'client-side' dry2.err; then
             echo "the second dry run still names a client-side writer" >&2

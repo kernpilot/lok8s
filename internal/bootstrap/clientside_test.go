@@ -337,13 +337,26 @@ func TestDryRunReadFailure(t *testing.T) {
 			}
 		})
 	}
-	// A diff that fails too: the read failure is not named.
+	// A diff that fails too: the read ran and failed, the entry is an
+	// error, and the read failure is not named.
 	e, f, spec, kc := dryEngine(t, "testcni")
+	var calls []string
 	f.handler = func(c execx.Cmd) error {
+		if isFieldManagerRead(c) {
+			calls = append(calls, "read")
+		} else if len(c.Args) > 2 {
+			calls = append(calls, c.Args[2])
+		}
 		fmt.Fprintln(c.Stderr, "error: the server could not be reached")
 		return &rcError{2}
 	}
 	_ = e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	if !slices.Equal(calls, []string{"read", "diff"}) {
+		t.Errorf("kubectl calls = %v, want the read, then the diff", calls)
+	}
+	if want := "bootstrap dry-run: testcni: error\n"; !strings.Contains(stdoutOf(e), want) {
+		t.Errorf("stdout:\n%s\nwant %q", stdoutOf(e), want)
+	}
 	if strings.Contains(stderrOf(e), "lo cannot read the field managers") {
 		t.Errorf("a failed diff also named the read:\n%s", stderrOf(e))
 	}
