@@ -243,14 +243,17 @@ A few things worth knowing before you reach for it:
   space: `kubectl --context kubehz-<slug>` signs you in with your kubehz
   account (OIDC) on first use. `lo kubeconfig` prints that path.
 - **`spec.bootstrap` does not apply.** The platform baseline (CNI and
-  in-cluster DNS) is already running on the shared plane. Ingress and
-  certificates for your own apps are not available yet. A space cannot
-  install cluster-scoped things.
+  in-cluster DNS) is already running on the shared plane. Not available yet:
+  inbound traffic to your apps (no ingress, no LoadBalancer Service, no
+  NodePort, no hostPort), certificates for your apps and persistent volumes.
+  A space cannot install cluster-scoped things, with one exception: the
+  platform API can allow the space CRDs of its own.
 - **Machines are yours.** lok8s does not provision them and kubehz does not
   bill for them.
 - **A deregistered node can come back.** Deregistering removes the node from
-  the space only. It does not revoke the client certificate of the node, and
-  the join script makes the kubelet start at boot. Thus a machine that keeps
+  the space and revokes the open join tickets for its name. It does not revoke
+  the client certificate of the node, and the join script makes the kubelet
+  start at boot. Thus a machine that keeps
   its kubelet registers again. To remove a node for good, first delete the
   machine. If you keep the machine, run `systemctl disable --now kubelet` on
   it and delete `/etc/kubernetes/bootstrap-kubelet.conf` and
@@ -310,8 +313,9 @@ lo kubehz node uncordon --name worker-1   # schedulable again
 - **A drain does not remove the node.** The node stays in the space and
   holds its slot. Uncordon it to put it back into service. To deregister
   the node, use the dashboard or the api route
-  `DELETE /api/spaces/{id}/nodes/{name}`: `lo` has no command for it. Stop
-  its kubelet first (see "A deregistered node can come back" above).
+  `DELETE /api/spaces/{id}/nodes/{name}`: `lo` has no command for it. First
+  delete the machine, or disable its kubelet and delete its kubeconfigs (see
+  "A deregistered node can come back" above).
 - **The token.** The calls need a `KUBEHZ_TOKEN` with the `clusters:write`
   scope. The slug lookup also reads your space list, which needs the `read`
   scope: with `--space-id`, `lo` sends no list request. From a browser
@@ -620,11 +624,11 @@ is deployed. `lo kubehz register` does the same on its own. Both post to
 - **`KUBEHZ_TOKEN`.** lo registers the cluster directly in your account. See
   [claim at provision time](#kubehz-token-claim-at-provision-time). When both
   tokens are set, lo tries this one first.
-- **No token.** lo announces the cluster domain and the MD5 fingerprint of an
-  SSH public key. Anyone can compute that fingerprint, so it proves nothing,
-  and the dashboard does not accept it as a claim ticket. Claim such a
-  cluster with the claim code ([below](#claiming)). The announce is also the
-  anchor for the automatic claim of a hosted control plane.
+- **No token, or both other ways failed (`KubeOne` and `Capi`).** lo announces
+  the cluster domain and the MD5 fingerprint of an SSH public key. Anyone can
+  compute that fingerprint, so it proves nothing, and the dashboard does not
+  accept it as a claim ticket. Claim such a cluster with the claim code
+  ([below](#claiming)).
 
 If the API is unreachable, lo prints a warning and the provisioning continues.
 :::
@@ -1015,7 +1019,9 @@ credential for your cluster and cannot connect into it; the agent pulls, and
 ::: tip What you give up for now
 While the live agent owns the heartbeat, the platform does not receive the
 24 h assessment: the live agent does not collect it yet, so `lo kubehz assess`
-goes stale. Set `agent: cronjob` and re-run `lo kubehz deploy` to get it back.
+goes stale. The live agent does not echo a claim nonce either: claim with the
+claim code, or claim before you switch. Set `agent: cronjob` and re-run
+`lo kubehz deploy` to get both back.
 :::
 
 ### Permissions the live agent holds
