@@ -493,10 +493,9 @@ type csaCheck struct {
 // client-side writer owns. Under --skip-client-side-owned each line says
 // that the object is left out, and the manifest of the check is without
 // these objects. ok is false when the entry fails: when a cancel stopped
-// the read (no line), under
-// --skip-client-side-owned when the read failed or the manifest does not
-// parse (lo cannot find the objects to leave out), or when the objects
-// cannot be taken out of the manifest. Without the flag, a manifest that
+// the read (no line), under --skip-client-side-owned when the read failed
+// or the manifest does not parse (lo cannot find the objects to leave
+// out), or when the objects cannot be taken out of the manifest. Without the flag, a manifest that
 // does not parse is a [warn] line here, and the caller prints the line of
 // a read that failed (csaReadFailedText): a dry run only when its diff
 // worked.

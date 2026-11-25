@@ -711,8 +711,9 @@ lines come in the order of the run; only the `--render-dir` files carry the
   apply of lo moves the fields of these writers to lo. Then it removes each
   of these fields that the entry does not set, if no other manager owns it.
   kubectl moves only the entry of a writer with the `apiVersion` of the
-  object in the entry. It removes the other entries of the writer, but
-  their fields stay on the object, with no manager.
+  object in the entry. It removes the other `Update` entries of the writer
+  that have no subresource, but their fields stay on the object, with no
+  manager.
   `kubectl diff` does not show this removal, thus the entry differs (exit 1)
   also when its diff has no change. The `[warn]` line names the writers,
   and the labels and annotations that the apply removes. lo does not name
@@ -726,7 +727,11 @@ lines come in the order of the run; only the `--render-dir` files carry the
   line and continues. With `--skip-client-side-owned` the entry is then an
   error, because lo cannot find the objects to leave out. A missing CRD is
   not such an error (no object of it can be live), but only when kubectl
-  reports no other error.
+  reports no other error. The check runs for each entry of
+  `spec.bootstrap`, also in `lo up`, `lo provision` and the lok8s
+  operator. It does not run for the `restore.d` files: lo applies them
+  without the check, and `--skip-client-side-owned` does not leave their
+  objects out.
 - `(non-repeatable)`: the render generated secret material that the store
   does not hold yet (a password, a key, a certificate, or a CA because
   `CAROOT` has none), or it updated a value of the store. The dry run keeps

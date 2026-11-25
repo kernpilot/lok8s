@@ -2470,10 +2470,11 @@ bootstrap::_diff_keys() {
 # A <without> that is not empty (what the dry run took out of the diff
 # input: its non-deterministic objects for --ignore-nondeterministic, the
 # objects of a client-side writer for --skip-client-side-owned) adds that
-# the diff by hand can show more, because the file holds the full render. Each argument that lo puts into the command is quoted
-# for a POSIX shell (bootstrap::_sh_quote), so a path with a space, a quote
-# or `$(...)` pastes as one word and runs nothing. The Go twin:
-# diffFailedText (the same bytes).
+# the diff by hand can show more, because the file holds the full render.
+# Each argument that lo puts into the command is quoted for a POSIX shell
+# (bootstrap::_sh_quote), so a path with a space, a quote or `$(...)`
+# pastes as one word and runs nothing. The Go twin: diffFailedText (the
+# same bytes).
 bootstrap::_diff_failed_text() {
   local _dir="${5}" _again="" _more=""
   if [[ -z "${_dir}" ]]; then

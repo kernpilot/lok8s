@@ -174,8 +174,13 @@ jobs:
         # kubectl get -f - prints a List for a stdin, and the jsonpath reads
         # managedFields and prints each fieldsV1 set as JSON. The dry run
         # names the object and exits 1 (kubectl diff does not show the
-        # drop). The real run names the dropped keys, and the last-applied
-        # annotation stays. A second dry run finds no client-side writer.
+        # drop). Its diff shows a change anyway: when kubectl applies an
+        # object that has the last-applied annotation server-side, the API
+        # server updates that annotation. So this step proves the count and
+        # the [warn] line; the unit tests prove that a diff with no change
+        # counts as differs. The real run names the dropped keys, and the
+        # last-applied annotation stays. A second dry run finds no
+        # client-side writer.
         # The bash twin sends the same kubectl argv and reads the same text
         # in the same way (hack/parity-orchestrate.sh).
         run: |
