@@ -369,6 +369,15 @@ for cmd in add-key remove-key; do
   sec_check secrets "${cmd}" "${KEY2}" "${FAKE_ID}"
   sec_no_echo "${FAKE_ID}" "secrets ${cmd} <age key> <private key>"
 done
+# A value with a line break or an escape but no marker passes the argv
+# guard: the not-a-valid-age-key line (age1...) and the not-a-file line
+# print the placeholder, never the value.
+for cmd in add-key remove-key; do
+  for arg in $'age1canary\nCANARYTAIL' $'age1canary\x1b[31mCANARYTAIL' $'Ab0Ab0Ab0\nCANARYTAIL'; do
+    sec_check secrets "${cmd}" "${arg}"
+    sec_no_echo "CANARYTAIL" "secrets ${cmd} <a value with a line break or an escape>"
+  done
+done
 # init and decrypt take the path of a key file: a key pasted into --ssh-key,
 # in both flag forms and split into words, is refused the same way.
 for cmd in init decrypt; do

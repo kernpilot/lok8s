@@ -2373,7 +2373,7 @@ _synthetic_pem() {
 @test "secrets::_shown_path: an END line, a PEM line in any case and a control byte get a placeholder" {
   local dashes="-----" i got loc
   local pem="(not printed: it holds a PEM block)" ctl="(not printed: it holds a line break or a control character)"
-  local -a names=(end-line lower-case mixed-case dotted-i body newline-at-end cr tab escape del c1 utf8)
+  local -a names=(end-line lower-case mixed-case dotted-i body newline-at-end cr tab escape del c1 utf8 unit-sep space)
   local -a inputs=(
     "${dashes}END CERTIFICATE${dashes}"
     "${dashes}begin certificate${dashes}"
@@ -2387,8 +2387,10 @@ _synthetic_pem() {
     $'/k/a\x7fb'
     $'/k/a\xc2\x85b'
     $'/k/\xc3\xa9'
+    $'/k/a\x1fb'
+    '/k/a b'
   )
-  local -a want=("${pem}" "${pem}" "${pem}" "" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "" "")
+  local -a want=("${pem}" "${pem}" "${pem}" "" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "${ctl}" "" "" "${ctl}" "")
   for loc in C C.UTF-8; do
     # Without the locale, bash stays in C and the second half proves
     # nothing: skip it with a reason, after the C half ran.

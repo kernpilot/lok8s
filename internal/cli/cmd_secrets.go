@@ -171,19 +171,19 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // GuardPrivateKeyArgv refuses a `lo secrets` call whose raw argv, its words
 // joined with spaces, has the shape of a private key or holds a PEM line,
 // "-----BEGIN" or "-----END" in any case (secrets.LooksLikeKeyArg): a
-// positional, a flag value (`--ssh-key X`, `--ssh-key=X`, `--domain X`), a flag that cobra does
-// not know (`--unknown=X`), or a paste split into words. No command of lo
-// secrets takes a PEM block as an argument (a certificate, a public key, a
-// static key of OpenVPN): such a word starts with "-", so pflag reads it as
-// a flag, and its error ("bad flag syntax: <arg>") prints all of it. main
-// runs the guard before Execute: cobra's flag parser, its unknown-command
-// error and the argument checks print what they reject. It covers `lo
-// secrets` and every command under it, and fails closed: when cobra cannot
-// resolve a command, it refuses too. That is a Find error, or an argv that
-// resolves to the root itself, whose unknown-command error prints the first
-// word. It prints the refusal (never the argument) and reports whether it
-// refused. A resolved command outside `lo secrets` is left to cobra, unless
-// the first word of the argv by the bash rule is `secrets` (namesSecrets).
+// positional, a flag value (`--ssh-key X`, `--ssh-key=X`, `--domain X`), a flag
+// that cobra does not know (`--unknown=X`), or a paste split into words. No
+// command of lo secrets takes a PEM block as an argument (a certificate, a
+// public key, a static key of OpenVPN): such a word starts with "-", so pflag
+// reads it as a flag, and its error ("bad flag syntax: <arg>") prints all of
+// it. main runs the guard before Execute: cobra's flag parser, its
+// unknown-command error and the argument checks print what they reject. It
+// covers `lo secrets` and every command under it, and fails closed: when cobra
+// cannot resolve a command, it refuses too. That is a Find error, or an argv
+// that resolves to the root itself, whose unknown-command error prints the
+// first word. It prints the refusal (never the argument) and reports whether it
+// refused. A resolved command outside `lo secrets` is left to cobra, unless the
+// first word of the argv by the bash rule is `secrets` (namesSecrets).
 //
 // The first line of the refusal names a private key or the PEM block. For
 // `lo secrets set` (and its alias) the second line names stdin

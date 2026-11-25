@@ -642,6 +642,8 @@ func TestShownKeyPathHidesAControlByte(t *testing.T) {
 		"a tab":                     {"/k/a\tb", ctl},
 		"an escape":                 {"/k/\x1b[31mred", ctl},
 		"a DEL":                     {"/k/a\x7fb", ctl},
+		"a unit separator (0x1F)":   {"/k/a\x1fb", ctl},
+		"a space (0x20)":            {"/k/a b", "/k/a b"},
 		"a C1 character":            {"/k/a\u0085b", "/k/a\u0085b"},
 		"a UTF-8 letter":            {"/k/\u00e9", "/k/\u00e9"},
 	} {

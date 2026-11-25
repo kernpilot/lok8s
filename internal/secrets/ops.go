@@ -24,22 +24,21 @@ import (
 
 // ── Init ─────────────────────────────────────────────────
 
-// publicKeyHint is the hint of Init for a public key file that is not a
-// regular file, or "" for no hint. There is a hint only when nothing is at
-// that path (its lstat fails). When something else is there (a directory, a
-// FIFO, a link to no file), a command that writes the file writes through
-// the link or stops at that entry, and "Generate one" names a new key where
-// there is already a file: the line before the hint, which names the path,
-// is the whole message. When the private key of that .pub is a regular
-// file, the hint writes the .pub from it: a `ssh-keygen -t ed25519` there
-// asks to overwrite the key that decrypt reads. The private key is checked
-// with a stat only; it is never read. Each path goes through shownKeyPath,
-// then shellQuoted. When shownKeyPath replaces the path (it has the shape of
-// a private key, holds a PEM line or holds a control byte), there is no hint
-// either: the hint
-// would hold the placeholder, and a paste of it makes a file of that name.
-// The private key path is a prefix of the .pub path, so the test of the .pub
-// path covers both. Bash twin: the hint of secrets::init, with the same rule
+// publicKeyHint is the hint of Init for a public key file that is not a regular
+// file, or "" for no hint. There is a hint only when nothing is at that path
+// (its lstat fails). When something else is there (a directory, a FIFO, a link
+// to no file), a command that writes the file writes through the link or stops
+// at that entry, and "Generate one" names a new key where there is already a
+// file: the line before the hint, which names the path, is the whole message.
+// When the private key of that .pub is a regular file, the hint writes the .pub
+// from it: a `ssh-keygen -t ed25519` there asks to overwrite the key that
+// decrypt reads. The private key is checked with a stat only; it is never read.
+// Each path goes through shownKeyPath, then shellQuoted. When shownKeyPath
+// replaces the path (it has the shape of a private key, holds a PEM line or
+// holds a control byte), there is no hint either: the hint would hold the
+// placeholder, and a paste of it makes a file of that name. The private key
+// path is a prefix of the .pub path, so the test of the .pub path covers both.
+// Bash twin: the hint of secrets::init, with the same rule
 // (secrets::_path_is_shown).
 func publicKeyHint(sshKey string) string {
 	if _, err := os.Lstat(sshKey); err == nil || shownKeyPath(sshKey) != sshKey {
