@@ -1179,6 +1179,22 @@ EOF
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node remove --name worker-1 --domain hstub.dev --cluster-id cl-1a2b3c4d
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node remove --name worker-1 --domain hstub.dev
   done
+  # The 503 refusals of a hosted node remove: NODE_NOT_REMOVED names the
+  # wait of the body in seconds, NODE_REMOVE_RESULT_UNKNOWN sends the user
+  # to the node list first, and a wait that is absent, a string or above an
+  # hour gives "shortly". kc_reason: two equal outputs could both be wrong.
+  check_api - kubehz node remove --name remove-1 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, not removed, 5 seconds" "Run this command again in 5 seconds."
+  check_api - kubehz node remove --name remove-2 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, result unknown" "Read the node list before a retry:  lo kubehz node status"
+  check_api - kubehz node remove --name remove-3 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, no wait" "Run this command again shortly."
+  check_api - kubehz node remove --name remove-4 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, result unknown, 1 second" "run this command again in 1 second."
+  check_api - kubehz node remove --name remove-5 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, a wait that is a string" "Run this command again shortly."
+  check_api - kubehz node remove --name remove-6 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, a wait above an hour" "Run this command again shortly."
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev

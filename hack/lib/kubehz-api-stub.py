@@ -256,7 +256,32 @@ TICKET = ".".join(("a1b2c3", "d4e5f6g7h8i9j0k1"))
 TICKETS = {"worker-1": TICKET, "worker-nl": TICKET + "\n", "worker-nul": TICKET + "\x00",
            "worker-cr": TICKET + "\r"}
 
+def retry_later(code, message, help_text, seconds):
+    """A 503 refusal with retryAfterSeconds in its data and a Retry-After
+    header, or neither when seconds is None."""
+    status, body = refusal(503, code, message, help_text)
+    if seconds is None:
+        return status, body
+    body["data"]["retryAfterSeconds"] = seconds
+    return status, body, {"Retry-After": str(seconds)}
+
+
+# DELETE /api/clusters/cl-1a2b3c4d/nodes/<name>: the 503 refusals of a node
+# remove on a hosted cluster.
+REMOVE_PREFIX = "/api/clusters/cl-1a2b3c4d/nodes/"
+REMOVE_HELP = "Nothing was removed. Retry after the Retry-After interval."
+REMOVE_OPEN_HELP = "Read the node list of the cluster. If the node is still there, retry the removal after the Retry-After interval."
+REMOVES = {
+    "remove-1": retry_later("NODE_NOT_REMOVED", "The node was not removed: its join ticket was not revoked", REMOVE_HELP, 5),
+    "remove-2": retry_later("NODE_REMOVE_RESULT_UNKNOWN", "The result of this removal is not known", REMOVE_OPEN_HELP, 5),
+    "remove-3": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, None),
+    "remove-4": retry_later("NODE_REMOVE_RESULT_UNKNOWN", "The result of this removal is not known", REMOVE_OPEN_HELP, 1),
+    "remove-5": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "5"),
+    "remove-6": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 3601),
+}
+
 ROUTES = {
+    **{("DELETE", REMOVE_PREFIX + name): answer for name, answer in REMOVES.items()},
     ("GET", "/api/spaces"): (200, ok([SPACE, ODD_SPACE], {"pagination": {"page": 1, "perPage": 500, "total": 2, "pages": 1}})),
     ("GET", "/api/spaces/sp-1a2b3c4d"): (200, ok(SPACE_DETAIL)),
     ("GET", "/api/spaces/sp-1a2b3c4d/nodes"): (200, ok(SPACE_NODES)),

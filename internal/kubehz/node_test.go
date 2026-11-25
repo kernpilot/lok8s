@@ -1558,6 +1558,47 @@ func TestNodeRemove(t *testing.T) {
 	mustContain(t, h.output(), "lo kubehz node status")
 }
 
+// A 503 of the remove names the wait of the body (retryAfterSeconds, in
+// data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
+// is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
+// list before a retry. A wait that is absent, a string, a fraction, 0,
+// above an hour or of five digits gives "shortly". The help of the api (it
+// names a header that lo does not show) is not printed. Bash twin:
+// "remove: a 503 names the wait of the body, and the node list for an open
+// result".
+func TestNodeRemoveRetryLater(t *testing.T) {
+	const head = "[error] Failed to remove node 'box-1' (HTTP 503): m\n"
+	const gone = head + "  The node is still in the cluster. Run this command again "
+	const open = head + "  Read the node list before a retry:  lo kubehz node status\n  If the node is still there, run this command again "
+	body := func(code, wait string) string {
+		return `{"statusCode":503,"data":{"code":"` + code + `","message":"m","help":"Retry after the Retry-After interval."` + wait + `}}`
+	}
+	for name, tc := range map[string]struct{ body, want string }{
+		"not removed, 5":          {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":5`), gone + "in 5 seconds.\n"},
+		"not removed, 1":          {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":1`), gone + "in 1 second.\n"},
+		"not removed, 3600":       {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":3600`), gone + "in 3600 seconds.\n"},
+		"not removed, 3601":       {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":3601`), gone + "shortly.\n"},
+		"not removed, 10000":      {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":10000`), gone + "shortly.\n"},
+		"not removed, absent":     {body("NODE_NOT_REMOVED", ""), gone + "shortly.\n"},
+		"not removed, a string":   {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":"5"`), gone + "shortly.\n"},
+		"not removed, a fraction": {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":5.5`), gone + "shortly.\n"},
+		"not removed, 0":          {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":0`), gone + "shortly.\n"},
+		"not removed, top level":  {`{"code":"NODE_NOT_REMOVED","message":"m","retryAfterSeconds":7}`, gone + "in 7 seconds.\n"},
+		"unknown, 5":              {body("NODE_REMOVE_RESULT_UNKNOWN", `,"retryAfterSeconds":5`), open + "in 5 seconds.\n"},
+		"unknown, absent":         {body("NODE_REMOVE_RESULT_UNKNOWN", ""), open + "shortly.\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := defaultNodeStubs()
+			s.removeCode, s.removeBody = 503, tc.body
+			h := nodeHarness(t, s, "hosted", "")
+			mustErr(t, h.ctx.NodeRemove(t.Context(), "acme.example.org", NodeOpts{Name: "box-1"}))
+			if got := h.errOut.String(); got != tc.want {
+				t.Errorf("stderr %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // ── status ───────────────────────────────────────────────
 
 func TestNodeStatus(t *testing.T) {

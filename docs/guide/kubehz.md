@@ -550,6 +550,12 @@ notifies you, and removes an unacknowledged dark node after 30 days. Use
 `lo kubehz node remove` when you already know the machine is gone.
 :::
 
+When the platform cannot finish a removal, the command fails with `HTTP 503`
+and tells you when to run it again: in seconds, when the platform sends a
+wait. When the platform does not know if the removal happened, the command
+tells you to read the node list first. Run `lo kubehz node status`, and
+remove the node again only when it is still there.
+
 ### When a join is refused
 
 Every refusal names what to do next. The four you are most likely to meet:

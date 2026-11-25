@@ -9,6 +9,7 @@ package kubehz
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -203,9 +204,50 @@ func (c *Context) nodeAPIError(what string, res *httpResult) {
 	case "HOSTED_BACKEND_ERROR":
 		c.errorf("kubehz: the hosted control-plane backend did not answer%s", optSuffix(" — ", msg))
 		c.echoErr("  Nothing changed. Try again shortly, or contact kubehz support.")
+	case "NODE_NOT_REMOVED":
+		// A 503 of the remove: the node is still in the cluster, and the
+		// same call can succeed after the wait of the body.
+		c.apiErrorLine(what, res)
+		c.echoErr("  The node is still in the cluster. Run this command again %s.", retryWait(res.Body))
+	case "NODE_REMOVE_RESULT_UNKNOWN":
+		// A 503 of the remove: the platform does not know if the removal
+		// happened, so the node list comes before a retry.
+		c.apiErrorLine(what, res)
+		c.echoErr("  Read the node list before a retry:  lo kubehz node status")
+		c.echoErr("  If the node is still there, run this command again %s.", retryWait(res.Body))
 	default:
 		c.spaceAPIError(what, res)
 	}
+}
+
+// retryWaitMaxSeconds is the longest wait that retryWait names: an hour.
+const retryWaitMaxSeconds = 3600
+
+// retryWait is the wait of a refusal body for a help line: "in N seconds"
+// ("in 1 second") from `.data.retryAfterSeconds // .retryAfterSeconds`,
+// when that is a JSON number in digits only, from 1 to
+// retryWaitMaxSeconds. Else it is "shortly": a string, a fraction, 0 or a
+// number above an hour names no number. Atoi and the range check are
+// enough here: a JSON number has no "+" and no leading zero, a minus sign
+// gives a number below 1, and Atoi refuses a fraction, an exponent and a
+// number that does not fit. The bash twin is node::retry_wait.
+func retryWait(body []byte) string {
+	v, ok := parseJSON(body)
+	if !ok {
+		return "shortly"
+	}
+	n, ok := jalt(nil, jget(v, "data", "retryAfterSeconds"), jget(v, "retryAfterSeconds")).(json.Number)
+	if !ok {
+		return "shortly"
+	}
+	s, err := strconv.Atoi(string(n))
+	switch {
+	case err != nil || s < 1 || s > retryWaitMaxSeconds:
+		return "shortly"
+	case s == 1:
+		return "in 1 second"
+	}
+	return "in " + strconv.Itoa(s) + " seconds"
 }
 
 var nodeNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)

@@ -1768,6 +1768,36 @@ _refuse_flag() {
   assert_output --partial "lo kubehz node status"
 }
 
+# A 503 of the remove names the wait of the body (retryAfterSeconds, in
+# data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
+# is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
+# list before a retry. A wait that is absent, a string, a fraction, 0,
+# above an hour or of five digits gives "shortly". The help of the api is
+# not printed. Go twin: TestNodeRemoveRetryLater.
+@test "remove: a 503 names the wait of the body, and the node list for an open result" {
+  _stub_all
+  local head="[error] Failed to remove node 'box-1' (HTTP 503): m"$'\n' i
+  local gone="${head}  The node is still in the cluster. Run this command again "
+  local open="${head}  Read the node list before a retry:  lo kubehz node status"$'\n'"  If the node is still there, run this command again "
+  local -a codes=(NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED
+    NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_REMOVE_RESULT_UNKNOWN NODE_REMOVE_RESULT_UNKNOWN)
+  local -a waits=(',"retryAfterSeconds":5' ',"retryAfterSeconds":1' ',"retryAfterSeconds":3600' ',"retryAfterSeconds":3601'
+    ',"retryAfterSeconds":10000' '' ',"retryAfterSeconds":"5"' ',"retryAfterSeconds":5.5' ',"retryAfterSeconds":0'
+    ',"retryAfterSeconds":5' '')
+  local -a want=("${gone}in 5 seconds." "${gone}in 1 second." "${gone}in 3600 seconds." "${gone}shortly."
+    "${gone}shortly." "${gone}shortly." "${gone}shortly." "${gone}shortly." "${gone}shortly."
+    "${open}in 5 seconds." "${open}shortly.")
+  STUB_REMOVE_CODE="503"
+  for i in "${!waits[@]}"; do
+    STUB_REMOVE_BODY='{"statusCode":503,"data":{"code":"'"${codes[i]}"'","message":"m","help":"Retry after the Retry-After interval."'"${waits[i]}"'}}'
+    run node::remove --name box-1
+    [ "$status" -ne 0 ] && [ "$output" = "${want[i]}" ] || { echo "row ${i}: status $status: $output" >&2; return 1; }
+  done
+  STUB_REMOVE_BODY='{"code":"NODE_NOT_REMOVED","message":"m","retryAfterSeconds":7}'
+  run node::remove --name box-1
+  [ "$status" -ne 0 ] && [ "$output" = "${gone}in 7 seconds." ] || { echo "top level: status $status: $output" >&2; return 1; }
+}
+
 # ── status ───────────────────────────────────────────────
 
 @test "status: renders the slot count and one row per node" {

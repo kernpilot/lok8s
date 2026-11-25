@@ -207,12 +207,19 @@ func (c *Context) spaceAPIError(what string, res *httpResult) {
 	// Clipped as well as scrubbed: this is the FIRST api call lo makes, and
 	// an unbounded server string here is a terminal full of whatever the api
 	// chose. The bash twin bounds both halves the same way.
-	msg := clip(scrub(apiMessage(res.Body)))
 	help := clip(scrub(apiHelp(res.Body)))
-	c.errorf("%s (HTTP %d)%s", what, res.Status, optSuffix(": ", msg))
+	c.apiErrorLine(what, res)
 	if help != "" {
 		c.echoErr("  %s", help)
 	}
+}
+
+// apiErrorLine is the [error] line of spaceAPIError: what, the status and
+// the api's message, scrubbed and clipped. nodeAPIError prints it with its
+// own help for a code whose api help does not fit a CLI. The bash twin is
+// kubehz::space_api_error_line.
+func (c *Context) apiErrorLine(what string, res *httpResult) {
+	c.errorf("%s (HTTP %d)%s", what, res.Status, optSuffix(": ", clip(scrub(apiMessage(res.Body)))))
 }
 
 // spaceLookup ports kubehz::space_lookup: the Space row by slug (nil when

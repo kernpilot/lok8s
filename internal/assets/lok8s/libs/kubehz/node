@@ -224,10 +224,41 @@ node::api_error() {
     HOSTED_BACKEND_ERROR)
       error "kubehz: the hosted control-plane backend did not answer${msg:+ — ${msg}}"
       echo "  Nothing changed. Try again shortly, or contact kubehz support." >&2 ;;
+    NODE_NOT_REMOVED)
+      # A 503 of the remove: the node is still in the cluster, and the same
+      # call can succeed after the wait of the body.
+      kubehz::space_api_error_line "${context}"
+      echo "  The node is still in the cluster. Run this command again $(node::retry_wait)." >&2 ;;
+    NODE_REMOVE_RESULT_UNKNOWN)
+      # A 503 of the remove: the platform does not know if the removal
+      # happened, so the node list comes before a retry.
+      kubehz::space_api_error_line "${context}"
+      echo "  Read the node list before a retry:  lo kubehz node status" >&2
+      echo "  If the node is still there, run this command again $(node::retry_wait)." >&2 ;;
     *)
       kubehz::space_api_error "${context}" ;;
   esac
   return 0
+}
+
+# The wait of a refusal body (KUBEHZ_SPACE_API_BODY) for a help line:
+# "in N seconds" ("in 1 second") from retryAfterSeconds (.data first), when
+# that is a JSON number in digits only, from 1 to 3600 (an hour). Else it
+# is "shortly": a string, a fraction, 0 or a number above an hour names no
+# number. Go twin: retryWait.
+# Usage: node::retry_wait
+node::retry_wait() {
+  local s
+  s=$(jq -r '(.data.retryAfterSeconds // .retryAfterSeconds) | select(type == "number")' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || s=""
+  if [[ "${s}" =~ ^[0-9]{1,4}$ ]] && (( 10#${s} >= 1 && 10#${s} <= 3600 )); then
+    if (( 10#${s} == 1 )); then
+      printf '%s' "in 1 second"
+    else
+      printf 'in %d seconds' "$(( 10#${s} ))"
+    fi
+  else
+    printf '%s' "shortly"
+  fi
 }
 
 # ── Local facts + shape checks ───────────────────────────
