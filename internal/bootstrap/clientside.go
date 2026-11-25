@@ -118,10 +118,32 @@ func (e *Engine) readFieldManagers(ctx context.Context, kubeconfig, manifest str
 	case execx.LaunchFailed(err):
 		// bash: the shell's 127 of a command that is not found.
 		r.failed = 127
-	case !raceRe.MatchString(errOut.String()):
+	case !raceOnly(errOut.String()):
 		r.failed = execx.ExitCode(err)
 	}
 	return r
+}
+
+// raceOnly reports whether the stderr of a read that failed is the error
+// of a missing CRD only (bash: bootstrap::_csa_race_only): a line of
+// raceRe, and each other line is one too, empty, or a warning of the API
+// server ("Warning: "). A line of another error fails the read, also next
+// to the line of a missing CRD: kubectl then did not read all objects that
+// can be live, and --skip-client-side-owned cannot find all the objects to
+// leave out.
+func raceOnly(stderr string) bool {
+	race := false
+	for line := range strings.SplitSeq(stderr, "\n") {
+		switch {
+		case line == "":
+		case raceRe.MatchString(line):
+			race = true
+		case strings.HasPrefix(line, "Warning: "):
+		default:
+			return false
+		}
+	}
+	return race
 }
 
 // parseFieldManagers reads the output of csaTemplate. A line of another
@@ -189,10 +211,10 @@ type manifestObject struct {
 }
 
 // manifestObjects reads the objects of a manifest, in order. A document
-// that is not a map is not an object. A manifest that does not parse gives
-// no objects: the check then finds no object to name (bash: yq fails on
-// the stream).
-func manifestObjects(stream string) []manifestObject {
+// that is not a map is not an object. ok is false when the manifest does
+// not parse (bash: yq fails on the stream): lo then cannot find the
+// objects to name or to leave out.
+func manifestObjects(stream string) (objs []manifestObject, ok bool) {
 	str := func(v any) string {
 		s, _ := v.(string)
 		return s
@@ -206,15 +228,14 @@ func manifestObjects(stream string) []manifestObject {
 		sort.Strings(out)
 		return out
 	}
-	var objs []manifestObject
 	dec := yaml.NewDecoder(strings.NewReader(stream))
 	for {
 		var node yaml.Node
 		if err := dec.Decode(&node); err != nil {
 			if errors.Is(err, io.EOF) {
-				return objs
+				return objs, true
 			}
-			return nil
+			return nil, false
 		}
 		var m map[string]any
 		if node.Decode(&m) != nil || m == nil {
@@ -466,10 +487,12 @@ type csaCheck struct {
 // client-side writer owns. Under --skip-client-side-owned each line says
 // that the object is left out, and the manifest of the check is without
 // these objects. ok is false when the entry fails: under
-// --skip-client-side-owned when the read failed (lo cannot find the
-// objects to leave out) or when the objects cannot be taken out of the
-// manifest. The caller prints the line of a read that failed otherwise
-// (csaReadFailedText): a dry run only when its diff worked.
+// --skip-client-side-owned when the read failed or the manifest does not
+// parse (lo cannot find the objects to leave out), or when the objects
+// cannot be taken out of the manifest. Without the flag, a manifest that
+// does not parse is a [warn] line here, and the caller prints the line of
+// a read that failed (csaReadFailedText): a dry run only when its diff
+// worked.
 func (e *Engine) clientSideBefore(ctx context.Context, stderr io.Writer, entry, kubeconfig, manifest string) (csaCheck, bool) {
 	c := csaCheck{manifest: manifest}
 	read := e.readFieldManagers(ctx, kubeconfig, manifest)
@@ -481,8 +504,17 @@ func (e *Engine) clientSideBefore(ctx context.Context, stderr io.Writer, entry, 
 		}
 		c.readFailed = read.failed
 	}
+	// The error of the YAML decoder can quote a value: fixed text.
+	docs, parsed := manifestObjects(manifest)
+	if !parsed {
+		if skip {
+			ui.ErrorTo(stderr, "bootstrap: %s: lo cannot read the objects of the manifest, so --skip-client-side-owned cannot find the objects to leave out", entry)
+			return c, false
+		}
+		ui.WarnTo(stderr, "bootstrap: %s: lo cannot read the objects of the manifest, so it cannot name the fields that the apply drops", entry)
+	}
 	var drop []string
-	for _, o := range clientSideObjects(manifestObjects(manifest), read.objects) {
+	for _, o := range clientSideObjects(docs, read.objects) {
 		if skip {
 			ui.WarnTo(stderr, "bootstrap: %s: %s", entry, o.skipText())
 			drop = append(drop, o.label)

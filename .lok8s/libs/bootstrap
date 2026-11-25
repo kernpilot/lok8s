@@ -948,9 +948,10 @@ parse as $live
 # twin: Engine.readFieldManagers): KUBERC=off kubectl --kubeconfig
 # <kubeconfig> get -f - --ignore-not-found --show-managed-fields -o
 # jsonpath=<template>, with the manifest on stdin. Prints its output.
-# Returns 0 when the read worked, or failed only for a missing CRD (an
-# object whose CRD is not there cannot be live, and kubectl reads the other
-# objects), else the exit code of kubectl. Its stderr goes to a temp file
+# Returns 0 when the read worked, or failed only for a missing CRD
+# (bootstrap::_csa_race_only: an object whose CRD is not there cannot be
+# live, and kubectl reads the other objects), else the exit code of
+# kubectl. Its stderr goes to a temp file
 # that only the classification reads: lo never prints it.
 bootstrap::_csa_read() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
@@ -963,11 +964,25 @@ bootstrap::_csa_read() {
   _emsg="$(cat "${_err}" 2>/dev/null || true)"
   rm -f "${_err}"
   local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
-  if (( _rc != 0 )) && kapply::output_matches "${_race}" "${_emsg}"; then
+  if (( _rc != 0 )) && bootstrap::_csa_race_only "${_race}" "${_emsg}"; then
     _rc=0
   fi
   printf '%s' "${_out}"
   return "${_rc}"
+}
+
+# bootstrap::_csa_race_only <ere> <stderr>
+# Whether the stderr of a read that failed is the error of a missing CRD
+# only (the Go twin: raceOnly): a line that matches <ere>, and each other
+# line matches it too, is empty, or is a warning of the API server
+# ("Warning: "). A line of another error fails the read, also next to the
+# line of a missing CRD. The stderr goes to grep through a pipe, as in
+# kapply::output_matches.
+bootstrap::_csa_race_only() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }
+  kapply::output_matches "${1}" "${2}" || return 1
+  ! printf '%s\n' "${2}" | grep -v -E '^(Warning: |$)' | grep -v -E "${1}" >/dev/null
 }
 
 # bootstrap::_csa_docs <manifest>
@@ -975,13 +990,14 @@ bootstrap::_csa_read() {
 # manifestObjects): its label (l, the label of bootstrap::_object_lines,
 # what bootstrap::_without_objects drops), apiVersion (v), group (g), kind
 # (k), name (n), namespace (s), and the key names of its labels (lk) and
-# annotations (ak).
-# No value. A document that is not a map is not an object.
+# annotations (ak). No value. A document that is not a map is not an
+# object. Returns 1 when the manifest does not parse. No message of yq or
+# jq: it can quote the manifest.
 bootstrap::_csa_docs() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local -a _rc
-  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' | jq -c '
+  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' 2>/dev/null | jq -c '
     def str: if type == "string" then . else "" end;
     def names: if type == "object" then keys else [] end;
     (.metadata | if type == "object" then . else {} end) as $m
@@ -989,7 +1005,7 @@ bootstrap::_csa_docs() {
     | {l: "\(.apiVersion | str) \(.kind | str) \(if $ns != "" then $ns + "/" else "" end)\($m.name | str)",
        v: (.apiVersion | str), g: (.apiVersion | str | split("/") | if length > 1 then .[0] else "" end),
        k: (.kind | str), n: ($m.name | str), s: $ns,
-       lk: ($m.labels | names), ak: ($m.annotations | names)}'
+       lk: ($m.labels | names), ak: ($m.annotations | names)}' 2>/dev/null
   _rc=("${PIPESTATUS[@]}")
   (( _rc[0] == 0 && _rc[1] == 0 && _rc[2] == 0 ))
 }
@@ -999,15 +1015,17 @@ bootstrap::_csa_docs() {
 # owns (the Go twin: clientSideObjects), in the order of the read: its warn
 # text, its skip text, its check (the JSON that bootstrap::_csa_after reads,
 # or - when the writers own no label or annotation that the target does not
-# set) and the label of its manifest object, separated by tabs. A manifest
-# that does not parse gives no objects: the check then names no object.
+# set) and the label of its manifest object, separated by tabs. Returns 1
+# when the manifest does not parse or jq fails (the Go twin:
+# manifestObjects gives ok false): lo then cannot find the objects. No
+# message of jq: it can quote a name.
 bootstrap::_csa_objects() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _docs
-  _docs="$(bootstrap::_csa_docs "${1}")" || _docs=""
+  _docs="$(bootstrap::_csa_docs "${1}")" || return 1
   printf '%s' "${2}" \
-    | jq -R -s -r --slurpfile docs <(printf '%s\n' "${_docs}") "${_BOOTSTRAP_CSA_JQ_DEFS}${_BOOTSTRAP_CSA_BEFORE_JQ}"
+    | jq -R -s -r --slurpfile docs <(printf '%s\n' "${_docs}") "${_BOOTSTRAP_CSA_JQ_DEFS}${_BOOTSTRAP_CSA_BEFORE_JQ}" 2>/dev/null
 }
 
 # bootstrap::_csa_read_failed_text <addon_name> <rc>
@@ -1027,10 +1045,12 @@ bootstrap::_csa_read_failed_text() {
 # of them that has keys to check after the apply), _csa_left_out (the count
 # of the objects left out) and _csa_failed (the exit code of a read that
 # failed, 0 when it worked). Returns 1 when the entry fails: under
-# --skip-client-side-owned when the read failed (lo cannot find the objects
-# to leave out) or when the objects cannot be taken out of the manifest. The
-# caller prints the line of a read that failed otherwise
-# (bootstrap::_csa_read_failed_text): a dry run only when its diff worked.
+# --skip-client-side-owned when the read failed or lo cannot read the
+# objects of the manifest (lo cannot find the objects to leave out), or
+# when the objects cannot be taken out of the manifest. Without the flag,
+# a manifest that lo cannot read is a [warn] line here, and the caller
+# prints the line of a read that failed (bootstrap::_csa_read_failed_text):
+# a dry run only when its diff worked.
 bootstrap::_csa_before() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
@@ -1045,7 +1065,14 @@ bootstrap::_csa_before() {
     fi
     _csa_failed="${_rc}"
   fi
-  _lines="$(bootstrap::_csa_objects "${3}" "${_read}")" || _lines=""
+  if ! _lines="$(bootstrap::_csa_objects "${3}" "${_read}")"; then
+    if (( ${bootstrap_skip_csa:-0} )); then
+      error "bootstrap: ${_entry}: lo cannot read the objects of the manifest, so --skip-client-side-owned cannot find the objects to leave out"
+      return 1
+    fi
+    warn "bootstrap: ${_entry}: lo cannot read the objects of the manifest, so it cannot name the fields that the apply drops"
+    _lines=""
+  fi
   while IFS=$'\t' read -r _w _s _j _l; do
     [[ -n "${_w}" ]] || continue
     if (( ${bootstrap_skip_csa:-0} )); then

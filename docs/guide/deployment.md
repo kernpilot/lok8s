@@ -722,9 +722,11 @@ lines come in the order of the run; only the `--render-dir` files carry the
   objects out of the diff and out of the apply: the mark is then
   `(client-side owned, left out: N)`. lo never removes the last-applied
   annotation. When lo cannot read the field managers (for example, RBAC
-  does not allow `get`), it prints a `[warn]` line and continues. With
-  `--skip-client-side-owned` the entry is then an error, because lo cannot
-  find the objects to leave out.
+  does not allow `get`) or the objects of the render, it prints a `[warn]`
+  line and continues. With `--skip-client-side-owned` the entry is then an
+  error, because lo cannot find the objects to leave out. A missing CRD is
+  not such an error (no object of it can be live), but only when kubectl
+  reports no other error.
 - `(non-repeatable)`: the render generated secret material that the store
   does not hold yet (a password, a key, a certificate, or a CA because
   `CAROOT` has none), or it updated a value of the store. The dry run keeps

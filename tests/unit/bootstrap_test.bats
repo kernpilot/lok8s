@@ -7328,8 +7328,21 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_line "bootstrap dry-run: testcni: unchanged"
   refute_output --partial "lo cannot read the field managers"
 
-  CSA_READ_ERR="Error from server (Forbidden): namespaces is forbidden"
+  # A missing CRD next to another error is a read that failed.
+  CSA_READ_ERR=$'error: resource mapping not found for name: x: no matches for kind\nError from server (Forbidden): namespaces is forbidden'
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: testcni: unchanged"
+  assert_line "${failed}"
+  refute_output --partial "Forbidden"
+
   local bootstrap_skip_csa=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: testcni: error"
+  assert_line "[error] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so --skip-client-side-owned cannot find the objects to leave out"
+
+  CSA_READ_ERR="Error from server (Forbidden): namespaces is forbidden"
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
   assert_line "bootstrap dry-run: testcni: error"
@@ -7343,6 +7356,44 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
   assert_line "bootstrap dry-run: testcni: error"
   refute_output --partial "lo cannot read the field managers"
+}
+
+# A read that failed counts as the error of a missing CRD only when each
+# line of its stderr is one, empty, or a warning of the API server. Go:
+# TestCSARaceOnly.
+@test "bootstrap::_csa_race_only: only the lines of a missing CRD and warnings" {
+  local -r re='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
+  run bootstrap::_csa_race_only "${re}" $'error: resource mapping not found for name: "x" namespace: "" from "STDIN": no matches for kind "X" in version "example.com/v1"\nensure CRDs are installed first'
+  assert_success
+  run bootstrap::_csa_race_only "${re}" $'Warning: v1 ComponentStatus is deprecated in v1.19+\n\nerror: resource mapping not found for name: x: no matches for kind'
+  assert_success
+  run bootstrap::_csa_race_only "${re}" $'error: resource mapping not found for name: x: no matches for kind\nError from server (Forbidden): namespaces is forbidden'
+  assert_failure
+  run bootstrap::_csa_race_only "${re}" $'Error from server (Forbidden): namespaces is forbidden\nerror: resource mapping not found for name: x: no matches for kind'
+  assert_failure
+  run bootstrap::_csa_race_only "${re}" ''
+  assert_failure
+  run bootstrap::_csa_race_only "${re}" 'Warning: v1 ComponentStatus is deprecated in v1.19+'
+  assert_failure
+}
+
+# A manifest that lo cannot read: under --skip-client-side-owned the entry
+# fails, else a [warn] line. No object is named or left out, and lo prints
+# no message of yq or jq. Go: TestClientSideBeforeManifestThatDoesNotParse.
+@test "bootstrap::_csa_before: a manifest that does not parse" {
+  local -r bad=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  labels: [\n'
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_skip_csa=1
+  run bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${bad}"
+  assert_failure
+  assert_output "[error] bootstrap: testcni: lo cannot read the objects of the manifest, so --skip-client-side-owned cannot find the objects to leave out"
+  [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
+  bootstrap_skip_csa=0
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  run bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${bad}"
+  assert_success
+  assert_output "[warn] bootstrap: testcni: lo cannot read the objects of the manifest, so it cannot name the fields that the apply drops"
+  [ "$(_csa_calls)" = "read" ] || { cat "${KCALLS}"; return 1; }
 }
 
 # A real run names each object of a client-side writer before the apply,

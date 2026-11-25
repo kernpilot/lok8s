@@ -109,7 +109,8 @@ func TestCSATemplateReadsBothShapes(t *testing.T) {
 // csaWarnings runs the check over a read and a manifest and returns the
 // [warn] texts: the warn text of each object, and its skip text.
 func csaWarnings(read, manifest string) (warn, skip []string) {
-	for _, o := range clientSideObjects(manifestObjects(manifest), parseFieldManagers(read)) {
+	docs, _ := manifestObjects(manifest)
+	for _, o := range clientSideObjects(docs, parseFieldManagers(read)) {
 		warn = append(warn, o.warnText())
 		skip = append(skip, o.skipText())
 	}
@@ -310,6 +311,9 @@ func TestDryRunReadFailure(t *testing.T) {
 	}{
 		{"forbidden", "Error from server (Forbidden): namespaces is forbidden", false, failed, "unchanged"},
 		{"a missing CRD", "error: resource mapping not found for name: x: no matches for kind", false, "", "unchanged"},
+		{"a missing CRD and another error", "error: resource mapping not found for name: x: no matches for kind\nError from server (Forbidden): namespaces is forbidden", false, failed, "unchanged"},
+		{"a missing CRD and another error, skip", "error: resource mapping not found for name: x: no matches for kind\nError from server (Forbidden): namespaces is forbidden", true,
+			"[error] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so --skip-client-side-owned cannot find the objects to leave out\n", "error"},
 		{"forbidden, skip", "Error from server (Forbidden): namespaces is forbidden", true,
 			"[error] bootstrap: testcni: lo cannot read the field managers of the live objects (kubectl get exited 1), so --skip-client-side-owned cannot find the objects to leave out\n", "error"},
 	} {
@@ -466,5 +470,56 @@ func TestDryRunClientSideExitCode(t *testing.T) {
 	f.handler = (&csaHandler{reads: []string{nsLines}}).handle
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); driver.ExitCode(err) != 1 {
 		t.Fatalf("rc = %d (%v), want 1", driver.ExitCode(err), err)
+	}
+}
+
+// A read that failed counts as the error of a missing CRD only when each
+// line of its stderr is one, empty, or a warning of the API server. bats:
+// "bootstrap::_csa_race_only: only the lines of a missing CRD and
+// warnings".
+func TestCSARaceOnly(t *testing.T) {
+	for _, tc := range []struct {
+		stderr string
+		want   bool
+	}{
+		{"error: resource mapping not found for name: \"x\" namespace: \"\" from \"STDIN\": no matches for kind \"X\" in version \"example.com/v1\"\nensure CRDs are installed first", true},
+		{"Warning: v1 ComponentStatus is deprecated in v1.19+\n\nerror: resource mapping not found for name: x: no matches for kind", true},
+		{"error: resource mapping not found for name: x: no matches for kind\nError from server (Forbidden): namespaces is forbidden", false},
+		{"Error from server (Forbidden): namespaces is forbidden\nerror: resource mapping not found for name: x: no matches for kind", false},
+		{"", false},
+		{"Warning: v1 ComponentStatus is deprecated in v1.19+", false},
+	} {
+		if got := raceOnly(tc.stderr); got != tc.want {
+			t.Errorf("raceOnly(%q) = %v, want %v", tc.stderr, got, tc.want)
+		}
+	}
+}
+
+// A manifest that lo cannot read: under --skip-client-side-owned the entry
+// fails, else a [warn] line. No object is named or left out, and lo prints
+// no message of the YAML decoder. bats: "bootstrap::_csa_before: a
+// manifest that does not parse".
+func TestClientSideBeforeManifestThatDoesNotParse(t *testing.T) {
+	const bad = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  labels: [\n"
+	for _, tc := range []struct {
+		skip bool
+		ok   bool
+		want string
+	}{
+		{true, false, "[error] bootstrap: testcni: lo cannot read the objects of the manifest, so --skip-client-side-owned cannot find the objects to leave out\n"},
+		{false, true, "[warn] bootstrap: testcni: lo cannot read the objects of the manifest, so it cannot name the fields that the apply drops\n"},
+	} {
+		e, f, job := csaJob(t)
+		e.Options.SkipClientSideOwned = tc.skip
+		h := &csaHandler{reads: []string{nsLines}}
+		f.handler = h.handle
+		var errOut bytes.Buffer
+		c, ok := e.clientSideBefore(t.Context(), &errOut, job.Name, job.Kubeconfig, bad)
+		if ok != tc.ok || errOut.String() != tc.want || len(c.objects) != 0 || c.leftOut != 0 {
+			t.Errorf("skip %v: ok %v, objects %d, left out %d, stderr:\n%s\nwant %q", tc.skip, ok, len(c.objects), c.leftOut, errOut.String(), tc.want)
+		}
+		if !slices.Equal(h.calls, []string{"read"}) {
+			t.Errorf("skip %v: kubectl calls = %v, want the read", tc.skip, h.calls)
+		}
 	}
 }
