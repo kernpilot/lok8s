@@ -1720,8 +1720,7 @@ _refuse_flag() {
     STUB_MINT_BODY='{"statusCode":503,"data":{"code":"'"${codes[i]}"'","message":"m","help":"Mint a new ticket after the Retry-After interval."'"${waits[i]}"'}}'
     run node::join --name box-1 --pool metal
     [ "$status" -ne 0 ] || { echo "row ${i}: status 0: $output" >&2; return 1; }
-    # The wanted lines, and each one ends its line.
-    [[ "$output" == *"${want[i]}" || "$output" == *"${want[i]}"$'\n'* ]] || { echo "row ${i}: $output" >&2; return 1; }
+    [ "$output" = "${want[i]}" ] || { echo "row ${i}: $output" >&2; return 1; }
     [[ "$output" != *"Retry-After"* ]] || { echo "row ${i}: the help of the api is printed: $output" >&2; return 1; }
   done
 }

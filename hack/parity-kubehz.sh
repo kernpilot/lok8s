@@ -1202,6 +1202,17 @@ EOF
   kc_reason "remove, a whole wait in the form of a fraction" "The node is still in the cluster. Run this command again in 1000 seconds."
   check_api - kubehz node remove --name remove-9 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, a fraction" "The node is still in the cluster. Run this command again shortly."
+  # Number forms that json.dumps does not write (the stub sends them as
+  # written): the value counts, not its form. 36.01e2 is above an hour, and
+  # 1e400 is too large for a float.
+  check_api - kubehz node remove --name remove-10 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 5e0" "The node is still in the cluster. Run this command again in 5 seconds."
+  check_api - kubehz node remove --name remove-11 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 1E3" "The node is still in the cluster. Run this command again in 1000 seconds."
+  check_api - kubehz node remove --name remove-12 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 36.01e2" "The node is still in the cluster. Run this command again shortly."
+  check_api - kubehz node remove --name remove-13 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 1e400" "The node is still in the cluster. Run this command again shortly."
   check_api - kubehz node remove --name remove-7 --domain hstub.dev --cluster-id cl-1a2b3c4d
   kc_reason "remove, join changes busy" "The platform is busy with other join changes of this account."
   kc_reason "remove, join changes busy, the wait" "  Run this command again in 5 seconds."

@@ -1564,9 +1564,8 @@ func TestNodeJoinRetryLater(t *testing.T) {
 			s.mintCode, s.mintBody = 503, tc.body
 			h := nodeHarness(t, s, "hosted", "")
 			mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
-			got := h.errOut.String()
-			if !strings.Contains(got, tc.want) {
-				t.Errorf("stderr %q\nwant it to hold %q", got, tc.want)
+			if got := h.errOut.String(); got != tc.want {
+				t.Errorf("stderr %q\nwant %q", got, tc.want)
 			}
 			if strings.Contains(h.output(), "Retry-After") {
 				t.Errorf("the help of the api is printed: %q", h.output())

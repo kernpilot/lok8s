@@ -1215,6 +1215,7 @@ _private_key_refusal() {
 # TestInitRefusesAPrivateKeyFileAtAHiddenPath.
 @test "secrets init: the refusal of a private key file at a path that ends in a newline prints a placeholder" {
   _init_fakes
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
   local path="${BATS_TEST_TMPDIR}/key"$'\n'
   printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" "${KEY_CANARY}" > "${path}"
   KEY_PATH="${path}"
@@ -1223,6 +1224,7 @@ _private_key_refusal() {
   [ "$status" -eq 1 ] && [ "$output" = "[error] (not printed: it holds a line break or a control character) holds a private key, not a public key: nothing from it is printed
 [error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key" ] || {
     echo "status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age read the file" >&2; return 1; }
 }
 
 # When only the PEM rule of secrets::_shown_path replaces a path that does

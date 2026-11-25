@@ -266,6 +266,19 @@ def retry_later(code, message, help_text, seconds):
     return status, body, {"Retry-After": str(seconds)}
 
 
+class RawJSON(str):
+    """A JSON body that the stub sends as written: json.dumps never writes
+    a number as 5e0 or 1E3."""
+
+
+def retry_later_raw(code, message, help_text, number):
+    """A 503 refusal whose retryAfterSeconds is the JSON number text as
+    given (5e0, 1E3, 36.01e2, 1e400), with no Retry-After header."""
+    status, body = refusal(503, code, message, help_text)
+    body["data"]["retryAfterSeconds"] = "@WAIT@"
+    return status, RawJSON(json.dumps(body).replace('"@WAIT@"', number))
+
+
 # DELETE /api/clusters/cl-1a2b3c4d/nodes/<name>: the 503 refusals of a node
 # remove on a hosted cluster.
 REMOVE_PREFIX = "/api/clusters/cl-1a2b3c4d/nodes/"
@@ -283,6 +296,11 @@ REMOVES = {
     # form of a fraction, and a fraction.
     "remove-8": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 1000.0),
     "remove-9": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 5.5),
+    # Number forms that json.dumps does not write, as the body gives them.
+    "remove-10": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "5e0"),
+    "remove-11": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "1E3"),
+    "remove-12": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "36.01e2"),
+    "remove-13": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "1e400"),
 }
 
 # POST /api/clusters/cl-1a2b3c4d/nodes/join-token, by the node name in the
@@ -353,7 +371,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def answer(self, status, body, headers=None):
-        if isinstance(body, (dict, list)):
+        if isinstance(body, RawJSON):
+            raw, ctype = body.encode(), "application/json"
+        elif isinstance(body, (dict, list)):
             raw, ctype = json.dumps(body).encode(), "application/json"
         else:
             raw = body.encode()
