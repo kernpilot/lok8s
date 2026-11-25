@@ -577,6 +577,16 @@ func decodeObject(doc *yaml.Node) (m map[string]any, isObject bool, err error) {
 	return m, true, nil
 }
 
+// ownTagMap reports whether doc is a map with a tag of its own
+// (`--- !tag`). Bash twin: the kind and tag test of bootstrap::_csa_docs.
+func ownTagMap(doc *yaml.Node) bool {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	return root.Kind == yaml.MappingNode && root.ShortTag() != "!!map"
+}
+
 // lastKeyWins is a copy of n in which each map keeps only the last pair of
 // a key that it holds more than once. Two keys are the same when they
 // have the same kind and text: the rule by which yaml.v3 refuses a key.

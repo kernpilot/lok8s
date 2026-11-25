@@ -725,7 +725,11 @@ lines come in the order of the run; only the `--render-dir` files carry the
   annotation. When lo cannot read the field managers (for example, RBAC
   does not allow `get`) or the objects of the render, it prints a `[warn]`
   line and continues. With `--skip-client-side-owned` the entry is then an
-  error, because lo cannot find the objects to leave out. A missing CRD is
+  error, because lo cannot find the objects to leave out. The same holds
+  for a render with a map that has a tag of its own (`--- !tag`): kubectl
+  reads it as an object. An object of a client-side writer whose document
+  lo cannot find in the render (an item of a `kind: List`, for example)
+  gets a `[warn]` line, and with the flag the entry is an error. A missing CRD is
   not such an error (no object of it can be live), but only when kubectl
   reports no other error. The check runs for each entry of
   `spec.bootstrap`, also in `lo up`, `lo provision` and the lok8s

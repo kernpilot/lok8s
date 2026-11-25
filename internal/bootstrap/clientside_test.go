@@ -165,8 +165,9 @@ func TestClientSideObjectsNamesTheDroppedKeys(t *testing.T) {
 			"O\tv1\tConfigMap\tdemo\tcm\n" + writer + `{"f:kubernetes.io/metadata.name":{}}` + "\t{" + la + "}\n",
 			"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n",
 			[]string{"ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label kubernetes.io/metadata.name"}},
-		{"an object of another group is not the manifest object",
-			"O\tapps/v1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\n", nsManifest, nil},
+		{"an object of another group is not the manifest object: lo cannot find its document",
+			"O\tapps/v1\tNamespace\t\tdemo\n" + writer + `{"f:team":{}}` + "\t{" + la + "}\n", nsManifest,
+			[]string{"Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields, and lo cannot find its document in the manifest, so it cannot name the fields that the apply drops"}},
 		{"an entry of the writer with another apiVersion keeps its keys on the object",
 			"O\tapps/v1\tDeployment\tdemo\tweb\n" + writerApps + `{"f:team":{}}` + "\t{" + la + "}\n" +
 				"M\tkubectl-client-side-apply\tUpdate\t\tapps/v1beta2\t{\"f:tier\":{}}\t\n", depManifest,
@@ -190,6 +191,12 @@ func TestClientSideObjectsNamesTheDroppedKeys(t *testing.T) {
 				t.Fatalf("warn:\n%q\nwant:\n%q", warn, tc.warn)
 			}
 			for i, s := range skip {
+				if head, ok := strings.CutSuffix(tc.warn[i], ", so it cannot name the fields that the apply drops"); ok {
+					if want := head + ", so --skip-client-side-owned cannot leave it out"; s != want {
+						t.Errorf("skip: %q, want %q", s, want)
+					}
+					continue
+				}
 				obj, _, _ := strings.Cut(tc.warn[i], ": ")
 				writers := strings.SplitN(tc.warn[i], ": ", 2)[1]
 				writers, _, _ = strings.Cut(writers, "; the apply")
@@ -585,9 +592,9 @@ func TestClientSideBeforeCancelledRead(t *testing.T) {
 // A key twice in a map: the last value counts, as kubectl reads it and as
 // the bash twin reads it (yq, then jq). The object is named, and
 // --skip-client-side-owned leaves it out: the rest keeps its documents as
-// the render wrote them. A map that does not decode also so (a key that is
-// a list) gives ok false. bats: "bootstrap::_csa_before: a key twice in a
-// map".
+// the render wrote them. A map that does not decode (a key that is a list)
+// and a map with a tag of its own give ok false. bats:
+// "bootstrap::_csa_before: a key twice in a map".
 func TestClientSideBeforeAKeyTwice(t *testing.T) {
 	const twice = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: other\n  name: demo\n  labels:\n    app: y\n"
 	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  name: cm\n  namespace: demo\n"
@@ -613,8 +620,8 @@ func TestClientSideBeforeAKeyTwice(t *testing.T) {
 	if _, ok := manifestObjects("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n? [a]\n: b\n"); ok {
 		t.Error("a map with a key that is a list: ok true")
 	}
-	if docs, ok := manifestObjects("!thing\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n"); !ok || len(docs) != 0 {
-		t.Errorf("a map with a tag of its own: ok %v, objects %+v", ok, docs)
+	if _, ok := manifestObjects("!thing\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n"); ok {
+		t.Error("a map with a tag of its own: ok true")
 	}
 }
 
@@ -644,6 +651,62 @@ func TestClientSideBeforeAStrayNamespaceWithALineBreak(t *testing.T) {
 		}
 		if tc.skip && (c.leftOut != 1 || strings.Contains(c.manifest, "Namespace") || !strings.Contains(c.manifest, "name: cm")) {
 			t.Errorf("left out %d, manifest:\n%s", c.leftOut, c.manifest)
+		}
+	}
+}
+
+// A stray namespace that holds a NUL byte: --skip-client-side-owned leaves
+// the Namespace out. bats: "bootstrap::_csa_before: a stray namespace with
+// a NUL byte".
+func TestClientSideBeforeAStrayNamespaceWithANUL(t *testing.T) {
+	const m = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  namespace: \"x\\0evil\"\n---\n" +
+		"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n"
+	e, f, job := csaJob(t)
+	e.Options.SkipClientSideOwned = true
+	h := &csaHandler{reads: []string{nsLines}}
+	f.handler = h.handle
+	var errOut bytes.Buffer
+	c, ok := e.clientSideBefore(t.Context(), &errOut, job.Name, job.Kubeconfig, m)
+	want := "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\n"
+	if !ok || errOut.String() != want || c.leftOut != 1 || strings.Contains(c.manifest, "Namespace") || !strings.Contains(c.manifest, "name: cm") {
+		t.Errorf("ok %v, left out %d, stderr:\n%s\nmanifest:\n%s", ok, c.leftOut, errOut.String(), c.manifest)
+	}
+}
+
+// An object of a client-side writer whose document lo cannot find in the
+// manifest: kubectl reads the items of a List, lo does not. Under
+// --skip-client-side-owned the entry fails (lo cannot leave the object
+// out), else a [warn] line names it and counts it. A map with a tag of its
+// own: kubectl reads it as an object, so lo cannot read the manifest, and
+// it names no object. bats: "bootstrap::_csa_before: an object with no
+// document, and a map with a tag of its own".
+func TestClientSideBeforeNoDocument(t *testing.T) {
+	const list = "apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Namespace\n  metadata:\n    name: demo\n"
+	const tagged = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n--- !thing\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n"
+	const head = "bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields, and lo cannot find its document in the manifest, so "
+	const unread = "bootstrap: testcni: lo cannot read the objects of the manifest, so "
+	for i, tc := range []struct {
+		manifest string
+		skip, ok bool
+		named    int
+		want     string
+	}{
+		{list, true, false, 0, "[error] " + head + "--skip-client-side-owned cannot leave it out\n"},
+		{list, false, true, 1, "[warn] " + head + "it cannot name the fields that the apply drops\n"},
+		{tagged, true, false, 0, "[error] " + unread + "--skip-client-side-owned cannot find the objects to leave out\n"},
+		{tagged, false, true, 0, "[warn] " + unread + "it cannot name the fields that the apply drops\n"},
+	} {
+		e, f, job := csaJob(t)
+		e.Options.SkipClientSideOwned = tc.skip
+		h := &csaHandler{reads: []string{nsLines}}
+		f.handler = h.handle
+		var errOut bytes.Buffer
+		c, ok := e.clientSideBefore(t.Context(), &errOut, job.Name, job.Kubeconfig, tc.manifest)
+		if ok != tc.ok || errOut.String() != tc.want || len(c.objects) != tc.named || c.leftOut != 0 {
+			t.Errorf("row %d: ok %v, named %d, left out %d, stderr:\n%s\nwant %q", i, ok, len(c.objects), c.leftOut, errOut.String(), tc.want)
+		}
+		if ok && c.manifest != tc.manifest {
+			t.Errorf("row %d: the manifest changed:\n%s", i, c.manifest)
 		}
 	}
 }

@@ -213,10 +213,12 @@ type manifestObject struct {
 // manifestObjects reads the objects of a manifest, in order. A document
 // that is not a map is not an object, and a key twice in a map keeps its
 // last value, as kubectl reads it (decodeObject). ok is false when the
-// manifest does not parse (bash: yq fails on the stream), or when a map
-// does not decode: lo then cannot find the objects to name or to leave
-// out. kubectl cannot read such a map either; the bash twin reads a key
-// that is a list as "".
+// manifest does not parse (bash: yq fails on the stream), when a map does
+// not decode, or when a map has a tag of its own (`--- !tag`): lo then
+// cannot find the objects to name or to leave out. kubectl cannot read a
+// map that does not decode either (the bash twin reads a key that is a
+// list as ""), but it reads a map with a tag of its own as an object
+// (sigs.k8s.io/yaml does not check the tag of a map).
 func manifestObjects(stream string) (objs []manifestObject, ok bool) {
 	str := func(v any) string {
 		s, _ := v.(string)
@@ -238,6 +240,9 @@ func manifestObjects(stream string) (objs []manifestObject, ok bool) {
 			if errors.Is(err, io.EOF) {
 				return objs, true
 			}
+			return nil, false
+		}
+		if ownTagMap(&node) {
 			return nil, false
 		}
 		m, isObject, err := decodeObject(&node)
@@ -291,6 +296,10 @@ type clientSideObject struct {
 	object string
 	// label is the label of its manifest object (withoutObjects).
 	label string
+	// noDocument: lo cannot find the manifest object of the live object
+	// (an item of a kind List, for example: kubectl reads the items, lo
+	// does not). lo cannot leave it out, and cannot name its keys.
+	noDocument bool
 	// group, kind, namespace and name find it in the read after the apply.
 	group, kind, namespace, name string
 	// writers are the managers of the Update entries that own the
@@ -316,7 +325,7 @@ type clientSideObject struct {
 // fields: the apply does not drop a field that it owns too. lo's own Apply
 // entry does not keep a field. A label that the API server sets
 // (serverSetLabels) is not named. A live object with no manifest object is
-// not named.
+// named with noDocument: lo cannot tell which of its keys the apply drops.
 func clientSideObjects(docs []manifestObject, live []liveObject) []clientSideObject {
 	var out []clientSideObject
 	for _, o := range live {
@@ -331,6 +340,10 @@ func clientSideObjects(docs []manifestObject, live []liveObject) []clientSideObj
 		}
 		doc, ok := matchManifest(docs, o)
 		if !ok {
+			out = append(out, clientSideObject{
+				object: objectName(o), group: o.group, kind: o.kind, namespace: o.namespace, name: o.name,
+				writers: sortedKeys(writers), noDocument: true,
+			})
 			continue
 		}
 		owned, other := keySet{}, keySet{}
@@ -457,6 +470,9 @@ func escapedList(s []string) string {
 // warnText is the [warn] line of an object that the apply takes, after
 // "bootstrap: <entry>: ".
 func (c clientSideObject) warnText() string {
+	if c.noDocument {
+		return c.noDocumentText() + ", so it cannot name the fields that the apply drops"
+	}
 	s := c.object + ": " + csaWriters(c.writers) + "; the apply moves them to lo and drops what the target does not set"
 	if k := csaKeys(c.dropLabels, c.dropAnnotations); k != "" {
 		s += ": " + k
@@ -465,9 +481,18 @@ func (c clientSideObject) warnText() string {
 }
 
 // skipText is the [warn] line of an object that --skip-client-side-owned
-// leaves out, after "bootstrap: <entry>: ".
+// leaves out, after "bootstrap: <entry>: ". For an object with noDocument
+// it is the [error] line: lo cannot leave it out.
 func (c clientSideObject) skipText() string {
+	if c.noDocument {
+		return c.noDocumentText() + ", so --skip-client-side-owned cannot leave it out"
+	}
 	return c.object + ": left out of the apply (--skip-client-side-owned): " + csaWriters(c.writers)
+}
+
+// noDocumentText starts the line of an object with noDocument.
+func (c clientSideObject) noDocumentText() string {
+	return c.object + ": " + csaWriters(c.writers) + ", and lo cannot find its document in the manifest"
 }
 
 // csaReadFailedText is the [warn] line of a read that failed.
@@ -493,12 +518,13 @@ type csaCheck struct {
 // client-side writer owns. Under --skip-client-side-owned each line says
 // that the object is left out, and the manifest of the check is without
 // these objects. ok is false when the entry fails: when a cancel stopped
-// the read (no line), under --skip-client-side-owned when the read failed
-// or the manifest does not parse (lo cannot find the objects to leave
-// out), or when the objects cannot be taken out of the manifest. Without the flag, a manifest that
-// does not parse is a [warn] line here, and the caller prints the line of
-// a read that failed (csaReadFailedText): a dry run only when its diff
-// worked.
+// the read (no line), under --skip-client-side-owned when the read failed,
+// the manifest does not parse or lo cannot find the document of an object
+// (lo cannot find the objects to leave out), or when the objects cannot be
+// taken out of the manifest. Without the flag, a manifest that does not
+// parse is a [warn] line here and no object is named, and the caller
+// prints the line of a read that failed (csaReadFailedText): a dry run only
+// when its diff worked.
 func (e *Engine) clientSideBefore(ctx context.Context, stderr io.Writer, entry, kubeconfig, manifest string) (csaCheck, bool) {
 	c := csaCheck{manifest: manifest}
 	read := e.readFieldManagers(ctx, kubeconfig, manifest)
@@ -524,9 +550,14 @@ func (e *Engine) clientSideBefore(ctx context.Context, stderr io.Writer, entry, 
 			return c, false
 		}
 		ui.WarnTo(stderr, "bootstrap: %s: lo cannot read the objects of the manifest, so it cannot name the fields that the apply drops", entry)
+		return c, true
 	}
 	var drop []string
 	for _, o := range clientSideObjects(docs, read.objects) {
+		if skip && o.noDocument {
+			ui.ErrorTo(stderr, "bootstrap: %s: %s", entry, o.skipText())
+			return c, false
+		}
 		if skip {
 			ui.WarnTo(stderr, "bootstrap: %s: %s", entry, o.skipText())
 			drop = append(drop, o.label)

@@ -906,9 +906,10 @@ def obj: (.k | esc) + " " + (if .s != "" then (.s | esc) + "/" else "" end) + (.
 
 # The program of bootstrap::_csa_objects (the Go twin: clientSideObjects
 # with warnText and skipText): over the read (the input, one string) and
-# the manifest objects ($docs). Only the Update entry of a writer with the
-# apiVersion of the target moves to lo ($own); an object with none is not
-# named. Each other Update entry of a writer with no subresource is dropped
+# the manifest objects ($docs). An object with no manifest object gets the
+# label ? (the Go twin: noDocument). Only the Update entry of a writer with
+# the apiVersion of the target moves to lo ($own); an object with none is
+# not named. Each other Update entry of a writer with no subresource is dropped
 # by kubectl, so it is not in $other either. The label
 # kubernetes.io/metadata.name of a Namespace is not one that the apply
 # drops: the API server sets it on each write (the Go twin:
@@ -921,19 +922,23 @@ _BOOTSTRAP_CSA_BEFORE_JQ='
 | select($w | length > 0)
 | [$docs[] | select(.g == $o.g and .k == $o.k and .n == $o.n)] as $c
 | (first($c[] | select(.s == $o.s)) // first($c[] | select(.s == "")) // $c[0]) as $d
-| select($d != null)
-| [.e[] | select((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "" and .v == $d.v)] as $own
-| select($own | length > 0)
-| [.e[] | select(((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "") or (.m == "kubectl" and .o == "Apply" and .r == "") | not)] as $other
-| (([$own[].l[]] | unique) - $d.lk - (if $o.g == "" and $o.k == "Namespace" then ["kubernetes.io/metadata.name"] else [] end)) as $ul
-| (([$own[].a[]] | unique) - [$la] - $d.ak) as $ua
-| ($ul - [$other[].l[]]) as $dl
-| ($ua - [$other[].a[]]) as $da
-| obj as $obj
-| [ $obj + ": " + ($w | writers) + "; the apply moves them to lo and drops what the target does not set" + (keytext($dl; $da) | if . != "" then ": " + . else "" end),
-    $obj + ": left out of the apply (--skip-client-side-owned): " + ($w | writers),
-    (if ($ul | length) + ($ua | length) > 0 then {g: .g, k: .k, s: .s, n: .n, obj: $obj, ul: $ul, ua: $ua} | tojson else "-" end),
-    ($d.l | tojson) ]
+| if $d == null then
+    (obj + ": " + ($w | writers) + ", and lo cannot find its document in the manifest") as $t
+    | [$t + ", so it cannot name the fields that the apply drops", $t + ", so --skip-client-side-owned cannot leave it out", "-", "?"]
+  else
+    ([.e[] | select((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "" and .v == $d.v)] as $own
+    | select($own | length > 0)
+    | [.e[] | select(((.m as $m | any($w[]; . == $m)) and .o == "Update" and .r == "") or (.m == "kubectl" and .o == "Apply" and .r == "") | not)] as $other
+    | (([$own[].l[]] | unique) - $d.lk - (if $o.g == "" and $o.k == "Namespace" then ["kubernetes.io/metadata.name"] else [] end)) as $ul
+    | (([$own[].a[]] | unique) - [$la] - $d.ak) as $ua
+    | ($ul - [$other[].l[]]) as $dl
+    | ($ua - [$other[].a[]]) as $da
+    | obj as $obj
+    | [ $obj + ": " + ($w | writers) + "; the apply moves them to lo and drops what the target does not set" + (keytext($dl; $da) | if . != "" then ": " + . else "" end),
+        $obj + ": left out of the apply (--skip-client-side-owned): " + ($w | writers),
+        (if ($ul | length) + ($ua | length) > 0 then {g: .g, k: .k, s: .s, n: .n, obj: $obj, ul: $ul, ua: $ua} | tojson else "-" end),
+        ($d.l | tojson) ])
+  end
 | join("\t")
 '
 
@@ -999,13 +1004,14 @@ bootstrap::_csa_race_only() {
 # what bootstrap::_without_objects drops), apiVersion (v), group (g), kind
 # (k), name (n), namespace (s), and the key names of its labels (lk) and
 # annotations (ak). No value. A document that is not a map is not an
-# object. Returns 1 when the manifest does not parse. No message of yq or
-# jq: it can quote the manifest.
+# object. Returns 1 when the manifest does not parse, or when a map has a
+# tag of its own (`--- !tag`): kubectl reads such a map as an object, and
+# lo could not find it. No message of yq or jq: it can quote the manifest.
 bootstrap::_csa_docs() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local -a _rc
-  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' 2>/dev/null | jq -c '
+  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null) | select(kind != "map" or tag == "!!map" or error("a map with a tag of its own")) | select(tag == "!!map")' 2>/dev/null | jq -c '
     def str: if type == "string" then . else "" end;
     def names: if type == "object" then keys else [] end;
     (.metadata | if type == "object" then . else {} end) as $m
@@ -1024,8 +1030,10 @@ bootstrap::_csa_docs() {
 # text, its skip text, its check (the JSON that bootstrap::_csa_after reads,
 # or - when the writers own no label or annotation that the target does not
 # set) and the label of its manifest object as a JSON string (a namespace
-# of the manifest can hold a tab or a line break), separated by tabs.
-# Returns 1
+# of the manifest can hold a tab, a line break or a NUL), separated by
+# tabs. For an object whose manifest object lo cannot find (an item of a
+# kind List, for example) the label is ?, and the skip text is the [error]
+# line: lo cannot leave the object out (the Go twin: noDocument). Returns 1
 # when the manifest does not parse or jq fails (the Go twin:
 # manifestObjects gives ok false): lo then cannot find the objects. No
 # message of jq: it can quote a name.
@@ -1055,12 +1063,14 @@ bootstrap::_csa_read_failed_text() {
 # of them that has keys to check after the apply), _csa_left_out (the count
 # of the objects left out) and _csa_failed (the exit code of a read that
 # failed, 0 when it worked). Returns 1 when the entry fails: under
-# --skip-client-side-owned when the read failed or lo cannot read the
-# objects of the manifest (lo cannot find the objects to leave out), or
-# when the objects cannot be taken out of the manifest. Without the flag,
-# a manifest that lo cannot read is a [warn] line here, and the caller
-# prints the line of a read that failed (bootstrap::_csa_read_failed_text):
-# a dry run only when its diff worked.
+# --skip-client-side-owned when the read failed, lo cannot read the objects
+# of the manifest or lo cannot find the document of an object (lo cannot
+# find the objects to leave out), or when the objects cannot be taken out
+# of the manifest. Without the flag, a manifest that lo cannot read is a
+# [warn] line here and no object is named, and the caller prints the line
+# of a read that failed (bootstrap::_csa_read_failed_text): a dry run only
+# when its diff worked. The labels of the objects stay JSON up to yq
+# (bootstrap::_without_labels): a label can hold a NUL.
 bootstrap::_csa_before() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
@@ -1086,11 +1096,11 @@ bootstrap::_csa_before() {
   while IFS=$'\t' read -r _w _s _j _l; do
     [[ -n "${_w}" ]] || continue
     if (( ${bootstrap_skip_csa:-0} )); then
-      warn "bootstrap: ${_entry}: ${_s}"
-      _l="$(printf '%s' "${_l}" | jq -r . 2>/dev/null)" || {
-        error "bootstrap: ${_entry}: cannot take the objects of a client-side writer out of the manifest"
+      if [[ "${_l}" == '?' ]]; then
+        error "bootstrap: ${_entry}: ${_s}"
         return 1
-      }
+      fi
+      warn "bootstrap: ${_entry}: ${_s}"
       _drop+=("${_l}")
       continue
     fi
@@ -1099,7 +1109,8 @@ bootstrap::_csa_before() {
     [[ "${_j}" == - ]] || _csa_checks+=("${_j}")
   done < <(printf '%s\n' "${_lines}")
   if (( ${#_drop[@]} > 0 )); then
-    if ! _csa_manifest="$(bootstrap::_without_objects "${3}" "${_drop[@]}")"; then
+    if ! _l="$(printf '%s\n' "${_drop[@]}" | jq -s -c . 2>/dev/null)" \
+      || ! _csa_manifest="$(bootstrap::_without_labels "${3}" "${_l}")"; then
       error "bootstrap: ${_entry}: cannot take the objects of a client-side writer out of the manifest"
       return 1
     fi
@@ -2152,7 +2163,16 @@ bootstrap::_without_objects() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _stream="${1}"; shift
-  printf '%s\n' "${_stream}" | BOOTSTRAP_DROP_LABELS="$(printf '%s\0' "${@}" | jq -R -s -c 'split("\u0000")[:-1]')" yq --header-preprocess=false '
+  bootstrap::_without_labels "${_stream}" "$(printf '%s\0' "${@}" | jq -R -s -c 'split("\u0000")[:-1]')"
+}
+
+# bootstrap::_without_labels <stream> <labels>
+# bootstrap::_without_objects with the labels as one JSON list, so a label
+# can hold any byte, a NUL too (the labels of bootstrap::_csa_before).
+bootstrap::_without_labels() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
+  printf '%s\n' "${1}" | BOOTSTRAP_DROP_LABELS="${2}" yq --header-preprocess=false '
     select(. != null and tag == "!!map")
     | select(
         ((to_json(0) | from_json) as $j

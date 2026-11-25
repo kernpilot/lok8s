@@ -7246,9 +7246,11 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   # A namespaced object matches a manifest object with no namespace.
   run bootstrap::_csa_objects $'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n' $'O\tv1\tConfigMap\tdemo\tcm\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n'
   assert_output $'ConfigMap demo/cm: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team\tConfigMap demo/cm: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields\t{"g":"","k":"ConfigMap","s":"demo","n":"cm","obj":"ConfigMap demo/cm","ul":["team"],"ua":[]}\t"v1 ConfigMap cm"'
-  # An object of another group is not the manifest object.
-  run csa $'O\tapps/v1\tNamespace\t\tdemo\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n' "${ns}"
-  assert_output ""
+  # An object of another group is not the manifest object: lo cannot find
+  # its document. Its label is ?, and its skip text is the [error] line.
+  run bootstrap::_csa_objects "${ns}" $'O\tapps/v1\tNamespace\t\tdemo\n'"${w}"'{"f:team":{}}'$'\t{'"${la}"$'}\n'
+  assert_success
+  assert_output "Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields, and lo cannot find its document in the manifest, so it cannot name the fields that the apply drops"$'\tNamespace demo: a client-side writer (kubectl-client-side-apply) owns fields, and lo cannot find its document in the manifest, so --skip-client-side-owned cannot leave it out\t-\t?'
   # The name label of a Namespace is set by the API server; the same label
   # of another kind is named.
   run csa "${o}${w}"'{"f:kubernetes.io/metadata.name":{},"f:team":{}}'$'\t{'"${la}"$'}\n' "${ns}"
@@ -7386,12 +7388,14 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   run bootstrap::_csa_race_only "${re}" 'Warning: v1 ComponentStatus is deprecated in v1.19+'
   assert_failure
   # A line that is not valid UTF-8 is the line of another error, also under
-  # a UTF-8 locale: lo reads bytes.
-  if locale -a 2>/dev/null | grep -qi -E '^c\.utf-?8$'; then
-    export LC_ALL=C.UTF-8
-    run bootstrap::_csa_race_only "${re}" $'error: resource mapping not found for name: x: no matches for kind\n\xff Forbidden'
-    assert_failure
+  # a UTF-8 locale: lo reads bytes. Without the locale, bash stays in C and
+  # this part proves nothing: skip it with a reason, after the C part ran.
+  if ! locale -a 2>/dev/null | grep -qi -E '^c\.utf-?8$'; then
+    skip "no C.UTF-8 locale on this host: only the C part ran"
   fi
+  export LC_ALL=C.UTF-8
+  run bootstrap::_csa_race_only "${re}" $'error: resource mapping not found for name: x: no matches for kind\n\xff Forbidden'
+  assert_failure
 }
 
 # A manifest that lo cannot read: under --skip-client-side-owned the entry
@@ -7415,9 +7419,9 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
 
 # A key twice in a map: the last value counts, as kubectl reads it (the Go
 # twin decodes so too). The object is named, and --skip-client-side-owned
-# leaves it out: the rest keeps its documents as the render wrote them. A
-# map with a tag of its own is not an object. Go:
-# TestClientSideBeforeAKeyTwice.
+# leaves it out: the rest keeps its documents as the render wrote them. lo
+# cannot read a map with a tag of its own: kubectl reads it as an object.
+# Go: TestClientSideBeforeAKeyTwice.
 @test "bootstrap::_csa_before: a key twice in a map" {
   local -r twice=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: other\n  name: demo\n  labels:\n    app: y\n'
   local -r cm=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  name: cm\n  namespace: demo\n'
@@ -7426,7 +7430,7 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   assert_output '{"l":"v1 Namespace demo","v":"v1","g":"","k":"Namespace","n":"demo","s":"","lk":["app"],"ak":[]}
 {"l":"v1 ConfigMap demo/cm","v":"v1","g":"","k":"ConfigMap","n":"cm","s":"demo","lk":[],"ak":[]}'
   run bootstrap::_csa_docs $'!thing\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n'
-  assert_success; assert_output ""
+  assert_failure; assert_output ""
   _csa_kubectl_stub "$(_csa_ns_read)"
   local bootstrap_skip_csa=1 _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0
   local -a _csa_checks=()
@@ -7466,6 +7470,48 @@ _csa_calls() { sed 's/ .*//' "${KCALLS}" | paste -sd' ' -; }
   _csa_kubectl_stub "$(_csa_ns_read)"
   bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${m}" > "${BATS_TEST_TMPDIR}/out" 2>&1
   [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "[warn] bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note" ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+}
+
+# A stray namespace that holds a NUL byte: the label of the object stays
+# JSON up to yq, so --skip-client-side-owned leaves the Namespace out. Go:
+# TestClientSideBeforeAStrayNamespaceWithANUL.
+@test "bootstrap::_csa_before: a stray namespace with a NUL byte" {
+  local -r m=$'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n  namespace: "x\\0evil"\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n'
+  _csa_kubectl_stub "$(_csa_ns_read)"
+  local bootstrap_skip_csa=1 _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0
+  local -a _csa_checks=()
+  bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${m}" > "${BATS_TEST_TMPDIR}/out" 2>&1
+  [ "${_csa_left_out}" -eq 1 ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+  [[ "${_csa_manifest}" != *Namespace* && "${_csa_manifest}" == *"name: cm"* ]] || { echo "${_csa_manifest}"; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "[warn] bootstrap: testcni: Namespace demo: left out of the apply (--skip-client-side-owned): a client-side writer (kubectl-client-side-apply) owns fields" ] || { cat "${BATS_TEST_TMPDIR}/out"; return 1; }
+}
+
+# An object of a client-side writer whose document lo cannot find in the
+# manifest: kubectl reads the items of a List, lo does not. Under
+# --skip-client-side-owned the entry fails (lo cannot leave the object
+# out), else a [warn] line names it and counts it. A map with a tag of its
+# own: kubectl reads it as an object, so lo cannot read the manifest, and
+# it names no object. Go: TestClientSideBeforeNoDocument.
+@test "bootstrap::_csa_before: an object with no document, and a map with a tag of its own" {
+  local -r list=$'apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Namespace\n  metadata:\n    name: demo\n'
+  local -r tagged=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\n--- !thing\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n'
+  local -r head="bootstrap: testcni: Namespace demo: a client-side writer (kubectl-client-side-apply) owns fields, and lo cannot find its document in the manifest, so "
+  local -r unread="bootstrap: testcni: lo cannot read the objects of the manifest, so "
+  local -a manifests=("${list}" "${list}" "${tagged}" "${tagged}") skips=(1 0 1 0) rcs=(1 0 1 0) named=(0 1 0 0)
+  local -a want=("[error] ${head}--skip-client-side-owned cannot leave it out" "[warn] ${head}it cannot name the fields that the apply drops"
+    "[error] ${unread}--skip-client-side-owned cannot find the objects to leave out" "[warn] ${unread}it cannot name the fields that the apply drops")
+  local bootstrap_skip_csa _csa_manifest _csa_named _csa_left_out _csa_failed i rc
+  local -a _csa_checks
+  for i in "${!manifests[@]}"; do
+    _csa_kubectl_stub "$(_csa_ns_read)"
+    bootstrap_skip_csa="${skips[i]}" _csa_manifest="" _csa_named=0 _csa_left_out=0 _csa_failed=0 rc=0
+    _csa_checks=()
+    bootstrap::_csa_before testcni "${BATS_TEST_TMPDIR}/kc" "${manifests[i]}" > "${BATS_TEST_TMPDIR}/out" 2>&1 || rc=$?
+    [ "${rc}" -eq "${rcs[i]}" ] && [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "${want[i]}" ] \
+      && [ "${_csa_named}" -eq "${named[i]}" ] && [ "${_csa_left_out}" -eq 0 ] && [ "${#_csa_checks[@]}" -eq 0 ] \
+      || { echo "row ${i}: rc ${rc}, named ${_csa_named}: $(cat "${BATS_TEST_TMPDIR}/out")" >&2; return 1; }
+    (( rc != 0 )) || [ "${_csa_manifest}" = "${manifests[i]}" ] || { echo "row ${i}: the manifest changed" >&2; return 1; }
+  done
 }
 
 # A real run names each object of a client-side writer before the apply,
