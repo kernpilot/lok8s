@@ -486,7 +486,8 @@ type csaCheck struct {
 // manifest and prints a [warn] line for each object whose fields a
 // client-side writer owns. Under --skip-client-side-owned each line says
 // that the object is left out, and the manifest of the check is without
-// these objects. ok is false when the entry fails: under
+// these objects. ok is false when the entry fails: when a cancel stopped
+// the read (no line), under
 // --skip-client-side-owned when the read failed or the manifest does not
 // parse (lo cannot find the objects to leave out), or when the objects
 // cannot be taken out of the manifest. Without the flag, a manifest that
@@ -498,6 +499,12 @@ func (e *Engine) clientSideBefore(ctx context.Context, stderr io.Writer, entry, 
 	read := e.readFieldManagers(ctx, kubeconfig, manifest)
 	skip := e.Options.SkipClientSideOwned
 	if read.failed != 0 {
+		if ctx.Err() != nil {
+			// A cancel stopped the read: the run reports the cancel, and
+			// the exit code of a killed kubectl means nothing here. bash
+			// has no twin: the shell stops on the signal.
+			return c, false
+		}
 		if skip {
 			ui.ErrorTo(stderr, "bootstrap: %s: lo cannot read the field managers of the live objects (kubectl get exited %d), so --skip-client-side-owned cannot find the objects to leave out", entry, read.failed)
 			return c, false

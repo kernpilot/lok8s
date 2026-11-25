@@ -6526,6 +6526,11 @@ SH
   assert_success
   dry_run=1; run bootstrap::mode_check 1 0
   assert_success
+  # --no-diff reads no cluster: --skip-client-side-owned is refused with it.
+  no_diff=1; run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--skip-client-side-owned does not work with --no-diff: --no-diff does not read the cluster"
+  skip_client_side_owned=0; run bootstrap::mode_check 1 0
+  assert_success
 }
 
 # --only GIVEN but blank (every comma-separated value whitespace/empty, OR

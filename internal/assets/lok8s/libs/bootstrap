@@ -155,6 +155,12 @@ bootstrap::mode_check() {
     if (( ${allow_generators:-0} )); then error "--allow-generators requires --dry-run"; return 1; fi
     if (( ${ignore_nondeterministic:-0} )); then error "--ignore-nondeterministic requires --dry-run"; return 1; fi
   fi
+  # --no-diff reads no cluster: --skip-client-side-owned would leave
+  # nothing out, with no line.
+  if (( ${no_diff:-0} && ${skip_client_side_owned:-0} )); then
+    error "--skip-client-side-owned does not work with --no-diff: --no-diff does not read the cluster"
+    return 1
+  fi
   # --with-restore only means anything alongside --only (item H).
   if (( ${with_restore:-0} )) && (( ! _only_given )); then
     error "--with-restore requires --only"
@@ -2179,7 +2185,8 @@ bootstrap::_diff_manifest() {
     echo rendered
     return 0
   fi
-  # --ignore-nondeterministic left nothing to diff.
+  # --ignore-nondeterministic or --skip-client-side-owned left nothing to
+  # diff.
   if [[ -z "${diff_input//[[:space:]]/}" ]]; then
     if [[ -n "${bootstrap_render_dir:-}" ]] && ! : | bootstrap::_write_guarded "${bootstrap_render_dir}/${stem}.diff"; then
       umask "${_prior_umask}"

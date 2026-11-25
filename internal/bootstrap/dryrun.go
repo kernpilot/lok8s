@@ -635,7 +635,8 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	if e.Options.NoDiff {
 		return dryResult{status: dryRendered}
 	}
-	// --ignore-nondeterministic left nothing to diff.
+	// --ignore-nondeterministic or --skip-client-side-owned left nothing
+	// to diff.
 	if strings.TrimSpace(diffInput) == "" {
 		if e.Options.RenderDir != "" {
 			if err := writeGuarded(filepath.Join(e.Options.RenderDir, stem+".diff"), nil, 0o600); err != nil {

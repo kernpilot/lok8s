@@ -6,6 +6,7 @@ package bootstrap
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -533,6 +534,27 @@ func TestClientSideBeforeManifestThatDoesNotParse(t *testing.T) {
 		}
 		if !slices.Equal(h.calls, []string{"read"}) {
 			t.Errorf("skip %v: kubectl calls = %v, want the read", tc.skip, h.calls)
+		}
+	}
+}
+
+// A read that a cancel stopped: the entry stops, and lo prints no line of
+// the read (the run reports the cancel). No bash twin: the shell stops on
+// the signal.
+func TestClientSideBeforeCancelledRead(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		e, f, job := csaJob(t)
+		e.Options.SkipClientSideOwned = skip
+		ctx, cancel := context.WithCancel(t.Context())
+		f.handler = func(execx.Cmd) error {
+			cancel()
+			return &rcError{137}
+		}
+		var errOut bytes.Buffer
+		_, ok := e.clientSideBefore(ctx, &errOut, job.Name, job.Kubeconfig, csaManifest)
+		cancel()
+		if ok || errOut.Len() != 0 {
+			t.Errorf("skip %v: ok %v, stderr:\n%s", skip, ok, errOut.String())
 		}
 	}
 }

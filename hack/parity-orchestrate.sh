@@ -1329,6 +1329,11 @@ dry_check - provision --domain dry.dev --skip-client-side-owned
 for side in bash go; do
   csa_pin "${side}: --skip-client-side-owned requires --bootstrap" "${WORK}/${side}.err" "--skip-client-side-owned requires --bootstrap"
 done
+dry_check - bootstrap --domain dry.dev --dry-run --no-diff --skip-client-side-owned
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --no-diff --skip-client-side-owned
+for side in bash go; do
+  csa_pin "${side}: --skip-client-side-owned does not work with --no-diff" "${WORK}/${side}.err" "--skip-client-side-owned does not work with --no-diff: --no-diff does not read the cluster"
+done
 # The real run: the warning before the apply, the dropped keys after it
 # (the read after the apply finds the label team owned, the rest gone).
 # With --skip-client-side-owned nothing of the entry is left: no apply of

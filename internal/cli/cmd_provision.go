@@ -79,6 +79,12 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChange
 			return bootstrap.Options{}, ErrHandled
 		}
 	}
+	// --no-diff reads no cluster: --skip-client-side-owned would leave
+	// nothing out, with no line.
+	if f.noDiff && f.skipCSA {
+		ui.ErrorTo(stderr, "--skip-client-side-owned does not work with --no-diff: --no-diff does not read the cluster")
+		return bootstrap.Options{}, ErrHandled
+	}
 	if f.withRestore && !onlyChanged {
 		ui.ErrorTo(stderr, "--with-restore requires --only")
 		return bootstrap.Options{}, ErrHandled

@@ -833,7 +833,9 @@ mode 0700, and says so on stderr. A later run clears only the files it owns
 directory without the marker (as a regular file), a path with a symlink in
 it, and a symlink inside the directory.
 
-`--no-diff` renders only and never contacts the cluster.
+`--no-diff` renders only and never contacts the cluster. Thus lo refuses
+`--no-diff` with `--skip-client-side-owned`: without a read of the cluster,
+lo cannot find the objects to leave out.
 
 **Exit codes**, the same for `lo bootstrap` and `lo provision --bootstrap`:
 0 when nothing would change, 1 only when a completed diff found a change
