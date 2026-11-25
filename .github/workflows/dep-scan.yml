@@ -78,11 +78,14 @@ jobs:
       - name: download the advisory archives
         id: archives
         timeout-minutes: 5
+        env:
+          # One for each kind of lock file in this repo.
+          ECOSYSTEMS: Go npm
         run: |
           set -euo pipefail
           # The scan refuses an archive that is older than this second.
           echo "since=$(date +%s)" | tee -a "$GITHUB_OUTPUT"
-          for ecosystem in Go npm; do
+          for ecosystem in $ECOSYSTEMS; do
             dir="$RUNNER_TEMP/osv-db/osv-scalibr/$ecosystem"
             mkdir -p "$dir"
             # Every advisory of the ecosystem, for every user the same file.
