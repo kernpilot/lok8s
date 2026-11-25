@@ -53,13 +53,35 @@ func LooksLikePrivateKey(arg string) bool {
 // LooksLikeKeyArg is LooksLikePrivateKey for an argument of a command that
 // takes the path of a key file or an age public key (init, decrypt, add-key,
 // remove-key), and for the argv of `lo secrets set`. No such argument is a
-// PEM block, so the first word of any PEM block ("-----BEGIN") counts too: a
-// paste split into words reaches cobra's flag parser as the flag
-// "-----BEGIN", and its error prints that word. The value of set goes on
-// stdin: as an argument, a PEM block starts with "-", and the flag error
-// prints all of it. Bash twin: secrets::_is_key_arg.
+// PEM block, so a PEM line counts too (holdsPEMLine): a paste split into
+// words reaches cobra's flag parser as the flag "-----BEGIN", and its error
+// prints that word. The value of set goes on stdin: as an argument, a PEM
+// block starts with "-", and the flag error prints all of it. Bash twin:
+// secrets::_is_key_arg.
 func LooksLikeKeyArg(arg string) bool {
-	return LooksLikePrivateKey(arg) || strings.Contains(arg, "-----BEGIN")
+	return LooksLikePrivateKey(arg) || holdsPEMLine(arg)
+}
+
+// holdsPEMLine reports whether arg holds the start of a PEM line: five
+// dashes, then BEGIN or END, in any case. A paste of the END line alone, or
+// of a block in lower case, is key material too. Only the ASCII letters are
+// folded, as in the bash twin under LC_ALL=C. Bash twin: the PEM part of
+// secrets::_is_key_arg.
+func holdsPEMLine(arg string) bool {
+	folded := asciiLower(arg)
+	return strings.Contains(folded, "-----begin") || strings.Contains(folded, "-----end")
+}
+
+// asciiLower is s with each ASCII capital letter in lower case. Each other
+// byte stays as it is.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // refusedArgLine prints the first line of a refusal of lo secrets: it names
@@ -72,7 +94,7 @@ func refusedArgLine(w io.Writer, argv string) {
 		ui.ErrorTo(w, "an argument looks like a private key: it is not printed")
 		return
 	}
-	ui.ErrorTo(w, "a value starts a PEM block (-----BEGIN): it is not printed")
+	ui.ErrorTo(w, "a value holds a PEM line (-----BEGIN or -----END): it is not printed")
 }
 
 // RefusePrivateKey prints the refusal for an argument of lo secrets that has
@@ -99,10 +121,15 @@ func RefusePrivateKeyValue(w io.Writer, argv string) {
 }
 
 // keyPlaceholder is the text that a message prints instead of arg when arg
-// has the shape of a private key or holds a PEM block (LooksLikeKeyArg), and
-// "" for any other arg. A PEM block that is not a private key (a
-// certificate, a static key of OpenVPN) can be key material too, so a
-// message prints none. shownKeyPath and QuoteArg both use it.
+// has the shape of a private key, holds a PEM line (LooksLikeKeyArg) or
+// holds a control byte (holdsControlByte), and "" for any other arg. A PEM
+// block that is not a private key (a certificate, a static key of OpenVPN)
+// can be key material too, so a message prints none. A value with a line
+// break is a paste of more than one line (a key body without its BEGIN
+// line, for example), and no key path holds one; a control byte can also
+// move the cursor of the terminal. A long paste on one line with no marker
+// gets no placeholder: no rule tells it from a long path. shownKeyPath and
+// QuoteArg both use it.
 func keyPlaceholder(arg string) string {
 	if LooksLikePrivateKey(arg) {
 		return "(not printed: it looks like a private key)"
@@ -110,14 +137,31 @@ func keyPlaceholder(arg string) string {
 	if LooksLikeKeyArg(arg) {
 		return "(not printed: it holds a PEM block)"
 	}
+	if holdsControlByte(arg) {
+		return "(not printed: it holds a line break or a control character)"
+	}
 	return ""
 }
 
+// holdsControlByte reports whether s holds a byte 0x00-0x1F or 0x7F (a line
+// break, a tab, an escape). It reads bytes, not runes, as the bash twin
+// does under LC_ALL=C ([[:cntrl:]]): a C1 character such as U+0085 does not
+// count. Bash twin: secrets::_holds_control_byte.
+func holdsControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // shownKeyPath is path for a message, or a placeholder when it has the shape
-// of a private key or holds a PEM block (keyPlaceholder): a value pasted
-// into LOK8S_SSH_KEY reaches the messages of init, decrypt and remove-key,
-// which no argv guard sees. Every message that prints a key path prints it
-// through shownKeyPath. Bash twin: secrets::_shown_path.
+// of a private key, holds a PEM line or holds a control byte
+// (keyPlaceholder): a value pasted into LOK8S_SSH_KEY reaches the messages
+// of init, decrypt and remove-key, which no argv guard sees. Every message
+// that prints a key path prints it through shownKeyPath. Bash twin:
+// secrets::_shown_path.
 func shownKeyPath(path string) string {
 	if p := keyPlaceholder(path); p != "" {
 		return p
@@ -126,7 +170,8 @@ func shownKeyPath(path string) string {
 }
 
 // QuoteArg is arg in Go quotes for a message, or a placeholder when arg has
-// the shape of a private key or holds a PEM block (keyPlaceholder).
+// the shape of a private key, holds a PEM line or holds a control byte
+// (keyPlaceholder).
 func QuoteArg(arg string) string {
 	if p := keyPlaceholder(arg); p != "" {
 		return p
@@ -152,7 +197,7 @@ func (c *Context) recipientArg(key string) (string, error) {
 		agePubkey = key
 	} else {
 		if !fsutil.IsRegular(key) {
-			ui.ErrorTo(c.ErrOut, "not an age key and not a readable file: %s", key)
+			ui.ErrorTo(c.ErrOut, "not an age key and not a readable file: %s", shownKeyPath(key))
 			ui.ErrorTo(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
 			return "", ErrHandled
 		}
@@ -167,7 +212,7 @@ func (c *Context) recipientArg(key string) (string, error) {
 			return "", ErrHandled
 		}
 		if err != nil && !errors.Is(err, errUnsupportedKey) {
-			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", key)
+			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", shownKeyPath(key))
 			ui.ErrorTo(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
 			return "", ErrHandled
 		}

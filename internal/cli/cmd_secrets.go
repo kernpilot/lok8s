@@ -168,9 +168,9 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 }
 
 // GuardPrivateKeyArgv refuses a `lo secrets` call whose raw argv, its words
-// joined with spaces, has the shape of a private key or holds the start of
-// a PEM block, "-----BEGIN" (secrets.LooksLikeKeyArg): a positional, a flag
-// value (`--ssh-key X`, `--ssh-key=X`, `--domain X`), a flag that cobra does
+// joined with spaces, has the shape of a private key or holds a PEM line,
+// "-----BEGIN" or "-----END" in any case (secrets.LooksLikeKeyArg): a
+// positional, a flag value (`--ssh-key X`, `--ssh-key=X`, `--domain X`), a flag that cobra does
 // not know (`--unknown=X`), or a paste split into words. No command of lo
 // secrets takes a PEM block as an argument (a certificate, a public key, a
 // static key of OpenVPN): such a word starts with "-", so pflag reads it as

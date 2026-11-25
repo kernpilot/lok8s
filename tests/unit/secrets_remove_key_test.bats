@@ -2007,7 +2007,7 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   local before; before="$(cat "${CFG}")"
   for arg in "${fake}" "${PEM_HEAD}" "-----BEGIN"; do
     first="[error] an argument looks like a private key: it is not printed"
-    [ "${arg}" != "-----BEGIN" ] || first="[error] a value starts a PEM block (-----BEGIN): it is not printed"
+    [ "${arg}" != "-----BEGIN" ] || first="[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed"
     want="${first}
 [error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
     DOMAIN=a.dev run _rm "${arg}"
@@ -2076,14 +2076,14 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   _run_lo s s -n app KEY ${PEM_HEAD} < /dev/null
   [ "$status" -ne 0 ] && [ "$output" = "${want}" ] || {
     echo "s s <PEM words>: rc ${status}: ${output}" >&2; return 1; }
-  pem_want="[error] a value starts a PEM block (-----BEGIN): it is not printed
+  pem_want="[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed
 [error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
   for value in "${ovpn}" "${cert}"; do
     _run_lo secrets set -n vpn ta.key "${value}" < /dev/null
     [ "$status" -eq 1 ] && [ "$output" = "${pem_want}" ] && [[ "$output" != *"${canary}"* ]] || {
       echo "set <${value%%$'\n'*}>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
   done
-  pem_path_want="[error] a value starts a PEM block (-----BEGIN): it is not printed
+  pem_path_want="[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed
 [error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
   for sub in list st; do
     for value in "${ovpn}" "${cert}"; do

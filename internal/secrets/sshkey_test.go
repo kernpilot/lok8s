@@ -135,12 +135,10 @@ func wantPrivateKeyRefusal(path string) string {
 }
 
 // Init refuses a private key file with the path and the fix, prints nothing
-// from the file and writes nothing; also when the path ends in .pub. The fix
-// names <path>.pub also for a path that ends in a newline (bash twin: the
-// newline test of secrets::_read_public_key).
+// from the file and writes nothing; also when the path ends in .pub.
 func TestInitRefusesAPrivateKeyFile(t *testing.T) {
 	for name, content := range privateKeyForms {
-		for _, suffix := range []string{"", ".pub", "\n"} {
+		for _, suffix := range []string{"", ".pub"} {
 			t.Run(name+suffix, func(t *testing.T) {
 				c, out, errOut := testEnv(t)
 				path := filepath.Join(t.TempDir(), "key"+suffix)
@@ -158,25 +156,35 @@ func TestInitRefusesAPrivateKeyFile(t *testing.T) {
 	}
 }
 
-// When only the PEM rule of shownKeyPath replaces a path that does not end
-// in .pub, the fix line of the refusal names ssh-keygen, not <path>.pub: no
-// line of the output holds the path (bash twin: the refusal test of a
-// private key file at a PEM path).
-func TestInitRefusesAPrivateKeyFileAtAPEMPath(t *testing.T) {
-	c, out, errOut := testEnv(t)
-	dir := mkdir(t, filepath.Join(t.TempDir(), pemLine("X")))
-	path := filepath.Join(dir, "key")
-	write(t, path, privateKeyForms["openssh"])
-	if err := c.Init(path); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
-	}
-	want := "[error] (not printed: it holds a PEM block) holds a private key, not a public key: nothing from it is printed\n" +
-		"[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key\n"
-	if errOut.String() != want || out.String() != "" {
-		t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
-	}
-	if strings.Contains(out.String()+errOut.String(), "BEGIN") {
-		t.Error("a PEM line reached the output")
+// When the placeholder rule of shownKeyPath replaces a path that does not
+// end in .pub (a PEM line, BEGIN or END in any case, or a control byte),
+// the fix line of the refusal names ssh-keygen, not <path>.pub: no line of
+// the output holds the path (bash twins: the refusal tests of a private key
+// file at a PEM path and at a path that ends in a newline).
+func TestInitRefusesAPrivateKeyFileAtAHiddenPath(t *testing.T) {
+	const fix = "[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key\n"
+	dashes := strings.Repeat("-", 5)
+	for name, tc := range map[string]struct{ dir, file, shown string }{
+		"a PEM line":              {pemLine("X"), "key", "(not printed: it holds a PEM block)"},
+		"an END line, lower case": {dashes + "end x" + dashes, "key", "(not printed: it holds a PEM block)"},
+		"a newline at the end":    {"", "key\n", "(not printed: it holds a line break or a control character)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			dir := mkdir(t, filepath.Join(t.TempDir(), tc.dir))
+			path := filepath.Join(dir, tc.file)
+			write(t, path, privateKeyForms["openssh"])
+			if err := c.Init(path); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v", err)
+			}
+			want := "[error] " + tc.shown + " holds a private key, not a public key: nothing from it is printed\n" + fix
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+			}
+			if strings.Contains(out.String()+errOut.String(), "BEGIN") {
+				t.Error("a PEM line reached the output")
+			}
+		})
 	}
 }
 
@@ -291,6 +299,44 @@ func TestKeyParseErrorsPrintNoLibraryError(t *testing.T) {
 		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(out.String()+errOut.String(), keyCanary) ||
 			strings.Contains(errOut.String(), "base64") {
 			t.Errorf("stdout %q\nstderr %q\nwant the two lines first", out.String(), errOut.String())
+		}
+	})
+}
+
+// An argument of add-key with no marker of a private key passes the argv
+// check, so the not-a-file and the derive lines print it through
+// shownKeyPath: a key body pasted without its BEGIN line (a line break) and
+// a key file at a path with a tab get the placeholder, never the value
+// (bash twins: "a pasted key body with no BEGIN line is refused and not
+// echoed", "a key file at a path with a tab that does not derive prints a
+// placeholder").
+func TestRecipientArgHidesAPasteWithNoMarker(t *testing.T) {
+	const ctl = "(not printed: it holds a line break or a control character)"
+	t.Run("not a file", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		sopsYAMLWith(t, c, keyA)
+		body := strings.Repeat("Ab0", 8) + "\n" + keyCanary
+		if err := c.AddKey(body, false, false); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		want := "[error] not an age key and not a readable file: " + ctl + "\n" +
+			"[error] pass an age public key (age1…) or the path to an ed25519 SSH public key\n"
+		if errOut.String() != want || out.String() != "" {
+			t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+		}
+	})
+	t.Run("derive", func(t *testing.T) {
+		c, out, errOut := testEnv(t)
+		sopsYAMLWith(t, c, keyA)
+		path := filepath.Join(t.TempDir(), "id\t.pub")
+		write(t, path, "ssh-ed25519 AAAA"+keyCanary+"!!\n")
+		if err := c.AddKey(path, false, false); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		want := "[error] could not derive an age key from " + ctl + "\n" +
+			"[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key\n"
+		if !strings.HasPrefix(errOut.String(), want) || strings.Contains(out.String()+errOut.String(), "\t") {
+			t.Errorf("stdout %q\nstderr %q\nwant the two lines first, and no tab", out.String(), errOut.String())
 		}
 	})
 }
@@ -548,6 +594,10 @@ func TestShownKeyPathHidesAPEMBlock(t *testing.T) {
 		"a private key":                  {syntheticPEM("OPENSSH "+privKey, keyCanary), private},
 		"a plain path":                   {"/home/user/.ssh/id_ed25519.pub", "/home/user/.ssh/id_ed25519.pub"},
 		"BEGIN without the dashes":       {"/keys/BEGIN CERTIFICATE/id.pub", "/keys/BEGIN CERTIFICATE/id.pub"},
+		"an END line only":               {strings.Repeat("-", 5) + "END CERTIFICATE" + strings.Repeat("-", 5), pem},
+		"a PEM line in lower case":       {strings.Repeat("-", 5) + "begin certificate" + strings.Repeat("-", 5), pem},
+		"a PEM line in mixed case":       {"/k/" + strings.Repeat("-", 5) + "End X" + strings.Repeat("-", 5), pem},
+		"a dotted capital I":             {"/k/" + strings.Repeat("-", 5) + "BEG\u0130N X" + strings.Repeat("-", 5), "/k/" + strings.Repeat("-", 5) + "BEG\u0130N X" + strings.Repeat("-", 5)},
 	} {
 		if got := shownKeyPath(tc.path); got != tc.want {
 			t.Errorf("%s: shownKeyPath gives %q, want %q", name, got, tc.want)
@@ -555,6 +605,36 @@ func TestShownKeyPathHidesAPEMBlock(t *testing.T) {
 		if tc.want != tc.path {
 			if got := QuoteArg(tc.path); got != tc.want {
 				t.Errorf("%s: QuoteArg gives %q, want %q", name, got, tc.want)
+			}
+		}
+	}
+}
+
+// A key path that holds a control byte (0x00-0x1F, 0x7F) is not printed: a
+// line break means a paste of more than one line, for example a key body
+// without its BEGIN line, and an escape can move the cursor of the terminal.
+// The rule reads bytes: a C1 character (U+0085) and a UTF-8 letter print as
+// they are, as in the bash twin under LC_ALL=C. Bash twin:
+// "secrets::_shown_path: an END line, a PEM line in any case and a control
+// byte get a placeholder".
+func TestShownKeyPathHidesAControlByte(t *testing.T) {
+	const ctl = "(not printed: it holds a line break or a control character)"
+	for name, tc := range map[string]struct{ path, want string }{
+		"a body with no BEGIN line": {strings.Repeat("Ab0", 8) + "\n" + keyCanary, ctl},
+		"a newline at the end":      {"/k/id\n", ctl},
+		"a carriage return":         {"/k/id\r", ctl},
+		"a tab":                     {"/k/a\tb", ctl},
+		"an escape":                 {"/k/\x1b[31mred", ctl},
+		"a DEL":                     {"/k/a\x7fb", ctl},
+		"a C1 character":            {"/k/a\u0085b", "/k/a\u0085b"},
+		"a UTF-8 letter":            {"/k/\u00e9", "/k/\u00e9"},
+	} {
+		if got := shownKeyPath(tc.path); got != tc.want {
+			t.Errorf("%s: shownKeyPath gives %q, want %q", name, got, tc.want)
+		}
+		if tc.want == ctl {
+			if got := QuoteArg(tc.path); got != ctl {
+				t.Errorf("%s: QuoteArg gives %q, want %q", name, got, ctl)
 			}
 		}
 	}
@@ -653,14 +733,18 @@ func TestLooksLikePrivateKeyArgvMarkers(t *testing.T) {
 			t.Errorf("not refused: %q", arg)
 		}
 	}
-	for _, arg := range []string{
-		"-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----",
-		"-----BEGIN PUBLIC KEY-----\nMCowfake\n-----END PUBLIC KEY-----",
-		"-----BEGIN",
-		"/k/id_ed25519.pub",
-		"age1" + strings.Repeat("q", 58),
+	for arg, pem := range map[string]bool{
+		"-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----": true,
+		"-----BEGIN PUBLIC KEY-----\nMCowfake\n-----END PUBLIC KEY-----":   true,
+		"-----BEGIN":                      true,
+		"-----END CERTIFICATE-----":       true,
+		"-----begin certificate-----":     true,
+		"-----End":                        true,
+		"BEGIN CERTIFICATE":               false,
+		"---- BEGIN SSH2 PUBLIC KEY ----": false,
+		"/k/id_ed25519.pub":               false,
+		"age1" + strings.Repeat("q", 58):  false,
 	} {
-		pem := strings.Contains(arg, "-----BEGIN")
 		if LooksLikePrivateKey(arg) || LooksLikeKeyArg(arg) != pem {
 			t.Errorf("%q: LooksLikePrivateKey %v, LooksLikeKeyArg %v", arg, LooksLikePrivateKey(arg), LooksLikeKeyArg(arg))
 		}
