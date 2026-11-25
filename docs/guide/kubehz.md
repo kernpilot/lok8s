@@ -67,8 +67,8 @@ A hosted control plane has no plan and no tier. Its **shape** describes it:
 | Value | Range | Default | Meaning |
 |-------|-------|---------|---------|
 | `spec.controlPlane.replicas` | 1 to 3 | 1 | apiserver replicas. `lo provision` sends this count to the platform. |
-| state limit | 1 GB to the datastore maximum | 2 GB | How much cluster state the control plane holds (etcd: up to 6 GB, kine: up to 32 GB). |
-| auto-grow step and cap | 1 GB steps, up to the datastore maximum | 1 GB, the datastore maximum | The platform raises the limit by one step at 80% use, until the cap. |
+| state limit | 1 to 6 GB | 2 GB | How much cluster state the control plane holds. |
+| auto-grow step and cap | 1 GB steps, up to 6 GB | 1 GB, 6 GB | The platform raises the limit by one step at 80% use, until the cap. |
 
 The presets in the dashboard (`dev`: one apiserver, `ha`: three) are defaults
 only. The platform bills every started hour of what runs. Each unit is capped
@@ -242,12 +242,23 @@ A few things worth knowing before you reach for it:
   `.kubeconfig/<domain>.yaml`, the kubelogin file the api serves for the
   space: `kubectl --context kubehz-<slug>` signs you in with your kubehz
   account (OIDC) on first use. `lo kubeconfig` prints that path.
-- **`spec.bootstrap` does not apply.** The platform baseline (CNI, ingress,
-  certificates, DNS) is already running on the shared plane, and a space
-  cannot install cluster-scoped things anyway.
+- **`spec.bootstrap` does not apply.** The platform baseline (CNI and
+  in-cluster DNS) is already running on the shared plane. Not available yet:
+  inbound traffic to your apps (no ingress, no LoadBalancer Service, no
+  NodePort, no hostPort), certificates for your apps and persistent volumes.
+  A space cannot install cluster-scoped things, with one exception: the
+  platform API can allow the space CRDs of its own.
 - **Machines are yours.** lok8s does not provision them and kubehz does not
-  bill for them. Deregistering a node withdraws its credentials; shutting the
-  machine down is still your call.
+  bill for them.
+- **A deregistered node can come back.** Deregistering removes the node from
+  the space and revokes the open join tickets for its name. It does not revoke
+  the client certificate of the node, and the join script makes the kubelet
+  start at boot. Thus a machine that keeps
+  its kubelet registers again. To remove a node for good, first delete the
+  machine. If you keep the machine, run `systemctl disable --now kubelet` on
+  it and delete `/etc/kubernetes/bootstrap-kubelet.conf` and
+  `/etc/kubernetes/kubelet.conf`. Then deregister the node. Hetzner bills a
+  stopped server too: only a deleted server stops the bill.
 - **The shard is the upgrade unit.** The platform upgrades the shared
   control plane as a whole, on its own schedule, and retires old versions on
   that schedule too. Here `upgrades.channel` is a preference, not consent: an
@@ -302,7 +313,9 @@ lo kubehz node uncordon --name worker-1   # schedulable again
 - **A drain does not remove the node.** The node stays in the space and
   holds its slot. Uncordon it to put it back into service. To deregister
   the node, use the dashboard or the api route
-  `DELETE /api/spaces/{id}/nodes/{name}`: `lo` has no command for it.
+  `DELETE /api/spaces/{id}/nodes/{name}`: `lo` has no command for it. First
+  delete the machine, or disable its kubelet and delete its kubeconfigs (see
+  "A deregistered node can come back" above).
 - **The token.** The calls need a `KUBEHZ_TOKEN` with the `clusters:write`
   scope. The slug lookup also reads your space list, which needs the `read`
   scope: with `--space-id`, `lo` sends no list request. From a browser
@@ -366,10 +379,10 @@ firewall, the bare-metal lane):
 [kubehz docs → Spaces](https://kubehz.io/docs/spaces/).
 
 ::: tip Still no lock-in
-A space is the one shape where the control plane is not yours, so it is worth
-being explicit: everything else in lok8s keeps working without kubehz, and
-moving to a cluster of your own (`hosting: hosted` or `self`) is a supported
-path rather than an export-and-rebuild.
+A space is the one shape where the control plane is not yours. Everything
+else in lok8s keeps working without kubehz. To leave a space, copy your
+manifests and data to a cluster of your own (`hosting: hosted` or `self`).
+There is no automatic move.
 :::
 
 ## Bootstrap addons on hosted clusters
@@ -598,16 +611,26 @@ and never rotates them. Re-applying the manifests is a no-op: the manifest of
 the Secret has no data, so `kubectl apply` keeps the values. Registration is
 **provider-agnostic**: no SSH key, no hcloud token, nothing Hetzner-specific.
 
-::: details Legacy: `lo kubehz register`
-A pre-agent announce still exists and runs automatically at the end of
-`lo provision` (or standalone via `lo kubehz register`): it POSTs the cluster
-domain plus an SSH-key MD5 fingerprint to `/api/clusters/register`, making the
-cluster visible before the agent is deployed. It is **vestigial** for
-self-hosted clusters (the agent's self-registration and the claim code below
-are the real path) and stays only as a best-effort announce and as the
-anchor for the platform's hosted-control-plane auto-claim. It proves nothing
-and needs no token; if the API is unreachable it warns and provisioning
-continues.
+::: details `lo kubehz register`: the claim key
+`lo provision` also registers the cluster from your machine, before the agent
+is deployed. `lo kubehz register` does the same on its own. Both post to
+`/api/clusters/register`. What lo sends depends on the tokens in your shell:
+
+- **`HCLOUD_TOKEN` (the usual path for a self-hosted cluster at Hetzner).**
+  lo uploads the claim key `kubehz-claim-<domain>` to your Hetzner Cloud
+  project. The fingerprint of that key is the one-time claim ticket: paste it
+  into the dashboard **Claim** page. See
+  [Claiming a registered cluster](./deployment.md#claiming-a-registered-cluster).
+- **`KUBEHZ_TOKEN`.** lo registers the cluster directly in your account. See
+  [claim at provision time](#kubehz-token-claim-at-provision-time). When both
+  tokens are set, lo tries this one first.
+- **No token, or both other ways failed (`KubeOne` and `Capi`).** lo announces
+  the cluster domain and the MD5 fingerprint of an SSH public key. Anyone can
+  compute that fingerprint, so it proves nothing, and the dashboard does not
+  accept it as a claim ticket. Claim such a cluster with the claim code
+  ([below](#claiming)).
+
+If the API is unreachable, lo prints a warning and the provisioning continues.
 :::
 
 ::: details When the platform is busy: 503 or 429
@@ -994,10 +1017,11 @@ credential for your cluster and cannot connect into it; the agent pulls, and
 `kubectl delete namespace kubehz-system` ends it.
 
 ::: tip What you give up for now
-While the live agent owns the heartbeat, the platform does not receive
-control-plane component health, certificate expiry, or the 24 h assessment:
-the live agent does not collect them yet, so `lo kubehz assess` will go stale.
-Set `agent: cronjob` and re-run `lo kubehz deploy` to get them back.
+While the live agent owns the heartbeat, the platform does not receive the
+24 h assessment: the live agent does not collect it yet, so `lo kubehz assess`
+goes stale. The live agent does not echo a claim nonce either: claim with the
+claim code, or claim before you switch. Set `agent: cronjob` and re-run
+`lo kubehz deploy` to get both back.
 :::
 
 ### Permissions the live agent holds
@@ -1701,6 +1725,10 @@ lo kubehz assess    # pretty-print the stored assessment + feasibility
 `spec.kubehz.apiUrl`).
 
 ### Receiving an ejected control plane
+
+::: warning Not available yet
+kubehz cannot start an eject yet. The commands in this section wait for that.
+:::
 
 When you move a **hosted** control plane onto your own machine, the platform
 exports a bundle (cluster CA, service-account keys, front-proxy CA, the
