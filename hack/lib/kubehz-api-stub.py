@@ -279,6 +279,10 @@ REMOVES = {
     "remove-5": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "5"),
     "remove-6": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 3601),
     "remove-7": retry_later("JOIN_TICKET_BUSY", "Other join tickets of this account are being minted or removed now", REMOVE_HELP, 5),
+    # json.dumps writes 1000.0 and 5.5 as they are: a whole value in the
+    # form of a fraction, and a fraction.
+    "remove-8": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 1000.0),
+    "remove-9": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 5.5),
 }
 
 # POST /api/clusters/cl-1a2b3c4d/nodes/join-token, by the node name in the

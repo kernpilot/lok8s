@@ -1604,9 +1604,11 @@ func TestNodeRemove(t *testing.T) {
 // data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
 // is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
 // list before a retry. JOIN_TICKET_BUSY says that other join changes of
-// the account hold the platform. A wait that is absent, a string, a
-// fraction, 0, above an hour or of five digits gives "shortly". The help
-// of the api (it names a header that lo does not show) is not printed.
+// the account hold the platform. The value of the wait counts, not its
+// form (5.0, 5e0, 1E3). A wait that is absent, a string, a fraction, 0,
+// negative, above an hour, of five digits or too large for a float gives
+// "shortly". The help of the api (it names a header that lo does not
+// show) is not printed.
 // Bash twin:
 // "remove: a 503 names the wait of the body, and the node list for an open
 // result".
@@ -1628,6 +1630,13 @@ func TestNodeRemoveRetryLater(t *testing.T) {
 		"not removed, a string":   {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":"5"`), gone + "shortly.\n"},
 		"not removed, a fraction": {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":5.5`), gone + "shortly.\n"},
 		"not removed, 0":          {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":0`), gone + "shortly.\n"},
+		"not removed, 5.0":        {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":5.0`), gone + "in 5 seconds.\n"},
+		"not removed, 5e0":        {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":5e0`), gone + "in 5 seconds.\n"},
+		"not removed, 1E3":        {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":1E3`), gone + "in 1000 seconds.\n"},
+		"not removed, 3.6001e3":   {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":3.6001e3`), gone + "shortly.\n"},
+		"not removed, 36.01e2":    {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":36.01e2`), gone + "shortly.\n"},
+		"not removed, 1e400":      {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":1e400`), gone + "shortly.\n"},
+		"not removed, -5":         {body("NODE_NOT_REMOVED", `,"retryAfterSeconds":-5`), gone + "shortly.\n"},
 		"not removed, top level":  {`{"code":"NODE_NOT_REMOVED","message":"m","retryAfterSeconds":7}`, gone + "in 7 seconds.\n"},
 		"unknown, 5":              {body("NODE_REMOVE_RESULT_UNKNOWN", `,"retryAfterSeconds":5`), open + "in 5 seconds.\n"},
 		"unknown, absent":         {body("NODE_REMOVE_RESULT_UNKNOWN", ""), open + "shortly.\n"},

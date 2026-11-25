@@ -261,13 +261,16 @@ node::api_error() {
 
 # The wait of a refusal body (KUBEHZ_SPACE_API_BODY) for a help line:
 # "in N seconds" ("in 1 second") from retryAfterSeconds (.data first), when
-# that is a JSON number in digits only, from 1 to 3600 (an hour). Else it
-# is "shortly": a string, a fraction, 0 or a number above an hour names no
-# number. Go twin: retryWait.
+# that is a JSON number whose value is a whole number from 1 to 3600 (an
+# hour), in any JSON form: 5, 5.0 and 5e0 all give "in 5 seconds". Else it
+# is "shortly": a string, a fraction, 0, a negative number or a number
+# above an hour names no number. jq prints one number in other forms
+# across its versions, so floor gives the digits of the value, and the
+# check below reads only those. Go twin: retryWait.
 # Usage: node::retry_wait
 node::retry_wait() {
   local s
-  s=$(jq -r '(.data.retryAfterSeconds // .retryAfterSeconds) | select(type == "number")' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || s=""
+  s=$(jq -r '(.data.retryAfterSeconds // .retryAfterSeconds) | select(type == "number" and . == floor) | floor' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || s=""
   if [[ "${s}" =~ ^[0-9]{1,4}$ ]] && (( 10#${s} >= 1 && 10#${s} <= 3600 )); then
     if (( 10#${s} == 1 )); then
       printf '%s' "in 1 second"

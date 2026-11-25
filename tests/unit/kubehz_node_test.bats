@@ -1817,9 +1817,11 @@ _refuse_flag() {
 # data or at the top level) in seconds: NODE_NOT_REMOVED says that the node
 # is still there, and NODE_REMOVE_RESULT_UNKNOWN sends the user to the node
 # list before a retry. JOIN_TICKET_BUSY says that other join changes of
-# the account hold the platform. A wait that is absent, a string, a
-# fraction, 0, above an hour or of five digits gives "shortly". The help of
-# the api is not printed. Go twin: TestNodeRemoveRetryLater.
+# the account hold the platform. The value of the wait counts, not its
+# form (5.0, 5e0, 1E3). A wait that is absent, a string, a fraction, 0,
+# negative, above an hour, of five digits or too large for a float gives
+# "shortly". The help of the api is not printed. Go twin:
+# TestNodeRemoveRetryLater.
 @test "remove: a 503 names the wait of the body, and the node list for an open result" {
   _stub_all
   local head="[error] Failed to remove node 'box-1' (HTTP 503): m"$'\n' i
@@ -1828,13 +1830,18 @@ _refuse_flag() {
   local busy="${head}  The platform is busy with other join changes of this account. Run this command again "
   local -a codes=(NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED
     NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_REMOVE_RESULT_UNKNOWN NODE_REMOVE_RESULT_UNKNOWN
-    JOIN_TICKET_BUSY JOIN_TICKET_BUSY)
+    JOIN_TICKET_BUSY JOIN_TICKET_BUSY
+    NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED NODE_NOT_REMOVED)
   local -a waits=(',"retryAfterSeconds":5' ',"retryAfterSeconds":1' ',"retryAfterSeconds":3600' ',"retryAfterSeconds":3601'
     ',"retryAfterSeconds":10000' '' ',"retryAfterSeconds":"5"' ',"retryAfterSeconds":5.5' ',"retryAfterSeconds":0'
-    ',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' '')
+    ',"retryAfterSeconds":5' '' ',"retryAfterSeconds":5' ''
+    ',"retryAfterSeconds":5.0' ',"retryAfterSeconds":5e0' ',"retryAfterSeconds":1E3' ',"retryAfterSeconds":3.6001e3'
+    ',"retryAfterSeconds":36.01e2' ',"retryAfterSeconds":1e400' ',"retryAfterSeconds":-5')
   local -a want=("${gone}in 5 seconds." "${gone}in 1 second." "${gone}in 3600 seconds." "${gone}shortly."
     "${gone}shortly." "${gone}shortly." "${gone}shortly." "${gone}shortly." "${gone}shortly."
-    "${open}in 5 seconds." "${open}shortly." "${busy}in 5 seconds." "${busy}shortly.")
+    "${open}in 5 seconds." "${open}shortly." "${busy}in 5 seconds." "${busy}shortly."
+    "${gone}in 5 seconds." "${gone}in 5 seconds." "${gone}in 1000 seconds." "${gone}shortly."
+    "${gone}shortly." "${gone}shortly." "${gone}shortly.")
   STUB_REMOVE_CODE="503"
   for i in "${!waits[@]}"; do
     STUB_REMOVE_BODY='{"statusCode":503,"data":{"code":"'"${codes[i]}"'","message":"m","help":"Retry after the Retry-After interval."'"${waits[i]}"'}}'

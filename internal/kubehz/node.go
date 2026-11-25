@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -243,12 +244,14 @@ const retryWaitMaxSeconds = 3600
 
 // retryWait is the wait of a refusal body for a help line: "in N seconds"
 // ("in 1 second") from `.data.retryAfterSeconds // .retryAfterSeconds`,
-// when that is a JSON number in digits only, from 1 to
-// retryWaitMaxSeconds. Else it is "shortly": a string, a fraction, 0 or a
-// number above an hour names no number. Atoi and the range check are
-// enough here: a JSON number has no "+" and no leading zero, a minus sign
-// gives a number below 1, and Atoi refuses a fraction, an exponent and a
-// number that does not fit. The bash twin is node::retry_wait.
+// when that is a JSON number whose value is a whole number from 1 to
+// retryWaitMaxSeconds, in any JSON form: 5, 5.0 and 5e0 all give "in 5
+// seconds". Else it is "shortly": a string, a fraction, 0, a negative
+// number or a number above an hour names no number. The value counts, not
+// its form: the bash twin reads the number through jq, and jq prints one
+// number in other forms across its versions (jq 1.6 prints 5.0 as 5, jq
+// 1.8 prints 5e0 as 5). ParseFloat gives an error for a number that does
+// not fit (1e400). The bash twin is node::retry_wait.
 func retryWait(body []byte) string {
 	v, ok := parseJSON(body)
 	if !ok {
@@ -258,14 +261,14 @@ func retryWait(body []byte) string {
 	if !ok {
 		return "shortly"
 	}
-	s, err := strconv.Atoi(string(n))
+	f, err := strconv.ParseFloat(string(n), 64)
 	switch {
-	case err != nil || s < 1 || s > retryWaitMaxSeconds:
+	case err != nil || f != math.Trunc(f) || f < 1 || f > retryWaitMaxSeconds:
 		return "shortly"
-	case s == 1:
+	case f == 1:
 		return "in 1 second"
 	}
-	return "in " + strconv.Itoa(s) + " seconds"
+	return "in " + strconv.Itoa(int(f)) + " seconds"
 }
 
 var nodeNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
