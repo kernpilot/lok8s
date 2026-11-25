@@ -1128,13 +1128,33 @@ parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
 # Parity stub kubectl (dry run): log the argv; `diff` answers per the
 # manifest on stdin (unchanged / a canned two-object diff / unreachable);
-# anything that writes must never be reached.
+# anything that writes must never be reached. The read of the field
+# managers answers PARITY_CSA_READ (the first read of a side) and
+# PARITY_CSA_AFTER (a later one), or nothing (no live object); with
+# PARITY_CSA_FAIL it fails as a forbidden read does. With PARITY_CSA_APPLY
+# an apply works (the real-run cases of the check).
 echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
 # Only a `-f -` call carries a manifest: never read stdin otherwise (a stub
 # that always reads hangs on a terminal or an open pipe).
 manifest=""
 [[ " $* " != *" -f - "* ]] || manifest="$(cat)"
 case " $* " in
+  *" get -f - "*" --show-managed-fields "*)
+    if [[ -n "${PARITY_CSA_FAIL:-}" ]]; then
+      echo "Error from server (Forbidden): configmaps is forbidden: CSA-STDERR-CANARY" >&2
+      exit 1
+    fi
+    if [[ -n "${PARITY_CSA_AFTER:-}" ]] && (( $(grep -c -- ' --show-managed-fields ' "${PARITY_KUBECTL_LOG}") > 1 )); then
+      cat "${PARITY_CSA_AFTER}"
+    elif [[ -n "${PARITY_CSA_READ:-}" ]]; then
+      cat "${PARITY_CSA_READ}"
+    fi
+    exit 0 ;;
+  *" apply "*)
+    if [[ -n "${PARITY_CSA_APPLY:-}" ]]; then
+      echo "configmap/cilium serverside-applied"
+      exit 0
+    fi ;;
   *" diff "*)
     case "${manifest}" in
       *"name: cilium-ca"*|*"name: extra-cm"*|*"name: extra"*)
@@ -1252,6 +1272,86 @@ dry_check - provision --domain dry.dev --bootstrap --dry-run --only cilium
 dry_expect_rc 0 provision --domain dry.dev --bootstrap --dry-run --only cilium
 dry_check - provision --domain beta.cloud --bootstrap --dry-run     # cloud kind: NOT gated, stops at the missing kubeconfig (rc 2: a dry run's failure outside the diff; never 3)
 dry_expect_rc 2 provision --domain beta.cloud --bootstrap --dry-run
+
+# ── lo bootstrap: the check of the field managers ────────────────────────────
+# Before each diff, and before and after each apply, lo reads the field
+# managers of the live objects of the entry (kubectl get -f - with a
+# jsonpath template). The read names two client-side writers of the live
+# cilium ConfigMap (Update entries that own the last-applied annotation),
+# with a backslash in a manager name and a control byte in a label key:
+# both sides send the same argv (the template included), escape the names
+# in the same way and print the same lines. An entry of a writer with
+# another apiVersion (v1beta1) does not move to lo, so its label tier is
+# not named. A dry run counts the entry as differs (rc 1) although its
+# diff is unchanged; --skip-client-side-owned leaves the object out. A read
+# that fails is a warning, or under --skip-client-side-owned an error; lo
+# never prints its kubectl message.
+printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl-client-side-apply\tUpdate\t\tv1\t{".":{},"f:team":{},"f:k\\u001bx":{}}\t{".":{},"f:kubectl.kubernetes.io/last-applied-configuration":{},"f:note":{}}\nM\tkubectl-client-side-apply\tUpdate\t\tv1beta1\t{"f:tier":{}}\t\nM\tevil\\\tUpdate\t\tv1\t\t{"f:kubectl.kubernetes.io/last-applied-configuration":{}}\nO\tv1\tList\t\t\n' > "${WORK}/csa.read"
+printf 'O\tv1\tConfigMap\tkube-system\tcilium\nM\tkubectl\tApply\t\tv1\t{"f:team":{}}\t\nO\tv1\tList\t\t\n' > "${WORK}/csa.after"
+csa_pin() {  # <label> <file> <fixed text>: a line ends with the text
+  # ENVIRON, not -v: awk -v reads backslash escapes in the value.
+  if CSA_PIN_TEXT="${3}" awk 'BEGIN { t = ENVIRON["CSA_PIN_TEXT"] }
+      length($0) >= length(t) && substr($0, length($0) - length(t) + 1) == t { f = 1 }
+      END { exit !f }' "${2}"; then echo "ok: ${1}"; else
+    echo "FAIL: ${1}: no line ends with ${3} in ${2}:"; sed 's/^/  /' "${2}" | head -20
+    failures=$((failures + 1))
+  fi
+}
+csa_warn='[warn] bootstrap: cilium: ConfigMap kube-system/cilium: client-side writers (evil\\, kubectl-client-side-apply) own fields; the apply moves them to lo and drops what the target does not set: labels k\x1bx, team; annotation note'
+csa_failed='[warn] bootstrap: cilium: lo cannot read the field managers of the live objects (kubectl get exited 1), so it cannot name the fields that the apply drops'
+PARITY_CSA_READ="${WORK}/csa.read" dry_check - bootstrap --domain dry.dev --dry-run --only cilium
+parity::state_same "${WORK}/kubectl.bash.log" "${WORK}/kubectl.go.log" "kubectl argv of the dry run with a client-side writer" || failures=$((failures + 1))
+PARITY_CSA_READ="${WORK}/csa.read" dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only cilium
+for side in bash go; do
+  tls_pin "${side}: the read before the diff" "${WORK}/kubectl.${side}.log" "^kubectl --kubeconfig PROJ/\.kubeconfig/dryc\.yaml get -f - --ignore-not-found --show-managed-fields -o jsonpath=\{range \.items\[\*\]\}"
+  tls_pin "${side}: a client-side writer makes the entry differ" "${WORK}/${side}.out" "^bootstrap dry-run: cilium: differs \(client-side owned: 1\)$"
+  csa_pin "${side}: the writers and the keys, escaped" "${WORK}/${side}.err" "${csa_warn}"
+done
+PARITY_CSA_READ="${WORK}/csa.read" dry_check - bootstrap --domain dry.dev --dry-run --only cilium --skip-client-side-owned
+parity::state_same "${WORK}/kubectl.bash.log" "${WORK}/kubectl.go.log" "kubectl argv of the dry run with --skip-client-side-owned" || failures=$((failures + 1))
+PARITY_CSA_READ="${WORK}/csa.read" dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium --skip-client-side-owned
+for side in bash go; do
+  tls_pin "${side}: the object is left out" "${WORK}/${side}.out" "^bootstrap dry-run: cilium: unchanged \(client-side owned, left out: 1\)$"
+  csa_pin "${side}: the left-out object is named" "${WORK}/${side}.err" '[warn] bootstrap: cilium: ConfigMap kube-system/cilium: left out of the apply (--skip-client-side-owned): client-side writers (evil\\, kubectl-client-side-apply) own fields'
+done
+PARITY_CSA_FAIL=1 dry_check - bootstrap --domain dry.dev --dry-run --only cilium
+PARITY_CSA_FAIL=1 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
+for side in bash go; do
+  csa_pin "${side}: a read that fails is a warning" "${WORK}/${side}.err" "${csa_failed}"
+  tls_absent "${side}: no kubectl message of the read" "${WORK}/${side}.err" "CSA-STDERR-CANARY"
+done
+PARITY_CSA_FAIL=1 dry_check - bootstrap --domain dry.dev --dry-run --only cilium --skip-client-side-owned
+PARITY_CSA_FAIL=1 dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --only cilium --skip-client-side-owned
+for side in bash go; do
+  tls_pin "${side}: a read that fails is an error under --skip-client-side-owned" "${WORK}/${side}.out" "^bootstrap dry-run: cilium: error$"
+  tls_absent "${side}: no kubectl message of the read (skip)" "${WORK}/${side}.err" "CSA-STDERR-CANARY"
+done
+dry_check - provision --domain dry.dev --skip-client-side-owned
+for side in bash go; do
+  csa_pin "${side}: --skip-client-side-owned requires --bootstrap" "${WORK}/${side}.err" "--skip-client-side-owned requires --bootstrap"
+done
+dry_check - bootstrap --domain dry.dev --dry-run --no-diff --skip-client-side-owned
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --no-diff --skip-client-side-owned
+for side in bash go; do
+  csa_pin "${side}: --skip-client-side-owned does not work with --no-diff" "${WORK}/${side}.err" "--skip-client-side-owned does not work with --no-diff: --no-diff does not read the cluster"
+done
+# The real run: the warning before the apply, the dropped keys after it
+# (the read after the apply finds the label team owned, the rest gone).
+# With --skip-client-side-owned nothing of the entry is left: no apply of
+# the entry (the cluster inventory is still applied).
+PARITY_CSA_APPLY=1 PARITY_CSA_READ="${WORK}/csa.read" PARITY_CSA_AFTER="${WORK}/csa.after" dry_check - bootstrap --domain dry.dev --only cilium
+parity::state_same "${WORK}/kubectl.bash.log" "${WORK}/kubectl.go.log" "kubectl argv of the real run with a client-side writer" || failures=$((failures + 1))
+for side in bash go; do
+  csa_pin "${side}: the real run names the writers" "${WORK}/${side}.out" "${csa_warn}"
+  csa_pin "${side}: the real run names the dropped keys" "${WORK}/${side}.out" '[warn] bootstrap: cilium: ConfigMap kube-system/cilium: the apply dropped label k\x1bx; annotation note'
+  if [[ "$(grep -c -- ' --show-managed-fields ' "${WORK}/kubectl.${side}.log")" == 2 ]]; then echo "ok: ${side}: a read before and after the apply"; else fail "${side}: not two reads around the apply"; fi
+done
+PARITY_CSA_APPLY=1 PARITY_CSA_READ="${WORK}/csa.read" dry_check - bootstrap --domain dry.dev --only cilium --skip-client-side-owned
+for side in bash go; do
+  csa_pin "${side}: the real run names the left-out object" "${WORK}/${side}.out" '[warn] bootstrap: cilium: ConfigMap kube-system/cilium: left out of the apply (--skip-client-side-owned): client-side writers (evil\\, kubectl-client-side-apply) own fields'
+  tls_absent "${side}: nothing is left to apply" "${WORK}/kubectl.${side}.log" " apply --server-side --force-conflicts -f -$"
+done
+PARITY_CSA_APPLY=1 PARITY_CSA_READ="${WORK}/csa.read" dry_expect_rc 0 bootstrap --domain dry.dev --only cilium --skip-client-side-owned
 
 # ── Review round 3: the in-place dry run ─────────────────────────────────────
 # A dry run renders IN PLACE, exactly as a real run does. The project now

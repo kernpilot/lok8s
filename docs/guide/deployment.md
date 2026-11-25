@@ -664,9 +664,10 @@ lines come in the order of the run; only the `--render-dir` files carry the
   the kubectl that the dry run used. Each path in the command is in single
   quotes, so you can paste it into a shell. Without `--render-dir`, the
   line tells you to do the dry run again with `--render-dir <dir>`: `<dir>`
-  is a directory that you choose. With `--ignore-nondeterministic`, the dry
-  run diffed the render without its non-deterministic objects, but the file
-  holds the full render: the diff by hand can show more. When kubectl did
+  is a directory that you choose. With `--ignore-nondeterministic` or
+  `--skip-client-side-owned`, the dry run diffed the render without some of
+  its objects, but the file holds the full render: the diff by hand can
+  show more. When kubectl did
   not start (it is not installed), or an interrupt or a SIGTERM stopped it
   (exit 130 or 143), the line says so and gives no command.
 - `inconclusive (needs-crd)`: the server-side diff failed because the CRD
@@ -702,6 +703,39 @@ lines come in the order of the run; only the `--render-dir` files carry the
   changes them. The result includes these objects: the entry differs, and
   the run exits 1. `--ignore-nondeterministic` diffs the entry without them.
   The run still lists them, and `--render-dir` keeps them.
+- `(client-side owned: N)`, with one `[warn]` line for each object: a
+  client-side writer owns fields of these live objects. A client-side
+  writer is a `managedFields` entry with the operation `Update` that owns
+  the `kubectl.kubernetes.io/last-applied-configuration` annotation, for
+  example from a `kubectl apply` without `--server-side`. The server-side
+  apply of lo moves the fields of these writers to lo. Then it removes each
+  of these fields that the entry does not set, if no other manager owns it.
+  kubectl moves only the entry of a writer with the `apiVersion` of the
+  object in the entry. It removes the other `Update` entries of the writer
+  that have no subresource, but their fields stay on the object, with no
+  manager.
+  `kubectl diff` does not show this removal, thus the entry differs (exit 1)
+  also when its diff has no change. The `[warn]` line names the writers,
+  and the labels and annotations that the apply removes. lo does not name
+  other fields (for example the keys under `data`). A real run prints the
+  same lines before the apply, and after the apply a line with the labels
+  and annotations that it removed. `--skip-client-side-owned` leaves these
+  objects out of the diff and out of the apply: the mark is then
+  `(client-side owned, left out: N)`. lo never removes the last-applied
+  annotation. When lo cannot read the field managers (for example, RBAC
+  does not allow `get`) or the objects of the render, it prints a `[warn]`
+  line and continues. With `--skip-client-side-owned` the entry is then an
+  error, because lo cannot find the objects to leave out. The same holds
+  for a render with a map that has a tag of its own (`--- !tag`): kubectl
+  reads it as an object. An object of a client-side writer whose document
+  lo cannot find in the render (an item of a `kind: List`, for example)
+  gets a `[warn]` line, and with the flag the entry is an error. A missing CRD is
+  not such an error (no object of it can be live), but only when kubectl
+  reports no other error. The check runs for each entry of
+  `spec.bootstrap`, also in `lo up`, `lo provision` and the lok8s
+  operator. It does not run for the `restore.d` files: lo applies them
+  without the check, and `--skip-client-side-owned` does not leave their
+  objects out.
 - `(non-repeatable)`: the render generated secret material that the store
   does not hold yet (a password, a key, a certificate, or a CA because
   `CAROOT` has none), or it updated a value of the store. The dry run keeps
@@ -808,7 +842,9 @@ mode 0700, and says so on stderr. A later run clears only the files it owns
 directory without the marker (as a regular file), a path with a symlink in
 it, and a symlink inside the directory.
 
-`--no-diff` renders only and never contacts the cluster.
+`--no-diff` renders only and never contacts the cluster. Thus lo refuses
+`--no-diff` with `--skip-client-side-owned`: without a read of the cluster,
+lo cannot find the objects to leave out.
 
 **Exit codes**, the same for `lo bootstrap` and `lo provision --bootstrap`:
 0 when nothing would change, 1 only when a completed diff found a change

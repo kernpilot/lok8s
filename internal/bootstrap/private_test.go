@@ -244,6 +244,9 @@ func TestDryRunDiffFileIsPrivate(t *testing.T) {
 	e.Options.RenderDir = dir
 	var envs [][]string
 	f.handler = func(c execx.Cmd) error {
+		if isFieldManagerRead(c) {
+			return nil
+		}
 		envs = append(envs, c.Env)
 		fmt.Fprint(c.Stdout, diffOutWithCanary)
 		return &rcError{1}

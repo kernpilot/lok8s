@@ -1179,6 +1179,59 @@ EOF
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node remove --name worker-1 --domain hstub.dev --cluster-id cl-1a2b3c4d
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node remove --name worker-1 --domain hstub.dev
   done
+  # The 503 refusals of a hosted node remove: NODE_NOT_REMOVED names the
+  # wait of the body in seconds, NODE_REMOVE_RESULT_UNKNOWN sends the user
+  # to the node list first, JOIN_TICKET_BUSY names the wait too, the value
+  # of the wait counts and not its form (1000.0), and a wait that is
+  # absent, a string, a fraction or above an hour gives "shortly". Each
+  # kc_reason holds the whole help line of its code: two equal outputs
+  # could both be wrong.
+  check_api - kubehz node remove --name remove-1 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, not removed, 5 seconds" "The node is still in the cluster. Run this command again in 5 seconds."
+  check_api - kubehz node remove --name remove-2 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, result unknown" "Read the node list before a retry:  lo kubehz node status"
+  check_api - kubehz node remove --name remove-3 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, no wait" "The node is still in the cluster. Run this command again shortly."
+  check_api - kubehz node remove --name remove-4 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, result unknown, 1 second" "If the node is still there, run this command again in 1 second."
+  check_api - kubehz node remove --name remove-5 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, a wait that is a string" "The node is still in the cluster. Run this command again shortly."
+  check_api - kubehz node remove --name remove-6 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, a wait above an hour" "The node is still in the cluster. Run this command again shortly."
+  check_api - kubehz node remove --name remove-8 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, a whole wait in the form of a fraction" "The node is still in the cluster. Run this command again in 1000 seconds."
+  check_api - kubehz node remove --name remove-9 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, a fraction" "The node is still in the cluster. Run this command again shortly."
+  # Number forms that json.dumps does not write (the stub sends them as
+  # written): the value counts, not its form. 36.01e2 is above an hour, and
+  # 1e400 is too large for a float.
+  check_api - kubehz node remove --name remove-10 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 5e0" "The node is still in the cluster. Run this command again in 5 seconds."
+  check_api - kubehz node remove --name remove-11 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 1E3" "The node is still in the cluster. Run this command again in 1000 seconds."
+  check_api - kubehz node remove --name remove-12 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 36.01e2" "The node is still in the cluster. Run this command again shortly."
+  check_api - kubehz node remove --name remove-13 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, 1e400" "The node is still in the cluster. Run this command again shortly."
+  check_api - kubehz node remove --name remove-7 --domain hstub.dev --cluster-id cl-1a2b3c4d
+  kc_reason "remove, join changes busy" "The platform is busy with other join changes."
+  kc_reason "remove, join changes busy, the wait" "  Run this command again in 5 seconds."
+  # The 503 refusals of a hosted join mint: JOIN_TICKET_NOT_MINTED names the
+  # wait of the body, JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the
+  # node can exist, that it holds a node slot, that the next mint revokes
+  # it and how to free the slot, and JOIN_TICKET_BUSY with no wait gives
+  # "shortly".
+  check_api - kubehz node join --print-only --name mint-1 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+  kc_reason "join, not minted" "No join ticket was minted for this node."
+  kc_reason "join, not minted, the wait" "  Run this command again in 5 seconds."
+  check_api - kubehz node join --print-only --name mint-2 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+  kc_reason "join, result unknown" "exist, but lo did not get it. It holds a node slot for about ten minutes."
+  kc_reason "join, result unknown, the revoke" "The next mint for this node name revokes that ticket."
+  kc_reason "join, result unknown, the wait" "Run this command again in 5 seconds, or free the slot now:"
+  kc_reason "join, result unknown, the remove" "    lo kubehz node remove --name <node-name>"
+  check_api - kubehz node join --print-only --name mint-3 --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+  kc_reason "join, busy" "The platform is busy with other join changes."
+  kc_reason "join, busy, no wait" "  Run this command again shortly."
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev

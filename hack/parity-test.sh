@@ -369,6 +369,15 @@ for cmd in add-key remove-key; do
   sec_check secrets "${cmd}" "${KEY2}" "${FAKE_ID}"
   sec_no_echo "${FAKE_ID}" "secrets ${cmd} <age key> <private key>"
 done
+# A value with a line break or an escape but no marker passes the argv
+# guard: the not-a-valid-age-key line (age1...) and the not-a-file line
+# print the placeholder, never the value.
+for cmd in add-key remove-key; do
+  for arg in $'age1canary\nCANARYTAIL' $'age1canary\x1b[31mCANARYTAIL' $'Ab0Ab0Ab0\nCANARYTAIL'; do
+    sec_check secrets "${cmd}" "${arg}"
+    sec_no_echo "CANARYTAIL" "secrets ${cmd} <a value with a line break or an escape>"
+  done
+done
 # init and decrypt take the path of a key file: a key pasted into --ssh-key,
 # in both flag forms and split into words, is refused the same way.
 for cmd in init decrypt; do
@@ -387,11 +396,11 @@ done
 # key-path commands refuse any PEM block (here a certificate line). For a
 # PEM block that is not a private key, the first line of the refusal of set
 # names the PEM block; for a private key, it names a private key.
-SET_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
+SET_REFUSAL="[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed
 [error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
 SET_KEY_REFUSAL="[error] an argument looks like a private key: it is not printed
 [error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>"
-PEM_PATH_REFUSAL="[error] a value starts a PEM block (-----BEGIN): it is not printed
+PEM_PATH_REFUSAL="[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed
 [error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)"
 sec_check secrets set -n app KEY "${FAKE_ID}"
 sec_no_echo "${FAKE_ID}" "secrets set <private key>"
@@ -416,6 +425,13 @@ sec_check secrets add-key "-----BEGIN CERTIFICATE-----"
 if [[ "$(cat "${WORK}/go.err")" != "${PEM_PATH_REFUSAL}" ]]; then
   fail "secrets add-key <certificate line>: not the refusal that names the PEM block and the key file"
 fi
+# A PEM line is BEGIN or END, in any case.
+for pem_word in "-----END CERTIFICATE-----" "-----begin certificate-----"; do
+  sec_check secrets add-key "${pem_word}"
+  if [[ "$(cat "${WORK}/go.err")" != "${PEM_PATH_REFUSAL}" ]]; then
+    fail "secrets add-key <${pem_word}>: not the refusal that names the PEM line and the key file"
+  fi
+done
 # Another command of lo secrets (list, a typo of set) refuses a PEM block
 # too: no command of lo secrets takes one as an argument. The second line
 # names the key file.
@@ -472,6 +488,34 @@ for pem in "OpenVPN Static key V1" "CERTIFICATE" "SOME DATA"; do
     fi
     if [[ "${cmd}" == decrypt ]] && ! grep -qxF "[error] SSH private key not found: ${PEM_SHOWN}" "${WORK}/go.err"; then
       fail "secrets decrypt <${pem} block in LOK8S_SSH_KEY>: no not-found line with the placeholder"
+    fi
+  done
+done
+# A paste with no BEGIN line reaches no argv guard either: a key body (more
+# than one line), a block in lower case, an END line alone and lines that
+# end in CRLF. The not-found lines print a placeholder (a PEM line in any
+# case, or a line break), never a line of the paste.
+PASTE_CTL="(not printed: it holds a line break or a control character)"
+for paste in body lower end crlf; do
+  case "${paste}" in
+    body) export LOK8S_SSH_KEY="${PEM_BODY}"$'\n'"${PEM_BODY}x"; paste_shown="${PASTE_CTL}" ;;
+    lower) export LOK8S_SSH_KEY="-----begin certificate-----"$'\n'"${PEM_BODY}"$'\n'"-----end certificate-----"; paste_shown="${PEM_SHOWN}" ;;
+    end) export LOK8S_SSH_KEY="-----END CERTIFICATE-----"; paste_shown="${PEM_SHOWN}" ;;
+    crlf) export LOK8S_SSH_KEY="${PEM_BODY}"$'\r\n'"${PEM_BODY}x"$'\r'; paste_shown="${PASTE_CTL}" ;;
+  esac
+  for cmd in init decrypt; do
+    sec_check secrets "${cmd}"
+    while IFS= read -r pem_line; do
+      pem_line="${pem_line%$'\r'}"
+      if [[ -n "${pem_line}" ]]; then
+        sec_no_echo "${pem_line}" "secrets ${cmd} <${paste} paste in LOK8S_SSH_KEY>"
+      fi
+    done <<< "${LOK8S_SSH_KEY}"
+    if [[ "${cmd}" == init && "$(cat "${WORK}/go.err")" != "[error] SSH public key not found: ${paste_shown}" ]]; then
+      fail "secrets init <${paste} paste in LOK8S_SSH_KEY>: not the one line with the placeholder"
+    fi
+    if [[ "${cmd}" == decrypt ]] && ! grep -qxF "[error] SSH private key not found: ${paste_shown}" "${WORK}/go.err"; then
+      fail "secrets decrypt <${paste} paste in LOK8S_SSH_KEY>: no not-found line with the placeholder"
     fi
   done
 done

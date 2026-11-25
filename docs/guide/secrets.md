@@ -93,8 +93,8 @@ stdin too: the flag parser reads such an argument as a flag. `set` refuses any
 PEM block or private key as the value argument before a parser reads it, does
 not print it, and says to use stdin (see below). A value that holds a PEM
 block at a later position also goes on stdin, for example a JSON document
-with a certificate in it: `set` refuses each argument that holds
-`-----BEGIN`.
+with a certificate in it: `set` refuses each argument that holds a
+PEM line (`-----BEGIN` or `-----END`, in any case).
 
 ```bash
 lo secrets set --domain app.example.com --name tls tls.crt < cert.pem
@@ -219,14 +219,18 @@ block as an argument: it starts with `-`, so the flag parser reads it as a
 flag and prints it. The refusal includes a key pasted into `--ssh-key` or
 `--domain`, a key in place of a command, and a paste that the shell splits
 into words. For a PEM block that is not a private key, the first line of
-the error is `a value starts a PEM block (-----BEGIN): it is not printed`.
+the error is `a value holds a PEM line (-----BEGIN or -----END): it is not printed`.
 For `set`, the error says to pass the value on stdin. When the value of
-`LOK8S_SSH_KEY` looks like a private key or holds a PEM block, each message
-that names the key file shows a placeholder instead of the value:
-`(not printed: it looks like a private key)` for a private key, and
-`(not printed: it holds a PEM block)` for any other PEM block. For both,
-`init` shows no hint after the error: no command to write the `.pub` file,
-and no command to make a new key.
+`LOK8S_SSH_KEY` looks like a private key, holds a PEM line or holds a line
+break, each message that names the key file shows a placeholder instead of
+the value: `(not printed: it looks like a private key)` for a private key,
+`(not printed: it holds a PEM block)` for any other PEM line, and
+`(not printed: it holds a line break or a control character)` for a value
+with a line break, a tab or another control character. No key path holds
+a line break. For all three, `init` shows no hint after the error: no
+command to write the `.pub` file, and no command to make a new key. The
+key argument of `add-key` and `remove-key` gets the same placeholders in
+each message that names it, also an `age1…` key that is not valid.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

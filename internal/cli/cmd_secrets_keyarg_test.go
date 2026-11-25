@@ -38,13 +38,13 @@ const privateKeyValueRefusal = "[error] an argument looks like a private key: it
 // prints for a word that holds "-----BEGIN" when the refused words have no
 // private key: the first line names the PEM block (secrets.RefusePrivateKey;
 // bash: secrets::_no_private_key).
-const pemPathRefusal = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n" +
+const pemPathRefusal = "[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed\n" +
 	"[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"
 
 // pemValueRefusal is what the guard prints for lo secrets set when the argv
 // holds "-----BEGIN" and has no private key (a certificate, a public key, a
 // static key of OpenVPN): the first line names the PEM block.
-const pemValueRefusal = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n" +
+const pemValueRefusal = "[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed\n" +
 	"[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
 
 // privateKeyArgvs are the argvs of one key command with a private key shape

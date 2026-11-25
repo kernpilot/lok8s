@@ -217,6 +217,9 @@ func TestQuoteArg(t *testing.T) {
 		"-----BEGIN OPENSSH PRIVATE KEY-----":  "(not printed: it looks like a private key)",
 		"-----BEGIN CERTIFICATE-----\nMIIB":    "(not printed: it holds a PEM block)",
 		"-----BEGIN":                           "(not printed: it holds a PEM block)",
+		"-----END CERTIFICATE-----":            "(not printed: it holds a PEM block)",
+		"-----begin certificate-----":          "(not printed: it holds a PEM block)",
+		"a\nb":                                 "(not printed: it holds a line break or a control character)",
 		`{"ca":"-----BEGIN CERTIFICATE-----"}`: "(not printed: it holds a PEM block)",
 	} {
 		if got := QuoteArg(in); got != want {
@@ -245,13 +248,15 @@ func TestKeyArgumentRefusesAPrivateKey(t *testing.T) {
 		// Each argument, and the first line of its refusal: a private key,
 		// or the PEM block when the argument has no private key.
 		const keyFirst = "[error] an argument looks like a private key: it is not printed\n"
-		const pemFirst = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n"
+		const pemFirst = "[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed\n"
 		for arg, first := range map[string]string{
 			fakeAgeIdentity:                       keyFirst,
 			strings.ToLower(fakeAgeIdentity):      keyFirst,
 			"-----BEGIN OPENSSH PRIVATE KEY-----": keyFirst,
 			"-----BEGIN":                          pemFirst,
 			"-----BEGIN CERTIFICATE-----":         pemFirst,
+			"-----END CERTIFICATE-----":           pemFirst,
+			"-----begin certificate-----":         pemFirst,
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				c, out, errOut := testEnv(t)

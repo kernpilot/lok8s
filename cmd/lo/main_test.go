@@ -374,7 +374,7 @@ func TestKeysOnlyRefusesAnOldPluginExec(t *testing.T) {
 // that leaves a mark) never runs.
 func TestSecretsRefusesAPEMBlockAtTheEntrypoint(t *testing.T) {
 	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
-	const pemFirst = "[error] a value starts a PEM block (-----BEGIN): it is not printed\n"
+	const pemFirst = "[error] a value holds a PEM line (-----BEGIN or -----END): it is not printed\n"
 	const keyFirst = "[error] an argument looks like a private key: it is not printed\n"
 	const stdinLine = "[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>\n"
 	const keyFileLine = "[error] pass the path of the key file instead. add-key and remove-key also take an age public key (age1…)\n"

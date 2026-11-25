@@ -245,6 +245,55 @@ func TestSecretsKeyNotFoundHidesAPEMBlock(t *testing.T) {
 	}
 }
 
+// A paste in LOK8S_SSH_KEY with no BEGIN line: a key body (more than one
+// line), a block in lower case, an END line alone and lines that end in
+// CRLF. The not-found lines of init and decrypt print a placeholder (a PEM
+// line in any case, or a line break), never a line of the paste, and init
+// prints no hint. Bash twin: "secrets init and decrypt: the not-found line
+// does not print a paste with no BEGIN line from LOK8S_SSH_KEY".
+func TestSecretsKeyNotFoundHidesAPasteWithNoBEGINLine(t *testing.T) {
+	const canary = "CANARY_SECRET_MATERIAL_DO_NOT_LEAK"
+	const pem = "(not printed: it holds a PEM block)"
+	const ctl = "(not printed: it holds a line break or a control character)"
+	dashes := strings.Repeat("-", 5)
+	for form, tc := range map[string]struct{ value, shown string }{
+		"a body only":    {strings.Repeat("Ab0", 8) + "\n" + canary, ctl},
+		"lower case":     {dashes + "begin certificate" + dashes + "\n" + canary + "\n" + dashes + "end certificate" + dashes, pem},
+		"an END line":    {dashes + "END CERTIFICATE" + dashes, pem},
+		"CRLF line ends": {strings.Repeat("Ab0", 8) + "\r\n" + canary + "\r", ctl},
+	} {
+		for cmd, want := range map[string]string{
+			"init":    "[error] SSH public key not found: " + tc.shown + "\n",
+			"decrypt": "[error] SSH private key not found: " + tc.shown + "\n",
+		} {
+			t.Run(form+"/"+cmd, func(t *testing.T) {
+				paths := secretsProject(t)
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+				for _, v := range []string{"SOPS_AGE_KEY", "SOPS_AGE_KEY_CMD", "SOPS_AGE_SSH_PRIVATE_KEY_FILE"} {
+					t.Setenv(v, "")
+					os.Unsetenv(v)
+				}
+				t.Setenv("SOPS_AGE_KEY_FILE", home+"/no-keys.txt")
+				t.Setenv("LOK8S_SSH_KEY", tc.value)
+				out, errOut, err := runSecrets(t, paths, "secrets", "--domain", "alpha.dev", cmd)
+				if err == nil || !strings.HasSuffix(errOut, want) {
+					t.Errorf("err %v\nstderr %q\nwant it to end with %q", err, errOut, want)
+				}
+				for i, line := range strings.Split(tc.value, "\n") {
+					if line = strings.TrimSuffix(line, "\r"); line != "" && strings.Contains(out+errOut, line) {
+						t.Errorf("line %d of the paste reached the output", i+1)
+					}
+				}
+				if strings.Contains(errOut, "ssh-keygen") {
+					t.Error("a hint with the placeholder was printed")
+				}
+			})
+		}
+	}
+}
+
 // The guard of main covers lo secrets and every command under it, over the
 // whole argv joined with spaces: a key in a flag value of the parent
 // (--domain, a flag that cobra does not know), in a command that takes no
@@ -350,6 +399,8 @@ func TestGuardPrivateKeyArgvRefusesAPEMBlock(t *testing.T) {
 	cert := "-----BEGIN CERTIFICATE-----\nMIIBfake" + canary + "\n-----END CERTIFICATE-----"
 	pub := "-----BEGIN PUBLIC KEY-----\nMCowfake" + canary + "\n-----END PUBLIC KEY-----"
 	ovpn := "-----BEGIN OpenVPN Static key V1-----\n" + canary + "\n-----END OpenVPN Static key V1-----"
+	endLine := "-----END CERTIFICATE-----"
+	lower := "-----begin certificate-----\nmiibfake" + canary + "\n-----end certificate-----"
 	roots := map[string]*config.Paths{
 		"go":             secretsProject(t),
 		"default bash":   routedProject(t, "    default: bash\n", true),
@@ -361,7 +412,7 @@ func TestGuardPrivateKeyArgvRefusesAPEMBlock(t *testing.T) {
 		if err != nil || shim != (name != "go") {
 			t.Fatalf("%s: lo secrets is the shim: %v, want %v (err %v)", name, shim, name != "go", err)
 		}
-		for _, value := range []string{cert, pub, ovpn, "-----BEGIN"} {
+		for _, value := range []string{cert, pub, ovpn, "-----BEGIN", endLine, lower} {
 			for i, argv := range [][]string{
 				{"secrets", "set", "--domain", "alpha.dev", "-n", "tls", "tls.crt", value},
 				{"s", "s", "-n", "vpn", "ta.key", value},

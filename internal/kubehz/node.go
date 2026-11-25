@@ -9,9 +9,11 @@ package kubehz
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -203,9 +205,76 @@ func (c *Context) nodeAPIError(what string, res *httpResult) {
 	case "HOSTED_BACKEND_ERROR":
 		c.errorf("kubehz: the hosted control-plane backend did not answer%s", optSuffix(" — ", msg))
 		c.echoErr("  Nothing changed. Try again shortly, or contact kubehz support.")
+	case "NODE_NOT_REMOVED":
+		// A 503 of the remove: the node is still in the cluster, and the
+		// same call can succeed after the wait of the body.
+		c.apiErrorLine(what, res)
+		c.echoErr("  The node is still in the cluster. Run this command again %s.", retryWait(res.Body))
+	case "NODE_REMOVE_RESULT_UNKNOWN":
+		// A 503 of the remove: the platform does not know if the removal
+		// happened, so the node list comes before a retry.
+		c.apiErrorLine(what, res)
+		c.echoErr("  Read the node list before a retry:  lo kubehz node status")
+		c.echoErr("  If the node is still there, run this command again %s.", retryWait(res.Body))
+	case "JOIN_TICKET_BUSY":
+		// A 503 of a join mint or a node remove: other join changes hold
+		// the platform (the lock of the account, or the cap of the whole
+		// API), and the same call can succeed after the wait of the body.
+		c.apiErrorLine(what, res)
+		c.echoErr("  The platform is busy with other join changes.")
+		c.echoErr("  Run this command again %s.", retryWait(res.Body))
+	case "JOIN_TICKET_NOT_MINTED":
+		// A 503 of a join mint: the platform minted no ticket, and the
+		// same call can succeed after the wait of the body.
+		c.apiErrorLine(what, res)
+		c.echoErr("  No join ticket was minted for this node.")
+		c.echoErr("  Run this command again %s.", retryWait(res.Body))
+	case "JOIN_TICKET_RESULT_UNKNOWN":
+		// A 503 of a join mint: the platform does not know if it kept the
+		// ticket. A ticket can exist that lo did not get, and it holds a
+		// node slot until it expires. The next mint for the name revokes
+		// it, and a remove frees the slot, so the text says all three.
+		c.apiErrorLine(what, res)
+		c.echoErr("  The platform did not confirm the join ticket. A ticket for this node can")
+		c.echoErr("  exist, but lo did not get it. It holds a node slot for about ten minutes.")
+		c.echoErr("  The next mint for this node name revokes that ticket.")
+		c.echoErr("  Run this command again %s, or free the slot now:", retryWait(res.Body))
+		c.echoErr("    lo kubehz node remove --name <node-name>")
 	default:
 		c.spaceAPIError(what, res)
 	}
+}
+
+// retryWaitMaxSeconds is the longest wait that retryWait names: an hour.
+const retryWaitMaxSeconds = 3600
+
+// retryWait is the wait of a refusal body for a help line: "in N seconds"
+// ("in 1 second") from `.data.retryAfterSeconds // .retryAfterSeconds`,
+// when that is a JSON number whose value is a whole number from 1 to
+// retryWaitMaxSeconds, in any JSON form: 5, 5.0 and 5e0 all give "in 5
+// seconds". Else it is "shortly": a string, a fraction, 0, a negative
+// number or a number above an hour names no number. The value counts, not
+// its form: the bash twin reads the number through jq, and jq prints one
+// number in other forms across its versions (jq 1.6 prints 5.0 as 5, jq
+// 1.8 prints 5e0 as 5). ParseFloat gives an error for a number that does
+// not fit (1e400). The bash twin is node::retry_wait.
+func retryWait(body []byte) string {
+	v, ok := parseJSON(body)
+	if !ok {
+		return "shortly"
+	}
+	n, ok := jalt(nil, jget(v, "data", "retryAfterSeconds"), jget(v, "retryAfterSeconds")).(json.Number)
+	if !ok {
+		return "shortly"
+	}
+	f, err := strconv.ParseFloat(string(n), 64)
+	switch {
+	case err != nil || f != math.Trunc(f) || f < 1 || f > retryWaitMaxSeconds:
+		return "shortly"
+	case f == 1:
+		return "in 1 second"
+	}
+	return "in " + strconv.Itoa(int(f)) + " seconds"
 }
 
 var nodeNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)

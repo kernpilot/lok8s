@@ -43,7 +43,12 @@ vendored)`, `rendered`, `skipped`, `error`) plus a summary, with a
 `restore.d` line first. Marks after the status: `(non-deterministic: N)`
 when objects change on each render (they are listed, for example the CA and
 TLS Secrets of Cilium; `--ignore-nondeterministic` diffs the entry without
-them), `(non-repeatable)` when the render generated or updated secret
+them), `(client-side owned: N)` when a client-side writer (for example a
+`kubectl apply` without `--server-side`) owns fields of live objects of the
+entry: the apply takes these fields over and removes the ones that the
+entry does not set and no other manager owns (`--skip-client-side-owned`
+leaves these objects out; see [Deployment](./deployment.md)),
+`(non-repeatable)` when the render generated or updated secret
 material that the store does not hold, or read such material that an
 earlier entry of the run generated, and `(partial: KRM function skipped)`
 (also for a function in a base or component the entry references), or

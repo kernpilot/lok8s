@@ -224,10 +224,68 @@ node::api_error() {
     HOSTED_BACKEND_ERROR)
       error "kubehz: the hosted control-plane backend did not answer${msg:+ — ${msg}}"
       echo "  Nothing changed. Try again shortly, or contact kubehz support." >&2 ;;
+    NODE_NOT_REMOVED)
+      # A 503 of the remove: the node is still in the cluster, and the same
+      # call can succeed after the wait of the body.
+      kubehz::space_api_error_line "${context}"
+      echo "  The node is still in the cluster. Run this command again $(node::retry_wait)." >&2 ;;
+    NODE_REMOVE_RESULT_UNKNOWN)
+      # A 503 of the remove: the platform does not know if the removal
+      # happened, so the node list comes before a retry.
+      kubehz::space_api_error_line "${context}"
+      echo "  Read the node list before a retry:  lo kubehz node status" >&2
+      echo "  If the node is still there, run this command again $(node::retry_wait)." >&2 ;;
+    JOIN_TICKET_BUSY)
+      # A 503 of a join mint or a node remove: other join changes hold the
+      # platform (the lock of the account, or the cap of the whole API),
+      # and the same call can succeed after the wait of the body.
+      kubehz::space_api_error_line "${context}"
+      echo "  The platform is busy with other join changes." >&2
+      echo "  Run this command again $(node::retry_wait)." >&2 ;;
+    JOIN_TICKET_NOT_MINTED)
+      # A 503 of a join mint: the platform minted no ticket, and the same
+      # call can succeed after the wait of the body.
+      kubehz::space_api_error_line "${context}"
+      echo "  No join ticket was minted for this node." >&2
+      echo "  Run this command again $(node::retry_wait)." >&2 ;;
+    JOIN_TICKET_RESULT_UNKNOWN)
+      # A 503 of a join mint: the platform does not know if it kept the
+      # ticket. A ticket can exist that lo did not get, and it holds a node
+      # slot until it expires. The next mint for the name revokes it, and a
+      # remove frees the slot, so the text says all three.
+      kubehz::space_api_error_line "${context}"
+      echo "  The platform did not confirm the join ticket. A ticket for this node can" >&2
+      echo "  exist, but lo did not get it. It holds a node slot for about ten minutes." >&2
+      echo "  The next mint for this node name revokes that ticket." >&2
+      echo "  Run this command again $(node::retry_wait), or free the slot now:" >&2
+      echo "    lo kubehz node remove --name <node-name>" >&2 ;;
     *)
       kubehz::space_api_error "${context}" ;;
   esac
   return 0
+}
+
+# The wait of a refusal body (KUBEHZ_SPACE_API_BODY) for a help line:
+# "in N seconds" ("in 1 second") from retryAfterSeconds (.data first), when
+# that is a JSON number whose value is a whole number from 1 to 3600 (an
+# hour), in any JSON form: 5, 5.0 and 5e0 all give "in 5 seconds". Else it
+# is "shortly": a string, a fraction, 0, a negative number or a number
+# above an hour names no number. jq prints one number in other forms
+# across its versions, so floor gives the digits of the value, and the
+# check below reads only those. Go twin: retryWait.
+# Usage: node::retry_wait
+node::retry_wait() {
+  local s
+  s=$(jq -r '(.data.retryAfterSeconds // .retryAfterSeconds) | select(type == "number" and . == floor) | floor' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || s=""
+  if [[ "${s}" =~ ^[0-9]{1,4}$ ]] && (( 10#${s} >= 1 && 10#${s} <= 3600 )); then
+    if (( 10#${s} == 1 )); then
+      printf '%s' "in 1 second"
+    else
+      printf 'in %d seconds' "$(( 10#${s} ))"
+    fi
+  else
+    printf '%s' "shortly"
+  fi
 }
 
 # ── Local facts + shape checks ───────────────────────────

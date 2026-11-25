@@ -221,6 +221,56 @@ _add() { # <key> [all] [skip_orphans]
   [[ "$output" == *"not an age key and not a readable file"* ]]
 }
 
+# An argument that holds a line break (a key body pasted without its BEGIN
+# line) has no marker of a private key, so the argv check lets it pass: the
+# not-a-file line prints the placeholder of secrets::_shown_path, never a
+# line of the paste. Go twin: TestRecipientArgHidesAPasteWithNoMarker (not a
+# file).
+@test "a pasted key body with no BEGIN line is refused and not echoed" {
+  _load
+  local canary="CANARY_SECRET_MATERIAL_DO_NOT_LEAK" body line
+  body="$(printf 'Ab0%.0s' 1 2 3 4 5 6 7 8)"$'\n'"${canary}"
+  run _add "${body}"
+  [ "$status" -ne 0 ] || { echo "the paste was accepted" >&2; return 1; }
+  [ "$output" = "[error] not an age key and not a readable file: (not printed: it holds a line break or a control character)
+[error] pass an age public key (age1…) or the path to an ed25519 SSH public key" ] || {
+    echo "${output//${canary}/<canary>}" >&2; return 1; }
+  while IFS= read -r line; do
+    [[ "${output}" != *"${line}"* ]] || { echo "a line of the paste reached the output" >&2; return 1; }
+  done <<< "${body}"
+}
+
+# An argument that starts with age1 but holds a line break or an escape is
+# not a valid age key: the line prints the placeholder of
+# secrets::_shown_path, never the argument. Go twin:
+# TestRecipientArgHidesAPasteWithNoMarker (an age key with a line break,
+# with an escape).
+@test "an age key with a line break or an escape is refused and not echoed" {
+  _load
+  local canary="CANARY_SECRET_MATERIAL_DO_NOT_LEAK" key
+  for key in "age1abc"$'\n'"${canary}" "age1abc"$'\e[2J'"${canary}"; do
+    run _add "${key}"
+    [ "$status" -ne 0 ] || { echo "the key was accepted" >&2; return 1; }
+    [ "$output" = "[error] not a valid age public key: (not printed: it holds a line break or a control character)" ] || {
+      echo "${output//${canary}/<canary>}" >&2; return 1; }
+  done
+}
+
+# A key file at a path with a tab that ssh-to-age cannot read: the derive
+# line prints the placeholder of secrets::_shown_path, not the path. Go
+# twin: TestRecipientArgHidesAPasteWithNoMarker (derive).
+@test "a key file at a path with a tab that does not derive prints a placeholder" {
+  _load
+  ssh-to-age() { return 1; }
+  local key="${BATS_TEST_TMPDIR}/id"$'\t'".pub"
+  printf 'ssh-ed25519 AAAAnotakey\n' > "${key}"
+  run secrets::_recipient "${key}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${lines[0]}" = "[error] could not derive an age key from (not printed: it holds a line break or a control character)" ] &&
+    [ "${lines[1]}" = "[error] only ed25519 SSH keys are supported, and it must be the PUBLIC key" ] || { echo "$output" >&2; return 1; }
+  [[ "${output}" != *$'\t'* ]] || { echo "the path reached the output" >&2; return 1; }
+}
+
 @test "a private key argument is refused and not echoed" {
   # The not-a-file error above prints the argument, so a pasted age identity
   # would land in the terminal. The filler is outside the bech32 alphabet: the

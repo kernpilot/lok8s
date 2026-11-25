@@ -57,12 +57,16 @@ diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.other /tmp/MERGED-1/v1.ConfigMap.def
 `
 
 // diffAnswers scripts the kubectl diff calls in order: each element is the
-// exit code of one call (1 → cannedDiff on stdout). Any other kubectl verb
-// fails the test: a dry run may only ever diff.
+// exit code of one call (1 → cannedDiff on stdout). The read of the field
+// managers finds no live object. Any other kubectl verb fails the test: a
+// dry run may only diff and read.
 func diffAnswers(t *testing.T, f *fakeRunner, codes ...int) {
 	t.Helper()
 	call := 0
 	f.handler = func(c execx.Cmd) error {
+		if isFieldManagerRead(c) {
+			return nil
+		}
 		// Every call is `--kubeconfig <path> <verb> …`.
 		verb := ""
 		if len(c.Args) > 2 && c.Args[0] == "--kubeconfig" {
@@ -226,11 +230,15 @@ func refuseTerminalStreams(t *testing.T, c execx.Cmd) {
 
 // diffScript scripts the kubectl diff calls: call i exits codes[i] (0 past
 // the end) and prints outText on stdout and errText on stderr, at every
-// exit code. Any other kubectl verb fails the test.
+// exit code. The read of the field managers finds no live object. Any
+// other kubectl verb fails the test.
 func diffScript(t *testing.T, f *fakeRunner, outText, errText string, codes ...int) {
 	t.Helper()
 	call := 0
 	f.handler = func(c execx.Cmd) error {
+		if isFieldManagerRead(c) {
+			return nil
+		}
 		if len(c.Args) < 3 || c.Args[2] != "diff" {
 			t.Errorf("a dry run reached kubectl %v", c.Args)
 			return &rcError{9}
@@ -312,18 +320,18 @@ func TestDiffFailedTextGolden(t *testing.T) {
 	const odd = "/p/a b $(touch x); c'd"
 	for _, tc := range []struct {
 		name, renderDir string
-		filtered        bool
+		without         string
 		want            string
 	}{
-		{"render dir", odd + "/out", false,
+		{"render dir", odd + "/out", "",
 			`bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'`},
-		{"no render dir", "", false,
+		{"no render dir", "", "",
 			`bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '<dir>/01-testcni.yaml'`},
-		{"filtered", odd + "/out", true,
+		{"filtered", odd + "/out", "its non-deterministic objects",
 			`bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run (this diff can show more: the dry run diffed the render without its non-deterministic objects): '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := diffFailedText("testcni", 2, odd+"/.bin/kubectl", odd+"/kc.yaml", tc.renderDir, "01-testcni", tc.filtered); got != tc.want {
+			if got := diffFailedText("testcni", 2, odd+"/.bin/kubectl", odd+"/kc.yaml", tc.renderDir, "01-testcni", tc.without); got != tc.want {
 				t.Errorf("got:\n%s\nwant:\n%s", got, tc.want)
 			}
 		})
@@ -911,6 +919,9 @@ func TestDryRunIgnoresForce(t *testing.T) {
 	t.Setenv("LOK8S_FORCE_RECREATE", "1")
 	e, f, spec, kc := dryEngine(t, "testcni")
 	f.handler = func(c execx.Cmd) error {
+		if isFieldManagerRead(c) {
+			return nil
+		}
 		if !strings.Contains(strings.Join(c.Args, " "), " diff ") {
 			t.Errorf("force reached kubectl %v", c.Args)
 			return &rcError{9}

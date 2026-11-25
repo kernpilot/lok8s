@@ -118,6 +118,7 @@ func TestBootstrapModeFlagDependencies(t *testing.T) {
 		{[]string{"provision", "--only", "cilium", "--domain", "alpha.dev"}, "--only requires --bootstrap"},
 		{[]string{"provision", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --bootstrap"},
 		{[]string{"provision", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --bootstrap"},
+		{[]string{"provision", "--skip-client-side-owned", "--domain", "alpha.dev"}, "--skip-client-side-owned requires --bootstrap"},
 		{[]string{"provision", "-b", "--no-diff", "--domain", "alpha.dev"}, "--no-diff requires --dry-run"},
 		{[]string{"provision", "-b", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --dry-run"},
 		{[]string{"bootstrap", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --dry-run"},
@@ -128,6 +129,12 @@ func TestBootstrapModeFlagDependencies(t *testing.T) {
 		if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] "+tc.want) || len(*exits) != 0 {
 			t.Errorf("%v: err=%v exits=%v stderr=%q", tc.argv, err, *exits, stderr)
 		}
+	}
+	// --no-diff reads no cluster, so --skip-client-side-owned is refused
+	// with it (rc 2: the command line asks for --dry-run).
+	_, stderr, err = runLo(t, NewRoot(p), "bootstrap", "--dry-run", "--no-diff", "--skip-client-side-owned", "--domain", "alpha.dev")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] --skip-client-side-owned does not work with --no-diff: --no-diff does not read the cluster") || len(*exits) != 1 || (*exits)[0] != 2 {
+		t.Errorf("--no-diff --skip-client-side-owned: err=%v exits=%v stderr=%q", err, *exits, stderr)
 	}
 }
 

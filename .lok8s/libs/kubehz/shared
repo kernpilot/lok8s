@@ -355,17 +355,28 @@ kubehz::space_limits_refused() {
 # Usage: kubehz::space_api_error <context>
 kubehz::space_api_error() {
   local context="${1}"
-  local msg help
-  msg=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
+  local help
   help=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
   # Both halves are SERVER strings and this is the FIRST api call lo makes,
   # so an api that hides \033[2J\033[H in a message would clear the caller's
   # terminal before anything else is printed. Both are scrubbed and clipped
   # the same way: error() and the plain echo print them as they are.
-  [[ -z "${msg}" ]] || msg=$(kubehz::space_bound_string "${msg}")
   [[ -z "${help}" ]] || help=$(kubehz::space_bound_string "${help}")
-  error "${context} (HTTP ${KUBEHZ_SPACE_API_STATUS})${msg:+: ${msg}}"
+  kubehz::space_api_error_line "${context}"
   [[ -n "${help}" ]] && echo "  ${help}" >&2
+  return 0
+}
+
+# The [error] line of kubehz::space_api_error: the context, the status and
+# the api's message, scrubbed and clipped. node::api_error prints it with
+# its own help for a code whose api help does not fit a CLI. Go twin:
+# apiErrorLine.
+# Usage: kubehz::space_api_error_line <context>
+kubehz::space_api_error_line() {
+  local context="${1}" msg
+  msg=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || msg=""
+  [[ -z "${msg}" ]] || msg=$(kubehz::space_bound_string "${msg}")
+  error "${context} (HTTP ${KUBEHZ_SPACE_API_STATUS})${msg:+: ${msg}}"
   return 0
 }
 

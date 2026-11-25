@@ -256,7 +256,69 @@ TICKET = ".".join(("a1b2c3", "d4e5f6g7h8i9j0k1"))
 TICKETS = {"worker-1": TICKET, "worker-nl": TICKET + "\n", "worker-nul": TICKET + "\x00",
            "worker-cr": TICKET + "\r"}
 
+
+def retry_later(code, message, help_text, seconds):
+    """A 503 refusal with retryAfterSeconds in its data and a Retry-After
+    header, or neither when seconds is None."""
+    status, body = refusal(503, code, message, help_text)
+    if seconds is None:
+        return status, body
+    body["data"]["retryAfterSeconds"] = seconds
+    return status, body, {"Retry-After": str(seconds)}
+
+
+class RawJSON(str):
+    """A JSON body that the stub sends as written: json.dumps never writes
+    a number as 5e0 or 1E3."""
+
+
+def retry_later_raw(code, message, help_text, number):
+    """A 503 refusal whose retryAfterSeconds is the JSON number text as
+    given (5e0, 1E3, 36.01e2, 1e400), with no Retry-After header."""
+    status, body = refusal(503, code, message, help_text)
+    body["data"]["retryAfterSeconds"] = "@WAIT@"
+    return status, RawJSON(json.dumps(body).replace('"@WAIT@"', number))
+
+
+# DELETE /api/clusters/cl-1a2b3c4d/nodes/<name>: the 503 refusals of a node
+# remove on a hosted cluster.
+REMOVE_PREFIX = "/api/clusters/cl-1a2b3c4d/nodes/"
+REMOVE_HELP = "Nothing was removed. Retry after the Retry-After interval."
+REMOVE_OPEN_HELP = "Read the node list of the cluster. If the node is still there, retry the removal after the Retry-After interval."
+REMOVES = {
+    "remove-1": retry_later("NODE_NOT_REMOVED", "The node was not removed: its join ticket was not revoked", REMOVE_HELP, 5),
+    "remove-2": retry_later("NODE_REMOVE_RESULT_UNKNOWN", "The result of this removal is not known", REMOVE_OPEN_HELP, 5),
+    "remove-3": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, None),
+    "remove-4": retry_later("NODE_REMOVE_RESULT_UNKNOWN", "The result of this removal is not known", REMOVE_OPEN_HELP, 1),
+    "remove-5": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "5"),
+    "remove-6": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 3601),
+    "remove-7": retry_later("JOIN_TICKET_BUSY", "Other join tickets of this account are being minted or removed now", REMOVE_HELP, 5),
+    # json.dumps writes 1000.0 and 5.5 as they are: a whole value in the
+    # form of a fraction, and a fraction.
+    "remove-8": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 1000.0),
+    "remove-9": retry_later("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, 5.5),
+    # Number forms that json.dumps does not write, as the body gives them.
+    "remove-10": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "5e0"),
+    "remove-11": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "1E3"),
+    "remove-12": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "36.01e2"),
+    "remove-13": retry_later_raw("NODE_NOT_REMOVED", "The node was not removed", REMOVE_HELP, "1e400"),
+}
+
+# POST /api/clusters/cl-1a2b3c4d/nodes/join-token, by the node name in the
+# body: the 503 refusals of a join mint on a hosted cluster.
+MINT_PATH = "/api/clusters/cl-1a2b3c4d/nodes/join-token"
+MINT_HELP = "Mint a new ticket for this node name after the Retry-After interval."
+MINTS = {
+    "mint-1": retry_later("JOIN_TICKET_NOT_MINTED", "No join ticket was minted: the ticket of this request is not live",
+                          MINT_HELP, 5),
+    "mint-2": retry_later("JOIN_TICKET_RESULT_UNKNOWN", "The result of this mint is not known",
+                          MINT_HELP + " The new mint revokes the ticket of this request if it was kept.", 5),
+    "mint-3": retry_later("JOIN_TICKET_BUSY", "Other join tickets of this account are being minted now",
+                          "Nothing was minted. Retry after the Retry-After interval.", None),
+}
+
 ROUTES = {
+    **{("DELETE", REMOVE_PREFIX + name): answer for name, answer in REMOVES.items()},
     ("GET", "/api/spaces"): (200, ok([SPACE, ODD_SPACE], {"pagination": {"page": 1, "perPage": 500, "total": 2, "pages": 1}})),
     ("GET", "/api/spaces/sp-1a2b3c4d"): (200, ok(SPACE_DETAIL)),
     ("GET", "/api/spaces/sp-1a2b3c4d/nodes"): (200, ok(SPACE_NODES)),
@@ -310,7 +372,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def answer(self, status, body, headers=None):
-        if isinstance(body, (dict, list)):
+        if isinstance(body, RawJSON):
+            raw, ctype = body.encode(), "application/json"
+        elif isinstance(body, (dict, list)):
             raw, ctype = json.dumps(body).encode(), "application/json"
         else:
             raw = body.encode()
@@ -390,6 +454,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.close_connection = True
                 return None
             return self.answer(*found)
+        if self.command == "POST" and path == MINT_PATH and isinstance(body, dict):
+            return self.answer(*MINTS.get(body.get("nodeName"), refusal(404, "NOT_FOUND", "Cluster not found")))
         if self.command == "POST" and path == JOIN_PATH and isinstance(body, dict):
             ticket = TICKETS.get(body.get("nodeName"))
             if ticket is None:

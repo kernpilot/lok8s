@@ -78,6 +78,11 @@ type Options struct {
 	// the addon named, e.g. keeping cert-manager from ACME-reissuing and
 	// hitting the Let's Encrypt rate limit). No effect without --only.
 	WithRestore bool
+	// SkipClientSideOwned leaves each object whose fields a client-side
+	// writer owns out of the apply, and a dry run out of the diff
+	// (clientside.go). Default off: the apply takes such an object, and
+	// lo names the fields that the apply drops.
+	SkipClientSideOwned bool
 }
 
 // ErrDryRunDiffers is the dry run's "something would change" exit (rc 1).
@@ -130,6 +135,11 @@ type dryResult struct {
 	// skips an exec function in a dry run without an error), or a reference
 	// outside the project or a remote one that the hint did not read.
 	partial addons.KRMHint
+	// clientSide counts the live objects whose fields a client-side writer
+	// owns (clientside.go); leftOut: --skip-client-side-owned left them
+	// out of the diff.
+	clientSide int
+	leftOut    bool
 }
 
 // Inconclusive reasons.
@@ -333,7 +343,9 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 // render is the report's status field: the word (an inconclusive one with
 // its reason), then `changed=N new=M` for a diff that was counted, then the
 // marks: `(non-deterministic: N)` (objects regenerated on every apply,
-// listed on their own lines), `(non-repeatable)` (the render generated
+// listed on their own lines), `(client-side owned: N)` or `(client-side
+// owned, left out: N)` (live objects whose fields a client-side writer
+// owns, named on [warn] lines), `(non-repeatable)` (the render generated
 // secret material), `(partial: KRM function skipped)` or `(partial: a
 // reference outside the project was not inspected)`.
 func (r dryResult) render(s ui.Style) string {
@@ -358,6 +370,12 @@ func (r dryResult) render(s ui.Style) string {
 	}
 	if n := len(r.nondeterministic); n > 0 {
 		word += fmt.Sprintf(" (non-deterministic: %d)", n)
+	}
+	switch {
+	case r.clientSide > 0 && r.leftOut:
+		word += fmt.Sprintf(" (client-side owned, left out: %d)", r.clientSide)
+	case r.clientSide > 0:
+		word += fmt.Sprintf(" (client-side owned: %d)", r.clientSide)
 	}
 	if r.nonRepeatable {
 		word += " (non-repeatable)"
@@ -384,6 +402,12 @@ func (r dryResult) render(s ui.Style) string {
 // the cluster, every apply rotates them); --ignore-nondeterministic diffs
 // without them. The secrets plugin keeps what it generated in the run store,
 // so its values are the same in both renders.
+//
+// Before the diff, the check of the field managers (clientside.go) names
+// each live object whose fields a client-side writer owns: kubectl diff
+// does not show what the apply drops of these fields, so the entry counts
+// as "differs" when the diff finds no change. --skip-client-side-owned
+// diffs without these objects, as the real run applies without them.
 func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult {
 	stderr := e.stderr()
 	if reason, skip := e.skipReason(job); skip {
@@ -439,13 +463,37 @@ func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult 
 	// of a command substitution: the files must match byte for byte.
 	rendered = strings.TrimRight(rendered, "\n") + "\n"
 	diffInput := rendered
+	var without []string
 	if e.Options.IgnoreNondeterministic && len(nondeterministic) > 0 {
 		if diffInput, err = withoutObjects(rendered, nondeterministic); err != nil {
 			ui.ErrorTo(stderr, "bootstrap: %s: %v", job.Name, err)
 			return dryResult{status: dryError, nonRepeatable: nonRepeatable, partial: partial}
 		}
+		without = append(without, "its non-deterministic objects")
 	}
-	res := e.diffManifest(ctx, job.Kubeconfig, rendered, diffInput, stem, job.Name)
+	// The check of the field managers reads the cluster: not with
+	// --no-diff, and not for an input with no object.
+	var csa csaCheck
+	if !e.Options.NoDiff && strings.TrimSpace(diffInput) != "" {
+		var ok bool
+		if csa, ok = e.clientSideBefore(ctx, stderr, job.Name, job.Kubeconfig, diffInput); !ok {
+			return dryResult{status: dryError, nonRepeatable: nonRepeatable, partial: partial}
+		}
+		if csa.leftOut > 0 {
+			diffInput = csa.manifest
+			without = append(without, "the objects of a client-side writer")
+		}
+	}
+	res := e.diffManifest(ctx, job.Kubeconfig, rendered, diffInput, stem, job.Name, strings.Join(without, " and "))
+	// A read that failed is news only when the diff worked: a diff that
+	// failed reports the cluster error itself.
+	if csa.readFailed != 0 && (res.status == dryUnchanged || res.status == dryDiffers) {
+		ui.WarnTo(stderr, "%s", csaReadFailedText(job.Name, csa.readFailed))
+	}
+	if len(csa.objects) > 0 && res.status == dryUnchanged {
+		res.status = dryDiffers
+	}
+	res.clientSide, res.leftOut = len(csa.objects)+csa.leftOut, csa.leftOut > 0
 	res.nonRepeatable, res.partial, res.nondeterministic = nonRepeatable, partial, nondeterministic
 	return res
 }
@@ -467,7 +515,9 @@ func objectLabel(doc map[string]any) string {
 }
 
 // splitObjects decodes a rendered YAML stream into its objects, in order,
-// each with its label and its canonical (re-encoded) content.
+// each with its label and its canonical (re-encoded) content
+// (decodeObject: a key twice in a map keeps its last value). docs keeps
+// each document as the render wrote it.
 func splitObjects(stream string) (labels []string, content map[string]string, docs map[string]*yaml.Node, err error) {
 	content, docs = map[string]string{}, map[string]*yaml.Node{}
 	dec := yaml.NewDecoder(strings.NewReader(stream))
@@ -479,8 +529,11 @@ func splitObjects(stream string) (labels []string, content map[string]string, do
 			}
 			return nil, nil, nil, err
 		}
-		var m map[string]any
-		if node.Decode(&m) != nil || m == nil {
+		m, isObject, err := decodeObject(&node)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if !isObject {
 			continue
 		}
 		raw, err := yaml.Marshal(m)
@@ -495,6 +548,71 @@ func splitObjects(stream string) (labels []string, content map[string]string, do
 		n := node
 		docs[label] = &n
 	}
+}
+
+// errUnreadableObject is the error of a document that is a map that lo
+// cannot decode, also with the last value of each key (a key that is a
+// list, for example). kubectl cannot read it either. Fixed text: the error
+// of the YAML decoder can quote a value.
+var errUnreadableObject = errors.New("a document of the manifest is a map that lo cannot read")
+
+// decodeObject decodes one document of a rendered stream. isObject is
+// false for a document that is not a map with the plain map tag (an empty
+// document, a list, a scalar, a map with a tag of its own), as the bash
+// twin selects with yq (tag == "!!map"). A key that a map holds more than
+// once keeps its last value: kubectl reads a manifest so
+// (sigs.k8s.io/yaml), and the bash twin too (yq, then jq). yaml.v3 refuses
+// such a map when it decodes it.
+func decodeObject(doc *yaml.Node) (m map[string]any, isObject bool, err error) {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode || root.ShortTag() != "!!map" {
+		return nil, false, nil
+	}
+	if err := lastKeyWins(root).Decode(&m); err != nil {
+		return nil, false, errUnreadableObject
+	}
+	return m, true, nil
+}
+
+// ownTagMap reports whether doc is a map with a tag of its own
+// (`--- !tag`). Bash twin: the kind and tag test of bootstrap::_csa_docs.
+func ownTagMap(doc *yaml.Node) bool {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	return root.Kind == yaml.MappingNode && root.ShortTag() != "!!map"
+}
+
+// lastKeyWins is a copy of n in which each map keeps only the last pair of
+// a key that it holds more than once. Two keys are the same when they
+// have the same kind and text: the rule by which yaml.v3 refuses a key.
+func lastKeyWins(n *yaml.Node) *yaml.Node {
+	type key struct {
+		kind  yaml.Kind
+		value string
+	}
+	last := map[key]int{}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			last[key{n.Content[i].Kind, n.Content[i].Value}] = i
+		}
+	}
+	c := *n
+	c.Content = make([]*yaml.Node, 0, len(n.Content))
+	for i, child := range n.Content {
+		if n.Kind == yaml.MappingNode {
+			k := n.Content[i-i%2]
+			if last[key{k.Kind, k.Value}] != i-i%2 {
+				continue
+			}
+		}
+		c.Content = append(c.Content, lastKeyWins(child))
+	}
+	return &c
 }
 
 // nondeterministicObjects lists the objects whose content differs between
@@ -573,8 +691,10 @@ func marshalYAML(n *yaml.Node) (string, error) {
 // both go through the exact same write-then-diff mechanics.
 // label is the plain addon name (no "NN-" render-dir prefix) used in the
 // error message, so it reads the same as the bash twin's — stem stays the
-// render-dir file stem (the --render-dir path and nothing else).
-func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInput, stem, label string) dryResult {
+// render-dir file stem (the --render-dir path and nothing else). without
+// names what the diff input is without (diffFailedText), "" for the full
+// render.
+func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInput, stem, label, without string) dryResult {
 	stderr := e.stderr()
 	if e.Options.RenderDir != "" {
 		if err := writeGuarded(filepath.Join(e.Options.RenderDir, stem+".yaml"), []byte(rendered), 0o600); err != nil {
@@ -585,7 +705,8 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	if e.Options.NoDiff {
 		return dryResult{status: dryRendered}
 	}
-	// --ignore-nondeterministic left nothing to diff.
+	// --ignore-nondeterministic or --skip-client-side-owned left nothing
+	// to diff.
 	if strings.TrimSpace(diffInput) == "" {
 		if e.Options.RenderDir != "" {
 			if err := writeGuarded(filepath.Join(e.Options.RenderDir, stem+".diff"), nil, 0o600); err != nil {
@@ -665,7 +786,7 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	if path, ok := execx.Look(e.Paths, "kubectl"); ok {
 		kubectl = path
 	}
-	ui.ErrorTo(stderr, "%s", diffFailedText(label, rc, kubectl, kubeconfig, e.Options.RenderDir, stem, diffInput != rendered))
+	ui.ErrorTo(stderr, "%s", diffFailedText(label, rc, kubectl, kubeconfig, e.Options.RenderDir, stem, without))
 	return dryResult{status: dryError}
 }
 
@@ -677,19 +798,21 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 // "valueUnstructured{Value:<value>}". The line tells the operator how to
 // see the message: run the diff by hand on the rendered file under
 // --render-dir. Without --render-dir, do the dry run again with it: <dir>
-// is a placeholder. filtered (--ignore-nondeterministic removed objects
-// from the diff input) adds that the diff by hand can show more, because
-// the file holds the full render. Each argument that lo puts into the
+// is a placeholder. A without that is not empty (what the dry run took out
+// of the diff input: its non-deterministic objects for
+// --ignore-nondeterministic, the objects of a client-side writer for
+// --skip-client-side-owned) adds that the diff by hand can show more,
+// because the file holds the full render. Each argument that lo puts into the
 // command is quoted for a POSIX shell (shQuote), so a path with a space,
 // a quote or `$(...)` pastes as one word and runs nothing. The bash twin
 // (bootstrap::_diff_failed_text) prints the same bytes.
-func diffFailedText(label string, rc int, kubectl, kubeconfig, renderDir, stem string, filtered bool) string {
+func diffFailedText(label string, rc int, kubectl, kubeconfig, renderDir, stem, without string) string {
 	dir, again, more := renderDir, "", ""
 	if dir == "" {
 		dir, again = "<dir>", "do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then "
 	}
-	if filtered {
-		more = " (this diff can show more: the dry run diffed the render without its non-deterministic objects)"
+	if without != "" {
+		more = " (this diff can show more: the dry run diffed the render without " + without + ")"
 	}
 	return fmt.Sprintf("bootstrap: kubectl diff failed for %s (rc=%d). lo does not show the kubectl message: it can quote a value of the manifest. To see it, %srun%s: %s --kubeconfig %s diff --server-side --force-conflicts -f %s",
 		label, rc, again, more, shQuote(kubectl), shQuote(kubeconfig), shQuote(dir+"/"+stem+".yaml"))
@@ -1154,6 +1277,6 @@ func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) 
 		return nil
 	}
 	rendered := strings.Join(docs, "\n---\n") + "\n"
-	res := e.diffManifest(ctx, kubeconfig, rendered, rendered, "restore.d", "restore.d")
+	res := e.diffManifest(ctx, kubeconfig, rendered, rendered, "restore.d", "restore.d", "")
 	return &res
 }

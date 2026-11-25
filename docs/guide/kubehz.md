@@ -550,6 +550,16 @@ notifies you, and removes an unacknowledged dark node after 30 days. Use
 `lo kubehz node remove` when you already know the machine is gone.
 :::
 
+When the platform cannot finish a removal, the command fails with `HTTP 503`
+and tells you when to run it again: in seconds, when the platform sends a
+wait. When the platform does not know if the removal happened, the command
+tells you to read the node list first. Run `lo kubehz node status`, and
+remove the node again only when it is still there.
+
+A join or a removal can also fail with `HTTP 503` while the platform is
+busy with other join changes: of your account, or of all accounts together.
+The command then tells you when to run it again.
+
 ### When a join is refused
 
 Every refusal names what to do next. The four you are most likely to meet:
@@ -560,6 +570,13 @@ Every refusal names what to do next. The four you are most likely to meet:
 | The kubelet is too old | A node must run a kubelet no more than two minor versions below the control plane. Upgrade the kubelet. |
 | No free slot | The cluster is at its static-node limit. Remove a node you no longer use, or ask support to raise the limit. |
 | No join address yet | The control plane publishes its join address and CA fingerprints after the cluster declares its first `kind: static` pool. Check `lo kubehz node status`, then try again. |
+
+A join can also fail with `HTTP 503` when the platform did not mint the
+join ticket, or when it does not know if it kept the ticket. In the second
+case, a ticket for the node can exist, but the command did not get it. That
+ticket holds a node slot for about ten minutes. The next join with the same
+node name revokes it, and `lo kubehz node remove` frees the slot at once.
+In both cases the command tells you when to run it again.
 
 ## Registration
 
