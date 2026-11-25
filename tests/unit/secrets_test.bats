@@ -1209,6 +1209,25 @@ _private_key_refusal() {
   [ "${n}" -eq 30 ] || { echo "${n} paths, not 30" >&2; return 1; }
 }
 
+# The fix line of that refusal names <path>.pub when secrets::_shown_path
+# prints the path as it is (secrets::_path_is_shown), also for a path that
+# ends in a newline: a command substitution drops that newline, so a
+# compare with its output takes the path for a placeholder. Go twin:
+# TestInitRefusesAPrivateKeyFile (the suffix of a newline).
+@test "secrets init: the refusal of a private key file at a path that ends in a newline names its .pub" {
+  _init_fakes
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  local path="${BATS_TEST_TMPDIR}/key"$'\n'
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" "${KEY_CANARY}" > "${path}"
+  KEY_PATH="${path}"
+  :args() { ssh_key="${KEY_PATH}"; }
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "${output}" == *$'\n'"[error] pass the public key file instead: ${path}.pub" ]] || { echo "$output" >&2; return 1; }
+  [[ "${output}" != *"${KEY_CANARY}"* ]] || { echo "the file reached the output" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age read the file" >&2; return 1; }
+}
+
 # A derivation that fails (ssh-to-age exits non-zero) prints the two lines
 # of the Go twin and the exit status of the tool, never its output: the tool
 # quotes its input on a failure. ssh-to-age is a function that does so.
@@ -2181,6 +2200,8 @@ _synthetic_pem() {
 # guard follows it. Go twin: publicKeyHint compares shownKeyPath with the
 # path.
 @test "secrets init: the hint guard follows each placeholder case of secrets::_shown_path" {
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
   secrets::_shown_path() {
     if [[ "${1}" == *HIDDEN-PART* ]]; then printf '%s\n' "(not printed: a case of this test)"; else printf '%s\n' "${1}"; fi
   }
@@ -2191,6 +2212,7 @@ _synthetic_pem() {
   run secrets::init
   [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: (not printed: a case of this test)" ] || {
     echo "status $status: $output" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
 }
 
 # A missing public key file gets a hint. When the private key of that .pub
@@ -2273,6 +2295,27 @@ _synthetic_pem() {
   done
   got="$(secrets::_shown_quoted ""; printf x)"
   [ "${got%x}" = "''" ] || { echo "empty: got ${got%x}" >&2; return 1; }
+}
+
+# secrets::_path_is_shown returns 0 when secrets::_shown_path prints the
+# path as it is, and 1 when it prints a placeholder. The x keeps a newline
+# at the end of the path, so such a path is shown as it is. Go twin:
+# shownKeyPath(path) == path.
+@test "secrets::_path_is_shown: 0 for a path shown as it is, 1 for a placeholder" {
+  local dashes="-----" i rc
+  local -a names=(empty plain newline-at-end pem-block private-key) want=(0 0 0 1 1)
+  local -a inputs=(
+    ""
+    "/home/u/.ssh/id_ed25519"
+    $'a\n'
+    "$(_synthetic_pem "SOME DATA" "${KEY_CANARY}")"
+    "${dashes}BEGIN OPENSSH PRIVATE ""KEY${dashes}"$'\n'"${KEY_CANARY}"
+  )
+  for i in "${!names[@]}"; do
+    rc=0
+    secrets::_path_is_shown "${inputs[i]}" || rc=$?
+    [ "${rc}" = "${want[i]}" ] || { echo "${names[i]}: return ${rc}, want ${want[i]}" >&2; return 1; }
+  done
 }
 
 # The key file is read once and at most 64 KiB: a bigger file, a file that

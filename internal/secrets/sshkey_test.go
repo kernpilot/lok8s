@@ -135,10 +135,12 @@ func wantPrivateKeyRefusal(path string) string {
 }
 
 // Init refuses a private key file with the path and the fix, prints nothing
-// from the file and writes nothing; also when the path ends in .pub.
+// from the file and writes nothing; also when the path ends in .pub. The fix
+// names <path>.pub also for a path that ends in a newline (bash twin: the
+// newline test of secrets::_read_public_key).
 func TestInitRefusesAPrivateKeyFile(t *testing.T) {
 	for name, content := range privateKeyForms {
-		for _, suffix := range []string{"", ".pub"} {
+		for _, suffix := range []string{"", ".pub", "\n"} {
 			t.Run(name+suffix, func(t *testing.T) {
 				c, out, errOut := testEnv(t)
 				path := filepath.Join(t.TempDir(), "key"+suffix)
