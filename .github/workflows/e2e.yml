@@ -230,7 +230,8 @@ jobs:
             | jq '.metadata.managedFields | map({manager, operation, subresource, apiVersion, fieldsV1})'
 
           cd "${proj}"
-          warn='[warn] bootstrap: ns: Namespace lok8s-csa: a client-side writer (kubectl-client-side-apply) owns fields; the apply moves them to lo and drops what the target does not set: label team; annotation note'
+          warn='[warn] bootstrap: ns: Namespace lok8s-csa: a client-side writer (kubectl-client-side-apply) owns fields; '
+          warn+='the apply moves them to lo and drops what the target does not set: label team; annotation note'
           rc=0
           "${lo}" bootstrap --domain csa.lok8s.dev --dry-run > dry.out 2> dry.err || rc=$?
           cat dry.out dry.err
