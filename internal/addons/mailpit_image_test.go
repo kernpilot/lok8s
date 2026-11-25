@@ -8,6 +8,8 @@ package addons
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,8 +33,9 @@ func readMailpitYAML(t *testing.T, path string, out any) {
 
 // TestMailpitImagePin: the tag in the chart values holds a digest, the
 // appVersion names the version of the tag, the one image line of the
-// templates renders repository and tag unchanged, and no values file and no
-// transformer of the addon replaces the pin.
+// templates renders repository and tag unchanged, and nothing else of the
+// addon replaces the pin: no values file, no values in chart.yaml, and no
+// transformer, patch or resource in the kustomization.
 func TestMailpitImagePin(t *testing.T) {
 	var values struct {
 		Image struct {
@@ -43,7 +46,7 @@ func TestMailpitImagePin(t *testing.T) {
 	readMailpitYAML(t, "chart/values.yaml", &values)
 	m := imageDigestTag.FindStringSubmatch(values.Image.Tag)
 	if values.Image.Repository == "" || m == nil {
-		t.Fatalf("chart/values.yaml: image %q tag %q is not `<version>@sha256:<64 hex>`", values.Image.Repository, values.Image.Tag)
+		t.Fatalf("chart/values.yaml: image %q tag %q, want a repository and a tag `<version>@sha256:<64 hex>`", values.Image.Repository, values.Image.Tag)
 	}
 
 	var chart struct {
@@ -88,9 +91,26 @@ func TestMailpitImagePin(t *testing.T) {
 			t.Errorf("%s sets image: it replaces the pin of the chart values", filepath.Base(f))
 		}
 	}
+
+	var renderer struct {
+		Chart      string         `yaml:"chart"`
+		ValueFiles []string       `yaml:"valueFiles"`
+		Values     map[string]any `yaml:"values"`
+	}
+	readMailpitYAML(t, "chart.yaml", &renderer)
+	if renderer.Chart != "./chart" || !slices.Equal(renderer.ValueFiles, []string{"values.yaml"}) || renderer.Values != nil {
+		t.Errorf("chart.yaml: chart %q, valueFiles %q, values %v, want ./chart with values.yaml only", renderer.Chart, renderer.ValueFiles, renderer.Values)
+	}
 	var kustomization map[string]any
 	readMailpitYAML(t, "kustomization.yaml", &kustomization)
-	if _, ok := kustomization["images"]; ok {
-		t.Error("kustomization.yaml sets images: the transformer can replace the pin")
+	if got := kustomization["generators"]; !reflect.DeepEqual(got, []any{"chart.yaml"}) {
+		t.Errorf("kustomization.yaml: generators %v, want chart.yaml only", got)
+	}
+	for key := range kustomization {
+		switch key {
+		case "apiVersion", "kind", "labels", "generators":
+		default:
+			t.Errorf("kustomization.yaml sets %s: check that it keeps the pin, then add it here", key)
+		}
 	}
 }
