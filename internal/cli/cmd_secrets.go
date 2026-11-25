@@ -121,7 +121,9 @@ func secretsArgs(minArgs, maxArgs int, names ...string) cobra.PositionalArgs {
 // of that shape first, and the flag-error func does not print an error that
 // holds one. GuardPrivateKeyArgv runs the same check on the raw argv, before
 // cobra parses anything; these checks stay for a caller that runs the
-// command without main.
+// command without main. They do not read control bytes: that rule is in the
+// guard only, and the messages of these commands print no such value
+// (shownKeyPath).
 func keyArgCommand(c *cobra.Command) *cobra.Command {
 	return privateKeyGuarded(c, secretsArgs(1, 1, "key"))
 }
@@ -185,6 +187,13 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // refused. A resolved command outside `lo secrets` is left to cobra, unless the
 // first word of the argv by the bash rule is `secrets` (namesSecrets).
 //
+// With the same scope it refuses an argv that holds a control byte
+// (secrets.HoldsControlByte: a line break, a tab, an escape), and the refusal
+// has its own lines (secrets.RefuseControlByte). A key body pasted without its
+// BEGIN line has no other mark, and the parsers print it as an extra argument
+// or as a command that they do not know. `lo secrets set` is left out: its
+// value is any text.
+//
 // The first line of the refusal names a private key or the PEM block. For
 // `lo secrets set` (and its alias) the second line names stdin
 // (secrets.RefusePrivateKeyValue), else the key file
@@ -193,18 +202,25 @@ func privateKeyGuarded(c *cobra.Command, arity cobra.PositionalArgs) *cobra.Comm
 // secrets::_no_private_argv in main::secrets.
 func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) bool {
 	joined := strings.Join(argv, " ")
-	if !secrets.LooksLikeKeyArg(joined) {
+	key := secrets.LooksLikeKeyArg(joined)
+	if !key && !secrets.HoldsControlByte(joined) {
 		return false
 	}
 	cmd, rest, err := root.Find(argv)
 	if err == nil && (isSecretsSet(cmd) || isSecretsGroup(cmd) && isSetWord(secretsSubcommand(cmd, rest))) {
-		secrets.RefusePrivateKeyValue(errOut, joined)
-		return true
+		if key {
+			secrets.RefusePrivateKeyValue(errOut, joined)
+		}
+		return key
 	}
 	if err == nil && cmd.HasParent() && !underSecrets(cmd) && !namesSecrets(root, secretsSubcommand(root, argv)) {
 		return false
 	}
-	secrets.RefusePrivateKey(errOut, joined)
+	if key {
+		secrets.RefusePrivateKey(errOut, joined)
+	} else {
+		secrets.RefuseControlByte(errOut)
+	}
 	return true
 }
 

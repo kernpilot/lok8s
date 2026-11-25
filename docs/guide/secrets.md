@@ -220,17 +220,24 @@ flag and prints it. The refusal includes a key pasted into `--ssh-key` or
 `--domain`, a key in place of a command, and a paste that the shell splits
 into words. For a PEM block that is not a private key, the first line of
 the error is `a value holds a PEM line (-----BEGIN or -----END): it is not printed`.
-For `set`, the error says to pass the value on stdin. When the value of
-`LOK8S_SSH_KEY` looks like a private key, holds a PEM line or holds a line
-break, each message that names the key file shows a placeholder instead of
-the value: `(not printed: it looks like a private key)` for a private key,
+For `set`, the error says to pass the value on stdin.
+
+Every `lo secrets` command except `set` also refuses an argument that holds
+a line break, a tab or another control character, and does not print it. A
+key body pasted without its `BEGIN` line has no other mark. The first line of
+the error is
+`an argument holds a line break or a control character: it is not printed`.
+The value of `set` can be any text.
+
+When the value of `LOK8S_SSH_KEY` looks like a private key, holds a PEM line
+or holds a line break, each message that names the key file shows a
+placeholder instead of the value:
+`(not printed: it looks like a private key)` for a private key,
 `(not printed: it holds a PEM block)` for any other PEM line, and
 `(not printed: it holds a line break or a control character)` for a value
 with a line break, a tab or another control character. No key path holds
 a line break. For all three, `init` shows no hint after the error: no
-command to write the `.pub` file, and no command to make a new key. The
-key argument of `add-key` and `remove-key` gets the same placeholders in
-each message that names it, also an `age1…` key that is not valid.
+command to write the `.pub` file, and no command to make a new key.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also

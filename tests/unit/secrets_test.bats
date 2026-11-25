@@ -2096,6 +2096,13 @@ _pem_value_refusal() {
     '[error] pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>'
 }
 
+# _control_refusal: the refusal of an argv of lo secrets that holds a control
+# byte and no key (Go twin: controlByteRefusal).
+_control_refusal() {
+  printf '%s\n' '[error] an argument holds a line break or a control character: it is not printed' \
+    '[error] in lo secrets, only the value of set can hold one: check the command, and pass the path of a key file, not the key'
+}
+
 # _refused_path_arg <cmd> <arg>...: runs secrets::<cmd> with the arguments,
 # and fails unless it refused them with _path_refusal and printed no canary.
 _refused_path_arg() {
@@ -2772,4 +2779,91 @@ _path_without() {
   # The key-path commands refuse any PEM block in their own check.
   _refused_as _pem_path_refusal secrets::add-key "${cert}"
   _refused_as _pem_path_refusal secrets::init --ssh-key "${cert}"
+}
+
+# A key body pasted without its BEGIN line has no marker of a key, and the
+# parsers print it: as an extra argument, as a command that they do not know.
+# The checks of main of lo and of main::secrets refuse an argv of lo secrets
+# that holds a control byte (a line break first of all): as a positional, a
+# flag value of the command, of the group and of the root, a command, the
+# first word of the argv, and with a command that lo does not know. A key or
+# a PEM line in the argv keeps its own refusal. The value of set is any text:
+# set passes (the words of the argv find it, also after an unknown flag), and
+# a key in it is still refused. A command outside lo secrets is left to that
+# command. The rule reads bytes: a C1 character (U+0085) is no control byte.
+# Go twin: TestGuardPrivateKeyArgvRefusesAControlByte.
+@test "secrets: an argument with a control byte is refused, for set it is not" {
+  _init_fakes
+  local -a usage=('up|u@destructive' 'Start cluster' 'secrets|s' 'Manage secrets')
+  local -a args=('-' 'Global flags:' 'verbose|v:+' 'Verbose' 'cluster|s' 'Cluster name' 'domain|' 'Domain')
+  local id="AGE-SECRET-KEY-1${KEY_CANARY}" value
+  _passes() {
+    run "${@}"
+    [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "${*@Q}: status ${status}: ${output}" >&2; return 1; }
+  }
+  _refused_as() {
+    local want="${1}"
+    shift
+    run "${@}" < /dev/null
+    [ "$status" -eq 1 ] && [ "$output" = "$("${want}")" ] && [[ "${output}" != *"${KEY_CANARY}"* ]] || {
+      echo "${*@Q}: status ${status}: ${output}" >&2; return 1; }
+  }
+  for value in "Ab0Ab0Ab0"$'\n'"${KEY_CANARY}" "${KEY_CANARY}"$'\r' "${KEY_CANARY}"$'\t'x \
+      $'\x1b[31m'"${KEY_CANARY}" "${KEY_CANARY}"$'\x7f' $'\x01'"${KEY_CANARY}" $'\x1f'"${KEY_CANARY}"; do
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets add-key "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets remove-key "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets add-key age1x "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets init --ssh-key "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets decrypt "--ssh-key=${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets "${value}" list
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets list "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets print "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets --domain "${value}" list
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets --domain set list "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv secrets st KEY "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv s l "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv --domain "${value}" secrets list
+    _refused_as _control_refusal secrets::_guard_lo_argv "${value}"
+    _refused_as _control_refusal secrets::_guard_lo_argv "${value}" secrets list
+    _refused_as _control_refusal secrets::_guard_lo_argv "${value}" up
+    _refused_as _control_refusal secrets::_guard_lo_argv no-such-command "${value}"
+    _refused_as _control_refusal secrets::_no_private_argv add-key "${value}"
+    _refused_as _control_refusal secrets::_no_private_argv "${value}"
+    _refused_as _control_refusal secrets::_no_private_argv --domain set list "${value}"
+    _refused_as _control_refusal secrets::_no_private_argv st KEY "${value}"
+    _refused_as _control_refusal main::secrets add-key "${value}"
+    _refused_as _control_refusal main::secrets "${value}"
+    _passes secrets::_guard_lo_argv secrets set -n app KEY "${value}"
+    _passes secrets::_guard_lo_argv s s -n app KEY "${value}"
+    _passes secrets::_guard_lo_argv --domain alpha.dev secrets set -n app KEY "${value}"
+    _passes secrets::_guard_lo_argv secrets --domain alpha.dev set KEY "${value}"
+    _passes secrets::_guard_lo_argv secrets --no-such-flag set KEY "${value}"
+    # The words of the argv find set here (the binary refuses these three:
+    # cobra's Find does not reach set).
+    _passes secrets::_guard_lo_argv --no-such-flag secrets set KEY "${value}"
+    _passes secrets::_guard_lo_argv -- secrets set KEY "${value}"
+    _passes secrets::_guard_lo_argv secrets -z set list "${value}"
+    _passes secrets::_no_private_argv set -n app KEY "${value}"
+    _passes secrets::_no_private_argv s KEY "${value}"
+    _passes secrets::_guard_lo_argv up "${value}"
+    _passes secrets::_guard_lo_argv --domain secrets up "${value}"
+    _passes secrets::_guard_lo_argv --domain "${value}" up
+    # A key or a PEM line beside the control byte: its own refusal.
+    _refused_as _path_refusal secrets::_guard_lo_argv secrets add-key "${id}" "${value}"
+    _refused_as _pem_path_refusal secrets::_guard_lo_argv secrets add-key "-----BEGIN CERTIFICATE-----" "${value}"
+    _refused_as _value_refusal secrets::_guard_lo_argv secrets set -n app KEY "${id}${value}"
+    _refused_as _pem_value_refusal secrets::_guard_lo_argv secrets set -n app KEY "-----END CERTIFICATE-----${value}"
+    _refused_as _path_refusal secrets::_no_private_argv add-key "${id}" "${value}"
+    _refused_as _value_refusal secrets::_no_private_argv set KEY "${id}${value}"
+  done
+  _passes secrets::_guard_lo_argv secrets add-key "/k/a b.pub"
+  _passes secrets::_guard_lo_argv secrets list $'a\xc2\x85b'
+  _passes secrets::_guard_lo_argv secrets add-key $'/k/schl\xc3\xbcssel.pub'
+  _passes secrets::_guard_lo_argv secrets list ""
+  # main::secrets lets the value of set pass to :usage.
+  :usage() { echo ran >> "${BATS_TEST_TMPDIR}/usage.ran"; usage=(true); }
+  run main::secrets set -n app KEY "one"$'\n'"two" < /dev/null
+  [ "$status" -eq 0 ] && [ -e "${BATS_TEST_TMPDIR}/usage.ran" ] || {
+    echo "main::secrets set with a line break did not reach :usage: status $status: $output" >&2; return 1; }
 }

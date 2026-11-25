@@ -303,9 +303,10 @@ func TestKeyParseErrorsPrintNoLibraryError(t *testing.T) {
 	})
 }
 
-// An argument of add-key with no marker of a private key passes the argv
-// check, so the not-a-file, the derive and the age key lines print it
-// through shownKeyPath: a key body pasted without its BEGIN line (a line
+// An argument of add-key with no marker of a private key passes the check of
+// the command (the guard of main refuses a control byte first), so the
+// not-a-file, the derive and the age key lines print it through
+// shownKeyPath: a key body pasted without its BEGIN line (a line
 // break), a key file at a path with a tab and an age key with a line break
 // or an escape get the placeholder, never the value (bash twins: "a pasted
 // key body with no BEGIN line is refused and not echoed", "a key file at a

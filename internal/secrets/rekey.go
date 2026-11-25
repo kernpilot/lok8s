@@ -120,9 +120,19 @@ func RefusePrivateKeyValue(w io.Writer, argv string) {
 	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")
 }
 
+// RefuseControlByte is the refusal for an argv of `lo secrets` (set excepted:
+// its value is any text) that holds a control byte (HoldsControlByte) and no
+// marker of a key (LooksLikeKeyArg): a key body pasted without its BEGIN
+// line, for example. It never prints the argument. The guard of main prints
+// it. Bash twin: secrets::_no_control_byte.
+func RefuseControlByte(w io.Writer) {
+	ui.ErrorTo(w, "an argument holds a line break or a control character: it is not printed")
+	ui.ErrorTo(w, "in lo secrets, only the value of set can hold one: check the command, and pass the path of a key file, not the key")
+}
+
 // keyPlaceholder is the text that a message prints instead of arg when arg
 // has the shape of a private key, holds a PEM line (LooksLikeKeyArg) or
-// holds a control byte (holdsControlByte), and "" for any other arg. A PEM
+// holds a control byte (HoldsControlByte), and "" for any other arg. A PEM
 // block that is not a private key (a certificate, a static key of OpenVPN)
 // can be key material too, so a message prints none. A value with a line
 // break is a paste of more than one line (a key body without its BEGIN
@@ -137,17 +147,17 @@ func keyPlaceholder(arg string) string {
 	if LooksLikeKeyArg(arg) {
 		return "(not printed: it holds a PEM block)"
 	}
-	if holdsControlByte(arg) {
+	if HoldsControlByte(arg) {
 		return "(not printed: it holds a line break or a control character)"
 	}
 	return ""
 }
 
-// holdsControlByte reports whether s holds a byte 0x00-0x1F or 0x7F (a line
+// HoldsControlByte reports whether s holds a byte 0x00-0x1F or 0x7F (a line
 // break, a tab, an escape). It reads bytes, not runes, as the bash twin
 // does under LC_ALL=C ([[:cntrl:]]): a C1 character such as U+0085 does not
 // count. Bash twin: secrets::_holds_control_byte.
-func holdsControlByte(s string) bool {
+func HoldsControlByte(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] == 0x7f {
 			return true
