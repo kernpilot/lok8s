@@ -1,4 +1,4 @@
-# Flux CD (fluxcd-community/flux2 chart 2.19.0, appVersion 2.9.1) — generic,
+# Flux CD (fluxcd-community/flux2 chart 2.19.1, appVersion 2.9.5) — generic,
 # portable framework-addon values.
 #
 # A test reads the first line. Its chart must be the one that chart.yaml
