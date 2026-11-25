@@ -2129,18 +2129,15 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   _lo_refused --domain "${body}" secrets list
   _lo_refused "${body}"
   # The words of the argv find set, so the checks leave these to the parsers.
-  # They stop at the unknown flag and do not print the value.
+  # The status depends on the parser (the argsh builtin shows the help and
+  # returns 0, the bash one fails): the value must not be printed.
   local flag
-  for flag in "--no-such-flag secrets set -n app OTHER" "secrets -z set list"; do
+  for flag in "--no-such-flag secrets set -n app OTHER" "secrets -z set list" "-- secrets set -n app OTHER"; do
     # shellcheck disable=SC2086 # the words of the argv
     _run_lo ${flag} "${body}" < /dev/null
-    [ "$status" -ne 0 ] && [[ "$output" != *"${canary}"* ]] || {
+    [[ "$output" != *"${canary}"* ]] || {
       echo "lo ${flag} <body>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
   done
-  # "--" ends no flags here: set runs, and the value is not printed.
-  _run_lo -- secrets set -n app OTHER "${body}" < /dev/null
-  [ "$status" -eq 0 ] && [[ "$output" != *"${canary}"* ]] || {
-    echo "lo -- secrets set <body>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
   _run_lo secrets set -n app KEY "${body}" < /dev/null
   [ "$status" -eq 0 ] && [[ "$output" != *"${canary}"* ]] || {
     echo "set <body>: rc ${status}: ${output//${canary}/<canary>}" >&2; return 1; }
