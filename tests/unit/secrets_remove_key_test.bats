@@ -1960,6 +1960,25 @@ ${_scope}
   [ "$(grep -cF "${_scope}" <<< "$output")" -eq 1 ]
 }
 
+# A keys file at a path with a PEM line in it: the warning prints the PEM
+# placeholder of secrets::_shown_path, not the path. Go twin:
+# TestRemoveKeyOwnIdentityAtAPEMPath.
+@test "removing the caller's own identity from a keys file at a PEM path warns with the placeholder" {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local dashes="-----"
+  local dir="${BATS_TEST_TMPDIR}/${dashes}BEGIN CERTIFICATE${dashes}"
+  mkdir -p "${dir}"
+  export SOPS_AGE_KEY_FILE="${dir}/keys.txt"
+  printf '# created: test\n# public key: %s\n' "${RCPT_B}" > "${SOPS_AGE_KEY_FILE}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [[ "$output" == *"[warn] the recipient is your own decrypt identity ((not printed: it holds a PEM block)): once it is removed"* ]] || {
+    echo "$output" >&2; return 1; }
+  [[ "$output" != *BEGIN* ]] || { echo "the path of the keys file reached the output" >&2; return 1; }
+}
+
 @test "a removal of a key that is not the caller's prints the scope line of the identity check only" {
   # No match warning does not mean that the key is not the caller's: the
   # check does not read every source.

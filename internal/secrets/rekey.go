@@ -98,27 +98,38 @@ func RefusePrivateKeyValue(w io.Writer, argv string) {
 	ui.ErrorTo(w, "pass the value on stdin, not as an argument: lo secrets set --name <name> <key> < <file>")
 }
 
-// shownKeyPath is path for a message, or a placeholder when it has the shape
-// of a private key: a key pasted into LOK8S_SSH_KEY reaches the messages of
-// init, decrypt and remove-key, which no argv guard sees. Every message that
-// prints a key path prints it through shownKeyPath. Bash twin:
-// secrets::_shown_path.
-func shownKeyPath(path string) string {
-	if LooksLikePrivateKey(path) {
-		return "(not printed: it looks like a private key)"
-	}
-	return path
-}
-
-// QuoteArg is arg in Go quotes for a message, or a placeholder when arg has
-// the shape of a private key or holds a PEM block (LooksLikeKeyArg): a PEM
-// block can be key material, and a message must not print it.
-func QuoteArg(arg string) string {
+// keyPlaceholder is the text that a message prints instead of arg when arg
+// has the shape of a private key or holds a PEM block (LooksLikeKeyArg), and
+// "" for any other arg. A PEM block that is not a private key (a
+// certificate, a static key of OpenVPN) can be key material too, so a
+// message prints none. shownKeyPath and QuoteArg both use it.
+func keyPlaceholder(arg string) string {
 	if LooksLikePrivateKey(arg) {
 		return "(not printed: it looks like a private key)"
 	}
 	if LooksLikeKeyArg(arg) {
 		return "(not printed: it holds a PEM block)"
+	}
+	return ""
+}
+
+// shownKeyPath is path for a message, or a placeholder when it has the shape
+// of a private key or holds a PEM block (keyPlaceholder): a value pasted
+// into LOK8S_SSH_KEY reaches the messages of init, decrypt and remove-key,
+// which no argv guard sees. Every message that prints a key path prints it
+// through shownKeyPath. Bash twin: secrets::_shown_path.
+func shownKeyPath(path string) string {
+	if p := keyPlaceholder(path); p != "" {
+		return p
+	}
+	return path
+}
+
+// QuoteArg is arg in Go quotes for a message, or a placeholder when arg has
+// the shape of a private key or holds a PEM block (keyPlaceholder).
+func QuoteArg(arg string) string {
+	if p := keyPlaceholder(arg); p != "" {
+		return p
 	}
 	return strconv.Quote(arg)
 }

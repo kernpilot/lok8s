@@ -1209,6 +1209,44 @@ _private_key_refusal() {
   [ "${n}" -eq 30 ] || { echo "${n} paths, not 30" >&2; return 1; }
 }
 
+# The fix line of that refusal names <path>.pub when secrets::_shown_path
+# prints the path as it is (secrets::_path_is_shown), also for a path that
+# ends in a newline: a command substitution drops that newline, so a
+# compare with its output takes the path for a placeholder. Go twin:
+# TestInitRefusesAPrivateKeyFile (the suffix of a newline).
+@test "secrets init: the refusal of a private key file at a path that ends in a newline names its .pub" {
+  _init_fakes
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  local path="${BATS_TEST_TMPDIR}/key"$'\n'
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" "${KEY_CANARY}" > "${path}"
+  KEY_PATH="${path}"
+  :args() { ssh_key="${KEY_PATH}"; }
+  run secrets::init
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "${output}" == *$'\n'"[error] pass the public key file instead: ${path}.pub" ]] || { echo "$output" >&2; return 1; }
+  [[ "${output}" != *"${KEY_CANARY}"* ]] || { echo "the file reached the output" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age read the file" >&2; return 1; }
+}
+
+# When only the PEM rule of secrets::_shown_path replaces a path that does
+# not end in .pub, the fix line names ssh-keygen, not <path>.pub: no line
+# of the output holds the path. Go twin:
+# TestInitRefusesAPrivateKeyFileAtAPEMPath.
+@test "secrets init: the refusal of a private key file at a PEM path names ssh-keygen and prints no PEM line" {
+  _init_fakes
+  local dashes="-----" shown="(not printed: it holds a PEM block)"
+  local dir="${BATS_TEST_TMPDIR}/${dashes}BEGIN X${dashes}"
+  mkdir -p "${dir}"
+  printf -- '-----BEGIN OPENSSH %s-----\n%s\n' "PRIVATE ""KEY" "${KEY_CANARY}" > "${dir}/key"
+  KEY_PATH="${dir}/key"
+  :args() { ssh_key="${KEY_PATH}"; }
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] ${shown} holds a private key, not a public key: nothing from it is printed
+[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key" ] || {
+    echo "status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  [[ "${output}" != *BEGIN* && "${output}" != *"${KEY_CANARY}"* ]] || { echo "a PEM line or the file reached the output" >&2; return 1; }
+}
+
 # A derivation that fails (ssh-to-age exits non-zero) prints the two lines
 # of the Go twin and the exit status of the tool, never its output: the tool
 # quotes its input on a failure. ssh-to-age is a function that does so.
@@ -2113,6 +2151,88 @@ _refused_path_arg() {
   [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
 }
 
+# _synthetic_pem <label> <body>: a block of the PEM form with the label and
+# the body of a test: no key and no certificate. It is built at run time, so
+# no block is in the source. Go twin: syntheticPEM.
+_synthetic_pem() {
+  local dashes="-----"
+  printf '%sBEGIN %s%s\n%s\n%sEND %s%s' "${dashes}" "${1}" "${dashes}" "${2}" "${dashes}" "${1}" "${dashes}"
+}
+
+# A PEM block that is not a private key (a certificate, a static key of
+# OpenVPN, a block with any other label: the rule is no list of labels) can
+# be key material too. secrets::_shown_path prints the PEM placeholder for
+# it, in LOK8S_SSH_KEY as in a path: the not-found lines of init and decrypt
+# never print a line of the block (the END line too), and init prints no
+# hint, which would hold the placeholder. A private key keeps its own
+# placeholder. A plain path, and a path with BEGIN but no dashes, print as
+# they are. Go twin: TestShownKeyPathHidesAPEMBlock,
+# TestInitMissingKeyAtAPEMPath and TestSecretsKeyNotFoundHidesAPEMBlock.
+@test "secrets init and decrypt: the not-found line does not print a PEM block from LOK8S_SSH_KEY" {
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
+  local shown="(not printed: it holds a PEM block)" block line dir plain="${BATS_TEST_TMPDIR}/keys/id_ed25519.pub"
+  local dashes="-----" nodash="${BATS_TEST_TMPDIR}/BEGIN CERTIFICATE/id"
+  local -a blocks=(
+    "$(_synthetic_pem CERTIFICATE "${KEY_CANARY}")"
+    "$(_synthetic_pem "OpenVPN Static key V1" "$(printf '0f%.0s' 1 2 3 4 5 6 7 8)"$'\n'"${KEY_CANARY}")"
+    "$(_synthetic_pem "SOME DATA" "${KEY_CANARY}")"
+  )
+  for block in "${blocks[@]}"; do
+    [ "$(secrets::_shown_path "${block}")" = "${shown}" ] || { echo "_shown_path printed: $(secrets::_shown_path "${block}" | head -n 1)" >&2; return 1; }
+    export LOK8S_SSH_KEY="${block}"
+    run secrets::init
+    [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}" ] || {
+      echo "init: status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+    run secrets::decrypt < /dev/null
+    [ "$status" -eq 1 ] && [[ "${output}" == *"[error] SSH private key not found: ${shown}" ]] || {
+      echo "decrypt: status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+    while IFS= read -r line; do
+      [[ "${output}" != *"${line}"* ]] || { echo "decrypt printed a line of the block" >&2; return 1; }
+    done <<< "${block}"
+    [[ "${output}" != *BEGIN* ]] || { echo "decrypt printed a PEM line" >&2; return 1; }
+  done
+  [ "$(secrets::_shown_path "$(_synthetic_pem "OPENSSH PRIVATE ""KEY" "${KEY_CANARY}")")" = "(not printed: it looks like a private key)" ] || {
+    echo "a private key lost its own placeholder" >&2; return 1; }
+  [ "$(secrets::_shown_path "${plain}")" = "${plain}" ] || { echo "a plain path was replaced" >&2; return 1; }
+  # BEGIN without the dashes is no PEM line: the path prints as it is, and
+  # init prints its hint.
+  [ "$(secrets::_shown_path "${nodash}.pub")" = "${nodash}.pub" ] || { echo "BEGIN without the dashes was replaced" >&2; return 1; }
+  export LOK8S_SSH_KEY="${nodash}"
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${nodash}.pub"$'\n'"[error] Generate one with: ssh-keygen -t ed25519" ] || {
+    echo "init at a path with BEGIN but no dashes: status $status: $output" >&2; return 1; }
+  # A private key file at a path with a PEM line in it, and no .pub: no hint.
+  dir="${BATS_TEST_TMPDIR}/${dashes}BEGIN CERTIFICATE${dashes}"
+  mkdir -p "${dir}"
+  printf '%s\n' "${KEY_CANARY}" > "${dir}/id"
+  export LOK8S_SSH_KEY="${dir}/id"
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}" ] || {
+    echo "init at a PEM path: status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+}
+
+# The hint guard of init has one rule with the not-found line: no hint when
+# secrets::_shown_path replaces the path (secrets::_path_is_shown). Here
+# secrets::_shown_path has a placeholder case that no other check knows: the
+# guard follows it. Go twin: publicKeyHint compares shownKeyPath with the
+# path.
+@test "secrets init: the hint guard follows each placeholder case of secrets::_shown_path" {
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
+  secrets::_shown_path() {
+    if [[ "${1}" == *HIDDEN-PART* ]]; then printf '%s\n' "(not printed: a case of this test)"; else printf '%s\n' "${1}"; fi
+  }
+  local dir="${BATS_TEST_TMPDIR}/HIDDEN-PART"
+  mkdir -p "${dir}"
+  printf 'filler\n' > "${dir}/id"
+  export LOK8S_SSH_KEY="${dir}/id"
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: (not printed: a case of this test)" ] || {
+    echo "status $status: $output" >&2; return 1; }
+}
+
 # A missing public key file gets a hint. When the private key of that .pub
 # exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
 # ed25519 there asks to overwrite the key that decrypt reads. The private key
@@ -2193,6 +2313,27 @@ _refused_path_arg() {
   done
   got="$(secrets::_shown_quoted ""; printf x)"
   [ "${got%x}" = "''" ] || { echo "empty: got ${got%x}" >&2; return 1; }
+}
+
+# secrets::_path_is_shown returns 0 when secrets::_shown_path prints the
+# path as it is, and 1 when it prints a placeholder. The x keeps a newline
+# at the end of the path, so such a path is shown as it is. Go twin:
+# shownKeyPath(path) == path.
+@test "secrets::_path_is_shown: 0 for a path shown as it is, 1 for a placeholder" {
+  local dashes="-----" i rc
+  local -a names=(empty plain newline-at-end pem-block private-key) want=(0 0 0 1 1)
+  local -a inputs=(
+    ""
+    "/home/u/.ssh/id_ed25519"
+    $'a\n'
+    "$(_synthetic_pem "SOME DATA" "${KEY_CANARY}")"
+    "${dashes}BEGIN OPENSSH PRIVATE ""KEY${dashes}"$'\n'"${KEY_CANARY}"
+  )
+  for i in "${!names[@]}"; do
+    rc=0
+    secrets::_path_is_shown "${inputs[i]}" || rc=$?
+    [ "${rc}" = "${want[i]}" ] || { echo "${names[i]}: return ${rc}, want ${want[i]}" >&2; return 1; }
+  done
 }
 
 # The key file is read once and at most 64 KiB: a bigger file, a file that

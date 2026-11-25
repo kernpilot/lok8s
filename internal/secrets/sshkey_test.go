@@ -135,10 +135,12 @@ func wantPrivateKeyRefusal(path string) string {
 }
 
 // Init refuses a private key file with the path and the fix, prints nothing
-// from the file and writes nothing; also when the path ends in .pub.
+// from the file and writes nothing; also when the path ends in .pub. The fix
+// names <path>.pub also for a path that ends in a newline (bash twin: the
+// newline test of secrets::_read_public_key).
 func TestInitRefusesAPrivateKeyFile(t *testing.T) {
 	for name, content := range privateKeyForms {
-		for _, suffix := range []string{"", ".pub"} {
+		for _, suffix := range []string{"", ".pub", "\n"} {
 			t.Run(name+suffix, func(t *testing.T) {
 				c, out, errOut := testEnv(t)
 				path := filepath.Join(t.TempDir(), "key"+suffix)
@@ -153,6 +155,28 @@ func TestInitRefusesAPrivateKeyFile(t *testing.T) {
 				sameStates(t, before, fileStates(t, c.Paths.Base))
 			})
 		}
+	}
+}
+
+// When only the PEM rule of shownKeyPath replaces a path that does not end
+// in .pub, the fix line of the refusal names ssh-keygen, not <path>.pub: no
+// line of the output holds the path (bash twin: the refusal test of a
+// private key file at a PEM path).
+func TestInitRefusesAPrivateKeyFileAtAPEMPath(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	dir := mkdir(t, filepath.Join(t.TempDir(), pemLine("X")))
+	path := filepath.Join(dir, "key")
+	write(t, path, privateKeyForms["openssh"])
+	if err := c.Init(path); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v", err)
+	}
+	want := "[error] (not printed: it holds a PEM block) holds a private key, not a public key: nothing from it is printed\n" +
+		"[error] pass the public key file instead: ssh-keygen -y -f <private key> prints the public key\n"
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+	}
+	if strings.Contains(out.String()+errOut.String(), "BEGIN") {
+		t.Error("a PEM line reached the output")
 	}
 }
 
@@ -492,6 +516,98 @@ func TestKeyPathMessagesHideAPrivateKeyShape(t *testing.T) {
 			t.Error("the path of the keys file reached the output")
 		}
 	})
+}
+
+// pemLine is the first line of a PEM block with the label, and syntheticPEM
+// a whole block with the label and the body of a test: no key and no
+// certificate. Both are built at run time, so no block is in the source.
+// Bash twin: _synthetic_pem in tests/unit/secrets_test.bats.
+func pemLine(label string) string {
+	return strings.Repeat("-", 5) + "BEGIN " + label + strings.Repeat("-", 5)
+}
+
+func syntheticPEM(label, body string) string {
+	return pemLine(label) + "\n" + body + "\n" + strings.Repeat("-", 5) + "END " + label + strings.Repeat("-", 5)
+}
+
+// A key path that holds a PEM block which is not a private key (a
+// certificate, a static key of OpenVPN, a block with any other label: the
+// rule is no list of labels) is not printed either: shownKeyPath and
+// QuoteArg give the PEM placeholder, never the block. A private key keeps
+// its own placeholder. A plain path, and a path with BEGIN in it but
+// no PEM line, print as they are. Bash twin: "secrets init and decrypt: the
+// not-found line does not print a PEM block from LOK8S_SSH_KEY".
+func TestShownKeyPathHidesAPEMBlock(t *testing.T) {
+	const pem = "(not printed: it holds a PEM block)"
+	const private = "(not printed: it looks like a private key)"
+	for name, tc := range map[string]struct{ path, want string }{
+		"a certificate":                  {syntheticPEM("CERTIFICATE", keyCanary), pem},
+		"a static key":                   {syntheticPEM("OpenVPN Static key V1", strings.Repeat("0f", 8)+"\n"+keyCanary), pem},
+		"a PEM line in a directory name": {"/keys/" + pemLine("CERTIFICATE") + "/id.pub", pem},
+		"another label":                  {syntheticPEM("SOME DATA", keyCanary), pem},
+		"a private key":                  {syntheticPEM("OPENSSH "+privKey, keyCanary), private},
+		"a plain path":                   {"/home/user/.ssh/id_ed25519.pub", "/home/user/.ssh/id_ed25519.pub"},
+		"BEGIN without the dashes":       {"/keys/BEGIN CERTIFICATE/id.pub", "/keys/BEGIN CERTIFICATE/id.pub"},
+	} {
+		if got := shownKeyPath(tc.path); got != tc.want {
+			t.Errorf("%s: shownKeyPath gives %q, want %q", name, got, tc.want)
+		}
+		if tc.want != tc.path {
+			if got := QuoteArg(tc.path); got != tc.want {
+				t.Errorf("%s: QuoteArg gives %q, want %q", name, got, tc.want)
+			}
+		}
+	}
+}
+
+// init with a missing .pub whose private key is a file at a path with a PEM
+// line in it: the not-found line prints the PEM placeholder, and there is no
+// hint, which would hold the placeholder (publicKeyHint). Bash twin: the
+// hint part of "secrets init and decrypt: the not-found line does not print
+// a PEM block from LOK8S_SSH_KEY".
+func TestInitMissingKeyAtAPEMPath(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	dir := mkdir(t, filepath.Join(c.Paths.Base, pemLine("CERTIFICATE")))
+	write(t, dir+"/id", keyCanary+"\n")
+	if err := c.Init(dir + "/id.pub"); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v", err)
+	}
+	want := "[error] SSH public key not found: (not printed: it holds a PEM block)\n"
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr %q\nwant %q", out.String(), errOut.String(), want)
+	}
+	if strings.Contains(out.String()+errOut.String(), "BEGIN") || strings.Contains(out.String()+errOut.String(), keyCanary) {
+		t.Error("the path or the file reached the output")
+	}
+}
+
+// remove-key of the own identity, from a keys file at a path with a PEM line
+// in it: the warning prints the PEM placeholder, not the path. Bash twin:
+// "removing the caller's own identity from a keys file at a PEM path warns
+// with the placeholder" in tests/unit/secrets_remove_key_test.bats.
+func TestRemoveKeyOwnIdentityAtAPEMPath(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	c.Domain = "a.dev"
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	file := filepath.Join(mkdir(t, filepath.Join(t.TempDir(), pemLine("CERTIFICATE"))), "keys.txt")
+	t.Setenv("SOPS_AGE_KEY_FILE", file)
+	write(t, file, "# created: test\n# public key: "+g+"\n"+gone.String()+"\n")
+	sopsRules(t, c, k+","+g)
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	write(t, a+"/Secret.app.default.K", "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	want := "[warn] the recipient is your own decrypt identity ((not printed: it holds a PEM block)): once it is removed"
+	if !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr %q lacks %q", errOut.String(), want)
+	}
+	if strings.Contains(out.String()+errOut.String(), "BEGIN") {
+		t.Error("the path of the keys file reached the output")
+	}
 }
 
 // The guard itself, with a HOME of the test as the real one: it names a

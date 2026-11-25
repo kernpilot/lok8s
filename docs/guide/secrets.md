@@ -221,9 +221,12 @@ flag and prints it. The refusal includes a key pasted into `--ssh-key` or
 into words. For a PEM block that is not a private key, the first line of
 the error is `a value starts a PEM block (-----BEGIN): it is not printed`.
 For `set`, the error says to pass the value on stdin. When the value of
-`LOK8S_SSH_KEY` looks like a private key, each message that names the key
-file shows a placeholder instead of the value, and `init` shows no command
-to write the `.pub` file.
+`LOK8S_SSH_KEY` looks like a private key or holds a PEM block, each message
+that names the key file shows a placeholder instead of the value:
+`(not printed: it looks like a private key)` for a private key, and
+`(not printed: it holds a PEM block)` for any other PEM block. For both,
+`init` shows no hint after the error: no command to write the `.pub` file,
+and no command to make a new key.
 
 `init` writes `.sops.yaml` only when no file is at that path. A key that is
 not ed25519 gives no age recipient: `init` stops and writes nothing, also
