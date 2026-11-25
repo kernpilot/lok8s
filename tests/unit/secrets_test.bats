@@ -2113,6 +2113,54 @@ _refused_path_arg() {
   [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
 }
 
+# _synthetic_pem <label> <body>: a block of the PEM form with the label and
+# the body of a test: no key and no certificate. It is built at run time, so
+# no block is in the source. Go twin: syntheticPEM.
+_synthetic_pem() {
+  local dashes="-----"
+  printf '%sBEGIN %s%s\n%s\n%sEND %s%s' "${dashes}" "${1}" "${dashes}" "${2}" "${dashes}" "${1}" "${dashes}"
+}
+
+# A PEM block that is not a private key (a certificate, a static key of
+# OpenVPN) can be key material too. secrets::_shown_path prints the PEM
+# placeholder for it, in LOK8S_SSH_KEY as in a path: the not-found lines of
+# init and decrypt never print the block, and init prints no hint, which
+# would hold the placeholder. A private key keeps its own placeholder, and a
+# plain path prints as itself. Go twin: TestShownKeyPathHidesAPEMBlock,
+# TestInitMissingKeyAtAPEMPath and TestSecretsKeyNotFoundHidesAPEMBlock.
+@test "secrets init and decrypt: the not-found line does not print a PEM block from LOK8S_SSH_KEY" {
+  ssh-to-age() { echo called >> "${BATS_TEST_TMPDIR}/ssh-to-age.called"; }
+  sops() { :; }
+  local shown="(not printed: it holds a PEM block)" block dir plain="${BATS_TEST_TMPDIR}/keys/id_ed25519.pub"
+  local -a blocks=(
+    "$(_synthetic_pem CERTIFICATE "${KEY_CANARY}")"
+    "$(_synthetic_pem "OpenVPN Static key V1" "$(printf '0f%.0s' 1 2 3 4 5 6 7 8)"$'\n'"${KEY_CANARY}")"
+  )
+  for block in "${blocks[@]}"; do
+    [ "$(secrets::_shown_path "${block}")" = "${shown}" ] || { echo "_shown_path printed: $(secrets::_shown_path "${block}" | head -n 1)" >&2; return 1; }
+    export LOK8S_SSH_KEY="${block}"
+    run secrets::init
+    [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}" ] || {
+      echo "init: status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+    run secrets::decrypt < /dev/null
+    [ "$status" -eq 1 ] && [[ "${output}" == *"[error] SSH private key not found: ${shown}" ]] || {
+      echo "decrypt: status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+    [[ "${output}" != *"${KEY_CANARY}"* && "${output}" != *BEGIN* ]] || { echo "decrypt printed the value" >&2; return 1; }
+  done
+  [ "$(secrets::_shown_path "$(_synthetic_pem "OPENSSH PRIVATE ""KEY" "${KEY_CANARY}")")" = "(not printed: it looks like a private key)" ] || {
+    echo "a private key lost its own placeholder" >&2; return 1; }
+  [ "$(secrets::_shown_path "${plain}")" = "${plain}" ] || { echo "a plain path was replaced" >&2; return 1; }
+  # A private key file at a path with a PEM line in it, and no .pub: no hint.
+  dir="${BATS_TEST_TMPDIR}/-----BEGIN CERTIFICATE-----"
+  mkdir -p "${dir}"
+  printf '%s\n' "${KEY_CANARY}" > "${dir}/id"
+  export LOK8S_SSH_KEY="${dir}/id"
+  run secrets::init
+  [ "$status" -eq 1 ] && [ "$output" = "[error] SSH public key not found: ${shown}" ] || {
+    echo "init at a PEM path: status $status: ${output//${KEY_CANARY}/<canary>}" >&2; return 1; }
+  [ ! -e "${BATS_TEST_TMPDIR}/ssh-to-age.called" ] || { echo "ssh-to-age ran" >&2; return 1; }
+}
+
 # A missing public key file gets a hint. When the private key of that .pub
 # exists, the hint writes the .pub from it (ssh-keygen -y): a ssh-keygen -t
 # ed25519 there asks to overwrite the key that decrypt reads. The private key

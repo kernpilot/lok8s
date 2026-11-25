@@ -35,8 +35,8 @@ import (
 // asks to overwrite the key that decrypt reads. The private key is checked
 // with a stat only; it is never read. Each path goes through shownKeyPath,
 // then shellQuoted. When shownKeyPath replaces the path (it has the shape of
-// a private key), there is no hint either: the hint would hold the
-// placeholder, and a paste of it makes a file of that name. The private key
+// a private key or holds a PEM block), there is no hint either: the hint
+// would hold the placeholder, and a paste of it makes a file of that name. The private key
 // path is a prefix of the .pub path, so the test of the .pub path covers
 // both. Bash twin: the hint of secrets::init.
 func publicKeyHint(sshKey string) string {
