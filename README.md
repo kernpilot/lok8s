@@ -31,23 +31,23 @@
 
 &nbsp;
 
-<p align="center"><b>Kubernetes, from your laptop to production — one CLI, one folder convention, the same workflow everywhere.</b></p>
+<p align="center"><b>Kubernetes, from your laptop to production: one CLI, one folder convention, the same workflow everywhere.</b></p>
 
 <p align="left">
-<b>lok8s</b> gives you a single CLI (<code>lo</code>) and a single per-domain folder layout for the whole journey: spin up a throwaway cluster on your laptop, iterate with a live dev loop, and ship the exact same definitions to production. It doesn't replace the tools you already know — <b>kustomize</b> builds your manifests, <b>Helm</b> charts inflate in place, <b>kind</b> runs clusters locally, and <b>Tilt</b> powers the hot-reload loop. lok8s is the thin, opinionated orchestration <i>around</i> them, so <code>clusters/&lt;your-domain&gt;/</code> means the same thing in dev, CI, and prod.
+<b>lok8s</b> gives you a single CLI (<code>lo</code>) and a single per-domain folder layout for the whole journey. You start a throwaway cluster on your laptop, iterate with a live dev loop, and ship the exact same definitions to production. It does not replace the tools you already know: <b>kustomize</b> builds your manifests, <b>Helm</b> charts inflate in place, <b>kind</b> runs clusters locally, and <b>Tilt</b> powers the hot-reload loop. lok8s is the thin, opinionated orchestration <i>around</i> them. Thus <code>clusters/&lt;your-domain&gt;/</code> means the same thing in dev, CI, and prod.
 </p>
 
-> Open-sourced in 2026 after **~9 years running real production workloads** — new to GitHub, but shaped by nearly a decade of operating clusters for keeps.
+> Open-sourced in 2026 after **~9 years running real production workloads**. It is new to GitHub, but nearly a decade of real cluster operations shaped it.
 
 &nbsp;
 
 ### ✨ Why lok8s
 
-- **🧰 Standard tools, not a walled garden.** Targets are plain `kustomize build`s; Helm charts inflate via the [khelm](https://github.com/mgoltzsche/khelm) kustomize plugin (no `helm` CLI to install). The `lo` CLI and the folder convention are *orchestration and ergonomics* — the artifacts underneath are vanilla Kubernetes YAML you could `kubectl apply` by hand. **No lock-in: lok8s produces standard manifests you can take anywhere.**
-- **💻 Dev-first, runs against any cluster.** The default experience is a local `kind` cluster with TLS, a registry mirror, and a Tilt hot-reload loop that just works. `lo build` emits portable `artifacts.yaml` you can `kubectl apply` to *any* cluster. The Hetzner/KubeOne/CAPI provisioners are a *convenience* for standing up production — **not a requirement**.
-- **🤖 AI built in, local-first.** `lo chat` is an on-device assistant for your cluster (read-only by default, with a code-enforced safety gate), and `lo mcp` exposes every `lo` command to agents like Claude Code over [MCP](https://modelcontextprotocol.io/). No data leaves your machine unless you explicitly opt into a frontier model.
-- **🧪 Nine years in production.** The conventions here aren't speculative — they're the residue of ~9 years of running this in production, keeping what survived contact with reality and dropping what didn't.
-- **🐚 Transparent and debuggable.** `lo` is one static Go binary, but it still runs the same `kubectl`/`kustomize`/`kind` commands you'd run by hand: orchestrated, not reimplemented. `lo --verbose` shows every command, and the bash implementation the binary was ported from ships frozen inside every project (a project's `lok8s.yaml` can route any command to it), so you can always read, lint and step through the reference. ([Why a Go binary, and why the bash stays](#-why-a-go-binary-and-why-the-bash-stays))
+- **🧰 Standard tools, not a walled garden.** Targets are plain `kustomize build`s. Helm charts inflate via the [khelm](https://github.com/mgoltzsche/khelm) kustomize plugin (no `helm` CLI to install). The `lo` CLI and the folder convention are *orchestration and ergonomics*. The artifacts underneath are vanilla Kubernetes YAML you could `kubectl apply` by hand. **No lock-in: lok8s produces standard manifests you can take anywhere.**
+- **💻 Dev-first, runs against any cluster.** The default experience is a local `kind` cluster with TLS, a registry mirror, and a Tilt hot-reload loop that just works. `lo build` emits portable `artifacts.yaml` you can `kubectl apply` to *any* cluster. The Hetzner/KubeOne/CAPI provisioners are a *convenience* for standing up production, **not a requirement**.
+- **🤖 AI built in, local-first.** `lo chat` is an on-device assistant for your cluster (read-only by default, with a code-enforced safety gate). `lo mcp` exposes every `lo` command to agents like Claude Code over [MCP](https://modelcontextprotocol.io/). No data leaves your machine unless you explicitly opt into a frontier model.
+- **🧪 Nine years in production.** The conventions here are not speculative. They are the residue of ~9 years in production: we kept what survived contact with reality and dropped the rest.
+- **🐚 Transparent and debuggable.** `lo` is one static Go binary, but it still runs the same `kubectl`/`kustomize`/`kind` commands you'd run by hand: orchestrated, not reimplemented. `lo --verbose` shows every command. The bash implementation the binary was ported from ships frozen inside every project, and a project's `lok8s.yaml` can route any command to it. So you can always read, lint and step through the reference. ([Why a Go binary, and why the bash stays](#-why-a-go-binary-and-why-the-bash-stays))
 
 &nbsp;
 
@@ -55,17 +55,17 @@
 
 A few principles shape every decision in lok8s:
 
-1. **Production is the reference; local dev is a nerfed overlay of it.** You don't learn one workflow for your laptop and a different one for prod — it's the same tree, the same commands, the same `cluster.lok8s.yaml`. The local cluster is just production with the expensive parts swapped out.
+1. **Production is the reference, and local dev is a reduced overlay of it.** You do not learn one workflow for your laptop and a different one for prod. It is the same tree, the same commands, the same `cluster.lok8s.yaml`. The local cluster is production with the expensive parts swapped out.
 2. **One cluster = one folder, keyed by FQDN.** Everything about a cluster lives under `clusters/<fqdn>/`. The domain *is* the identity, which makes multi-cluster and multi-environment setups obvious rather than clever.
-3. **Stand on standard tools.** lok8s orchestrates kustomize, Helm (via khelm), kind, and Tilt — it doesn't reimplement them. If you know those, you already know most of lok8s.
+3. **Stand on standard tools.** lok8s orchestrates kustomize, Helm (via khelm), kind, and Tilt. It does not reimplement them. If you know those, you already know most of lok8s.
 4. **Two concerns, kept apart.** *Cluster creation* (a pluggable driver) is separate from *cluster content* (kustomize targets). Swapping how a cluster is born never touches what runs on it.
-5. **Minimal magic, maximal transparency.** Rendered artifacts are plain YAML, every external call is a tool you could run yourself (`lo --verbose` prints it), and the only ordering primitive is an explicit `spec.bootstrap` list. When something breaks, you can see exactly what ran.
+5. **Minimal magic, maximal transparency.** Rendered artifacts are plain YAML. Every external call is a tool you could run yourself (`lo --verbose` prints it). The only ordering primitive is an explicit `spec.bootstrap` list. When something breaks, you can see exactly what ran.
 
 &nbsp;
 
 ### ✅ When to use lok8s (and when not to)
 
-Honesty up front — lok8s is opinionated, and that won't fit everyone.
+Honesty up front: lok8s is opinionated, and that does not fit everyone.
 
 **Reach for lok8s when you want to…**
 
@@ -73,13 +73,13 @@ Honesty up front — lok8s is opinionated, and that won't fit everyone.
 - Manage one or many clusters with a clear, FQDN-keyed folder convention.
 - Keep a fast local dev loop (Tilt hot-reload, local registry, working TLS) without bespoke glue.
 - Use kustomize + Helm charts as your manifest layer and want ergonomics around them.
-- Provision on Hetzner (kind/KubeOne/CAPI) with sensible, batteries-included defaults — or just deploy to a cluster you already have.
+- Provision on Hetzner (kind/KubeOne/CAPI) with sensible, batteries-included defaults, or just deploy to a cluster you already have.
 
 **Look elsewhere (or use lok8s only for the deploy side) when…**
 
-- You're fully invested in a managed platform's native workflow (EKS/GKE/AKS + their tooling) and don't want another convention on top.
-- You prefer a pure-GitOps, controller-driven model (Argo/Flux as the source of truth) — lok8s can emit manifests for that, but its dev-loop is CLI/Tilt-centric, and the in-tree `lo gitops` layer is still being built.
-- You need ready-made production provisioning on a cloud other than Hetzner today — the provisioning drivers currently target Hetzner. (You can still deploy lok8s-built artifacts to *any* cluster; you'd just bring your own provisioning.)
+- You are fully invested in a managed platform's native workflow (EKS/GKE/AKS + their tooling) and do not want another convention on top.
+- You prefer a pure-GitOps, controller-driven model (Argo/Flux as the source of truth). lok8s can emit manifests for that, but its dev loop is CLI/Tilt-centric, and the in-tree `lo gitops` layer is not complete yet.
+- You need ready-made production provisioning on a cloud other than Hetzner today. The provisioning drivers currently target Hetzner. (You can still deploy lok8s-built artifacts to *any* cluster that you provision yourself.)
 - A tool with no bash anywhere is a hard requirement for your team. `lo` is a single binary, but a project still carries the framework tree (`.lok8s/`), the Hetzner provider plugin is bash, and `bash ≥ 4.3` is a prerequisite.
 
 &nbsp;
@@ -88,7 +88,7 @@ Honesty up front — lok8s is opinionated, and that won't fit everyone.
 
 `lo` is a single static binary (linux/darwin × amd64/arm64), attached to every
 [GitHub release](https://github.com/kernpilot/lok8s/releases) with a
-`checksums.txt`. Download, verify, then run — nothing here is piped into a shell:
+`checksums.txt`. Download, verify, then run. Nothing here is piped into a shell:
 
 ```bash
 curl -fsSLO https://github.com/kernpilot/lok8s/releases/latest/download/lo-install.sh
@@ -121,9 +121,9 @@ runs the manifest render through the pinned `kustomize` binary and the two
 exec generators (khelm's `ChartRenderer`, the `secrets.lok8s.dev` Secret
 plugin) that `lo toolchain install` installs into the project with `b`. `lo-full`
 (`bash lo-install.sh --full`, ~120 MB) links the same kustomize API and khelm
-release into the binary and renders in-process — no `kustomize`, `khelm` or
+release into the binary and renders in-process, with no `kustomize`, `khelm` or
 `.kustomize/` needed. Both install as `lo`; `lo --version` names the build
-(`(core)` / `(full)`), and both render byte-identical output — that is the
+(`(core)` / `(full)`), and both render byte-identical output. That is the
 gate, see [the Go binary reference](docs/reference/go-migration.md#core-and-full).
 
 Then scaffold a project: `lo init project` writes `clusters/`, `lok8s.yaml`,
@@ -144,7 +144,7 @@ lo toolchain doctor            # b, kustomize, khelm and the Secret plugin at th
 ```
 
 Joining a project that already has `.bin/b.yaml`? `lo toolchain install` never
-overwrites it — it prints a diff against the pins this `lo` was built with —
+overwrites it. It prints a diff against the pins this `lo` was built with,
 and `b install` reproduces the committed `b.lock`. The full profile-based
 path (`b env add github.com/kernpilot/lok8s#local && b install`, which also
 syncs the framework tree and the frozen bash reference) is documented in
@@ -153,18 +153,18 @@ syncs the framework tree and the frozen bash reference) is documented in
 <details>
 <summary>Other ways (use <code>mise</code>, clone the repo) · legacy (argsh) install</summary>
 
-**Prefer [mise](https://mise.jdx.dev)?** A `mise.toml` ships at the repo root —
+**Prefer [mise](https://mise.jdx.dev)?** A `mise.toml` ships at the repo root:
 `mise install && mise activate` provisions the same toolchain. Then `lo doctor` to verify.
 
 **Cloning the repo directly?** The `argsh` runtime is vendored in `.bin/`, so
-`lo doctor` runs immediately and tells you which tools are still missing — no
+`lo doctor` runs immediately and tells you which tools are still missing, with no
 `b install` needed just to diagnose the environment. `make build` produces the
 Go binary at `bin/lo`.
 
 **Legacy (argsh) install.** New installs use `lo-install.sh` (above; also
 served at [lok8s.io/lo-install.sh](https://lok8s.io/lo-install.sh)). Before
 the Go binary, a self-contained argsh script (`lo-up`) bootstrapped a
-project — installing `b`, the profile and the toolchain in one go. It does not
+project: it installed `b`, the profile and the toolchain in one go. It does not
 install the Go binary. It is retired, not removed: the source and build live
 under [`.archive/legacy/install/`](.archive/legacy/install/README.md) and the
 published bundle stays at [lok8s.io/lo-up](https://lok8s.io/lo-up) for
@@ -172,11 +172,11 @@ existing users. Download and read it before running it:
 `curl -fsSL https://lok8s.io/lo-up -o lo-up && less lo-up && sh lo-up`.
 </details>
 
-**Profiles** — each ships only the binaries it needs:
+**Profiles.** Each one ships only the binaries it needs:
 
 | Profile | Adds | Use case |
 |---------|------|----------|
-| `core` | framework only | Remote deploy only — no kind/Tilt |
+| `core` | framework only | Remote deploy only (no kind/Tilt) |
 | `kustomize` | kustomize plugins | Standalone kustomize plugin use |
 | `local` | kind, Tilt, mkcert | **Local dev** (recommended starting point) |
 | `capi` | `clusterctl`, `hcloud` | Cluster API provisioning |
@@ -209,7 +209,7 @@ lo deploy                 # apply built artifacts (CRDs first, then resources, w
 lo lint                   # validate specs, bootstrap entries, and target references
 ```
 
-`lo build`'s output is plain Kubernetes YAML — `kubectl apply -f clusters/<domain>/artifacts.yaml` works against any cluster, with or without the rest of lok8s. With `spec.build.artifacts: split` the build additionally emits committable per-resource files under `clusters/<domain>/artifacts/` (Secrets sops-encrypted) for GitOps consumers — see [specs](https://lok8s.io/reference/specs).
+The output of `lo build` is plain Kubernetes YAML: `kubectl apply -f clusters/<domain>/artifacts.yaml` works against any cluster, with or without the rest of lok8s. With `spec.build.artifacts: split` the build also emits committable per-resource files under `clusters/<domain>/artifacts/` (Secrets sops-encrypted) for GitOps consumers. See [specs](https://lok8s.io/reference/specs).
 
 &nbsp;
 
@@ -217,8 +217,8 @@ lo lint                   # validate specs, bootstrap entries, and target refere
 
 lok8s keeps two concerns strictly separate:
 
-1. **Cluster creation** — *how the cluster comes to exist.* Handled by a **driver** (`.lok8s/drivers/<kind>/main`), selected by the `kind:` of your `cluster.lok8s.yaml`.
-2. **Cluster content** — *what runs on it.* Plain kustomize, split into two planes: ordered **bootstrap** infrastructure and independent **workload** targets.
+1. **Cluster creation**: *how the cluster comes to exist.* A **driver** (`.lok8s/drivers/<kind>/main`) handles it. The `kind:` of your `cluster.lok8s.yaml` selects the driver.
+2. **Cluster content**: *what runs on it.* Plain kustomize, split into two planes: ordered **bootstrap** infrastructure and independent **workload** targets.
 
 Everything is keyed by FQDN. A **cluster domain** owns a cluster (`cluster.lok8s.yaml`); a **deployment domain** ships content to another domain's cluster (`deploy.lok8s.yaml`).
 
@@ -226,8 +226,8 @@ Everything is keyed by FQDN. A **cluster domain** owns a cluster (`cluster.lok8s
 flowchart LR
     spec["cluster.lok8s.yaml<br/>kind: Lo · KubeOne · Capi · Kkp"] --> drv{{driver}}
     drv -->|provision| k8s[("Kubernetes cluster")]
-    k8s --> a["Plane A — bootstrap<br/>spec.bootstrap addons<br/>(CNI → LB → cert-manager …)"]
-    a --> b["Plane B — workloads<br/>targets/* · kustomize"]
+    k8s --> a["Plane A: bootstrap<br/>spec.bootstrap addons<br/>(CNI → LB → cert-manager …)"]
+    a --> b["Plane B: workloads<br/>targets/* · kustomize"]
     b -->|"Tilt (dev) / lo deploy (CI)"| run(["running cluster"])
 ```
 
@@ -243,8 +243,8 @@ lo up                    # domain comes from `lo use` / --domain
 
 The two content planes:
 
-- **Plane A — bootstrap (cluster infrastructure).** An ordered `spec.bootstrap` list of framework addons (CNI, load balancer, cert-manager, …) applied at provision time, with health waits between stages. The cluster isn't "ready" until this finishes.
-- **Plane B — workloads.** User-named kustomize directories under `targets/`, each built independently into its own `artifacts.yaml`. No framework-level ordering — you express any ordering you need with Tilt's `resource_deps` or your GitOps engine.
+- **Plane A: bootstrap (cluster infrastructure).** An ordered `spec.bootstrap` list of framework addons (CNI, load balancer, cert-manager, …) applied at provision time, with health waits between stages. The cluster is not "ready" until this finishes.
+- **Plane B: workloads.** User-named kustomize directories under `targets/`, each built independently into its own `artifacts.yaml`. There is no framework-level ordering: you express any ordering you need with Tilt's `resource_deps` or your GitOps engine.
 
 **Drivers** are pluggable cluster backends:
 
@@ -255,20 +255,20 @@ The two content planes:
 | **`Capi`** | Cluster API (Hetzner / CAPH today) | Declarative production provisioning |
 | **`Kkp`** | Kubermatic KKP | Hosted control planes |
 
-> The four drivers share one `.lok8s/` tree and one spec format. `Lo` (local) needs nothing but Docker; the production drivers target Hetzner today but are **optional** — you can run lok8s entirely against clusters you provision yourself. Adding a driver for another backend is a documented extension point (see [Extensibility](#-extensibility)).
+> The four drivers share one `.lok8s/` tree and one spec format. `Lo` (local) needs nothing but Docker. The production drivers target Hetzner today but are **optional**: you can run lok8s entirely against clusters you provision yourself. Adding a driver for another backend is a documented extension point (see [Extensibility](#-extensibility)).
 
-For the full model — layer map, atoms/molecules, build/deploy pipeline — see [ARCHITECTURE.md](ARCHITECTURE.md) and the [Concepts guide](docs/guide/concepts.md).
+For the full model (layer map, atoms/molecules, build/deploy pipeline), see [ARCHITECTURE.md](ARCHITECTURE.md) and the [Concepts guide](docs/guide/concepts.md).
 
 &nbsp;
 
 ### 🗂️ The `clusters/<fqdn>/` convention
 
-This single convention is what makes the "same workflow everywhere" promise hold. The framework (`/.lok8s/`) stays flat and framework-owned; **your** content lives in a parallel `clusters/` tree, one directory per cluster, named by its FQDN:
+This single convention is what makes the "same workflow everywhere" promise hold. The framework (`/.lok8s/`) stays flat and framework-owned. **Your** content lives in a parallel `clusters/` tree, one directory per cluster, named by its FQDN:
 
 ```
 clusters/
 ├── lok8s.dev/                  # local dev cluster (lo init cluster lok8s.dev)
-│   ├── cluster.lok8s.yaml       #   the spec — kind, bootstrap, network, …
+│   ├── cluster.lok8s.yaml       #   the spec: kind, bootstrap, network, …
 │   ├── targets/                 #   workload plane: one kustomize dir per target
 │   │   ├── platform/
 │   │   └── apps/
@@ -282,10 +282,10 @@ clusters/
 
 Why this matters:
 
-- **The folder name is the cluster's API hostname**, so the same brand can be served by different environments without collisions (`clusters/example.com/` locally, `clusters/cluster.example.in.net/` in prod).
+- **The folder name is the cluster's API hostname.** Thus different environments can serve the same brand without collisions (`clusters/example.com/` locally, `clusters/cluster.example.in.net/` in prod).
 - **Secrets are per-domain** (`clusters/<domain>/secrets/`), so dev and prod can never accidentally cross-pollinate credentials.
-- **A `Deploy` domain** carries no cluster of its own — it `clusterRef`s another domain and ships workloads there, which is how one repo can target many clusters.
-- It's just folders and YAML — diff-able, reviewable, and obvious to a newcomer.
+- **A `Deploy` domain** carries no cluster of its own. It `clusterRef`s another domain and ships workloads there. This is how one repo can target many clusters.
+- It is only folders and YAML: diff-able, reviewable, and obvious to a newcomer.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete tree and [Specs reference](docs/reference/specs.md) for every field.
 
@@ -293,14 +293,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete tree and [Specs referenc
 
 ### 💻 Local development
 
-The local experience is the part lok8s polishes hardest, because it's where you live day to day:
+The local experience is the part lok8s polishes hardest, because it is where you live day to day:
 
-- **One command, full loop.** `lo up` creates a `kind` cluster, applies your `spec.bootstrap` infrastructure, and starts **Tilt** — which reads your `services.yaml`, builds images, wires `docker_build` + `live_update`, and gives you a UI at the URL it prints (a per-domain port in `10351`–`10499`, so parallel projects never collide). Edit code → Tilt syncs and reloads. ([Local Dev guide](docs/guide/local-dev.md))
-- **Working TLS, no manual cert juggling.** The `secrets.lok8s.dev` kustomize plugin's `cert:` generator mints leaf certificates from a shared local dev CA — no `mkcert` dance per project. `lo trust` adds the CA to your system store so browsers are happy. ([Secrets guide](docs/guide/secrets.md), [Kustomize plugins](docs/reference/kustomize-plugins.md))
-- **Fast, shared registry mirrors.** A pull-through mirror network can be shared across all your lok8s projects, so images are pulled once, not once-per-cluster. Opt in per project with `spec.registries.shared.enabled: true` (off by default — the safer single-network topology). ([Shared Registries guide](docs/guide/shared-registries.md))
+- **One command, full loop.** `lo up` creates a `kind` cluster, applies your `spec.bootstrap` infrastructure, and starts **Tilt**. Tilt reads your `services.yaml`, builds images, wires `docker_build` + `live_update`, and gives you a UI at the URL it prints. The URL has a per-domain port from `10351` to `10499`, so parallel projects never collide. Edit code → Tilt syncs and reloads. ([Local Dev guide](docs/guide/local-dev.md))
+- **Working TLS, no manual cert juggling.** The `cert:` generator of the `secrets.lok8s.dev` kustomize plugin mints leaf certificates from a shared local dev CA, with no `mkcert` dance per project. `lo trust` adds the CA to your system store, so browsers accept them. ([Secrets guide](docs/guide/secrets.md), [Kustomize plugins](docs/reference/kustomize-plugins.md))
+- **Fast, shared registry mirrors.** All your lok8s projects can share one pull-through mirror network. Then each image is pulled once, not once per cluster. Opt in per project with `spec.registries.shared.enabled: true` (off by default: the safer single-network topology). ([Shared Registries guide](docs/guide/shared-registries.md))
 - **Multi-project friendly.** Use `*.[N].lok8s.dev` slots to run several local clusters on isolated Docker networks side by side.
 
-Define services once, in a committed `services.yaml`, with personal overrides in a gitignored `services.<config>.yaml` ("I'm not working on the frontend today" → `enabled: false`). Each buildable service carries a small `lok8s.yaml` describing its build, ports, and live-update rules. ([Services guide](docs/guide/services.md))
+Define services once, in a committed `services.yaml`. Put personal overrides in a gitignored `services.<config>.yaml` ("I'm not working on the frontend today" → `enabled: false`). Each buildable service carries a small `lok8s.yaml` describing its build, ports, and live-update rules. ([Services guide](docs/guide/services.md))
 
 &nbsp;
 
@@ -309,21 +309,21 @@ Define services once, in a committed `services.yaml`, with personal overrides in
 Two honest paths to production:
 
 1. **Provision with lok8s (Hetzner today).** The `KubeOne` and `Capi` drivers stand up real clusters on Hetzner Cloud (and bare metal via Hetzner Robot), with batteries-included networking, CNI, encryption-at-rest, and backups guidance. ([CAPI](docs/guide/capi.md) · [Bare Metal](docs/guide/bare-metal.md) · [Networking](docs/guide/networking.md) · [Security](docs/guide/security.md) · [Backups](docs/guide/backups.md))
-2. **Bring your own cluster.** `lo build` renders standard `artifacts.yaml` — plain manifests you `kubectl apply` to whatever cluster your `KUBECONFIG` points at. EKS, GKE, a Raspberry Pi, a colleague's kind cluster — if `kubectl` can reach it, lok8s' output runs on it. (`lo deploy` automates the apply against the kubeconfig it resolves for the domain.)
+2. **Bring your own cluster.** `lo build` renders standard `artifacts.yaml`: plain manifests you `kubectl apply` to whatever cluster your `KUBECONFIG` points at. EKS, GKE, a Raspberry Pi, a colleague's kind cluster: if `kubectl` can reach it, the output of lok8s runs on it. (`lo deploy` automates the apply against the kubeconfig it resolves for the domain.)
 
-The optional **operator** ([shell-operator](https://github.com/flant/shell-operator)-based) reconciles `Lo` and `Capi` CRDs on a management cluster; its hooks are the *same* `lo` binary (`lo operator <hook>`), so cluster lifecycle can be declarative when you want it. ([Operator guide](docs/guide/operator.md))
+The optional **operator** ([shell-operator](https://github.com/flant/shell-operator)-based) reconciles `Lo` and `Capi` CRDs on a management cluster. Its hooks are the *same* `lo` binary (`lo operator <hook>`), so cluster lifecycle can be declarative when you want it. ([Operator guide](docs/guide/operator.md))
 
-> The hosted, managed-platform layer (kubehz) is a separate product built *on top of* lok8s — lok8s works fully without it. No-lock-in is a design goal, not a slogan.
+> The hosted, managed-platform layer (kubehz) is a separate product built *on top of* lok8s. lok8s works fully without it. No lock-in is a design goal, not a slogan.
 
 &nbsp;
 
 ### 🤖 AI, built in
 
-lok8s treats AI as a first-class, **local-first** capability — not a cloud dependency.
+lok8s treats AI as a built-in, **local-first** capability, not a cloud dependency.
 
-- **`lo chat` — an on-device cluster assistant.** Ask "why won't this deploy?" or "what's the LB IP?" and it routes through `lo` tools, gathers facts, and streams a markdown answer in your terminal. It runs **read-only by default**, enforced in *code* (not by trusting the model), so it can't mutate your cluster unless you switch posture with `/posture open`. Backends are local: [Ollama](https://ollama.com) or any OpenAI-compatible server (llama-server, [llamafile](https://github.com/Mozilla-Ocho/llamafile), vLLM). Frontier CLIs (claude/gemini/codex) are strictly opt-in handoffs. Run `lo chat --check` for a guided setup. ([Local AI guide](docs/guide/lo-chat.md))
-- **`lo mcp` — your CLI as agent tools.** Every leaf `lo` command is exposed as an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio, so agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root. It launches `bin/lo mcp start` with the full tool surface enabled (see below).
-- **`lo ai` — wire skills into your assistant.** The repo ships curated [skills](skills/) (cluster specs, services, addons, secrets, the dev loop, troubleshooting…). `lo ai link claude` symlinks them into `.claude/skills/` for native loading; other agents get them by injection. `lo ai check` reports the whole setup at a glance.
+- **`lo chat`: an on-device cluster assistant.** Ask "why won't this deploy?" or "what's the LB IP?". It routes through `lo` tools, gathers facts, and streams a markdown answer in your terminal. It runs **read-only by default**, enforced in *code* (not by trusting the model). So it cannot change your cluster unless you switch posture with `/posture open`. Backends are local: [Ollama](https://ollama.com) or any OpenAI-compatible server (llama-server, [llamafile](https://github.com/Mozilla-Ocho/llamafile), vLLM). Frontier CLIs (claude/gemini/codex) are strictly opt-in handoffs. Run `lo chat --check` for a guided setup. ([Local AI guide](docs/guide/lo-chat.md))
+- **`lo mcp`: your CLI as agent tools.** Every leaf `lo` command is an [MCP](https://modelcontextprotocol.io/) tool (`lo_status`, `lo_build`, `lo_deploy`, …) over stdio. Thus agents like Claude Code or Cursor can drive lok8s the same way you do. Commands are tagged `@readonly` / `@idempotent` / `@destructive`, and a deterministic posture gate decides what an agent may actually run. A ready-to-use `.mcp.json` ships in the repo root. It launches `bin/lo mcp start` with the full tool surface enabled (see below).
+- **`lo ai`: wire skills into your assistant.** The repo ships curated [skills](skills/) (cluster specs, services, addons, secrets, the dev loop, troubleshooting…). `lo ai link claude` symlinks them into `.claude/skills/` for native loading. Other agents get them by injection. `lo ai check` reports the whole setup at a glance.
 
 Try it in two commands:
 
@@ -338,23 +338,23 @@ If a piece needs setup, `lo ai check` / `lo doctor` tell you exactly what to run
 
 ### 🧩 Extensibility
 
-lok8s is conventions, not a cage — every layer has a documented seam:
+lok8s is conventions, not a cage. Every layer has a documented seam:
 
-- **Custom cluster drivers.** The built-in drivers are Go packages under `internal/driver/`. The bash driver contract, a file at `.lok8s/drivers/<kind>/main` implementing `driver::provision`, `driver::destroy`, `driver::status`, `driver::kubeconfig` (plus an optional `driver::post_provision`), is still honoured by the frozen implementation (a `lok8s.yaml` that routes `provision` to bash) and by `lo drivers <kind> …`; the binary's own dispatch reads only the Go registry today. The [Driver Contract reference](docs/reference/kind-contract.md) includes a complete worked example (a k3s driver).
+- **Custom cluster drivers.** The built-in drivers are Go packages under `internal/driver/`. The bash driver contract is a file at `.lok8s/drivers/<kind>/main` that implements `driver::provision`, `driver::destroy`, `driver::status`, `driver::kubeconfig` (plus an optional `driver::post_provision`). The frozen implementation (a `lok8s.yaml` that routes `provision` to bash) and `lo drivers <kind> …` still honour it. The binary's own dispatch reads only the Go registry today. The [Driver Contract reference](docs/reference/kind-contract.md) includes a complete worked example (a k3s driver).
 - **Your own addons.** Drop a kustomize-buildable directory at `.lok8s/addons/<name>/` (a [khelm](https://github.com/mgoltzsche/khelm) `ChartRenderer` + layered `values.<driver>.yaml`/`values.<provider>.yaml`, or any plain kustomization) and reference it by name in `spec.bootstrap`. ([Addons guide](docs/guide/addons.md))
-- **Adopt what you already have.** Point a target's `kustomization.yaml` at an existing kustomize base (`resources: [ ../path/to/your/kustomization ]`), or inflate an existing Helm chart via a khelm `ChartRenderer` — no rewrite required.
+- **Adopt what you already have.** Point a target's `kustomization.yaml` at an existing kustomize base (`resources: [ ../path/to/your/kustomization ]`), or inflate an existing Helm chart via a khelm `ChartRenderer`. No rewrite is required.
 - **Add tools.** The toolchain is managed by [`b`](https://github.com/fentas/b): add an entry to `.bin/b.yaml`, assign it a profile group, `b install`, and it's on `PATH`.
 
 &nbsp;
 
-### 🐚 Why a Go binary — and why the bash stays
+### 🐚 Why a Go binary, and why the bash stays
 
-For most of its life the `lo` CLI was bash, built on [argsh](https://github.com/arg-sh/argsh). It is now a single static Go binary (`cmd/lo`, `internal/`), and the two facts below are both true on purpose:
+For most of its life the `lo` CLI was bash, built on [argsh](https://github.com/arg-sh/argsh). It is now a single static Go binary (`cmd/lo`, `internal/`). The two facts below are both true on purpose:
 
-- **The binary orchestrates the same tools; it does not reimplement them.** lok8s' job is to drive `kubectl`, `kustomize`, `kind`, `clusterctl`, `kubeone`, and friends. The Go code calls them as subprocesses through one seam, with the exact argv the bash used — no SDK drift, no version-matrix games. What lok8s runs is still what you'd run by hand, and `lo --verbose` still prints it. What Go buys is a one-file install with a verified checksum, a hermetic unit-test suite, and one `--help`/MCP schema that cannot drift from the code.
-- **The bash implementation is frozen, not deleted.** It ships in every project under `.lok8s/` as the reference the binary was ported from: a project's `lok8s.yaml` (`spec.implementation`) routes any command to it, ten differential parity harnesses diff the two implementations byte-for-byte in CI, and a `go test` fails if the command trees drift. When something looks wrong, you can still read the library under `.lok8s/libs/`, `set -x`, and step through it. If the bash is right and the binary is wrong, that is a bug we want reported. Full map, seams and the short list of deliberate differences: [The Go `lo` binary](docs/reference/go-migration.md).
+- **The binary orchestrates the same tools. It does not reimplement them.** The job of lok8s is to drive `kubectl`, `kustomize`, `kind`, `clusterctl`, `kubeone`, and friends. The Go code calls them as subprocesses through one seam, with the exact argv the bash used: no SDK drift, no version-matrix games. What lok8s runs is still what you'd run by hand, and `lo --verbose` still prints it. Go buys a one-file install with a verified checksum, a hermetic unit-test suite, and one `--help`/MCP schema that cannot drift from the code.
+- **The bash implementation is frozen, not deleted.** It ships in every project under `.lok8s/` as the reference the binary was ported from. A project's `lok8s.yaml` (`spec.implementation`) routes any command to it. In CI, ten differential parity harnesses diff the two implementations byte-for-byte, and a `go test` fails if the command trees drift. When something looks wrong, you can still read the library under `.lok8s/libs/`, `set -x`, and step through it. If the bash is right and the binary is wrong, that is a bug we want reported. Full map, seams and the short list of deliberate differences: [The Go `lo` binary](docs/reference/go-migration.md).
 
-argsh is still in the toolchain: the Hetzner provider plugin and the frozen tree source its runtime, and it is `shellcheck`-clean in CI (no new warnings allowed) alongside the Go lint. The kustomize plugins and the `lo chat` engine were Go from the start.
+argsh is still in the toolchain: the Hetzner provider plugin and the frozen tree source its runtime. It is `shellcheck`-clean in CI (no new warnings allowed) alongside the Go lint. The kustomize plugins and the `lo chat` engine were Go from the start.
 
 &nbsp;
 
@@ -381,7 +381,7 @@ argsh is still in the toolchain: the Hetzner provider plugin and the frozen tree
 | `lo tilt up\|down\|status\|restart\|ci\|preflight` | Manage the Tilt environment (`ci`: headless build + deploy + wait; `preflight`: clear stuck-Terminating objects) |
 | `lo registry up\|down\|status\|clean` | Manage registry mirrors |
 
-Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>` — in this table only `lo use [domain]` and `lo addons [name...]` take a positional. `lo build` and `lo deploy` take none: both act on the whole domain kustomization (deploy narrows via `-l key=value`, not targets). Global flags: `--verbose|-v`, `--force|-f`, `--force-recreate`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
+Most commands act on the **active domain** (set by `lo use`) or an explicit `--domain <domain>`. In this table only `lo use [domain]` and `lo addons [name...]` take a positional. `lo build` and `lo deploy` take none: both act on the whole domain kustomization (deploy narrows via `-l key=value`, not targets). Global flags: `--verbose|-v`, `--force|-f`, `--force-recreate`, `--remote|-r`, `--cluster|-s`, `--kubernetes`, `--config`, `--domain`, `--domain-sans`. Full reference: [docs/reference/cli.md](docs/reference/cli.md).
 
 &nbsp;
 
@@ -403,17 +403,17 @@ npm run docs:build      # build
 
 ### 🤝 Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), the agent/contributor guide in [AGENTS.md](AGENTS.md), and the test matrix in [TESTING.md](TESTING.md). In short: conventional commits, keep CI green (`go test ./...` + the parity harnesses + `npm run lint` + `npm test`), and **security is paramount** — never pipe *untrusted* remote content into a shell, never commit secrets, validate external input.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), the agent/contributor guide in [AGENTS.md](AGENTS.md), and the test matrix in [TESTING.md](TESTING.md). In short: use conventional commits and keep CI green (`go test ./...` + the parity harnesses + `npm run lint` + `npm test`). **Security is paramount**: never pipe *untrusted* remote content into a shell, never commit secrets, validate external input.
 
 &nbsp;
 
 ### 🔗 Related projects
 
-lok8s is built on — and shares a philosophy with — a few sibling tools:
+lok8s is built on a few sibling tools and shares a philosophy with them:
 
-- **[`b`](https://github.com/fentas/b)** · [binary.help](https://binary.help) — your one-stop binary manager. It installs and pins lok8s' toolchain, and lok8s ships as a `b` profile.
-- **[`argsh`](https://github.com/arg-sh/argsh)** · [arg.sh](https://arg.sh) — the framework the original `lo` CLI was built on, and still the runtime of the frozen reference implementation and the provider plugins; it brings structure and maintainability to complex Bash (typed args, dispatch, generated `--help`).
-- **[`atty`](https://github.com/fentas/atty)** · [atty.sh](https://atty.sh) — a suckless-style PTY proxy (Zig) that drops an LLM exec dialog, atuin autosuggest, and guardrail confirmations between your terminal and your shell.
+- **[`b`](https://github.com/fentas/b)** · [binary.help](https://binary.help): your one-stop binary manager. It installs and pins the toolchain of lok8s, and lok8s ships as a `b` profile.
+- **[`argsh`](https://github.com/arg-sh/argsh)** · [arg.sh](https://arg.sh): the framework the original `lo` CLI was built on. It is still the runtime of the frozen reference implementation and the provider plugins. It brings structure and maintainability to complex Bash (typed args, dispatch, generated `--help`).
+- **[`atty`](https://github.com/fentas/atty)** · [atty.sh](https://atty.sh): a suckless-style PTY proxy (Zig). It puts an LLM exec dialog, atuin autosuggest, and guardrail confirmations between your terminal and your shell.
 
 &nbsp;
 
