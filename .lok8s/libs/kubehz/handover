@@ -72,8 +72,8 @@ KUBEHZ_HANDOVER_ROOT_DIRS=(/ /etc)
 
 kubehz::handover() {
   local -a usage=(
-    'receive|r@destructive'  'Restore an exported control plane onto THIS node (kubeadm path)'
-    'preseed|p@destructive'  'Pre-seed exported PKI onto a kubeone node before kubeone apply'
+    'receive|r@destructive'  'Restore an exported control plane onto THIS node (kubeadm path); kubehz cannot start an eject yet'
+    'preseed|p@destructive'  'Pre-seed exported PKI onto a kubeone node before kubeone apply; kubehz cannot start an eject yet'
   )
   :usage "Control-plane handover — eject target side" "${@}"
   "${usage[@]}"
@@ -739,7 +739,7 @@ handover::receive() {
     'force|f:^:+'     'Proceed even when target dirs are not empty (DESTROYS existing etcd data)'
     "${args[@]:-}"
   )
-  :args "Restore an exported control plane onto THIS node" "${@}"
+  :args "Restore an exported control plane onto THIS node; kubehz cannot start an eject yet" "${@}"
 
   local k8s_dir="${KUBEHZ_HANDOVER_K8S_DIR:-/etc/kubernetes}"
   local etcd_dir="${KUBEHZ_HANDOVER_ETCD_DIR:-/var/lib/etcd}"
@@ -883,7 +883,7 @@ handover::preseed() {
     'accept-new-host-key|:+'  'Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)'
     "${args[@]:-}"
   )
-  :args "Pre-seed exported PKI onto a kubeone node before kubeone apply" "${@}"
+  :args "Pre-seed exported PKI onto a kubeone node before kubeone apply; kubehz cannot start an eject yet" "${@}"
 
   # ssh reads the value of `-o UserKnownHostsFile=<path>` in its config
   # language: it expands % tokens, ${VAR} and ~, it splits the value at

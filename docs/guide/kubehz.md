@@ -12,8 +12,11 @@ managed-Kubernetes platform for Hetzner. lok8s supports two ways to use it:
   The quickest start is `lo init cluster <domain> --driver kubehz-hosted`,
   which writes a hosted cluster spec (see [`lo init`](../reference/cli.md#lo-init)).
 
-Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). Sign-up
-can need an invite code.
+Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). For now
+kubehz caps the number of open sign-ups. When the cap is full, an invite code
+still admits a new account. At sign-up you confirm that kubehz is still in
+development. Features and limits can change or break, and there is no service
+guarantee (SLA) yet.
 
 ::: tip No lock-in
 The integration is strictly opt-in. lok8s works fully without kubehz: the
@@ -43,10 +46,10 @@ Two independent axes:
 |------|--------|---------|
 | `hosting` | `self` (default) | You provision and own the control plane: the normal lok8s flow. |
 | | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl` and a kubehz account: `lo provision` creates the cluster with your `KUBEHZ_TOKEN`. With `kind: Lo` it additionally requires `spec.runner`. |
-| | `shared` | kubehz runs a control plane shared by many customers and you get namespaces on it, with nodes you register yourself. Requires `apiUrl` and `kind: Kubehz`. See [Spaces](#spaces). |
+| | `shared` | kubehz runs a shared control plane and you get namespaces on it, with nodes you register yourself. In the preview, no other customer uses the control plane that your Spaces run on. Requires `apiUrl` and `kind: Kubehz`. See [Spaces](#spaces). |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats: read-only dashboard visibility. |
-| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)**: the platform enforces the tier once you claim the cluster. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. **Acting also needs `agent: operator`**: the default CronJob agent reports, it does not act. |
+| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)**: the platform enforces the tier once you claim the cluster. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. **Acting also needs `agent: operator`**: the default CronJob agent reports, it does not act. Today the platform switches on worker scaling only. It does not switch on self-healing and worker upgrades yet. |
 
 Plus two more keys:
 
@@ -75,6 +78,13 @@ only. The platform bills every started hour of what runs. Each unit is capped
 at 730 hours a month, so the monthly price on the
 [price page](https://kubehz.io/pricing) is the most a unit costs. The state
 limit, the step and the cap live in the dashboard.
+
+No usage charge applies to an hour that starts before the later of two dates.
+The first date is the billing start that the platform announces: until then,
+the launch trial runs. The second date is the end of the first 14 days of your
+account. The platform announces the billing start by e-mail to every account
+at least 30 days ahead. Until then, the dashboard shows your current use and
+what it would cost, but kubehz invoices no usage.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with
@@ -119,7 +129,7 @@ spec:
 
 > **Changed default.** An absent `channel` previously meant "no automatic
 > upgrades"; it now means `patch`. A spec without a `channel` receives
-> automatic patch upgrades once upgrade execution ships. Set
+> automatic patch upgrades once the platform switches upgrade execution on. Set
 > `channel: none` explicitly if you want the old behavior.
 - **`defer`** decides when an allowed upgrade starts: `window` (the default)
   waits for the next maintenance window; `immediate` starts as soon as the
@@ -134,28 +144,34 @@ How an upgrade lands depends on who owns the machines:
   yourself) get upgraded **in place**: the upgrade swaps the kubelet
   underneath the running workloads, and the swap itself does not restart
   them. On the managed tier, the live agent will walk the nodes one at a
-  time once upgrade execution ships.
+  time once the platform switches upgrade execution on.
 - **Hosted worker pools** get **replaced, surge-first**: new nodes join on
   the target version before old ones drain and leave. Per-pool tuning (surge
   size and the like) rides the pool definition on the platform side, not this
-  file.
+  file. The platform has the code for this replacement, but no live upgrade
+  shows that it works yet.
 
 `lo` checks the shape: the two enums, and that every exclusion is a
 `YYYY-MM-DD` date or `from/to` range. Full semantic validation happens where
 each block is consumed: for **hosted** clusters and pools, the platform API
 validates its own payloads; for **self-hosted** clusters the block is the
 declared input for the managed-tier agent's upgrade walk. The agent will
-read it locally once upgrade execution ships, so your cluster's upgrade
-behavior will never depend on the platform being reachable. Until then the
-block is declarative only. `lo` does not catch calendar validity beyond
+read it locally once the platform switches upgrade execution on. Then the
+upgrade behavior of your cluster does not depend on the platform being
+reachable. Until then the block is declarative only. `lo` does not catch calendar validity beyond
 the shape (a February 30th) today.
 
 ## Spaces
 
-`hosting: shared` is the third shape: kubehz runs a control plane shared by
-many customers, you get namespaces on it, and **you register your own
-machines** as the nodes your workloads run on. There is no control plane to
-provision, so the driver is thin: `kind: Kubehz`.
+`hosting: shared` is the third shape: kubehz runs a shared control plane, you
+get namespaces on it, and **you register your own machines** as the nodes your
+workloads run on. There is no control plane to provision, so the driver is
+thin: `kind: Kubehz`.
+
+Spaces are in **preview**. A rule that starts with "in the preview" on this
+page holds while Spaces are in preview, and it can change after that. One of
+them: no other customer uses the control plane that your Spaces run on (see
+below).
 
 ```yaml
 # clusters/acme.example.org/cluster.lok8s.yaml
@@ -187,9 +203,9 @@ and `objectCapKiB` is the size cap for one Secret or ConfigMap in those
 namespaces. There is no plan to pick.
 
 **The ceiling on each number belongs to your account, not to `lo`.** It
-differs per account, and extra resources are bought, so the platform is the
-only place that knows it. `lo` checks that a value is a whole number of 1 or
-more and sends it; the platform answers with your account's real ceiling if
+differs per account: an account without a payment method gets a smaller free
+allowance. So the platform is the only place that knows it. `lo` checks
+that a value is a whole number of 1 or more and sends it; the platform answers with your account's real ceiling if
 you asked for more. A number you leave out is not sent at all, and the
 platform applies its own default. Your current ceiling is in the kubehz
 dashboard.
@@ -212,6 +228,11 @@ lo kubehz deregister          # remove the space
 
 A few things worth knowing before you reach for it:
 
+- **In the preview, a control plane belongs to one account.** The first Space
+  of your account claims a shared control plane for your account for good. No
+  other customer gets a Space on it, and a delete of the Space does not free
+  it. An account holds at most two of these control planes. While this rule is
+  on, no Space moves to another control plane.
 - **`KUBEHZ_TOKEN` is required**, not optional as it is elsewhere: a space
   belongs to your account from the moment it exists, so there is no anonymous
   path and no claim step.
@@ -261,16 +282,17 @@ A few things worth knowing before you reach for it:
   stopped server too: only a deleted server stops the bill.
 - **The shard is the upgrade unit.** The platform upgrades the shared
   control plane as a whole, on its own schedule, and retires old versions on
-  that schedule too. Here `upgrades.channel` is a preference, not consent: an
-  eager channel moves your space early in a shard's upgrade window, a
-  conservative one later, but the platform migrates every space by the
-  deadline. There is no opting out.
+  that schedule too. Your space gets the upgrades of its control plane, and
+  there is no opting out. Here `upgrades.channel` is a preference, not
+  consent. In the preview no space moves to another control plane, so the
+  channel changes nothing yet.
 
 ### Cordon, uncordon and drain a node
 
 A space gives you no rights on the nodes of the shared control plane, so
 the shared control plane refuses `kubectl cordon` and `kubectl drain`. The
-platform does these three operations for you, one node at a time:
+platform does these three operations for you, one node at a time. The
+commands need `lo` v0.13.0 or later:
 
 ```bash
 lo kubehz node cordon --name worker-1     # the scheduler puts no new pods on it
@@ -344,25 +366,30 @@ Every refusal says whether something changed:
 
 ### Limits, and whose problem each one is
 
-A space runs inside three independent budgets, and the error codes keep them
-apart deliberately:
+A space runs inside four independent budgets. Two of them answer with the
+same code (`403 QUOTA_EXCEEDED`), and the message tells them apart:
 
 - **Your space's own three numbers**: `limits.nodes`, `limits.namespaces`
   and `limits.objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and
   names the limit. Fix: remove something, or raise the limit in the
   dashboard. The numbers in the spec apply when the space is created, so
   raising one there does nothing to a space that already exists.
-- **What your account allows**: the ceiling on each of the three numbers,
-  which differs per account and rises with what the account has bought. Ask
-  for more than it allows and the create answers `403
-  SPACE_LIMITS_ABOVE_FREE`; ask for more than a shared plane can hold for any
-  account and it answers `400 SPACE_LIMITS_ABOVE_SHARED`, which means a
-  cluster that large needs a control plane of its own, so use
-  `hosting: hosted`. A request that still carries a plan answers `400
+- **What your account allows**: the ceiling on each of the three numbers.
+  Without a payment method it is a free allowance, and a request above it
+  answers `403 SPACE_LIMITS_ABOVE_FREE` (add a payment method, or lower the
+  values). With one, it is the shared maximum, and a request above it answers
+  `400 SPACE_LIMITS_ABOVE_SHARED`: such a cluster needs its own control plane
+  (`hosting: hosted`). A request that still carries a plan answers `400
   SPACE_PLAN_RETIRED`: remove `spec.kubehz.space.plan` and use
   `spec.kubehz.space.limits`. Each refusal names the account's real ceiling,
   and `lo` prints that message together with the values it sent. The current
   ceiling is in the kubehz dashboard.
+- **The control planes your account holds** (preview): at most two. A new
+  Space goes on a control plane that your account holds, or claims a new one.
+  When that would be a third one, the create answers `403 QUOTA_EXCEEDED` with
+  the count. A delete does not give a control plane back, but a Space that you
+  delete frees room on its control plane for your next Space. Retry when one
+  of yours has room again, or contact support.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
   join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
@@ -951,7 +978,7 @@ Dashboard visibility comes from an in-cluster agent. lok8s ships two, and
 | What it is | A shell script in a stock `alpine/k8s` image | The Go agent from the public [kubehz-agent](https://github.com/kernpilot/kubehz-agent) repo |
 | Cadence | Every 5 minutes | Within seconds of a change, and at least every minute |
 | Reports | Node status, control-plane component health, certificate expiry, the 24 h [assessment](#assessment-and-handover) | Node status with capacity and instance type, control-plane component health, certificate expiry, pod counts by phase, warning events, machine-controller failures, your addon inventory |
-| Can act | No | Yes: worker scaling, self-healing and worker upgrades, when the platform authorizes them |
+| Can act | No | Yes: worker scaling, when the platform authorizes it. The platform does not switch on self-healing and worker upgrades yet |
 | Costs | ~50 m CPU for a few seconds every 5 minutes | ~25 m CPU and 64 Mi resident, always on |
 
 Deploy either one with:
@@ -1007,7 +1034,8 @@ With `agent: operator`, and once you [claim](#claiming) the cluster:
   a newer version. No dashboard needed.
 - **Worker scaling, self-healing and worker upgrades**, when **all** of these
   hold: your `access` is `managed`, your tenant tier allows acting
-  (Supporter+), and the platform has the feature switched on. The agent asks
+  (Supporter+), and the platform has the feature switched on. Today the
+  platform switches on worker scaling only. The agent asks
   the platform what it should do and obeys the answer. Nothing local turns
   acting on (there is no flag for it), and without `access: managed` the
   platform grants no acting permission at all.
@@ -1323,9 +1351,11 @@ The `-A` query above finds it wherever it is.
 ## Agent keys
 
 An agent key is a machine identity for an AI agent or a pipeline. A tenant
-owner or admin creates it in the dashboard or with `POST /api/agent-keys`. The
-answer shows the client id and the client secret once, the token endpoint,
-and the scope to request.
+owner or admin creates it in the dashboard or with `POST /api/agent-keys`.
+Both need a dashboard session with a fresh second-factor check. An API token or another
+agent key cannot create one (`403 TOKEN_NOT_ALLOWED`). The answer shows the
+client id and the client secret once, the token endpoint, and the scope to
+request.
 
 `lo kubehz token` turns the key into an access token. kubectl runs it as an
 exec credential plugin:
@@ -1379,6 +1409,11 @@ denies it to the model.
 turns them into tools, so an AI agent that runs `lo mcp` on your machine can
 create a space for a task, extend its lease, and delete it when the task is
 done.
+
+In the preview, the first space of an account claims a control plane for the
+account for good (see [Spaces](#spaces)). The end of a lease and a delete
+remove the space, not the claim. The account keeps that control plane, and it
+counts against the limit of two.
 
 ### The environment
 

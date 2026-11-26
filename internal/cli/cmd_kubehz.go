@@ -424,7 +424,7 @@ func newKubehzHandover(paths *config.Paths) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "handover",
 		Aliases:      []string{"h"},
-		Short:        "Control-plane handover (receive/preseed on the eject target)",
+		Short:        "Control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet",
 		SilenceUsage: true,
 		RunE:         argshGroupRunE,
 	}
@@ -436,7 +436,7 @@ func newKubehzHandoverReceive(paths *config.Paths) *cobra.Command {
 	c := &cobra.Command{
 		Use:          "receive --bundle <path> [--snapshot <file>] [--single-node] [--force]",
 		Aliases:      []string{"r"},
-		Short:        "Restore an exported control plane onto THIS node (kubeadm path)",
+		Short:        "Restore an exported control plane onto THIS node (kubeadm path); kubehz cannot start an eject yet",
 		Annotations:  commandSpec{destructive: true}.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
@@ -468,7 +468,7 @@ func newKubehzHandoverPreseed(paths *config.Paths) *cobra.Command {
 	c := &cobra.Command{
 		Use:          "preseed --bundle <path> --node <ip>",
 		Aliases:      []string{"p"},
-		Short:        "Pre-seed exported PKI onto a kubeone node before kubeone apply",
+		Short:        "Pre-seed exported PKI onto a kubeone node before kubeone apply; kubehz cannot start an eject yet",
 		Annotations:  commandSpec{destructive: true}.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
