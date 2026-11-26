@@ -84,7 +84,7 @@ subjects:
 # a second replica cannot see — two actors would double every bound.
 #
 # Without this Role the agent CANNOT ACT AT ALL: it logs the missing lease
-# loudly and keeps reporting (fail toward report-only). Apply this overlay
+# once and keeps reporting (fail toward report-only). Apply this overlay
 # again when upgrading from an agent that predates leader election.
 #
 # One Lease, three verbs: create (the object is made on first acquisition),

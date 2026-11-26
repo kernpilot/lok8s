@@ -1492,12 +1492,12 @@ _bindings() {
   # A digest is the only ref cosign verification and a rollback can reason about.
   refute_output --partial ":latest"
   refute_output --partial ":main"
-  # The exact digest, pinned: the kubehz-agent v0.1.0 release (digest.txt at
-  # https://github.com/kernpilot/kubehz-agent/releases/tag/v0.1.0). The RBAC
+  # The exact digest, pinned: the kubehz-agent v0.2.0 release (digest.txt at
+  # https://github.com/kernpilot/kubehz-agent/releases/tag/v0.2.0). The RBAC
   # above is pinned rule for rule; the image the RBAC was reviewed against is
   # pinned the same way, so a digest bump and its RBAC re-read land together.
   # A re-pin updates this line in the same change as deployment.yaml.
-  assert_output 'ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa'
+  assert_output 'ghcr.io/kernpilot/kubehz-agent@sha256:54bba61ef3e7900f8cd7af8439e3a2164b7968024c336a9d836c269598b24080'
 }
 
 # ══ 7. The pod spec (what the agent may do ON THE NODE) ═══════════════════

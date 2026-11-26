@@ -1062,12 +1062,18 @@ Secret by name: its own identity Secret. It has one write: `patch` on
 `clusterinventories/status`, which is where the addon-update answer lands. It
 cannot read pod logs, exec into a pod, or read any other Secret.
 
-With `access: managed` it also gets, in `kube-system` only:
+The base install has no grant on the acting Lease (see below). So at
+`access: registered`, the agent writes one warning to its log when it starts:
+the apiserver refuses it a read of the acting Lease, so it does not act. It
+reads the Lease again every 5 minutes. The warning is expected, because the
+registered tier does not act.
 
-- `patch` on `machinedeployments.cluster.k8s.io`, two fields only: the replica
-  count (scaling) and the kubelet version (worker upgrades). No `create`, no
-  `delete`.
-- `get`/`list`/`watch` **and `delete`** on `machines.cluster.k8s.io`. The
+With `access: managed` it also gets:
+
+- In `kube-system`, `list` and `patch` on `machinedeployments.cluster.k8s.io`.
+  The patch changes two fields only: the replica count (scaling) and the
+  kubelet version (worker upgrades). No `create`, no `delete`.
+- In `kube-system`, `list` **and `delete`** on `machines.cluster.k8s.io`. The
   `delete` verb exists for one reason: self-healing removes an unhealthy worker
   Machine so your MachineSet rebuilds it. It is the sharpest permission the
   agent holds. Remove that one verb and self-healing fails closed with a
@@ -1077,9 +1083,16 @@ With `access: managed` it also gets, in `kube-system` only:
   `Terminating` on it can never confirm their eviction, so the machine sits in
   deletion and the server keeps billing you. The agent force-deletes exactly
   those pods, once per machine, and only while the node is still unreachable.
+- In `kubehz-system`, the acting Lease: `create` on Leases, and `get` and
+  `update` on the one Lease `kubehz-live-agent`. The agent acts only while it
+  holds this Lease, so one replica at most acts. Without this grant, the agent
+  reports, but it does not act.
+
+The agent reads MachineDeployments and Machines with one `list` per pass, so
+it holds no `get` and no `watch` on them.
 
 Every one of these is documented at the rule in
-[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/v0.1.0/deploy/managed/rbac-managed.yaml),
+[`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/v0.2.0/deploy/managed/rbac-managed.yaml),
 and lok8s ships that file byte-identical to the agent's own repo: the
 permissions you grant are the ones the public source documents. That link
 points at the exact release tag lok8s vendored, which is what makes

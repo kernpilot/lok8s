@@ -3,8 +3,8 @@
 # that repo documents and audits, with nothing added on the way through lok8s —
 # these digests are how that claim is checked.
 #
-#   upstream: https://github.com/kernpilot/kubehz-agent/tree/6f172d9356851d000a633952943c51888bb87580/deploy
-#   commit:   6f172d9356851d000a633952943c51888bb87580 (main, before the tag v0.2.0)
+#   upstream: https://github.com/kernpilot/kubehz-agent/tree/v0.2.0/deploy
+#   commit:   69b4a425cbe00e11051156769c59c5f34648be72 (tag v0.2.0)
 #
 # Verified by tests/unit/kubehz_live_agent_test.bats on every run, with NO
 # upstream checkout required — that is the point. The older test could only
@@ -23,4 +23,4 @@
 # upstream diff defeats the pin: the digests record what was reviewed, not
 # whatever happens to be on disk.
 7569d693085af64cefef3a4315d2fccd9e96e6ca6a33cf3bb766f46ddf099e25  base/rbac.yaml
-89d88dfd2384fce61dd896a75cc33a0f8c00ffba1bde70a9a80f6c40a456f66d  managed/rbac-managed.yaml
+e8456acffd6ae23a47ee29436879f13d260ffc2104cc255318b2534880496f31  managed/rbac-managed.yaml
