@@ -934,7 +934,9 @@ Claim the new registration instead:
    the command reports that there is no claim code yet, wait a few minutes and
    run it again.
 3. Sign in to the dashboard, open the **Claim** page, pick the **One-time
-   code** tab and paste the code.
+   code** tab and paste the code. A new user signs up on
+   [kubehz.cloud](https://kubehz.cloud) first. For now kubehz caps the number
+   of new accounts, so sign-up can need an invite code.
 
 The job summary of the workflow gives the same steps.
 

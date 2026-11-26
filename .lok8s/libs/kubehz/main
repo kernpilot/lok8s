@@ -65,7 +65,7 @@ main::kubehz() {
     'cluster'                   'Clusters through the kubehz api (agent tools)'
     're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
-    'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
+    'handover|h'                'Control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet'
   )
   :usage "kubehz platform integration" "${@}"
   "${usage[@]}"
