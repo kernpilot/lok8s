@@ -1173,7 +1173,7 @@ kubehz::destroy_hosted() {
   # idempotent); rc 3 = more than one cluster for the domain: lo cannot
   # tell which one to delete, and deletes none of them (no flag selects
   # one); any other rc = the lookup itself failed, and a delete on a
-  # guessed id is the wrong-cluster bug again — refuse and delete nothing.
+  # guessed id is the wrong-cluster bug again. Refuse and delete nothing.
   # Both halves of issue #65 stay closed: a lookup failure is REPORTED,
   # never rendered as "nothing to destroy" while the cluster runs and bills.
   local cluster_id="" resolve_rc=0

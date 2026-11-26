@@ -119,7 +119,7 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 
 	// Query the tenant registry for the live row: send the ?domain= filter
 	// (clusterListURL), filter the rows client-side too and read the ROW's
-	// fields (status, lastHeartbeat, connected) — never the pagination
+	// fields (status, lastHeartbeat, connected), never the pagination
 	// envelope's.
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err

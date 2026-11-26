@@ -1023,7 +1023,7 @@ $(_hosted_unknown_tail)"
 # ── destroy_hosted ───────────────────────────────────────
 #
 # Pins the REAL contract: resolve the id from the tenant registry
-# (kubehz::resolve_cluster_id — the ?domain= filter and a client-side
+# (kubehz::resolve_cluster_id: the ?domain= filter and a client-side
 # domain filter), then DELETE /api/clusters/<id>. Real jq — the resolution
 # logic under test IS the jq filter. A query-string DELETE, a delete on an
 # unresolved id, and a delete with more than one cluster for the domain
