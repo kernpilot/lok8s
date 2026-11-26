@@ -665,7 +665,10 @@ kubehz::_hosted_kubeconfig_get() {
   [[ "${status}" =~ ^[0-9]{3}$ ]] || return 1
   if [[ "${status}" == 2* ]]; then
     KUBEHZ_KC_CAUSE=""
-    printf '%s' "${raw}"
+    # A write error (a full disk) fails the download, so that
+    # kubehz::_write_private keeps the old file. Go twin: writePrivateFile
+    # checks the Write and the Close.
+    printf '%s' "${raw}" || return 1
     return 0
   fi
   code=$(jq -r '.data.code // .code // empty' <<<"${raw}" 2>/dev/null) || code=""

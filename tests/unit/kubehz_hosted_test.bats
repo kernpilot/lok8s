@@ -1512,6 +1512,37 @@ _hosted_temps() {
   [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}/.kubeconfig" test.kubehz.dev.yaml)" ]
 }
 
+# A write error of the kubeconfig (here /dev/full, as on a full disk)
+# fails the download, and the old file stays. Before, the getter ignored
+# the error of printf, and lo renamed a short or empty temp file over the
+# old kubeconfig. The line names no cause of the request: the api
+# answered. Go twin: writePrivateFile checks the Write and the Close.
+@test "hosted kubeconfig: a write error keeps the old file" {
+  [[ -w /dev/full ]] || skip "this system has no /dev/full"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="t"
+  yq() { echo "test.kubehz.dev"; }
+  curl() { printf 'kc-new\n\n200'; }
+  export -f yq curl
+  local kc="${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  printf 'old\n' > "${kc}"
+
+  _kc_to_full() { kubehz::_hosted_kubeconfig_get "$@" > /dev/full; }
+  run _kc_to_full "https://api.kubehz.dev" cl-1
+  assert_failure
+  assert_output --partial "write error"
+
+  eval "$(declare -f kubehz::_hosted_kubeconfig_get | sed '1s/^kubehz::_hosted_kubeconfig_get /_kc_get_real /')"
+  kubehz::_hosted_kubeconfig_get() { _kc_get_real "$@" > /dev/full; }
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+  assert_failure
+  assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1"
+  refute_output --partial "for hosted cluster cl-1 ("
+  [ "$(cat "${kc}")" = old ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}/.kubeconfig" test.kubehz.dev.yaml)" ]
+}
+
 @test "provision_hosted: a failed download keeps the old kubeconfig and leaves no temp file" {
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
