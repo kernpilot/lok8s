@@ -1245,6 +1245,11 @@ EOF
   kubeone::validate_credentials() { :; }
   export -f kubeone::validate_credentials
 
+  # The check of spec.auditLog (step 1b of driver::provision) lives in the
+  # config file of the driver, which this test does not load.
+  kubeone::_audit_log_read() { :; }
+  export -f kubeone::_audit_log_read
+
   kubeone::extract_vars() { :; }
   export -f kubeone::extract_vars
 
@@ -1275,9 +1280,11 @@ EOF
   }
   export -f kubeone::kubeconfig_path
 
-  # Stub provider::provision — libs/provision would normally load a
+  # Stub provider::provision: libs/provision would normally load a
   # provider before driver::provision runs, so we satisfy the contract.
-  provider::provision() { :; }
+  # The spy line shows that the self-hosted branch reached the provider.
+  # Its rc 1 ends the run there: the steps after it are not under test.
+  provider::provision() { echo "spy: provider::provision"; return 1; }
   export -f provider::provision
   # Other kubeone internals that get called once the self-hosted
   # branch proceeds — stub to no-ops for this unit test.
@@ -1292,7 +1299,9 @@ EOF
   # provision_hosted guard — don't care if later kubeone/real-network
   # steps succeed.
   run driver::provision "test.kubehz.dev"
+  assert_output --partial "spy: provider::provision"
   refute_output --partial "KubeOne driver requires spec.provider"
+  refute_output --partial "command not found"
   refute_output --partial "hosted"
 }
 
