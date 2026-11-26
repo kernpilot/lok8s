@@ -102,29 +102,45 @@ token.
 
 `lo provision` does not create a second hosted cluster for a domain. Before
 the create, it reads your cluster list (the list of `lo kubehz cluster
-list`). When the list shows a cluster with the domain of
-`spec.cluster.domain`, the command names the cluster id and stops. Read that
-cluster with `lo kubehz cluster get <id>` (the command reads
-`KUBEHZ_API_URL`, see [The environment](#the-environment)). To apply
-`spec.bootstrap` again on a cluster that you provisioned, run
+list`) for the domain of `spec.cluster.domain`. lo sends the domain filter
+of the api and also compares the domain of each cluster itself.
+
+- **No cluster:** lo creates the cluster.
+- **One hosted cluster that is ready:** lo creates no cluster. It downloads
+  the kubeconfig of that cluster to `.kubeconfig/<domain>.yaml`, as after a
+  create. So you can run `lo provision` again to get the kubeconfig again.
+  lo reads the status of the cluster first, because the list keeps the
+  status of the create.
+- **One other cluster:** lo stops, and names the id, the hosting and the
+  status of the cluster. This is a cluster that is not hosted, a cluster
+  that is not `Running` yet (or that kubehz deletes), or a cluster whose
+  create kubehz still checks. Read the cluster with
+  `lo kubehz cluster get <id>` (the command reads `KUBEHZ_API_URL`, see
+  [The environment](#the-environment)).
+- **More than one cluster:** lo stops and names them. It uses a cluster only
+  when the account has one cluster for the domain.
+
+To apply `spec.bootstrap` again on a cluster that you provisioned, run
 `lo provision --bootstrap`.
 
 When lo cannot read the list, it stops too and creates no cluster: the api
-did not answer, refused the request, or sent no list. `KUBEHZ_TOKEN` needs
-the `read` scope and the `clusters:write` scope.
+did not answer, refused the request, sent no list, or sent a part of a
+longer list. `KUBEHZ_TOKEN` needs the `read` scope and the `clusters:write`
+scope.
 
 A create can get no answer after the request left your machine: the
 connection ends, or a gateway in front of the api answers `502`, `503` or
 `504` without an api code. Then kubehz can have made the cluster. lo reads
 the list again and names what it shows. If kubehz is still checking the
-create, it keeps or removes the cluster in about 3 minutes. Do not run
-`lo provision` again before that. Then run it again only if
-`lo kubehz cluster list` shows no cluster for the domain.
+create, it usually keeps or removes the cluster in about 3 minutes. When
+its check fails, kubehz tries again about 15 minutes later. Do not run
+`lo provision` again before kubehz keeps or removes the cluster. Then run it
+again: lo downloads the kubeconfig of a kept cluster, or creates a new one.
 
 While kubehz checks a create, it refuses each change of that cluster with
 `409 CLUSTER_CREATE_UNCONFIRMED`. A command that changes the cluster (for
-example `lo kubehz node join`) then says to wait about 3 minutes, not to
-create the cluster again, and to run the command again.
+example `lo kubehz node join`) then says to wait, not to create the cluster
+again, and to run the command again.
 
 ## Upgrades and maintenance windows
 

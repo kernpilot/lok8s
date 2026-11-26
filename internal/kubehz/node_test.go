@@ -1540,7 +1540,8 @@ func TestNodeJoinCreateUnconfirmed(t *testing.T) {
 	h := nodeHarness(t, s, "hosted", "")
 	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "[error] kubehz: the platform is still checking the create of this cluster.\n"+
-		"  In about 3 minutes it keeps or removes the cluster.\n"+
+		"  Usually, it keeps or removes the cluster in about 3 minutes.\n"+
+		"  When the check fails, it tries again about 15 minutes later.\n"+
 		"  Do not create the cluster again. Run this command again after that.\n")
 	mustNotContain(t, h.output(), "api help")
 }

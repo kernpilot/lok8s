@@ -80,20 +80,13 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 		return ErrHandled
 	}
 	c.debugf("Waiting for hosted cluster %s to become ready (timeout: %ds)", clusterID, timeout)
-	auth := withBearer(c.getenv("KUBEHZ_TOKEN"))
 	for elapsed := 0; elapsed < timeout; elapsed += 10 {
-		statusVal := "Unknown"
-		if body, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID, auth, nil); err == nil {
-			// Enveloped UI route: .data.status, with a bare-body fallback.
-			if v, ok := parseJSON(body); ok {
-				statusVal = jstr(jalt("Unknown", jget(v, "data", "status"), jget(v, "status")))
-			}
-		}
-		switch statusVal {
-		case "Running", "ready", "Ready":
+		statusVal := c.clusterStatus(ctx, apiURL, clusterID)
+		switch {
+		case clusterReady(statusVal):
 			c.debugf("Hosted cluster %s is ready", clusterID)
 			return nil
-		case "Failed", "Error":
+		case statusVal == "Failed" || statusVal == "Error":
 			c.errorf("Hosted cluster %s failed: status=%s", clusterID, statusVal)
 			return ErrHandled
 		}
@@ -104,6 +97,28 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 	}
 	c.errorf("Timed out waiting for hosted cluster %s after %ds", clusterID, timeout)
 	return ErrHandled
+}
+
+// clusterStatus reads the status of a hosted cluster once (GET
+// /api/clusters/{id}, the live phase of the cluster): "Unknown" when the
+// read fails. Bash: kubehz::_hosted_status.
+func (c *Context) clusterStatus(ctx context.Context, apiURL, clusterID string) string {
+	body, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	if err != nil {
+		return "Unknown"
+	}
+	// Enveloped UI route: .data.status, with a bare-body fallback.
+	v, ok := parseJSON(body)
+	if !ok {
+		return "Unknown"
+	}
+	return jstr(jalt("Unknown", jget(v, "data", "status"), jget(v, "status")))
+}
+
+// clusterReady tells whether a status of a hosted cluster lets lo download
+// the kubeconfig.
+func clusterReady(status string) bool {
+	return status == "Running" || status == "ready" || status == "Ready"
 }
 
 var digitsRe = regexp.MustCompile(`^[0-9]+$`)
@@ -237,11 +252,22 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 //
 // One cluster for one domain: the api does not refuse a second create
 // for a domain, and lo keeps no cluster id. So before the create, lo
-// reads the cluster list (hostedListed) and stops when the list shows a
-// cluster of the domain that the create sends (spec.cluster.domain), or
-// when lo cannot read the list. A create that left this machine and got
-// no answer can have made the cluster: lo reads the list again before it
-// prints anything (createUnknown).
+// reads the cluster list (hostedListed) for the domain that the create
+// sends (spec.cluster.domain):
+//   - lo cannot read the list: stop.
+//   - more than one cluster: stop, and name them (hostedMany).
+//   - one hosted cluster with a valid id whose create is confirmed and
+//     whose status is ready: no create. lo downloads its kubeconfig and
+//     writes the mirror, as after a create. So a run of lo provision
+//     gets the kubeconfig of the cluster again.
+//   - one other cluster: stop, and name its id, hosting and status
+//     (hostedExists).
+//
+// The list keeps the status that the create wrote for a hosted cluster,
+// so lo reads the live status of the cluster (clusterStatus) before it
+// decides. A create that left this machine and got no answer can have
+// made the cluster: lo reads the list again before it prints anything
+// (createUnknown).
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
 	if loadSpec(clusterYAML).kubernetesVersion() == "" {
 		c.errorf("%s", missingVersionLine(clusterYAML))
@@ -265,9 +291,21 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 	case l.cause != "":
 		c.hostedListUnread(l, createDomain)
 		return ErrHandled
-	case l.found:
-		c.hostedExists(l, createDomain)
+	case len(l.rows) > 1:
+		c.hostedMany(l.rows, createDomain)
 		return ErrHandled
+	case len(l.rows) == 1:
+		r := l.rows[0]
+		if r.id != "" && r.hosting == "hosted" {
+			r.status = c.clusterStatus(ctx, apiURL, r.id)
+		}
+		if !r.ready() {
+			c.hostedExists(r, createDomain)
+			return ErrHandled
+		}
+		c.echo("kubehz: your account already has cluster %s for %s (%s).", r.id, createDomain, r.state())
+		c.echo("  lo downloads its kubeconfig and does not create another cluster.")
+		return c.hostedKubeconfig(ctx, apiURL, r.id, domain, kubeconfigPath, clusterYAML)
 	}
 	payload := buildClusterPayload(clusterYAML)
 	if payload == nil {
@@ -322,7 +360,14 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 	if err := c.waitForCluster(ctx, apiURL, clusterID, 600); err != nil {
 		return err
 	}
+	return c.hostedKubeconfig(ctx, apiURL, clusterID, domain, kubeconfigPath, clusterYAML)
+}
 
+// hostedKubeconfig downloads the kubeconfig of a ready hosted cluster to
+// kubeconfigPath and mirrors it to .kubeconfig/<metadata.name>.yaml: the
+// end of a create, and of a run that finds the cluster of the domain.
+// Bash: kubehz::_hosted_kubeconfig.
+func (c *Context) hostedKubeconfig(ctx context.Context, apiURL, clusterID, domain, kubeconfigPath, clusterYAML string) error {
 	// Mode 0700 (at most, under the umask): the second check
 	// (privateTarget in writePrivateFile) refuses a directory that another
 	// user can write into, and must not refuse the directory made here
@@ -366,29 +411,95 @@ func gatewayAnswer(res *httpResult) bool {
 	return (res.Status == 502 || res.Status == 503 || res.Status == 504) && apiCode(res.Body) == ""
 }
 
+// hostedRow is one cluster of the domain in the cluster list. Each value
+// is a server string: id is "" when it does not have the api's shape
+// (kindCluster), hosting and status are "" when they are not one word
+// (hostedWordRe). unconfirmed is true when createUnconfirmedAt is not
+// null: kubehz still checks the create.
+type hostedRow struct {
+	id, hosting, status string
+	unconfirmed         bool
+}
+
+var hostedWordRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,31}$`)
+
+func readHostedRow(r any) hostedRow {
+	word := func(key string) string {
+		s, _ := jget(r, key).(string)
+		if !hostedWordRe.MatchString(s) {
+			return ""
+		}
+		return s
+	}
+	id, _ := jget(r, "id").(string)
+	if !kindCluster.id.MatchString(id) {
+		id = ""
+	}
+	return hostedRow{id: id, hosting: word("hosting"), status: word("status"), unconfirmed: jget(r, "createUnconfirmedAt") != nil}
+}
+
+// ready tells whether lo can download the kubeconfig of the row: a
+// hosted cluster with an id, a confirmed create and a ready status.
+func (r hostedRow) ready() bool {
+	return r.id != "" && r.hosting == "hosted" && !r.unconfirmed && clusterReady(r.status)
+}
+
+// hostingName is the hosting of a row as lo prints it.
+func (r hostedRow) hostingName() string {
+	switch r.hosting {
+	case "":
+		return "unknown"
+	case "self":
+		return "self-hosted"
+	}
+	return r.hosting
+}
+
+// state is the hosting and the status of a row, as lo prints them.
+func (r hostedRow) state() string {
+	s := r.hostingName() + ", " + r.status
+	if !hostedWordRe.MatchString(r.status) {
+		s = r.hostingName() + ", unknown"
+	}
+	if r.unconfirmed {
+		s += ", create not confirmed"
+	}
+	return s
+}
+
 // hostedList is what the cluster list says about one domain
 // (hostedListed). cause is not "" when lo cannot read the list. Else
-// found tells whether the list shows a cluster of the domain, and id is
-// the id of the oldest one when it has the api's shape (kindCluster),
-// "" otherwise. scope is true when the api refused the list for a
-// missing scope of the token.
+// rows are the clusters of the domain, the oldest first. scope is true
+// when the api refused the list for a missing scope of the token.
 type hostedList struct {
-	found bool
-	id    string
+	rows  []hostedRow
 	cause string
 	scope bool
 }
 
+// clusterDomainRe is the domain shape that the api takes (a lowercase
+// FQDN of RFC 1123 labels, two labels at least, 253 characters at most).
+// lo sends ?domain= only for a domain of this shape, which needs no
+// escape. The api refuses another domain with a 400, and the create
+// then names the field.
+var clusterDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
 // hostedListed reads the cluster list of the account (GET
 // /api/clusters, the route of `lo kubehz cluster list`) and finds the
 // clusters of domain. The list holds each cluster that is not deleted,
-// also one whose create kubehz still checks. lo cannot read the list
+// also one whose create kubehz still checks. lo sends the exact filter
+// ?domain= of the api, and compares the domain of each row too: an api
+// that ignores the filter sends all clusters. lo cannot read the list
 // when the request fails, when the api refuses it, when the answer holds
-// no list, and when the list is a part of the clusters (the total of
-// the answer is larger) and shows no cluster of the domain. Bash:
-// kubehz::_hosted_listed.
+// no list, and when the list is a part of the clusters (the total of the
+// answer is larger): then lo cannot tell how many clusters the domain
+// has. Bash: kubehz::_hosted_listed.
 func (c *Context) hostedListed(ctx context.Context, apiURL, domain string) hostedList {
-	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	url := apiURL + "/api/clusters?perPage=500"
+	if len(domain) <= 253 && clusterDomainRe.MatchString(domain) {
+		url += "&domain=" + domain
+	}
+	res, err := c.fetchStatus(ctx, "GET", url, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return hostedList{cause: "no answer"}
 	}
@@ -404,17 +515,14 @@ func (c *Context) hostedListed(ctx context.Context, apiURL, domain string) hoste
 	if !ok {
 		return hostedList{cause: "an answer without a list"}
 	}
-	if rs := domainRows(list, domain); len(rs) > 0 {
-		id := jstrOr(rs[0], "", "id")
-		if !kindCluster.id.MatchString(id) {
-			id = ""
-		}
-		return hostedList{found: true, id: id}
-	}
 	if total := jnum(jget(v, "meta", "pagination", "total")); total > len(list) {
 		return hostedList{cause: "it shows " + strconv.Itoa(len(list)) + " of " + strconv.Itoa(total) + " clusters"}
 	}
-	return hostedList{}
+	var rows []hostedRow
+	for _, r := range domainRows(list, domain) {
+		rows = append(rows, readHostedRow(r))
+	}
+	return hostedList{rows: rows}
 }
 
 // hostedListUnread stops a create when lo cannot read the cluster list:
@@ -428,15 +536,51 @@ func (c *Context) hostedListUnread(l hostedList, domain string) {
 	c.echoErr("  Run the command again when lo can read the list.")
 }
 
-// hostedExists stops a create when the list shows a cluster of domain.
-func (c *Context) hostedExists(l hostedList, domain string) {
-	if l.id == "" {
-		c.errorf("kubehz: your account already has a cluster for %s, so lo did not create another one.", domain)
+// hostedExists stops a create when the list shows one cluster of domain
+// whose kubeconfig lo does not download: it names the id, the hosting
+// and the status of the cluster, and why lo stops.
+func (c *Context) hostedExists(r hostedRow, domain string) {
+	if r.id == "" {
+		c.errorf("kubehz: your account already has a cluster for %s (%s), so lo did not create another one.", domain, r.state())
 		c.echoErr("  See your clusters with:  lo kubehz cluster list")
 		return
 	}
-	c.errorf("kubehz: your account already has cluster %s for %s, so lo did not create another one.", l.id, domain)
-	c.echoErr("  See the cluster with:  lo kubehz cluster get %s", l.id)
+	c.errorf("kubehz: your account already has cluster %s for %s (%s), so lo did not create another one.", r.id, domain, r.state())
+	switch {
+	case r.hosting != "hosted":
+		c.echoErr("  It is not a hosted cluster, so lo does not download its kubeconfig.")
+	case r.unconfirmed:
+		c.echoErr("  kubehz is still checking the create of this cluster.")
+		c.echoErr("  Usually, kubehz keeps or removes the cluster in about 3 minutes.")
+		c.echoErr("  When the check fails, kubehz tries again about 15 minutes later.")
+		c.echoErr("  Run the command again after that.")
+	default:
+		c.echoErr("  lo downloads the kubeconfig only when the status is Running.")
+	}
+	c.echoErr("  See the cluster with:  lo kubehz cluster get %s", r.id)
+}
+
+// hostedManyShown is the number of clusters that hostedMany names.
+const hostedManyShown = 10
+
+// hostedMany stops a create when the list shows more than one cluster of
+// domain: lo cannot tell which one to use. It names the clusters, the
+// oldest first.
+func (c *Context) hostedMany(rows []hostedRow, domain string) {
+	c.errorf("kubehz: your account has %d clusters for %s, so lo did not create another one.", len(rows), domain)
+	c.echoErr("  lo downloads a kubeconfig only when the account has one cluster for the domain.")
+	for i, r := range rows {
+		if i == hostedManyShown {
+			c.echoErr("  - and %d more", len(rows)-hostedManyShown)
+			break
+		}
+		if r.id == "" {
+			c.echoErr("  - a cluster (%s)", r.hostingName())
+			continue
+		}
+		c.echoErr("  - cluster %s (%s)", r.id, r.hostingName())
+	}
+	c.echoErr("  See your clusters with:  lo kubehz cluster list")
 }
 
 // createUnknown ends a create whose result is open: the request left this
@@ -450,16 +594,19 @@ func (c *Context) createUnknown(ctx context.Context, apiURL, domain, cause strin
 	switch {
 	case l.cause != "":
 		c.echoErr("  lo cannot read the cluster list either (%s).", l.cause)
-	case l.id != "":
-		c.echoErr("  The cluster list shows cluster %s for %s:  lo kubehz cluster get %s", l.id, domain, l.id)
-	case l.found:
+	case len(l.rows) > 1:
+		c.echoErr("  The cluster list shows %d clusters for %s:  lo kubehz cluster list", len(l.rows), domain)
+	case len(l.rows) == 1 && l.rows[0].id != "":
+		c.echoErr("  The cluster list shows cluster %s for %s:  lo kubehz cluster get %s", l.rows[0].id, domain, l.rows[0].id)
+	case len(l.rows) == 1:
 		c.echoErr("  The cluster list shows a cluster for %s:  lo kubehz cluster list", domain)
 	default:
 		c.echoErr("  The cluster list shows no cluster for %s now.", domain)
 	}
-	c.echoErr("  If kubehz is still checking the create, it keeps or removes the cluster in about 3 minutes.")
-	c.echoErr("  Do not run lo provision again before that.")
-	c.echoErr("  Then run it again only if lo kubehz cluster list shows no cluster for %s.", domain)
+	c.echoErr("  If kubehz is still checking the create, it usually keeps or removes the cluster in about 3 minutes.")
+	c.echoErr("  When the check fails, kubehz tries again about 15 minutes later.")
+	c.echoErr("  Do not run lo provision again before kubehz keeps or removes the cluster.")
+	c.echoErr("  Then run it again. lo downloads the kubeconfig of a kept cluster, or creates a new one.")
 }
 
 // privateFileError is a refusal of writePrivateFile; its text is the

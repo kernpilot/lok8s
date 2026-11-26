@@ -480,7 +480,7 @@ kubehz::agent_refused() {
       AGENT_KEY_SPEND_CAP)
         hint="Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC)." ;;
       CLUSTER_CREATE_UNCONFIRMED)
-        hint="The platform is still checking the create of this cluster. In about 3 minutes it keeps or removes the cluster. Do not create the cluster again. Run the command again after that." ;;
+        hint="The platform is still checking the create of this cluster. Usually, it keeps or removes the cluster in about 3 minutes. When the check fails, it tries again about 15 minutes later. Do not create the cluster again. Run the command again after that." ;;
       SPACE_LIMITS_ABOVE_SHARED)
         hint="Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default." ;;
       NO_SHARD_AVAILABLE|SHARD_AT_CAPACITY)

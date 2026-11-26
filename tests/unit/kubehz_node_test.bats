@@ -1759,7 +1759,8 @@ _refuse_flag() {
   run node::join --name box-1 --pool metal
   assert_failure
   assert_output --partial "[error] kubehz: the platform is still checking the create of this cluster.
-  In about 3 minutes it keeps or removes the cluster.
+  Usually, it keeps or removes the cluster in about 3 minutes.
+  When the check fails, it tries again about 15 minutes later.
   Do not create the cluster again. Run this command again after that."
   refute_output --partial "api help"
 }

@@ -229,7 +229,8 @@ node::api_error() {
       # kubehz checks whether the cluster exists, and refuses the writes
       # until it knows. The api's help is longer than lo shows.
       error "kubehz: the platform is still checking the create of this cluster."
-      echo "  In about 3 minutes it keeps or removes the cluster." >&2
+      echo "  Usually, it keeps or removes the cluster in about 3 minutes." >&2
+      echo "  When the check fails, it tries again about 15 minutes later." >&2
       echo "  Do not create the cluster again. Run this command again after that." >&2 ;;
     NODE_NOT_REMOVED)
       # A 503 of the remove: the node is still in the cluster, and the same

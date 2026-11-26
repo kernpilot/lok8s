@@ -69,15 +69,7 @@ kubehz::wait_for_cluster() {
   debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
 
   while (( elapsed < timeout )); do
-    # GET /api/clusters/{id} is an enveloped UI route ({ok,data,traceId}), so the
-    # status is at .data.status; the // .status fallback tolerates a bare body.
-    # -q first and the subshell with http::tls_log_vars_unset: curl reads no
-    # config file of the user and gets no TLS log or trace control
-    # (utils/http.sh).
-    status_val=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
-      http::tls_log_vars_unset &&
-        curl -q -K - -fsSL "${api_url}/api/clusters/${cluster_id}" 2>/dev/null
-    ) | jq -r '.data.status // .status // "Unknown"') || status_val="Unknown"
+    status_val=$(kubehz::_hosted_status "${api_url}" "${cluster_id}")
 
     case "${status_val}" in
       Running|ready|Ready)
@@ -97,6 +89,29 @@ kubehz::wait_for_cluster() {
 
   error "Timed out waiting for hosted cluster ${cluster_id} after ${timeout}s"
   return 1
+}
+
+# kubehz::_hosted_status <api_url> <cluster_id>: the status of a hosted
+# cluster, read once (GET /api/clusters/{id}, the live phase of the
+# cluster), on stdout. "Unknown" when the read fails or the answer is not
+# JSON. GET /api/clusters/{id} is an enveloped UI route
+# ({ok,data,traceId}), so the status is at .data.status; the // .status
+# fallback tolerates a bare body. The answer is read before jq, so the
+# exit code of curl counts also without pipefail.
+# -q first and the subshell with http::tls_log_vars_unset: curl reads no
+# config file of the user and gets no TLS log or trace control
+# (utils/http.sh). Go twin: clusterStatus.
+kubehz::_hosted_status() {
+  local body status_val
+  body=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -fsSL "${1}/api/clusters/${2}" 2>/dev/null
+  )) && [[ -n "${body}" ]] || {
+    printf 'Unknown\n'
+    return 0
+  }
+  status_val=$(jq -r '.data.status // .status // "Unknown"' <<<"${body}" 2>/dev/null) || status_val="Unknown"
+  printf '%s\n' "${status_val}"
 }
 
 # Render a friendly, human-readable message for a capacity rejection (the
@@ -150,11 +165,21 @@ kubehz::render_capacity_rejection() {
 # (HTTP 400, a missing field). Go twin: ProvisionHosted.
 # One cluster for one domain: the api does not refuse a second create for
 # a domain, and lo keeps no cluster id. So before the create, lo reads the
-# cluster list (kubehz::_hosted_listed) and stops when the list shows a
-# cluster of the domain that the create sends (spec.cluster.domain), or
-# when lo cannot read the list. A create that left this machine and got
-# no answer can have made the cluster: lo reads the list again before it
-# prints anything (kubehz::_hosted_create_unknown).
+# cluster list (kubehz::_hosted_listed) for the domain that the create
+# sends (spec.cluster.domain):
+#   - lo cannot read the list: stop.
+#   - more than one cluster: stop, and name them (kubehz::_hosted_many).
+#   - one hosted cluster with a valid id whose create is confirmed and
+#     whose status is ready: no create. lo downloads its kubeconfig and
+#     writes the mirror, as after a create. So a run of lo provision gets
+#     the kubeconfig of the cluster again.
+#   - one other cluster: stop, and name its id, hosting and status
+#     (kubehz::_hosted_exists).
+# The list keeps the status that the create wrote for a hosted cluster, so
+# lo reads the live status of the cluster (kubehz::_hosted_status) before
+# it decides. A create that left this machine and got no answer can have
+# made the cluster: lo reads the list again before it prints anything
+# (kubehz::_hosted_create_unknown).
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
 kubehz::provision_hosted() {
   local domain="${1}" cluster_yaml="${2}"
@@ -182,9 +207,28 @@ kubehz::provision_hosted() {
   local create_domain list_rc=0
   create_domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
   kubehz::_hosted_listed "${api_url}" "${create_domain}" || list_rc=$?
+  # Only rc 2 (no cluster of the domain) goes on to the create: any other
+  # code stops.
   case "${list_rc}" in
-    0) kubehz::_hosted_exists "${create_domain}"; return 1 ;;
-    1) kubehz::_hosted_list_unread "${create_domain}"; return 1 ;;
+    2) ;;
+    0)
+      if (( ${#KUBEHZ_HOSTED_LIST_IDS[@]} > 1 )); then
+        kubehz::_hosted_many "${create_domain}"
+        return 1
+      fi
+      if [[ -n "${KUBEHZ_HOSTED_LIST_IDS[0]}" && "${KUBEHZ_HOSTED_LIST_HOSTINGS[0]}" == hosted ]]; then
+        KUBEHZ_HOSTED_LIST_STATUSES[0]=$(kubehz::_hosted_status "${api_url}" "${KUBEHZ_HOSTED_LIST_IDS[0]}")
+      fi
+      if ! kubehz::_hosted_row_ready 0; then
+        kubehz::_hosted_exists "${create_domain}"
+        return 1
+      fi
+      echo "kubehz: your account already has cluster ${KUBEHZ_HOSTED_LIST_IDS[0]} for ${create_domain} ($(kubehz::_hosted_row_state 0))."
+      echo "  lo downloads its kubeconfig and does not create another cluster."
+      kubehz::_hosted_kubeconfig "${api_url}" "${KUBEHZ_HOSTED_LIST_IDS[0]}" "${domain}" "${kubeconfig_path}" "${cluster_yaml}"
+      return
+      ;;
+    *) kubehz::_hosted_list_unread "${create_domain}"; return 1 ;;
   esac
 
   local payload
@@ -268,6 +312,16 @@ kubehz::provision_hosted() {
   # an ungated wait lets a Failed hosted cluster "succeed" into the
   # kubeconfig download below.
   kubehz::wait_for_cluster "${api_url}" "${cluster_id}" || return 1
+  kubehz::_hosted_kubeconfig "${api_url}" "${cluster_id}" "${domain}" "${kubeconfig_path}" "${cluster_yaml}"
+}
+
+# kubehz::_hosted_kubeconfig <api_url> <cluster_id> <domain>
+#   <kubeconfig_path> <cluster_yaml>: download the kubeconfig of a ready
+# hosted cluster to <kubeconfig_path>, and mirror it to
+# .kubeconfig/<metadata.name>.yaml: the end of a create, and of a run that
+# finds the cluster of the domain. Go twin: hostedKubeconfig.
+kubehz::_hosted_kubeconfig() {
+  local api_url="${1}" cluster_id="${2}" domain="${3}" kubeconfig_path="${4}" cluster_yaml="${5}"
 
   # Download kubeconfig. kubehz::_write_private: a private temp file beside
   # the kubeconfig, renamed onto it only after a complete download. A
@@ -309,28 +363,48 @@ kubehz::provision_hosted() {
 # kubehz::_hosted_listed <api_url> <domain>: what the cluster list of the
 # account (GET /api/clusters, the route of `lo kubehz cluster list`) says
 # about the clusters of <domain>. The list holds each cluster that is not
-# deleted, also one whose create kubehz still checks. Prints nothing.
-#   rc 0: the list shows a cluster of <domain>. KUBEHZ_HOSTED_LIST_ID is
-#         the id of the oldest one when it has the api's shape, else "".
+# deleted, also one whose create kubehz still checks. lo sends the exact
+# filter ?domain= of the api, but only for a domain of the shape that the
+# api takes (a lowercase FQDN of RFC 1123 labels, two labels at least, 253
+# characters at most), which needs no escape. The api refuses another
+# domain with a 400, and the create then names the field. lo compares the
+# domain of each row too: an api that ignores the filter sends all
+# clusters. Prints nothing.
+#   rc 0: the list shows clusters of <domain>, the oldest first, one
+#         index for each in KUBEHZ_HOSTED_LIST_IDS (the id when it has the
+#         api's shape, else ""), KUBEHZ_HOSTED_LIST_HOSTINGS and
+#         KUBEHZ_HOSTED_LIST_STATUSES (the value when it is one word, else
+#         "") and KUBEHZ_HOSTED_LIST_UNCONFIRMED (1 when
+#         createUnconfirmedAt is not null: kubehz still checks the create).
 #   rc 2: the list shows no cluster of <domain>.
 #   rc 1: lo cannot read the list: the request failed, the api refused
 #         it, the answer holds no list, or the list is a part of the
-#         clusters (the total of the answer is larger) and shows no
-#         cluster of <domain>. KUBEHZ_HOSTED_LIST_CAUSE says why, and
-#         KUBEHZ_HOSTED_LIST_SCOPE is 1 when the api refused the list for
-#         a missing scope of the token.
+#         clusters (the total of the answer is larger), so lo cannot tell
+#         how many clusters <domain> has. KUBEHZ_HOSTED_LIST_CAUSE says
+#         why, and KUBEHZ_HOSTED_LIST_SCOPE is 1 when the api refused the
+#         list for a missing scope of the token.
 # -q first and the subshell with http::tls_log_vars_unset: curl reads no
 # config file of the user and gets no TLS log or trace control
 # (utils/http.sh). Go twin: hostedListed.
 kubehz::_hosted_listed() {
-  local api_url="${1}" domain="${2}" raw status body code listed rows id total n
+  local api_url="${1}" domain="${2}" raw status body code listed rows total n url
+  local id hosting status_word unconfirmed
   local LC_ALL=C
-  KUBEHZ_HOSTED_LIST_ID=""
+  local domain_re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+  local word_re='^[A-Za-z][A-Za-z0-9-]{0,31}$'
+  KUBEHZ_HOSTED_LIST_IDS=()
+  KUBEHZ_HOSTED_LIST_HOSTINGS=()
+  KUBEHZ_HOSTED_LIST_STATUSES=()
+  KUBEHZ_HOSTED_LIST_UNCONFIRMED=()
   KUBEHZ_HOSTED_LIST_CAUSE=""
   KUBEHZ_HOSTED_LIST_SCOPE=0
+  url="${api_url}/api/clusters?perPage=500"
+  if (( ${#domain} <= 253 )) && [[ "${domain}" =~ ${domain_re} ]]; then
+    url+="&domain=${domain}"
+  fi
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
     http::tls_log_vars_unset &&
-      curl -q -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null
+      curl -q -K - -sSL -w $'\n%{http_code}' "${url}" 2>/dev/null
   ) ) || {
     KUBEHZ_HOSTED_LIST_CAUSE="no answer"
     return 1
@@ -347,18 +421,9 @@ kubehz::_hosted_listed() {
   # `.data? // .`: the envelope of the api, or a bare body (the Go twin's
   # envelope). Only an array is a list.
   listed=$(jq -c '(.data? // .) | if type == "array" then . else empty end' <<<"${body}" 2>/dev/null) || listed=""
-  rows=""
-  [[ -z "${listed}" ]] || rows=$(jq -c --arg d "${domain}" \
-    '[.[] | objects | select(.domain == $d)] | sort_by(.createdAt)' <<<"${listed}" 2>/dev/null) || rows=""
-  if [[ -z "${rows}" ]]; then
+  if [[ -z "${listed}" ]]; then
     KUBEHZ_HOSTED_LIST_CAUSE="an answer without a list"
     return 1
-  fi
-  if [[ "${rows}" != "[]" ]]; then
-    id=$(jq -r '.[0].id | if type == "string" then . else "" end' <<<"${rows}" 2>/dev/null) || id=""
-    [[ "${id}" =~ ^cl-[A-Za-z0-9-]{1,64}$ ]] || id=""
-    KUBEHZ_HOSTED_LIST_ID="${id}"
-    return 0
   fi
   total=$(jq -r '.meta.pagination.total // 0' <<<"${body}" 2>/dev/null) || total=0
   [[ "${total}" =~ ^[0-9]{1,18}$ ]] || total=0
@@ -367,14 +432,71 @@ kubehz::_hosted_listed() {
     KUBEHZ_HOSTED_LIST_CAUSE="it shows ${n} of $(( 10#${total} )) clusters"
     return 1
   fi
-  return 2
+  # One line for each cluster of <domain>, the oldest first: the id, the
+  # hosting, the status and the unconfirmed flag, divided by "|". safe
+  # gives "" for a value that is not a string or that holds a character
+  # other than a letter, a digit or "-", so no value holds a "|" or a new
+  # line. The checks below then take the exact shapes.
+  rows=$(jq -r --arg d "${domain}" '
+    def safe: if type == "string" and (test("[^A-Za-z0-9-]") | not) then . else "" end;
+    [.[] | objects | select(.domain == $d)] | sort_by(.createdAt) | .[]
+      | [(.id | safe), (.hosting | safe), (.status | safe),
+         (if .createUnconfirmedAt == null then "0" else "1" end)] | join("|")' <<<"${listed}" 2>/dev/null) || {
+    KUBEHZ_HOSTED_LIST_CAUSE="an answer without a list"
+    return 1
+  }
+  [[ -n "${rows}" ]] || return 2
+  while IFS='|' read -r id hosting status_word unconfirmed; do
+    [[ "${id}" =~ ^cl-[A-Za-z0-9-]{1,64}$ ]] || id=""
+    [[ "${hosting}" =~ ${word_re} ]] || hosting=""
+    [[ "${status_word}" =~ ${word_re} ]] || status_word=""
+    KUBEHZ_HOSTED_LIST_IDS+=("${id}")
+    KUBEHZ_HOSTED_LIST_HOSTINGS+=("${hosting}")
+    KUBEHZ_HOSTED_LIST_STATUSES+=("${status_word}")
+    KUBEHZ_HOSTED_LIST_UNCONFIRMED+=("${unconfirmed}")
+  done <<<"${rows}"
+  return 0
+}
+
+# kubehz::_hosted_row_ready <index>: whether lo can download the
+# kubeconfig of a row of kubehz::_hosted_listed: a hosted cluster with an
+# id, a confirmed create and a ready status. Go twin: hostedRow.ready.
+kubehz::_hosted_row_ready() {
+  local i="${1}"
+  [[ -n "${KUBEHZ_HOSTED_LIST_IDS[i]}" && "${KUBEHZ_HOSTED_LIST_HOSTINGS[i]}" == hosted \
+    && "${KUBEHZ_HOSTED_LIST_UNCONFIRMED[i]}" == 0 ]] || return 1
+  case "${KUBEHZ_HOSTED_LIST_STATUSES[i]}" in
+    Running|ready|Ready) return 0 ;;
+  esac
+  return 1
+}
+
+# kubehz::_hosted_hosting_name <index>: the hosting of a row as lo prints
+# it. Go twin: hostedRow.hostingName.
+kubehz::_hosted_hosting_name() {
+  case "${KUBEHZ_HOSTED_LIST_HOSTINGS[${1}]}" in
+    "") printf 'unknown' ;;
+    self) printf 'self-hosted' ;;
+    *) printf '%s' "${KUBEHZ_HOSTED_LIST_HOSTINGS[${1}]}" ;;
+  esac
+}
+
+# kubehz::_hosted_row_state <index>: the hosting and the status of a row,
+# as lo prints them. Go twin: hostedRow.state.
+kubehz::_hosted_row_state() {
+  local LC_ALL=C i="${1}" s status_word
+  status_word="${KUBEHZ_HOSTED_LIST_STATUSES[i]}"
+  [[ "${status_word}" =~ ^[A-Za-z][A-Za-z0-9-]{0,31}$ ]] || status_word="unknown"
+  s="$(kubehz::_hosted_hosting_name "${i}"), ${status_word}"
+  [[ "${KUBEHZ_HOSTED_LIST_UNCONFIRMED[i]}" == 0 ]] || s+=", create not confirmed"
+  printf '%s' "${s}"
 }
 
 # kubehz::_hosted_list_unread <domain>: stop a create when lo cannot read
 # the cluster list (kubehz::_hosted_listed rc 1): lo cannot tell whether
 # the account has a cluster of <domain>. Go twin: hostedListUnread.
 kubehz::_hosted_list_unread() {
-  error "kubehz: lo cannot read the cluster list (${KUBEHZ_HOSTED_LIST_CAUSE}), so it cannot check for a cluster of ${1}. No cluster was created."
+  error "kubehz: lo cannot read the cluster list (${KUBEHZ_HOSTED_LIST_CAUSE:-an error in lo}), so it cannot check for a cluster of ${1}. No cluster was created."
   if (( KUBEHZ_HOSTED_LIST_SCOPE )); then
     echo "  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens)." >&2
     return 0
@@ -382,17 +504,51 @@ kubehz::_hosted_list_unread() {
   echo "  Run the command again when lo can read the list." >&2
 }
 
-# kubehz::_hosted_exists <domain>: stop a create when the list shows a
-# cluster of <domain> (kubehz::_hosted_listed rc 0). Go twin: hostedExists.
+# kubehz::_hosted_exists <domain>: stop a create when the list shows one
+# cluster of <domain> (row 0 of kubehz::_hosted_listed) whose kubeconfig
+# lo does not download: name the id, the hosting and the status of the
+# cluster, and why lo stops. Go twin: hostedExists.
 kubehz::_hosted_exists() {
-  local domain="${1}"
-  if [[ -z "${KUBEHZ_HOSTED_LIST_ID}" ]]; then
-    error "kubehz: your account already has a cluster for ${domain}, so lo did not create another one."
+  local domain="${1}" id="${KUBEHZ_HOSTED_LIST_IDS[0]}" state
+  state=$(kubehz::_hosted_row_state 0)
+  if [[ -z "${id}" ]]; then
+    error "kubehz: your account already has a cluster for ${domain} (${state}), so lo did not create another one."
     echo "  See your clusters with:  lo kubehz cluster list" >&2
     return 0
   fi
-  error "kubehz: your account already has cluster ${KUBEHZ_HOSTED_LIST_ID} for ${domain}, so lo did not create another one."
-  echo "  See the cluster with:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_ID}" >&2
+  error "kubehz: your account already has cluster ${id} for ${domain} (${state}), so lo did not create another one."
+  if [[ "${KUBEHZ_HOSTED_LIST_HOSTINGS[0]}" != hosted ]]; then
+    echo "  It is not a hosted cluster, so lo does not download its kubeconfig." >&2
+  elif [[ "${KUBEHZ_HOSTED_LIST_UNCONFIRMED[0]}" != 0 ]]; then
+    echo "  kubehz is still checking the create of this cluster." >&2
+    echo "  Usually, kubehz keeps or removes the cluster in about 3 minutes." >&2
+    echo "  When the check fails, kubehz tries again about 15 minutes later." >&2
+    echo "  Run the command again after that." >&2
+  else
+    echo "  lo downloads the kubeconfig only when the status is Running." >&2
+  fi
+  echo "  See the cluster with:  lo kubehz cluster get ${id}" >&2
+}
+
+# kubehz::_hosted_many <domain>: stop a create when the list shows more
+# than one cluster of <domain>: lo cannot tell which one to use. Names the
+# clusters, the oldest first, at most 10. Go twin: hostedMany.
+kubehz::_hosted_many() {
+  local domain="${1}" n="${#KUBEHZ_HOSTED_LIST_IDS[@]}" i
+  error "kubehz: your account has ${n} clusters for ${domain}, so lo did not create another one."
+  echo "  lo downloads a kubeconfig only when the account has one cluster for the domain." >&2
+  for (( i = 0; i < n; i++ )); do
+    if (( i == 10 )); then
+      echo "  - and $(( n - 10 )) more" >&2
+      break
+    fi
+    if [[ -z "${KUBEHZ_HOSTED_LIST_IDS[i]}" ]]; then
+      echo "  - a cluster ($(kubehz::_hosted_hosting_name "${i}"))" >&2
+      continue
+    fi
+    echo "  - cluster ${KUBEHZ_HOSTED_LIST_IDS[i]} ($(kubehz::_hosted_hosting_name "${i}"))" >&2
+  done
+  echo "  See your clusters with:  lo kubehz cluster list" >&2
 }
 
 # kubehz::_hosted_create_unknown <api_url> <domain> <cause>: end a create
@@ -404,18 +560,21 @@ kubehz::_hosted_create_unknown() {
   local api_url="${1}" domain="${2}" cause="${3}" rc=0
   kubehz::_hosted_listed "${api_url}" "${domain}" || rc=$?
   error "kubehz: the result of the create for ${domain} is unknown (${cause}). Possibly, kubehz made the cluster."
-  if (( rc == 1 )); then
-    echo "  lo cannot read the cluster list either (${KUBEHZ_HOSTED_LIST_CAUSE})." >&2
-  elif (( rc == 0 )) && [[ -n "${KUBEHZ_HOSTED_LIST_ID}" ]]; then
-    echo "  The cluster list shows cluster ${KUBEHZ_HOSTED_LIST_ID} for ${domain}:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_ID}" >&2
-  elif (( rc == 0 )); then
-    echo "  The cluster list shows a cluster for ${domain}:  lo kubehz cluster list" >&2
-  else
+  if (( rc == 2 )); then
     echo "  The cluster list shows no cluster for ${domain} now." >&2
+  elif (( rc != 0 )); then
+    echo "  lo cannot read the cluster list either (${KUBEHZ_HOSTED_LIST_CAUSE:-an error in lo})." >&2
+  elif (( ${#KUBEHZ_HOSTED_LIST_IDS[@]} > 1 )); then
+    echo "  The cluster list shows ${#KUBEHZ_HOSTED_LIST_IDS[@]} clusters for ${domain}:  lo kubehz cluster list" >&2
+  elif [[ -n "${KUBEHZ_HOSTED_LIST_IDS[0]}" ]]; then
+    echo "  The cluster list shows cluster ${KUBEHZ_HOSTED_LIST_IDS[0]} for ${domain}:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_IDS[0]}" >&2
+  else
+    echo "  The cluster list shows a cluster for ${domain}:  lo kubehz cluster list" >&2
   fi
-  echo "  If kubehz is still checking the create, it keeps or removes the cluster in about 3 minutes." >&2
-  echo "  Do not run lo provision again before that." >&2
-  echo "  Then run it again only if lo kubehz cluster list shows no cluster for ${domain}." >&2
+  echo "  If kubehz is still checking the create, it usually keeps or removes the cluster in about 3 minutes." >&2
+  echo "  When the check fails, kubehz tries again about 15 minutes later." >&2
+  echo "  Do not run lo provision again before kubehz keeps or removes the cluster." >&2
+  echo "  Then run it again. lo downloads the kubeconfig of a kept cluster, or creates a new one." >&2
 }
 
 # kubehz::_hosted_kubeconfig_get <api_url> <cluster_id>: the kubeconfig of

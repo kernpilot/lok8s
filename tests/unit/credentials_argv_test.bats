@@ -93,9 +93,10 @@ curl_respond() {
     # deletes it.
     */v1/ssh_keys\?name=*) out='{"ssh_keys":[{"id":7,"labels":{"lok8s.dev/kubehz-claim":"4832b62ed035fb411ffefd346ab61e77"}}]}' ;;
     */api/credentials) out='{"data":{"validation":{"writable":true}}}' ;;
-    # A hosted create reads the list first. With CREATED_MARK set, the
-    # list shows no cluster until the create made that file.
-    */api/clusters\?perPage=500)
+    # A hosted create reads the list first, with the domain filter. With
+    # CREATED_MARK set, the list shows no cluster until the create made
+    # that file.
+    */api/clusters\?perPage=500 | */api/clusters\?perPage=500\&domain=d.example)
       if [[ -n "${CREATED_MARK:-}" && ! -e "${CREATED_MARK}" ]]; then
         out='{"ok":true,"data":[]}'
       else
@@ -415,8 +416,10 @@ YAML
 
   assert_argv_clean
   [ "$(req_count "POST https://api.kubehz.example/api/clusters | user= | headers=Content-Type: application/json; Authorization: Bearer ${KUBEHZ_TOKEN}")" = 1 ]
-  # The list before the create, and the lookup of the destroy.
-  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500 | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 2 ]
+  # The list before the create (with the domain filter), and the lookup
+  # of the destroy.
+  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500&domain=d.example | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 1 ]
+  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500 | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 1 ]
   [ "$(req_count "GET https://api.kubehz.example/api/clusters/cl-1 ")" -ge 1 ]
   [ "$(req_count "GET https://api.kubehz.example/api/clusters/cl-1/kubeconfig")" = 1 ]
   [ "$(req_count "DELETE https://api.kubehz.example/api/clusters/cl-1")" = 1 ]

@@ -1477,6 +1477,8 @@ _routes() {
   "POST /api/credentials": {"code": 200, "body": {"data": {"validation": {"writable": true}}}},
   "GET /api/clusters?perPage=500": {"code": 200, "body": {"ok": true, "data": [{"id": "cl-1", "domain": "d.example",
     "createdAt": "2026-01-01T00:00:00Z", "status": "active", "connected": true}]}},
+  "GET /api/clusters?perPage=500&domain=d.example": {"code": 200, "body": {"ok": true, "data": [{"id": "cl-1",
+    "domain": "d.example", "createdAt": "2026-01-01T00:00:00Z", "status": "active", "connected": true}]}},
   "GET /api/clusters/cl-1/assessment": {"code": 200, "body": {"data": {}}},
   "POST /api/clusters/cl-1/agent-token": {"code": 200, "body": {"rotated": true, "clusterId": "cl-1"}},
   "DELETE /api/clusters/cl-1": {"code": 200, "body": {"ok": true}},
@@ -1844,9 +1846,11 @@ _agent_setup() {
 
 # ── hosted (libs/kubehz/hosted, the KUBEHZ_TOKEN bearer) ──
 
-# _hosted_list <json array>: the rows of the cluster list in the routes.
+# _hosted_list <json array>: the rows of the cluster list in the routes,
+# without and with the domain filter.
 _hosted_list() {
-  jq --argjson d "${1}" '."GET /api/clusters?perPage=500".body.data = $d' "${STUB_ROUTES}" > "${STUB_ROUTES}.new"
+  jq --argjson d "${1}" '."GET /api/clusters?perPage=500".body.data = $d
+    | ."GET /api/clusters?perPage=500&domain=d.example".body.data = $d' "${STUB_ROUTES}" > "${STUB_ROUTES}.new"
   mv -- "${STUB_ROUTES}.new" "${STUB_ROUTES}"
 }
 
@@ -1878,7 +1882,8 @@ _hosted_setup() {
   _hosted_setup
   _curlrc_case _hosted_flow 2
   grep -qx 'kind: Config' "${BATS_TEST_TMPDIR}/ref.out"
-  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 8 ]
+  [ "$(grep -c '^GET /api/clusters?perPage=500&domain=d.example bearer$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^POST /api/clusters bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters/cl-1 bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters/cl-1/kubeconfig bearer$' "${STUB_LOG}")" -eq 4 ]

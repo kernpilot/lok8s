@@ -438,7 +438,7 @@ func TestAgentRefusalsNameTheStatusTheCodeAndTheNextStep(t *testing.T) {
 				"  Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC).\n"},
 		{"create unconfirmed", 409, refusalBody("CLUSTER_CREATE_UNCONFIRMED", "The create of this cluster is not confirmed yet", "api help"), true,
 			"(HTTP 409 CLUSTER_CREATE_UNCONFIRMED): The create of this cluster is not confirmed yet\n" +
-				"  The platform is still checking the create of this cluster. In about 3 minutes it keeps or removes the cluster. Do not create the cluster again. Run the command again after that.\n"},
+				"  The platform is still checking the create of this cluster. Usually, it keeps or removes the cluster in about 3 minutes. When the check fails, it tries again about 15 minutes later. Do not create the cluster again. Run the command again after that.\n"},
 		{"not found", 404, refusalBody("NOT_FOUND", "Space not found", "api help"), false,
 			"  No space sp-1a2b3c4d exists, or the credential cannot reach it. List what it reaches: lo kubehz space list\n"},
 		{"unknown code: the api help", 409, refusalBody("KUBECONFIG_NOT_READY", "not ready", "Poll the space, then retry."), false,

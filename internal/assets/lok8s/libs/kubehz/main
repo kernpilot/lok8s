@@ -1172,8 +1172,9 @@ kubehz::status() {
     return 0
   fi
 
-  # Query the tenant registry for the live row. The list endpoint IGNORES
-  # ?domain= and answers the pagination envelope {ok, data: […]} — the old
+  # Query the tenant registry for the live row. The list route has an exact
+  # ?domain= filter that this read does not send (an older api ignores it),
+  # and answers the pagination envelope {ok, data: […]} — the old
   # code read `.status` off that ENVELOPE, so this line printed
   # "Status: unknown" for every registered cluster. Filter the rows
   # client-side (the resolve_cluster_id / space_lookup idiom) and read the
@@ -1454,7 +1455,8 @@ kubehz::claim-code() {
 # ── Cluster-id resolution (registry lookup) ──────────────
 
 # Resolve the platform cluster id (cl-<uuid8>) for a domain from the tenant's
-# registry. The list endpoint IGNORES ?domain=, so filter CLIENT-SIDE —
+# registry. The list route has an exact ?domain= filter, but this lookup
+# does not send it, and an older api ignores it: so filter CLIENT-SIDE.
 # .data[0] would silently pick the tenant's newest cluster on multi-cluster
 # tenants. Requires KUBEHZ_TOKEN (the id is only visible to the owning
 # tenant). Prints the id; on failure prints nothing and returns 1 (the list

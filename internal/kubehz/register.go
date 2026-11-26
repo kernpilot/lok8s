@@ -366,7 +366,8 @@ var errNotRegistered = errors.New("kubehz: no cluster registered for domain")
 
 // ResolveClusterID ports kubehz::resolve_cluster_id: the platform cluster
 // id (cl-<uuid8>) for a domain from the tenant's registry. The list
-// endpoint IGNORES ?domain=, so the rows are filtered CLIENT-SIDE,
+// route has an exact ?domain= filter, but this lookup does not send it,
+// and an older api ignores it: the rows are filtered CLIENT-SIDE,
 // oldest-first (the server binds agent identity to the OLDEST active row).
 // A failed list request is a plain error; a list without a row for the
 // domain is errNotRegistered — deregister/destroy branch on the distinction

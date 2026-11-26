@@ -266,7 +266,7 @@ func agentHint(s *agentSession, k agentKind, id string, status int, code string)
 	case code == "AGENT_KEY_SPEND_CAP":
 		return "Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC)."
 	case code == "CLUSTER_CREATE_UNCONFIRMED":
-		return "The platform is still checking the create of this cluster. In about 3 minutes it keeps or removes the cluster. Do not create the cluster again. Run the command again after that."
+		return "The platform is still checking the create of this cluster. Usually, it keeps or removes the cluster in about 3 minutes. When the check fails, it tries again about 15 minutes later. Do not create the cluster again. Run the command again after that."
 	case code == "SPACE_LIMITS_ABOVE_SHARED":
 		return "Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default."
 	case code == "NO_SHARD_AVAILABLE" || code == "SHARD_AT_CAPACITY":
