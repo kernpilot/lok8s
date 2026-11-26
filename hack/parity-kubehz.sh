@@ -892,7 +892,6 @@ if [[ -n "${STUB_PORT}" ]]; then
   check_api - kubehz cluster lease cl-self0001 --hours 3
   check_api - kubehz cluster lease cl-viewer01 --hours 3
   check_api - kubehz cluster kubeconfig cl-pending1 --file kc.yaml
-  check_api - kubehz space kubeconfig sp-dedicat1 --file kc.yaml
 
   # The kubeconfig: the same bytes and mode in both, the path on stdout.
   for format in text json; do

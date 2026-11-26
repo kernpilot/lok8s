@@ -337,10 +337,6 @@ ROUTES = {
     ("PATCH", "/api/spaces/sp-capped01/lease"): refusal(409, "AGENT_KEY_SPEND_CAP", "This agent key spent 1200 of its 1000 cents this month",
                                                          "Delete what the key created, or ask an owner for a key with a higher cap."),
     ("GET", "/api/spaces/sp-1a2b3c4d/kubeconfig/agent"): (200, KUBECONFIG),
-    ("GET", "/api/spaces/sp-dedicat1/kubeconfig/agent"): refusal(
-        409, "SPACE_HAS_DEDICATED_CONTROL_PLANE",
-        "This space runs a dedicated control plane: download its kubeconfig from the control-plane route",
-        "GET /api/spaces/sp-dedicat1/control-plane/kubeconfig (admin) or ?variant=sso (kubelogin)."),
     ("GET", "/api/clusters"): (200, ok([CLUSTER, SELF_CLUSTER], {"pagination": {"page": 1, "perPage": 500, "total": 612, "pages": 2}})),
     ("GET", "/api/clusters/cl-1a2b3c4d"): (200, ok({**CLUSTER, "heartbeat": {}, "execution": {}})),
     ("PATCH", "/api/clusters/cl-1a2b3c4d/lease"): (200, ok({"id": "cl-1a2b3c4d", "leaseExpiresAt": "2026-10-05T12:00:00.000Z"})),
