@@ -833,13 +833,13 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 	}
 	c.echo("Space '%s' is Active (id: %s)", sp.Slug, spaceID)
 	c.echo("  Namespace: %s", sp.Slug)
-	// D30 (both implementations): the space's kubectl kubeconfig. The api
-	// serves a kubelogin file for a shared space. It
-	// holds the public endpoint, the shard's sign-in client and the context
-	// kubehz-<slug>, and no credential. The file lands beside the hosted
-	// path's file. An api without the route, a space still wiring up or one
-	// with a dedicated plane keep the older two lines. Nothing fails: the
-	// space is Active either way.
+	// D30 (both implementations): the space's kubectl kubeconfig. A space
+	// runs on a shared control plane, and the api serves a kubelogin file
+	// for it. The file holds the public endpoint, the shard's sign-in client
+	// and the context kubehz-<slug>, and no credential. The file lands
+	// beside the hosted path's file. An api without the route, or a space
+	// still wiring up, keeps the older two lines. Nothing fails: the space
+	// is Active either way.
 	if path := c.spaceKubeconfig(ctx, cfg, domain, spaceID); path != "" {
 		c.echo("  Access: kubectl --context kubehz-%s -n %s get pods", sp.Slug, sp.Slug)
 		c.echo("  Kubeconfig: %s (kubectl signs you in with your kubehz account)", path)
