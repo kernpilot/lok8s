@@ -11,14 +11,20 @@
 #     move the pools (KUBEHZ_MD_NAMESPACE), move this Role's namespace with
 #     them;
 #   - machinedeployments.cluster.k8s.io (the legacy machine-api group KubeOne
-#     uses, NOT cluster.x-k8s.io): read verbs + patch. Patch covers the two
-#     fields the executors edit — spec.replicas (P3 scaling) and
+#     uses, NOT cluster.x-k8s.io): list + patch. Patch covers the two fields
+#     the executors edit — spec.replicas (P3 scaling) and
 #     spec.template.spec.versions.kubelet (P6 worker rolls). No update (patch
 #     is what the executor sends), no create, no delete;
-#   - machines.cluster.k8s.io: read verbs for the machineIssues collector
+#   - machines.cluster.k8s.io: list for the machineIssues collector
 #     (surfacing machine-controller provisioning failures on the heartbeat)
 #     and the P5/P6 loops' pool/health/progress reads — PLUS delete, below.
 #     No machinesets;
+#   - no get and no watch on either: every read the agent makes is one LIST
+#     per pass (no informer, no single-object read), and an unused read verb
+#     is a capability nobody needs;
+#   - the acting LEASE in kubehz-system (leader election): without it the
+#     agent refuses to act at all, because it cannot prove it is the only
+#     actor — see that object's own header;
 #   - ONE ClusterRole at the bottom (pods delete only — the P5 eviction
 #     unwedge; see its own header), the single cluster-scoped write grant in
 #     this overlay. Everything else stays namespaced.
@@ -30,9 +36,11 @@
 # server churn — the agent still holds no cloud credential). The blast
 # radius is bounded by the executor's hard guardrails (all unit-tested):
 # server-gated (execution.healing + the served policy), never control-plane,
-# storm brake above maxUnhealthy, per-pool cooldown with a fresh-cooldown
-# restart baseline, at most maxUnhealthy disruptions in flight, autoscaler
-# pools refused, unowned machines refused. If you do not want the platform
+# storm brake above maxUnhealthy, per-pool cooldown (never below five
+# minutes) with a fresh-cooldown restart baseline, at most maxUnhealthy
+# disruptions in flight, at most a third of a pool out of service at once,
+# simultaneous failures refused, autoscaler pools refused, unowned machines
+# refused. If you do not want the platform
 # to EVER delete a machine, remove the delete verb below — healing then
 # fails closed with a reported Forbidden and everything else keeps working.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -46,11 +54,11 @@ metadata:
 rules:
   - apiGroups: [cluster.k8s.io]
     resources: [machinedeployments]
-    verbs: [get, list, watch, patch]
+    verbs: [list, patch]
   - apiGroups: [cluster.k8s.io]
     resources: [machines]
     # delete = P5 self-healing ONLY (see the header warning above).
-    verbs: [get, list, watch, delete]
+    verbs: [list, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -64,6 +72,52 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: kubehz-live-agent-machinedeployments
+subjects:
+  - kind: ServiceAccount
+    name: kubehz-live-agent
+    namespace: kubehz-system
+---
+# ACTING LEASE — leader election. Acting is single-writer: the agent patches a
+# MachineDeployment or deletes a Machine only while it holds the Lease
+# kubehz-system/kubehz-live-agent, because every remaining guardrail (per-pool
+# cooldown, in-flight budget, one pool rolling at a time) is per-PROCESS state
+# a second replica cannot see — two actors would double every bound.
+#
+# Without this Role the agent CANNOT ACT AT ALL: it logs the missing lease
+# loudly and keeps reporting (fail toward report-only). Apply this overlay
+# again when upgrading from an agent that predates leader election.
+#
+# One Lease, three verbs: create (the object is made on first acquisition),
+# get + update on that name only (hold and renew it).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubehz-live-agent-lease
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [kubehz-live-agent]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubehz-live-agent-lease
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-live-agent
+    app.kubernetes.io/part-of: kubehz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubehz-live-agent-lease
 subjects:
   - kind: ServiceAccount
     name: kubehz-live-agent
