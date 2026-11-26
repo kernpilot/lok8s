@@ -7,10 +7,14 @@ package kubehz
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -177,7 +181,11 @@ func TestWaitForCluster(t *testing.T) {
 	mustContain(t, h.output(), "Timed out waiting for hosted cluster cl-003 after 30s")
 }
 
+// hostedSpec writes a hosted spec for test.kubehz.dev. It also answers
+// the cluster list with no cluster: ProvisionHosted reads it before the
+// create. A test registers its own list to replace it.
 func hostedSpec(h *harness, name string) string {
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[],"meta":{"pagination":{"page":1,"perPage":500,"total":0}}}`)
 	return h.writeSpec("test.kubehz.dev", "kind: KubeOne\nmetadata:\n  name: "+name+"\nspec:\n  cluster:\n    domain: test.kubehz.dev\n  kubernetes:\n    version: v1.31.10\n  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
 }
 
@@ -610,6 +618,478 @@ func TestProvisionHostedSurfacesAPIMessage(t *testing.T) {
 	mustContain(t, h.output(), "HTTP 502")
 	mustContain(t, h.output(), "Failed to schedule the hosted control plane")
 	mustContain(t, h.output(), "  try later")
+}
+
+// hostedCount counts the requests of one method to one exact path.
+func hostedCount(h *harness, method, path string) int {
+	n := 0
+	for _, r := range h.reqs() {
+		if r.Method == method && r.Path == path {
+			n++
+		}
+	}
+	return n
+}
+
+// hostedListBody is a list answer with the rows of the list and a total
+// that equals their number.
+func hostedListBody(rows ...string) string {
+	return `{"ok":true,"data":[` + strings.Join(rows, ",") + `],"meta":{"pagination":{"total":` + strconv.Itoa(len(rows)) + `}}}`
+}
+
+// The other row of a list: a cluster of another domain, which an api that
+// ignores ?domain= sends too.
+const hostedOtherRow = `{"id":"cl-other","domain":"other.example.com","hosting":"hosted","status":"Running","createdAt":"2026-01-01T00:00:00Z"}`
+
+// One cluster for one domain: one cluster of the domain that lo does not
+// use stops the create. lo names its id, its hosting and its status, and
+// why it stops. The create, the wait and the download are answered:
+// without the stop, the provision would succeed.
+func TestProvisionHostedStopsOnAClusterOfTheDomain(t *testing.T) {
+	t.Parallel()
+	const confirmLines = "  kubehz is still checking the create of this cluster.\n" +
+		"  Usually, kubehz keeps or removes the cluster in about 3 minutes.\n" +
+		"  When the check fails, kubehz tries again about 15 minutes later.\n" +
+		"  Run the command again after that.\n"
+	for name, tc := range map[string]struct {
+		row    string
+		status int    // the answer of GET /api/clusters/cl-1a; 0: no read expected
+		live   string // its body
+		want   string
+	}{
+		// The list keeps the status of the create: lo reads the live one.
+		"a hosted cluster that is not ready": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}`,
+			200, `{"ok":true,"data":{"id":"cl-1a","status":"Deleting"}}`,
+			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Deleting), so lo did not create another one.\n" +
+				"  lo downloads the kubeconfig only when the status is Running.\n" +
+				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		},
+		"a hosted cluster whose create is not confirmed": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}`,
+			200, `{"ok":true,"data":{"id":"cl-1a","status":"Running"}}`,
+			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Running, create not confirmed), so lo did not create another one.\n" +
+				confirmLines +
+				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		},
+		"a self-hosted cluster": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"self","status":"Running"}`,
+			0, "",
+			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (self-hosted, Running), so lo did not create another one.\n" +
+				"  It is not a hosted cluster, so lo does not download its kubeconfig.\n" +
+				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		},
+		"a cluster without a hosting": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","status":"Running"}`,
+			0, "",
+			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (unknown, Running), so lo did not create another one.\n" +
+				"  It is not a hosted cluster, so lo does not download its kubeconfig.\n" +
+				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		},
+		"the status read fails": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}`,
+			500, `{"ok":false}`,
+			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Unknown), so lo did not create another one.\n" +
+				"  lo downloads the kubeconfig only when the status is Running.\n" +
+				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		},
+		// A status that is not one word is a server string that lo does
+		// not repeat.
+		"a status lo does not show": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}`,
+			200, `{"ok":true,"data":{"status":"Running\u001b[2J"}}`,
+			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, unknown), so lo did not create another one.\n" +
+				"  lo downloads the kubeconfig only when the status is Running.\n" +
+				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		},
+		// An id in another shape is a server string that lo does not repeat,
+		// and lo reads no status for it.
+		"an id lo does not show": {
+			`{"id":"cl-\u001b[2J","domain":"test.kubehz.dev","hosting":"hosted","status":"Running"}`,
+			0, "",
+			"[error] kubehz: your account already has a cluster for test.kubehz.dev (hosted, Running), so lo did not create another one.\n" +
+				"  See your clusters with:  lo kubehz cluster list\n",
+		},
+		"no id, no hosting and no status": {
+			`{"domain":"test.kubehz.dev"}`,
+			0, "",
+			"[error] kubehz: your account already has a cluster for test.kubehz.dev (unknown, unknown), so lo did not create another one.\n" +
+				"  See your clusters with:  lo kubehz cluster list\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := hostedSpec(h, "test.kubehz.dev")
+			hostedKubeconfigRoutes(h, 200, "new\n")
+			h.handle("GET /api/clusters", 200, hostedListBody(hostedOtherRow, tc.row))
+			if tc.status != 0 {
+				h.handle("GET /api/clusters/cl-1a", tc.status, tc.live)
+			}
+			mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+			if got := h.output(); got != tc.want {
+				t.Fatalf("output:\n got %q\nwant %q", got, tc.want)
+			}
+			if h.anyReq("POST", "/api/clusters") {
+				t.Fatal("a create was sent")
+			}
+			want := 0
+			if tc.status != 0 {
+				want = 1
+			}
+			if n := hostedCount(h, "GET", "/api/clusters/cl-1a"); n != want {
+				t.Fatalf("the status was read %d times, want %d", n, want)
+			}
+			if h.anyReq("GET", "/kubeconfig") {
+				t.Fatal("a kubeconfig was downloaded")
+			}
+			r := h.lastReq("GET", "/api/clusters")
+			if r == nil || r.Query != "perPage=500&domain=test.kubehz.dev" || r.Auth != "Bearer khz_test_token" {
+				t.Fatalf("the list request: %+v", r)
+			}
+			if _, err := os.Stat(filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("a kubeconfig was written (stat: %v)", err)
+			}
+		})
+	}
+}
+
+// More than one cluster of the domain stops the create: lo cannot tell
+// which one to use. It names them, the oldest first, at most ten, and
+// reads no status.
+func TestProvisionHostedStopsOnMoreThanOneCluster(t *testing.T) {
+	t.Parallel()
+	row := func(id, hosting, at string) string {
+		return `{"id":"` + id + `","domain":"test.kubehz.dev","hosting":"` + hosting + `","status":"Running","createdAt":"` + at + `"}`
+	}
+	head := func(n int) string {
+		return "[error] kubehz: your account has " + strconv.Itoa(n) + " clusters for test.kubehz.dev, so lo did not create another one.\n" +
+			"  lo downloads a kubeconfig only when the account has one cluster for the domain.\n"
+	}
+	const foot = "  See your clusters with:  lo kubehz cluster list\n"
+	var twelve []string
+	for i := range 12 {
+		twelve = append(twelve, row("cl-"+strconv.Itoa(10+i), "hosted", "2026-02-"+strconv.Itoa(10+i)+"T00:00:00Z"))
+	}
+	var twelveWant strings.Builder
+	twelveWant.WriteString(head(12))
+	for i := range 10 {
+		twelveWant.WriteString("  - cluster cl-" + strconv.Itoa(10+i) + " (hosted)\n")
+	}
+	twelveWant.WriteString("  - and 2 more\n" + foot)
+	for name, tc := range map[string]struct {
+		rows []string
+		want string
+	}{
+		"three clusters": {
+			[]string{
+				hostedOtherRow,
+				row("cl-new", "hosted", "2026-03-01T00:00:00Z"),
+				`{"id":"../x","domain":"test.kubehz.dev","hosting":"x\u001b[2J","createdAt":"2026-02-15T00:00:00Z"}`,
+				row("cl-old", "self", "2026-02-01T00:00:00Z"),
+			},
+			head(3) +
+				"  - cluster cl-old (self-hosted)\n" +
+				"  - a cluster (unknown)\n" +
+				"  - cluster cl-new (hosted)\n" + foot,
+		},
+		"twelve clusters": {twelve, twelveWant.String()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := hostedSpec(h, "test.kubehz.dev")
+			hostedKubeconfigRoutes(h, 200, "new\n")
+			h.handle("GET /api/clusters", 200, hostedListBody(tc.rows...))
+			mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+			if got := h.output(); got != tc.want {
+				t.Fatalf("output:\n got %q\nwant %q", got, tc.want)
+			}
+			if h.anyReq("POST", "/api/clusters") || h.anyReq("GET", "/api/clusters/") {
+				t.Fatalf("a create, a status read or a download was sent: %+v", h.reqs())
+			}
+		})
+	}
+}
+
+// One hosted cluster of the domain with a confirmed create and a ready
+// status: lo creates no cluster. It downloads the kubeconfig and writes
+// the mirror, as after a create, and replaces the old kubeconfig. The list
+// keeps the status of the create ("Creating"): lo reads the live one once.
+func TestProvisionHostedUsesTheClusterOfTheDomain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "mirror-name")
+	h.handle("GET /api/clusters", 200, hostedListBody(hostedOtherRow,
+		`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}`))
+	h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"id":"cl-1a","status":"Running"}}`)
+	h.handle("GET /api/clusters/cl-1a/kubeconfig", 200, "apiVersion: v1\nkind: Config\n")
+	h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-2b"}}`)
+	dir := filepath.Join(h.base, ".kubeconfig")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kc := filepath.Join(dir, "test.kubehz.dev.yaml")
+	if err := os.WriteFile(kc, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
+	want := "kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Running).\n" +
+		"  lo downloads its kubeconfig and does not create another cluster.\n"
+	if got := h.output(); got != want {
+		t.Fatalf("output:\n got %q\nwant %q", got, want)
+	}
+	if got := h.out.String(); got != want {
+		t.Fatalf("stdout:\n got %q\nwant %q", got, want)
+	}
+	if h.anyReq("POST", "/api/clusters") {
+		t.Fatal("a create was sent")
+	}
+	if n := hostedCount(h, "GET", "/api/clusters/cl-1a"); n != 1 {
+		t.Fatalf("the status was read %d times, want 1", n)
+	}
+	for _, f := range []string{kc, filepath.Join(dir, "mirror-name.yaml")} {
+		if got := readFile(t, f); got != "apiVersion: v1\nkind: Config\n" {
+			t.Fatalf("%s: %q", f, got)
+		}
+	}
+	if r := h.lastReq("GET", "/api/clusters/cl-1a/kubeconfig"); r == nil || r.Auth != "Bearer khz_test_token" {
+		t.Fatalf("the download: %+v", r)
+	}
+}
+
+// A download that fails after lo found the cluster fails the run and
+// keeps the old kubeconfig, as after a create.
+func TestProvisionHostedUsedClusterFailedDownload(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	h.handle("GET /api/clusters", 200, hostedListBody(`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted"}`))
+	h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"status":"Running"}}`)
+	h.handle("GET /api/clusters/cl-1a/kubeconfig", 403, `{"ok":false,"data":{"code":"TOKEN_NOT_ALLOWED"}}`)
+	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+	mustContain(t, h.output(), "[error] Failed to download kubeconfig for hosted cluster cl-1a\n")
+	if h.anyReq("POST", "/api/clusters") {
+		t.Fatal("a create was sent")
+	}
+	if _, err := os.Stat(filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("a kubeconfig was written (stat: %v)", err)
+	}
+}
+
+// lo sends ?domain= only for a domain of the shape that the api takes;
+// such a value needs no escape. Another domain gets the list without the
+// filter, and lo still compares the domain of each row.
+func TestHostedListedDomainFilter(t *testing.T) {
+	t.Parallel()
+	label63 := strings.Repeat("a", 63)
+	long253 := label63 + "." + label63 + "." + label63 + "." + strings.Repeat("b", 61)
+	for domain, want := range map[string]string{
+		"test.kubehz.dev":          "perPage=500&domain=test.kubehz.dev",
+		"a-1.b2.example":           "perPage=500&domain=a-1.b2.example",
+		long253:                    "perPage=500&domain=" + long253,
+		long253 + "b":              "perPage=500",
+		"Test.kubehz.dev":          "perPage=500",
+		"localhost":                "perPage=500",
+		"-a.example.com":           "perPage=500",
+		"a-.example.com":           "perPage=500",
+		"a..example.com":           "perPage=500",
+		"a.example.com.":           "perPage=500",
+		"a&perPage=1.example.com":  "perPage=500",
+		"a.example.com\nb.example": "perPage=500",
+		label63 + "a.example.com":  "perPage=500",
+		"null":                     "perPage=500",
+		"":                         "perPage=500",
+	} {
+		h := newHarness(t)
+		h.handle("GET /api/clusters", 200, hostedListBody(hostedOtherRow))
+		l := h.ctx.hostedListed(t.Context(), h.apiURL(), domain)
+		if l.cause != "" || len(l.rows) != 0 {
+			t.Fatalf("%q: %+v", domain, l)
+		}
+		if r := h.lastReq("GET", "/api/clusters"); r == nil || r.Query != want {
+			t.Fatalf("%q: the list request %+v, want the query %q", domain, r, want)
+		}
+	}
+}
+
+// The domain of the create is spec.cluster.domain: a cluster of the lo
+// domain with another spec.cluster.domain does not stop the create, and a
+// full list without a cluster of the domain does not either.
+func TestProvisionHostedCreatesWhenTheListShowsNone(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := h.writeSpec("test.kubehz.dev", "kind: KubeOne\nmetadata:\n  name: test.kubehz.dev\nspec:\n  cluster:\n    domain: api.test.kubehz.dev\n  kubernetes:\n    version: v1.31.10\n  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev"},{"id":"cl-2b","domain":"other.example.com"}],"meta":{"pagination":{"total":2}}}`)
+	hostedKubeconfigRoutes(h, 200, "new\n")
+	mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
+	if !h.anyReq("POST", "/api/clusters") {
+		t.Fatal("no create was sent")
+	}
+	if r := h.lastReq("POST", "/api/clusters"); !strings.Contains(r.Body, `"domain":"api.test.kubehz.dev"`) {
+		t.Fatalf("the create body: %s", r.Body)
+	}
+}
+
+// hostedNoAnswer ends the connection of a request without an answer: the
+// request reached the server, the client gets no status.
+func hostedNoAnswer(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}
+}
+
+// A list that lo cannot read stops the create: lo cannot tell whether the
+// account has a cluster of the domain.
+func TestProvisionHostedStopsWhenTheListCannotBeRead(t *testing.T) {
+	t.Parallel()
+	const again = "  Run the command again when lo can read the list.\n"
+	line := func(cause string) string {
+		return "[error] kubehz: lo cannot read the cluster list (" + cause + "), so it cannot check for a cluster of test.kubehz.dev. No cluster was created.\n"
+	}
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		want   string
+	}{
+		"a refusal": {500, `{"ok":false,"data":{"code":"INTERNAL_ERROR","message":"boom"}}`, line("HTTP 500 INTERNAL_ERROR") + again},
+		"a missing scope": {403, `{"ok":false,"data":{"code":"TOKEN_SCOPE_MISSING","message":"This endpoint requires the 'read' scope"}}`,
+			line("HTTP 403 TOKEN_SCOPE_MISSING") + "  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens).\n"},
+		"a code lo does not repeat": {502, `{"data":{"code":"x\u001b[2J"}}`, line("HTTP 502") + again},
+		"no list":                   {200, `{"ok":true,"data":{"id":"cl-1"}}`, line("an answer without a list") + again},
+		"a null list":               {200, `{"ok":true,"data":null}`, line("an answer without a list") + again},
+		"not JSON":                  {200, `<html>proxy</html>`, line("an answer without a list") + again},
+		"a part of the clusters": {200, `{"ok":true,"data":[{"id":"cl-2b","domain":"other.example.com"}],"meta":{"pagination":{"total":612}}}`,
+			line("it shows 1 of 612 clusters") + again},
+		// lo cannot tell that the cluster on the page is the only one.
+		"a part of the clusters with a cluster of the domain": {200,
+			`{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Running"}],"meta":{"pagination":{"total":2}}}`,
+			line("it shows 1 of 2 clusters") + again},
+		"no answer": {0, "", line("no answer") + again},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := hostedSpec(h, "test.kubehz.dev")
+			hostedKubeconfigRoutes(h, 200, "new\n")
+			if tc.status == 0 {
+				h.handleFunc("GET /api/clusters", hostedNoAnswer(t))
+			} else {
+				h.handle("GET /api/clusters", tc.status, tc.body)
+			}
+			mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+			if got := h.output(); got != tc.want {
+				t.Fatalf("output:\n got %q\nwant %q", got, tc.want)
+			}
+			if h.anyReq("POST", "/api/clusters") {
+				t.Fatal("a create was sent")
+			}
+		})
+	}
+}
+
+// A create that reached the api and got no answer, or got the answer of a
+// gateway in front of the api, can have made the cluster. lo reads the
+// list again and names what it shows before it reports anything.
+func TestProvisionHostedLostAnswerReadsTheListAgain(t *testing.T) {
+	t.Parallel()
+	const tail = "  If kubehz is still checking the create, it usually keeps or removes the cluster in about 3 minutes.\n" +
+		"  When the check fails, kubehz tries again about 15 minutes later.\n" +
+		"  Do not run lo provision again before kubehz keeps or removes the cluster.\n" +
+		"  Then run it again. lo downloads the kubeconfig of a kept cluster, or creates a new one.\n"
+	head := func(cause string) string {
+		return "[error] kubehz: the result of the create for test.kubehz.dev is unknown (" + cause + "). Possibly, kubehz made the cluster.\n"
+	}
+	const row = `{"ok":true,"data":[{"id":"cl-1a2b3c4d","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"}]}`
+	type answer struct {
+		status int
+		body   string
+	}
+	for name, tc := range map[string]struct {
+		create answer // status 0: no answer
+		second answer // the second list read
+		want   string
+	}{
+		"no answer, the list shows the cluster": {answer{}, answer{200, row},
+			head("no answer") + "  The cluster list shows cluster cl-1a2b3c4d for test.kubehz.dev:  lo kubehz cluster get cl-1a2b3c4d\n" + tail},
+		"no answer, the list shows an id lo does not show": {answer{}, answer{200, `{"ok":true,"data":[{"id":"../x","domain":"test.kubehz.dev"}]}`},
+			head("no answer") + "  The cluster list shows a cluster for test.kubehz.dev:  lo kubehz cluster list\n" + tail},
+		"no answer, the list shows two clusters": {answer{}, answer{200, `{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev"},{"id":"cl-2b","domain":"test.kubehz.dev"}]}`},
+			head("no answer") + "  The cluster list shows 2 clusters for test.kubehz.dev:  lo kubehz cluster list\n" + tail},
+		"no answer, the list shows none": {answer{}, answer{200, `{"ok":true,"data":[]}`},
+			head("no answer") + "  The cluster list shows no cluster for test.kubehz.dev now.\n" + tail},
+		"no answer, the list fails": {answer{}, answer{500, `{"ok":false}`},
+			head("no answer") + "  lo cannot read the cluster list either (HTTP 500).\n" + tail},
+		"a gateway 504": {answer{504, `upstream request timeout`}, answer{200, row},
+			head("HTTP 504") + "  The cluster list shows cluster cl-1a2b3c4d for test.kubehz.dev:  lo kubehz cluster get cl-1a2b3c4d\n" + tail},
+		"a gateway 502 with a JSON body and no code": {answer{502, `{"ok":false}`}, answer{200, `{"ok":true,"data":[]}`},
+			head("HTTP 502") + "  The cluster list shows no cluster for test.kubehz.dev now.\n" + tail},
+		"a gateway 503": {answer{503, `no healthy upstream`}, answer{200, `{"ok":true,"data":[]}`},
+			head("HTTP 503") + "  The cluster list shows no cluster for test.kubehz.dev now.\n" + tail},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := hostedSpec(h, "test.kubehz.dev")
+			var lists atomic.Int32
+			h.handleFunc("GET /api/clusters", func(w http.ResponseWriter, _ *http.Request) {
+				if lists.Add(1) == 1 {
+					_, _ = io.WriteString(w, `{"ok":true,"data":[]}`)
+					return
+				}
+				w.WriteHeader(tc.second.status)
+				_, _ = io.WriteString(w, tc.second.body)
+			})
+			if tc.create.status == 0 {
+				h.handleFunc("POST /api/clusters", hostedNoAnswer(t))
+			} else {
+				h.handle("POST /api/clusters", tc.create.status, tc.create.body)
+			}
+			mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+			if got := h.output(); got != tc.want {
+				t.Fatalf("output:\n got %q\nwant %q", got, tc.want)
+			}
+			if n := lists.Load(); n != 2 {
+				t.Fatalf("the list was read %d times, want 2", n)
+			}
+			if h.anyReq("GET", "/api/clusters/") {
+				t.Fatalf("lo waited for a cluster: %+v", h.reqs())
+			}
+		})
+	}
+}
+
+// A create that did not leave this machine made no cluster: lo says so,
+// and does not read the list again. The list answer closes the connection
+// and the server stops listening, so the create cannot connect.
+func TestProvisionHostedCreateNotSent(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	var lists atomic.Int32
+	h.handleFunc("GET /api/clusters", func(w http.ResponseWriter, _ *http.Request) {
+		lists.Add(1)
+		w.Header().Set("Connection", "close")
+		_, _ = io.WriteString(w, `{"ok":true,"data":[]}`)
+		_ = h.srv.Listener.Close()
+	})
+	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+	want := "[error] Failed to create hosted cluster via kubehz API (network error)\n" +
+		"  The request did not reach the api, so no cluster was created.\n"
+	if got := h.output(); got != want {
+		t.Fatalf("output:\n got %q\nwant %q", got, want)
+	}
+	if h.anyReq("POST", "/api/clusters") {
+		t.Fatal("the create reached the server")
+	}
+	if n := lists.Load(); n != 1 {
+		t.Fatalf("the list was read %d times, want 1", n)
+	}
 }
 
 func TestDestroyHostedResolvesOldestAndDeletes(t *testing.T) {

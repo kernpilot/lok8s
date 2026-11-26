@@ -104,6 +104,8 @@ func TestDeregisterHookTail(t *testing.T) {
 func TestKubeoneDriverBranchesToHostedThroughHooks(t *testing.T) {
 	h := newHarness(t)
 	spec := h.writeSpec("test.kubehz.dev", "kind: KubeOne\nmetadata:\n  name: test\nspec:\n  kubernetes:\n    version: v1.31.0\n  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
+	// The list before the create: no cluster of the domain.
+	h.handle("GET /api/clusters", 200, `{"data":[]}`)
 	h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-h","status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-h", 200, `{"data":{"status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-h/kubeconfig", 200, "kc\n")
@@ -130,6 +132,8 @@ func TestKubeoneDriverBranchesToHostedThroughHooks(t *testing.T) {
 func TestCapiDriverBranchesThroughHooks(t *testing.T) {
 	h := newHarness(t)
 	h.writeSpec("test.kubehz.dev", "kind: Capi\nmetadata:\n  name: test-cluster\nspec:\n  kubernetes:\n    version: v1.31.0\n  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
+	// The list before the create: no cluster of the domain.
+	h.handle("GET /api/clusters", 200, `{"data":[]}`)
 	h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-c","status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-c", 200, `{"data":{"status":"Running"}}`)
 	h.handle("GET /api/clusters/cl-c/kubeconfig", 200, "kc\n")

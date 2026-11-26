@@ -333,7 +333,8 @@ teardown() {
 
 # ── deregister_cluster: resolve-then-delete-by-id ────────
 #
-# The REAL api contract: the list endpoint ignores ?domain= and there is NO
+# The REAL api contract: this lookup does not send the ?domain= filter of
+# the list (an older api ignores it), and there is NO
 # DELETE /api/clusters?domain=… route — deregister must resolve the id from
 # the tenant registry (client-side domain filter, oldest-first) and DELETE
 # /api/clusters/<id>. These mocks pin exactly that; a query-string DELETE
@@ -484,8 +485,9 @@ EOF
 
 # ── status subcommand: reads the ROW, not the envelope ───
 #
-# GET /api/clusters answers the pagination envelope {ok, data: […]} and
-# ignores ?domain=. The old code read `.status` off the ENVELOPE, so every
+# GET /api/clusters answers the pagination envelope {ok, data: […]}. The
+# status read does not send its ?domain= filter (an older api ignores
+# it). The old code read `.status` off the ENVELOPE, so every
 # registered cluster printed "Status: unknown". These tests feed the real
 # envelope shape and assert the ROW's fields come out.
 

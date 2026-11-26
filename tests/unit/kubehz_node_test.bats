@@ -1748,6 +1748,23 @@ _refuse_flag() {
   assert_output --partial "lo kubehz node remove"
 }
 
+# kubehz still checks the create of the cluster, and refuses its writes
+# until it knows. lo prints its own lines: the help of the api is longer
+# than lo shows. Go twin: TestNodeJoinCreateUnconfirmed.
+@test "error: CLUSTER_CREATE_UNCONFIRMED says to wait for the check and not to create the cluster again" {
+  _stub_all
+  STUB_MINT_CODE="409"
+  STUB_MINT_BODY='{"ok":false,"data":{"code":"CLUSTER_CREATE_UNCONFIRMED","message":"The create of this cluster is not confirmed yet","help":"api help"}}'
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "[error] kubehz: the platform is still checking the create of this cluster.
+  Usually, it keeps or removes the cluster in about 3 minutes.
+  When the check fails, it tries again about 15 minutes later.
+  Do not create the cluster again. Run this command again after that."
+  refute_output --partial "api help"
+}
+
 @test "error: POOL_NOT_STATIC says which pool kind a brought machine joins" {
   _stub_all
   STUB_MINT_CODE="409"

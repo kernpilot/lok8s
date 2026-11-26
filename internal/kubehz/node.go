@@ -205,6 +205,14 @@ func (c *Context) nodeAPIError(what string, res *httpResult) {
 	case "HOSTED_BACKEND_ERROR":
 		c.errorf("kubehz: the hosted control-plane backend did not answer%s", optSuffix(" — ", msg))
 		c.echoErr("  Nothing changed. Try again shortly, or contact kubehz support.")
+	case "CLUSTER_CREATE_UNCONFIRMED":
+		// A 409 of a write on a hosted cluster whose create got no answer:
+		// kubehz checks whether the cluster exists, and refuses the writes
+		// until it knows. The api's help is longer than lo shows.
+		c.errorf("kubehz: the platform is still checking the create of this cluster.")
+		c.echoErr("  Usually, it keeps or removes the cluster in about 3 minutes.")
+		c.echoErr("  When the check fails, it tries again about 15 minutes later.")
+		c.echoErr("  Do not create the cluster again. Run this command again after that.")
 	case "NODE_NOT_REMOVED":
 		// A 503 of the remove: the node is still in the cluster, and the
 		// same call can succeed after the wait of the body.

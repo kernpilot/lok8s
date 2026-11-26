@@ -1531,6 +1531,21 @@ func TestNodeErrorVocabulary(t *testing.T) {
 	}
 }
 
+// A 409 CLUSTER_CREATE_UNCONFIRMED: kubehz still checks the create of the
+// cluster, and refuses its writes until it knows. lo prints its own
+// lines: the help of the api is longer than lo shows.
+func TestNodeJoinCreateUnconfirmed(t *testing.T) {
+	s := defaultNodeStubs()
+	s.mintCode, s.mintBody = 409, `{"ok":false,"data":{"code":"CLUSTER_CREATE_UNCONFIRMED","message":"The create of this cluster is not confirmed yet","help":"api help"}}`
+	h := nodeHarness(t, s, "hosted", "")
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "[error] kubehz: the platform is still checking the create of this cluster.\n"+
+		"  Usually, it keeps or removes the cluster in about 3 minutes.\n"+
+		"  When the check fails, it tries again about 15 minutes later.\n"+
+		"  Do not create the cluster again. Run this command again after that.\n")
+	mustNotContain(t, h.output(), "api help")
+}
+
 // A 503 of the join mint names the wait of the body in seconds:
 // JOIN_TICKET_NOT_MINTED says that no ticket was minted,
 // JOIN_TICKET_RESULT_UNKNOWN says that a ticket for the node can exist,
