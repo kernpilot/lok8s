@@ -1091,6 +1091,11 @@ With `access: managed` it also gets:
 The agent reads MachineDeployments and Machines with one `list` per pass, so
 it holds no `get` and no `watch` on them.
 
+To upgrade a cluster that runs the live agent of an older lok8s, upgrade lok8s,
+then run `lo kubehz deploy` again. At `access: managed`, that deploy applies
+the new image together with the Lease Role and its binding, so the new agent
+can act.
+
 Every one of these is documented at the rule in
 [`rbac-managed.yaml`](https://github.com/kernpilot/kubehz-agent/blob/v0.2.0/deploy/managed/rbac-managed.yaml),
 and lok8s ships that file byte-identical to the agent's own repo: the

@@ -1482,6 +1482,13 @@ _bindings() {
 
 # ══ 6. The image (digest-pinning discipline) ══════════════════════════════
 
+# The exact digest, pinned: the kubehz-agent v0.2.0 release (digest.txt at
+# https://github.com/kernpilot/kubehz-agent/releases/tag/v0.2.0). The RBAC
+# above is pinned rule for rule; the image the RBAC was reviewed against is
+# pinned the same way, so a digest bump and its RBAC re-read land together.
+# A re-pin updates this line in the same change as deployment.yaml.
+PINNED_AGENT_IMAGE='ghcr.io/kernpilot/kubehz-agent@sha256:54bba61ef3e7900f8cd7af8439e3a2164b7968024c336a9d836c269598b24080'
+
 @test "image: the live agent is pinned to a public GHCR digest, never a tag" {
   run bash -c "command kustomize build '${LIVE_DIR}/base' | command yq -r 'select(.kind==\"Deployment\") | .spec.template.spec.containers[0].image'"
   assert_success
@@ -1492,12 +1499,16 @@ _bindings() {
   # A digest is the only ref cosign verification and a rollback can reason about.
   refute_output --partial ":latest"
   refute_output --partial ":main"
-  # The exact digest, pinned: the kubehz-agent v0.2.0 release (digest.txt at
-  # https://github.com/kernpilot/kubehz-agent/releases/tag/v0.2.0). The RBAC
-  # above is pinned rule for rule; the image the RBAC was reviewed against is
-  # pinned the same way, so a digest bump and its RBAC re-read land together.
-  # A re-pin updates this line in the same change as deployment.yaml.
-  assert_output 'ghcr.io/kernpilot/kubehz-agent@sha256:54bba61ef3e7900f8cd7af8439e3a2164b7968024c336a9d836c269598b24080'
+  assert_output "${PINNED_AGENT_IMAGE}"
+}
+
+@test "image: the managed overlay runs the same pinned digest as the base" {
+  # The managed overlay renders the base, but an `images:` entry in its own
+  # kustomization.yaml would replace the digest. The tier that acts must run
+  # the image that its RBAC was reviewed against.
+  run bash -c "command kustomize build '${LIVE_DIR}/managed' | command yq -r 'select(.kind==\"Deployment\") | .spec.template.spec.containers[0].image'"
+  assert_success
+  assert_output "${PINNED_AGENT_IMAGE}"
 }
 
 # ══ 7. The pod spec (what the agent may do ON THE NODE) ═══════════════════

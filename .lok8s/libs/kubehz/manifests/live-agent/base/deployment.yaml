@@ -11,11 +11,14 @@ metadata:
     app.kubernetes.io/part-of: kubehz
     app.kubernetes.io/component: live-view
 spec:
-  # Single replica by default. More than one is safe: the agent acts only while
-  # it holds the Lease kubehz-system/kubehz-live-agent (its Role is in
-  # ../managed), so one replica at most patches a MachineDeployment or deletes
-  # a Machine. The holder also sends the heartbeats, and the other replicas
-  # stand by. A holder whose heartbeats fail for 5 minutes gives up the Lease.
+  # Single replica by default. More than one is safe at the managed tier only.
+  # There the agent acts only while it holds the Lease
+  # kubehz-system/kubehz-live-agent (its Role is in ../managed), so one replica
+  # at most patches a MachineDeployment or deletes a Machine. The holder also
+  # sends the heartbeats, and the other replicas stand by. A holder whose
+  # heartbeats fail for 5 minutes gives up the Lease. At the registered tier
+  # (this base alone) no replica may read the Lease, so no election runs and
+  # every replica sends heartbeats: keep one replica there.
   # Strategy Recreate still avoids two agents briefly double-reporting during
   # a rollout. On shutdown the agent stops acting and releases the Lease
   # before it exits; the default 30 s terminationGracePeriodSeconds covers
