@@ -1900,19 +1900,18 @@ _hosted_setup() {
 
 # The kubeconfig download goes to a temp file beside the kubeconfig, which
 # is 0600 from its creation (also under umask 022), and replaces the
-# kubeconfig only after curl succeeded. A spy for curl records the mode of
-# its stdout when that is a file (the download; the other calls write to a
-# pipe). A failed download (HTTP 500) keeps the old kubeconfig and leaves
-# no temp file.
-@test "kubehz hosted: the kubeconfig is 0600 while curl writes it, and a failed download keeps the old one" {
+# kubeconfig only after a 2xx answer. A spy for curl records the mode of
+# that temp file while the download runs (it is there before lo writes the
+# answer into it). A failed download (HTTP 500) keeps the old kubeconfig
+# and leaves no temp file.
+@test "kubehz hosted: the kubeconfig is 0600 while lo writes it, and a failed download keeps the old one" {
   _need_real_curl
-  [[ -e "/proc/${BASHPID}/fd/1" ]] || skip "no /proc/<pid>/fd"
   _hosted_setup
   local kc="${PATH_BASE}/.kubeconfig/d.example.yaml" o="${BATS_TEST_TMPDIR}/hk.out" e="${BATS_TEST_TMPDIR}/hk.err" rc=0
-  export CURL_MODES="${BATS_TEST_TMPDIR}/modes"
+  export CURL_MODES="${BATS_TEST_TMPDIR}/modes" CURL_KCDIR="${PATH_BASE}/.kubeconfig"
   curl() {
-    if [[ -f "/proc/${BASHPID}/fd/1" ]]; then
-      stat -L -c %a "/proc/${BASHPID}/fd/1" >> "${CURL_MODES}"
+    if [[ " $* " == *"/kubeconfig "* ]]; then
+      find "${CURL_KCDIR}" -maxdepth 1 -name 'd.example.yaml.*' -exec stat -c %a {} + >> "${CURL_MODES}"
     fi
     command curl "$@"
   }
@@ -1924,7 +1923,7 @@ _hosted_setup() {
   _hosted_list '[]'
   ( umask 022 && kubehz::provision_hosted d.example "${YAML}" ) > "${o}" 2> "${e}" || rc=$?
   [ "${rc}" -ne 0 ]
-  grep -qF 'Failed to download kubeconfig for hosted cluster cl-1' "${e}"
+  grep -qF 'Failed to download kubeconfig for hosted cluster cl-1 (HTTP 500)' "${e}"
   [ "$(cat "${kc}")" = old ]
   [ -z "$(find "${PATH_BASE}/.kubeconfig" -name 'd.example.yaml.*')" ]
   [ "$(cat "${CURL_MODES}")" = 600 ]

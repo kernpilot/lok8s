@@ -895,6 +895,53 @@ func TestProvisionHostedUsesTheClusterOfTheDomain(t *testing.T) {
 	}
 }
 
+// A refused download names the cause and, for a code that lo knows, the
+// next step. The old kubeconfig stays.
+func TestHostedKubeconfigNamesTheCause(t *testing.T) {
+	t.Parallel()
+	const head = "[error] Failed to download kubeconfig for hosted cluster cl-1 "
+	for _, tc := range []struct {
+		name, body, want string
+		code             int
+	}{
+		{"an api that refuses each token", `{"ok":false,"data":{"code":"TOKEN_NOT_ALLOWED","message":"no"}}`, head + "(HTTP 403 TOKEN_NOT_ALLOWED)\n" +
+			"  This api gives the kubeconfig only to a dashboard sign-in, not to an API token. Download it in the dashboard.\n" +
+			"  The cluster exists: do not create it again.\n", 403},
+		{"a token without the scope", `{"code":"TOKEN_SCOPE_MISSING"}`, head + "(HTTP 403 TOKEN_SCOPE_MISSING)\n" +
+			"  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens).\n", 403},
+		{"not ready", `{"ok":false,"data":{"code":"KUBECONFIG_NOT_READY"}}`, head + "(HTTP 409 KUBECONFIG_NOT_READY)\n" +
+			"  Run the command again when the status is Running.\n", 409},
+		{"a code of another shape", `{"ok":false,"data":{"code":"no\u001b[2Jcode"}}`, head + "(HTTP 500)\n", 500},
+		{"another code", `{"ok":false,"data":{"code":"KUBECONFIG_BACKEND_UNAVAILABLE"}}`, head + "(HTTP 503 KUBECONFIG_BACKEND_UNAVAILABLE)\n", 503},
+		{"not JSON", `<html>`, head + "(HTTP 404)\n", 404},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := hostedSpec(h, "test.kubehz.dev")
+			h.handle("GET /api/clusters/cl-1/kubeconfig", tc.code, tc.body)
+			kc := filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")
+			_ = os.MkdirAll(filepath.Dir(kc), 0o700)
+			_ = os.WriteFile(kc, []byte("old\n"), 0o600)
+			mustErr(t, h.ctx.hostedKubeconfig(t.Context(), h.apiURL(), "cl-1", "test.kubehz.dev", kc, spec))
+			if h.output() != tc.want {
+				t.Fatalf("output:\n%s\nwant:\n%s", h.output(), tc.want)
+			}
+			if got := readFile(t, kc); got != "old\n" {
+				t.Fatalf("kubeconfig = %q, want the old one", got)
+			}
+		})
+	}
+	// No answer: the connection fails.
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	kc := filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")
+	mustErr(t, h.ctx.hostedKubeconfig(t.Context(), "https://127.0.0.1:1", "cl-1", "test.kubehz.dev", kc, spec))
+	if want := head + "(no answer)\n"; h.output() != want {
+		t.Fatalf("output:\n%s\nwant:\n%s", h.output(), want)
+	}
+}
+
 // A download that fails after lo found the cluster fails the run and
 // keeps the old kubeconfig, as after a create. The note of a Paused
 // cluster follows a download only.
@@ -906,7 +953,7 @@ func TestProvisionHostedUsedClusterFailedDownload(t *testing.T) {
 	h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"status":"Paused"}}`)
 	h.handle("GET /api/clusters/cl-1a/kubeconfig", 403, `{"ok":false,"data":{"code":"TOKEN_NOT_ALLOWED"}}`)
 	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
-	mustContain(t, h.output(), "[error] Failed to download kubeconfig for hosted cluster cl-1a\n")
+	mustContain(t, h.output(), "[error] Failed to download kubeconfig for hosted cluster cl-1a (HTTP 403 TOKEN_NOT_ALLOWED)\n")
 	if strings.Contains(h.output(), "The cluster is Paused") {
 		t.Fatalf("the note of a Paused cluster after a failed download:\n%s", h.output())
 	}

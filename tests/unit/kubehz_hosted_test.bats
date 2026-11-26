@@ -251,12 +251,14 @@ _hosted_no_cluster() { kubehz::_hosted_listed() { return 2; }; }
         printf '%s\n%s\n' '{"ok":true,"data":{"id":"cl-hosted-001","status":"Creating"}}' '201'
         ;;
       *api/clusters/cl-hosted-001/kubeconfig*)
+        # The kubeconfig and the trailing HTTP-status line (-w).
         echo "apiVersion: v1
 kind: Config
 clusters:
 - cluster:
     server: https://hosted.kubehz.dev:6443
   name: hosted"
+        printf '\n200'
         ;;
       *api/clusters/cl-hosted-001*)
         echo '{"id":"cl-hosted-001","status":"Running"}'
@@ -596,7 +598,7 @@ _hosted_list_setup() {
       *"/kubeconfig"*)
         echo "get kubeconfig" >> "${CALLS}"
         (( KC_RC == 0 )) || return "${KC_RC}"
-        printf 'kc\n' ;;
+        printf 'kc\n\n200' ;;
       *)
         echo "get ${a##* }" >> "${CALLS}"
         (( STATUS_RC == 0 )) || return "${STATUS_RC}"
@@ -1389,7 +1391,7 @@ _hosted_kc_harness() {
   _hosted_no_cluster
   export LOK8S_KUBEHZ_API_URL="https://api.test" KUBEHZ_TOKEN="t"
   curl() {
-    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then echo "kc-bytes"; return 0; fi
+    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then printf 'kc-bytes\n\n200'; return 0; fi
     printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
   }
   export -f curl
@@ -1424,6 +1426,90 @@ _hosted_kc_harness() {
 # <file> in <dir> (the name <file>.XXXXXX), one per line.
 _hosted_temps() {
   find "${1}" -maxdepth 1 -name "${2}.*" -print
+}
+
+# A refused download names the cause and the next step, and writes no
+# byte of the error body. Go twin: TestHostedKubeconfigNamesTheCause.
+@test "hosted kubeconfig: a refused download names the cause and the next step" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="t"
+  yq() { echo "test.kubehz.dev"; }
+  export -f yq
+  curl() {
+    [[ "${STUB_KC_STATUS}" != fail ]] || return 7
+    printf '%s\n%s' "${STUB_KC_BODY}" "${STUB_KC_STATUS}"
+  }
+  export -f curl
+  local kc="${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" head="[error] Failed to download kubeconfig for hosted cluster cl-1"
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  _kc_case() {
+    export STUB_KC_STATUS="${1}" STUB_KC_BODY="${2}"
+    printf 'old\n' > "${kc}"
+    run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+    assert_failure
+    assert_output "${3}"
+    [ "$(cat "${kc}")" = old ]
+    [ -z "$(find "${BATS_TEST_TMPDIR}/.kubeconfig" -name 'test.kubehz.dev.yaml.*')" ]
+  }
+  _kc_case 403 '{"ok":false,"data":{"code":"TOKEN_NOT_ALLOWED","message":"no"}}' "${head} (HTTP 403 TOKEN_NOT_ALLOWED)
+  This api gives the kubeconfig only to a dashboard sign-in, not to an API token. Download it in the dashboard.
+  The cluster exists: do not create it again."
+  _kc_case 403 '{"code":"TOKEN_SCOPE_MISSING"}' "${head} (HTTP 403 TOKEN_SCOPE_MISSING)
+  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens)."
+  _kc_case 409 '{"ok":false,"data":{"code":"KUBECONFIG_NOT_READY"}}' "${head} (HTTP 409 KUBECONFIG_NOT_READY)
+  Run the command again when the status is Running."
+  _kc_case 500 '{"ok":false,"data":{"code":"no\u001b[2Jcode"}}' "${head} (HTTP 500)"
+  _kc_case 503 '{"ok":false,"data":{"code":"KUBECONFIG_BACKEND_UNAVAILABLE"}}' "${head} (HTTP 503 KUBECONFIG_BACKEND_UNAVAILABLE)"
+  _kc_case 404 '<html>' "${head} (HTTP 404)"
+  _kc_case fail '' "${head} (no answer)"
+  # An answer without a status line is no answer.
+  _kc_case '' 'apiVersion: v1' "${head} (no answer)"
+  # A 2xx answer: the body whole, and no cause.
+  export STUB_KC_STATUS=200 STUB_KC_BODY=$'apiVersion: v1\nkind: Config\n'
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+  assert_success
+  [ "$(cat "${kc}")" = $'apiVersion: v1\nkind: Config' ]
+  [ "$(wc -c < "${kc}")" -eq 28 ]
+}
+
+# lo now reads the answer into a local. The kubelogin file holds no
+# credential, but a caller's set -x shows no byte of it all the same. A
+# refusal of the private file names no cause of the request: not of an
+# earlier download (the path is a directory, so no request goes out), and
+# not "no answer" after a complete download (the rename fails).
+@test "hosted kubeconfig: a caller's trace shows no byte of the file, and a file refusal names no old cause" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="t"
+  yq() { echo "test.kubehz.dev"; }
+  curl() { printf 'kc-canary-7f3a\n\n200'; }
+  export -f yq curl
+  local kc="${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  _traced() { set -x; kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null; }
+  run _traced
+  assert_success
+  assert_output --partial "+ kubehz::_hosted_kubeconfig "
+  refute_output --partial "kc-canary-7f3a"
+  [ "$(cat "${kc}")" = kc-canary-7f3a ]
+
+  local dir="${BATS_TEST_TMPDIR}/.kubeconfig/dir.yaml"
+  mkdir -p "${dir}"
+  KUBEHZ_KC_CAUSE="HTTP 403 TOKEN_NOT_ALLOWED" KUBEHZ_KC_CODE="TOKEN_NOT_ALLOWED"
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${dir}" /dev/null
+  assert_failure
+  assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1"
+  refute_output --partial "for hosted cluster cl-1 ("
+  refute_output --partial "This api gives"
+
+  curl() { printf 'kc-new\n\n200'; }
+  kubehz::_publish_private() { return 1; }
+  export -f curl
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+  assert_failure
+  assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1"
+  refute_output --partial "for hosted cluster cl-1 ("
+  [ "$(cat "${kc}")" = kc-canary-7f3a ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}/.kubeconfig" test.kubehz.dev.yaml)" ]
 }
 
 @test "provision_hosted: a failed download keeps the old kubeconfig and leaves no temp file" {
@@ -1467,18 +1553,18 @@ _hosted_temps() {
   [ "$(cat "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = kc-bytes ]
 }
 
-# The mode is checked while the content is written too (the stdout of the
-# download): a write in place through the link would write into the old
-# 0644 file, and a chmod after it would make the end mode 0600 all the same.
+# The mode is checked while the download runs too: the temp file beside
+# the target is there, 0600, before lo writes the answer into it. A write
+# in place through the link would write into the old 0644 file, and a
+# chmod after it would make the end mode 0600 all the same.
 @test "provision_hosted: a symlinked kubeconfig keeps the link and gets the new content, mode 0600" {
-  [[ -e "/proc/${BASHPID}/fd/1" ]] || skip "no /proc/<pid>/fd"
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
-  export KC_MODES="${BATS_TEST_TMPDIR}/modes"
+  export KC_MODES="${BATS_TEST_TMPDIR}/modes" KC_REAL="${PATH_BASE}/real"
   curl() {
     if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then
-      stat -L -c %a "/proc/${BASHPID}/fd/1" >> "${KC_MODES}"
-      echo "kc-bytes"
+      find "${KC_REAL}" -maxdepth 1 -name 'test.kubehz.dev.yaml.*' -exec stat -c %a {} + >> "${KC_MODES}"
+      printf 'kc-bytes\n\n200'
       return 0
     fi
     printf '{"data":{"id":"cl-1","status":"Running"}}\n201'

@@ -412,11 +412,12 @@ func (c *Context) hostedKubeconfig(ctx context.Context, apiURL, clusterID, domai
 	// A failed download leaves the old kubeconfig as it was: the file is
 	// written only after the whole answer is here (bash: the download goes
 	// into the temp file of kubehz::_write_private).
-	kc, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
-	if err != nil {
-		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
+	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters/"+clusterID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	if err != nil || !is2xx(res.Status) {
+		c.kubeconfigRefused(res, err, clusterID)
 		return ErrHandled
 	}
+	kc := res.Body
 	if err := writePrivateFile(ctx, kubeconfigPath, kc); err != nil {
 		if refused, ok := errors.AsType[privateFileError](err); ok {
 			c.errorf("%s", refused)
@@ -435,6 +436,33 @@ func (c *Context) hostedKubeconfig(ctx context.Context, apiURL, clusterID, domai
 		}
 	}
 	return nil
+}
+
+// kubeconfigRefused stops a kubeconfig download without a 2xx answer. It
+// names the cause (no answer, or the HTTP status and the code of the api)
+// and, for a code that lo knows, the next step. The cluster exists, so
+// the next step never creates one. Bash: kubehz::_hosted_kubeconfig and
+// kubehz::_hosted_kubeconfig_next.
+func (c *Context) kubeconfigRefused(res *httpResult, err error, clusterID string) {
+	if err != nil {
+		c.errorf("Failed to download kubeconfig for hosted cluster %s (no answer)", clusterID)
+		return
+	}
+	code := apiCode(res.Body)
+	if !apiCodeRe.MatchString(code) {
+		code = ""
+	}
+	c.errorf("Failed to download kubeconfig for hosted cluster %s (HTTP %d%s)", clusterID, res.Status, optSuffix(" ", code))
+	switch code {
+	case "TOKEN_NOT_ALLOWED":
+		// An api that refuses the kubeconfig route to each API token.
+		c.echoErr("  This api gives the kubeconfig only to a dashboard sign-in, not to an API token. Download it in the dashboard.")
+		c.echoErr("  The cluster exists: do not create it again.")
+	case "TOKEN_SCOPE_MISSING":
+		c.echoErr("  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens).")
+	case "KUBECONFIG_NOT_READY":
+		c.echoErr("  Run the command again when the status is Running.")
+	}
 }
 
 // gatewayAnswer tells whether a refusal of the create came from a gateway

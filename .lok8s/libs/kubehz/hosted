@@ -345,9 +345,14 @@ kubehz::_hosted_kubeconfig() {
   local kubeconfig_dir
   kubeconfig_dir=$(dirname -- "${kubeconfig_path}")
   ( umask 077 && mkdir -p -- "${kubeconfig_dir}" )
+  # KUBEHZ_KC_CAUSE stays "" when the private file fails, not the request
+  # (kubehz::_write_private names that cause itself).
+  KUBEHZ_KC_CAUSE=""
+  KUBEHZ_KC_CODE=""
   if ! kubehz::_write_private "${kubeconfig_path}" \
     kubehz::_hosted_kubeconfig_get "${api_url}" "${cluster_id}"; then
-    error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
+    error "Failed to download kubeconfig for hosted cluster ${cluster_id}${KUBEHZ_KC_CAUSE:+ (${KUBEHZ_KC_CAUSE})}"
+    kubehz::_hosted_kubeconfig_next
     return 1
   fi
 
@@ -634,15 +639,56 @@ kubehz::_hosted_create_unknown() {
 }
 
 # kubehz::_hosted_kubeconfig_get <api_url> <cluster_id>: the kubeconfig of
-# a hosted cluster on stdout. -q first: an output line in a config file of
-# the user would take the kubeconfig. The subshell with
-# http::tls_log_vars_unset: curl gets no TLS log or trace control
-# (utils/http.sh).
+# a hosted cluster on stdout, only for a 2xx answer. For each other answer
+# it prints nothing, sets KUBEHZ_KC_CAUSE ("no answer", or "HTTP <status>"
+# and the code of the api) and KUBEHZ_KC_CODE (the code, or ""), and
+# returns 1. lo reads the whole answer before it writes a byte (the Go
+# twin reads it into memory too), so an error body never goes into the
+# kubeconfig. Its stdout is the private temp file of kubehz::_write_private.
+# -q first: an output line in a config file of the user would take the
+# kubeconfig. The subshell with http::tls_log_vars_unset: curl gets no TLS
+# log or trace control (utils/http.sh). +x +i and no trace: the answer
+# goes into the environment of no child and into no trace. Only an error
+# body goes to jq, never the kubeconfig.
 kubehz::_hosted_kubeconfig_get() {
-  http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the kubeconfig
+  local +x +i raw status code || return 1
+  local LC_ALL=C
+  KUBEHZ_KC_CAUSE="no answer"
+  KUBEHZ_KC_CODE=""
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
     http::tls_log_vars_unset &&
-      curl -q -K - -fsSL "${1}/api/clusters/${2}/kubeconfig"
-  )
+      curl -q -K - -sSL -w $'\n%{http_code}' "${1}/api/clusters/${2}/kubeconfig"
+  )) || return 1
+  status="${raw##*$'\n'}"
+  raw="${raw%$'\n'*}"
+  [[ "${status}" =~ ^[0-9]{3}$ ]] || return 1
+  if [[ "${status}" == 2* ]]; then
+    KUBEHZ_KC_CAUSE=""
+    printf '%s' "${raw}"
+    return 0
+  fi
+  code=$(jq -r '.data.code // .code // empty' <<<"${raw}" 2>/dev/null) || code=""
+  [[ "${code}" =~ ^[A-Z0-9_]{1,64}$ ]] || code=""
+  KUBEHZ_KC_CODE="${code}"
+  KUBEHZ_KC_CAUSE="HTTP ${status}${code:+ ${code}}"
+  return 1
+}
+
+# kubehz::_hosted_kubeconfig_next: the next step after a refused download,
+# for a code of the api that lo knows (KUBEHZ_KC_CODE). The cluster
+# exists, so the next step never creates one. Go twin: kubeconfigRefused.
+kubehz::_hosted_kubeconfig_next() {
+  case "${KUBEHZ_KC_CODE:-}" in
+    TOKEN_NOT_ALLOWED)
+      # An api that refuses the kubeconfig route to each API token.
+      echo "  This api gives the kubeconfig only to a dashboard sign-in, not to an API token. Download it in the dashboard." >&2
+      echo "  The cluster exists: do not create it again." >&2 ;;
+    TOKEN_SCOPE_MISSING)
+      echo "  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens)." >&2 ;;
+    KUBECONFIG_NOT_READY)
+      echo "  Run the command again when the status is Running." >&2 ;;
+  esac
 }
 
 # kubehz::_write_private <dest> <command...>: run the command with its
