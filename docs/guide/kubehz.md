@@ -12,9 +12,8 @@ managed-Kubernetes platform for Hetzner. lok8s supports two ways to use it:
   The quickest start is `lo init cluster <domain> --driver kubehz-hosted`,
   which writes a hosted cluster spec (see [`lo init`](../reference/cli.md#lo-init)).
 
-Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). In the
-preview kubehz caps the number of new accounts, so sign-up can need an invite
-code. At sign-up you confirm that kubehz is still in development. Features and
+Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). For now
+kubehz caps the number of new accounts, so sign-up can need an invite code. At sign-up you confirm that kubehz is still in development. Features and
 limits can change or break, and there is no service guarantee (SLA) yet.
 
 ::: tip No lock-in
@@ -81,9 +80,9 @@ limit, the step and the cap live in the dashboard.
 No usage charge applies to an hour that starts before the later of two dates.
 The first date is the billing start that the platform announces: until then,
 the launch trial runs. The second date is the end of the first 14 days of your
-account. The platform announces the billing start at least 30 days ahead. 35
-days before that date, it mails each account the projected monthly cost at
-current use.
+account. The platform announces the billing start by e-mail at least 30 days
+ahead. Until then, the dashboard shows your use and what it would cost, but
+kubehz invoices nothing.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with
@@ -128,7 +127,7 @@ spec:
 
 > **Changed default.** An absent `channel` previously meant "no automatic
 > upgrades"; it now means `patch`. A spec without a `channel` receives
-> automatic patch upgrades once upgrade execution ships. Set
+> automatic patch upgrades once the platform switches upgrade execution on. Set
 > `channel: none` explicitly if you want the old behavior.
 - **`defer`** decides when an allowed upgrade starts: `window` (the default)
   waits for the next maintenance window; `immediate` starts as soon as the
@@ -143,7 +142,7 @@ How an upgrade lands depends on who owns the machines:
   yourself) get upgraded **in place**: the upgrade swaps the kubelet
   underneath the running workloads, and the swap itself does not restart
   them. On the managed tier, the live agent will walk the nodes one at a
-  time once upgrade execution ships.
+  time once the platform switches upgrade execution on.
 - **Hosted worker pools** get **replaced, surge-first**: new nodes join on
   the target version before old ones drain and leave. Per-pool tuning (surge
   size and the like) rides the pool definition on the platform side, not this
@@ -155,8 +154,8 @@ How an upgrade lands depends on who owns the machines:
 each block is consumed: for **hosted** clusters and pools, the platform API
 validates its own payloads; for **self-hosted** clusters the block is the
 declared input for the managed-tier agent's upgrade walk. The agent will
-read it locally once upgrade execution ships, so your cluster's upgrade
-behavior will never depend on the platform being reachable. Until then the
+read it locally once the platform switches upgrade execution on, so your
+cluster's upgrade behavior will never depend on the platform being reachable. Until then the
 block is declarative only. `lo` does not catch calendar validity beyond
 the shape (a February 30th) today.
 
@@ -199,8 +198,8 @@ namespaces. There is no plan to pick.
 
 **The ceiling on each number belongs to your account, not to `lo`.** It
 differs per account: an account without a payment method gets a smaller free
-allowance. So the platform is the only place that knows it. `lo` checks that a value is a whole number of 1 or
-more and sends it; the platform answers with your account's real ceiling if
+allowance. So the platform is the only place that knows it. `lo` checks
+that a value is a whole number of 1 or more and sends it; the platform answers with your account's real ceiling if
 you asked for more. A number you leave out is not sent at all, and the
 platform applies its own default. Your current ceiling is in the kubehz
 dashboard.
