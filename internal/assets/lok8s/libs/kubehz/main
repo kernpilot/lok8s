@@ -1174,7 +1174,7 @@ kubehz::status() {
 
   # Query the tenant registry for the live row. The list route has an exact
   # ?domain= filter that this read does not send (an older api ignores it),
-  # and answers the pagination envelope {ok, data: […]} — the old
+  # and answers the pagination envelope {ok, data: […]}: the old
   # code read `.status` off that ENVELOPE, so this line printed
   # "Status: unknown" for every registered cluster. Filter the rows
   # client-side (the resolve_cluster_id / space_lookup idiom) and read the
