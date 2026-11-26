@@ -138,9 +138,10 @@ func clusterReady(status string) bool {
 
 // kubeconfigStatus tells whether lo downloads the kubeconfig of a cluster
 // that the account has already, by its live status: a ready status
-// (clusterReady), Paused (the download asks kubehz to resume a cluster
-// that it paused because nobody used it) or Updating (the kubelogin file
-// stays the same across an update). hostedStatusNote names the two.
+// (clusterReady), Paused (a download with the clusters:write scope asks
+// kubehz to resume a cluster that it paused because nobody used it) or
+// Updating (the kubelogin file stays the same across an update).
+// hostedStatusNote names the two.
 func kubeconfigStatus(status string) bool {
 	return clusterReady(status) || status == "Paused" || status == "Updating"
 }
@@ -648,15 +649,16 @@ func (c *Context) hostedExists(r hostedRow, domain string) {
 
 // hostedStatusNote follows the download of the kubeconfig of a cluster
 // that the account has already, when its live status is Paused or
-// Updating. The download resumes a cluster that kubehz paused because
-// nobody used it. It resumes none of a suspended account, none after the
-// lease ended and none after the contract ended (kubehz-api
-// clusters/[id]/kubeconfig.get.ts and utils/idle-reap.ts), and the status
-// does not tell lo which pause it is. Bash: kubehz::_hosted_status_note.
+// Updating. A download resumes a cluster that kubehz paused because nobody
+// used it, but only a download by a person or with the clusters:write
+// scope: the api does not count the download of a read-only token as
+// activity. The api also resumes none of a suspended account, none after
+// the lease ended and none after the contract ended, and the status does
+// not tell lo which pause it is. Bash: kubehz::_hosted_status_note.
 func (c *Context) hostedStatusNote(r hostedRow) {
 	switch r.status {
 	case "Paused":
-		c.echo("  The cluster is Paused. The download asks kubehz to resume it.")
+		c.echo("  The cluster is Paused. The download asks kubehz to resume it only when KUBEHZ_TOKEN has the clusters:write scope.")
 		c.echo("  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get %s", r.id)
 	case "Updating":
 		c.echo("  The cluster is Updating: kubectl can fail for a short time, until the update ends.")

@@ -847,7 +847,7 @@ func TestProvisionHostedUsesTheClusterOfTheDomain(t *testing.T) {
 	t.Parallel()
 	for status, note := range map[string]string{
 		"Running": "",
-		"Paused": "  The cluster is Paused. The download asks kubehz to resume it.\n" +
+		"Paused": "  The cluster is Paused. The download asks kubehz to resume it only when KUBEHZ_TOKEN has the clusters:write scope.\n" +
 			"  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get cl-1a\n",
 		"Updating": "  The cluster is Updating: kubectl can fail for a short time, until the update ends.\n",
 	} {

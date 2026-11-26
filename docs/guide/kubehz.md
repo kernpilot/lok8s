@@ -112,11 +112,13 @@ of the api and also compares the domain of each cluster itself.
   kubeconfig again. lo reads the live status of the cluster first, because
   the list keeps the status of the create. lo uses the cluster when its
   status is `Running`, `Paused` or `Updating`:
-  - `Paused`: the download asks kubehz to resume a cluster that it paused
-    because nobody used it. kubehz does not resume the cluster of a
-    suspended account, after the lease ended or after the contract ended.
-    The status does not show which pause it is, so lo names
-    `lo kubehz cluster get <id>`.
+  - `Paused`: when `KUBEHZ_TOKEN` has the `clusters:write` scope, the
+    download asks kubehz to resume a cluster that it paused because nobody
+    used it. A read-only token gets the same file, but the cluster stays
+    paused: kubehz does not count that download as activity. kubehz also
+    does not resume the cluster of a suspended account, after the lease
+    ended or after the contract ended. The status does not show which
+    pause it is, so lo names `lo kubehz cluster get <id>`.
   - `Updating`: the kubeconfig stays the same across an update, but
     `kubectl` can fail for a short time until the update ends.
 - **One other cluster:** lo stops. It names the id, the hosting and the

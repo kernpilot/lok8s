@@ -851,7 +851,7 @@ get kubeconfig"
   # A Paused or an Updating cluster gets its kubeconfig too, and a note.
   local s
   local -A note=(
-    [Paused]="  The cluster is Paused. The download asks kubehz to resume it.
+    [Paused]="  The cluster is Paused. The download asks kubehz to resume it only when KUBEHZ_TOKEN has the clusters:write scope.
   A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get cl-1a"
     [Updating]="  The cluster is Updating: kubectl can fail for a short time, until the update ends."
   )

@@ -482,10 +482,10 @@ kubehz::_hosted_listed() {
 # kubehz::_hosted_row_ready <index>: whether lo can download the
 # kubeconfig of a row of kubehz::_hosted_listed: a hosted cluster with an
 # id, a confirmed create and a live status of Running (or ready, Ready),
-# Paused or Updating. Paused: the download asks kubehz to resume a cluster
-# that it paused because nobody used it. Updating: the kubelogin file
-# stays the same across an update. Go twins: hostedRow.ready and
-# kubeconfigStatus.
+# Paused or Updating. Paused: a download with the clusters:write scope
+# asks kubehz to resume a cluster that it paused because nobody used it.
+# Updating: the kubelogin file stays the same across an update. Go twins:
+# hostedRow.ready and kubeconfigStatus.
 kubehz::_hosted_row_ready() {
   local i="${1}"
   [[ -n "${KUBEHZ_HOSTED_LIST_IDS[i]}" && "${KUBEHZ_HOSTED_LIST_HOSTINGS[i]}" == hosted \
@@ -573,16 +573,18 @@ kubehz::_hosted_exists() {
 
 # kubehz::_hosted_status_note <index>: the note after the download of the
 # kubeconfig of a cluster that the account has already, when its live
-# status is Paused or Updating. The download resumes a cluster that kubehz
-# paused because nobody used it. It resumes none of a suspended account,
-# none after the lease ended and none after the contract ended (kubehz-api
-# clusters/[id]/kubeconfig.get.ts and utils/idle-reap.ts), and the status
-# does not tell lo which pause it is. Go twin: hostedStatusNote.
+# status is Paused or Updating. A download resumes a cluster that kubehz
+# paused because nobody used it, but only a download by a person or with
+# the clusters:write scope: the api does not count the download of a
+# read-only token as activity. The api also resumes none of a suspended
+# account, none after the lease ended and none after the contract ended,
+# and the status does not tell lo which pause it is. Go twin:
+# hostedStatusNote.
 kubehz::_hosted_status_note() {
   local i="${1}"
   case "${KUBEHZ_HOSTED_LIST_STATUSES[i]}" in
     Paused)
-      echo "  The cluster is Paused. The download asks kubehz to resume it."
+      echo "  The cluster is Paused. The download asks kubehz to resume it only when KUBEHZ_TOKEN has the clusters:write scope."
       echo "  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_IDS[i]}"
       ;;
     Updating)
