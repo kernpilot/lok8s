@@ -105,13 +105,13 @@ teardown() {
     assert_output --partial "/.lok8s/${f}:"
   done
   [ "$(grep -c "/.lok8s/libs/kubehz/main:[0-9]* credential$" <<<"${output}")" -eq 14 ]
-  [ "$(grep -c "/.lok8s/libs/kubehz/hosted:[0-9]* credential$" <<<"${output}")" -eq 4 ]
+  [ "$(grep -c "/.lok8s/libs/kubehz/hosted:[0-9]* credential$" <<<"${output}")" -eq 5 ]
   [ "$(grep -c "/.lok8s/drivers/kubeone/config:[0-9]* credential$" <<<"${output}")" -eq 2 ]
   [ "$(grep -c "/.lok8s/libs/kubehz/manifests/agent/cronjob.yaml:[0-9]* credential$" <<<"${output}")" -eq 4 ]
   [ "$(grep -c "/.lok8s/providers/hetzner/cloud-init/cloud.d/ci/write_files/bootstrap/install-tools.sh:[0-9]*$" <<<"${output}")" -eq 6 ]
   [ "$(grep -c "/.lok8s/libs/image:[0-9]*$" <<<"${output}")" -eq 2 ]
-  [ "$(grep -c ' credential$' <<<"${output}")" -eq 28 ]
-  [ "${#lines[@]}" -eq 40 ]
+  [ "$(grep -c ' credential$' <<<"${output}")" -eq 29 ]
+  [ "${#lines[@]}" -eq 41 ]
 }
 
 @test "curl gate: each curl call in the bash tree passes -q first" {
@@ -1844,14 +1844,25 @@ _agent_setup() {
 
 # ── hosted (libs/kubehz/hosted, the KUBEHZ_TOKEN bearer) ──
 
-# The create, the wait, the kubeconfig and the destroy (with the lookup).
+# _hosted_list <json array>: the rows of the cluster list in the routes.
+_hosted_list() {
+  jq --argjson d "${1}" '."GET /api/clusters?perPage=500".body.data = $d' "${STUB_ROUTES}" > "${STUB_ROUTES}.new"
+  mv -- "${STUB_ROUTES}.new" "${STUB_ROUTES}"
+}
+
+# The list before the create, the create, the wait, the kubeconfig and the
+# destroy (with the lookup). The list shows the cluster only after the
+# create.
 _hosted_flow() {
+  _hosted_list '[]'
   _step provision kubehz::provision_hosted d.example "${YAML}"
   cat "${PATH_BASE}/.kubeconfig/d.example.yaml"
+  _hosted_list '[{"id": "cl-1", "domain": "d.example", "createdAt": "2026-01-01T00:00:00Z"}]'
   _step destroy kubehz::destroy_hosted d.example "${YAML}"
 }
 
 _hosted_one() {
+  _hosted_list '[]'
   kubehz::provision_hosted d.example "${YAML}"
 }
 
@@ -1867,17 +1878,18 @@ _hosted_setup() {
   _hosted_setup
   _curlrc_case _hosted_flow 2
   grep -qx 'kind: Config' "${BATS_TEST_TMPDIR}/ref.out"
+  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 8 ]
   [ "$(grep -c '^POST /api/clusters bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters/cl-1 bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters/cl-1/kubeconfig bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^DELETE /api/clusters/cl-1 bearer$' "${STUB_LOG}")" -eq 4 ]
-  [ "$(wc -l < "${STUB_LOG}")" -eq $((4 * 5 + CONTROLS)) ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq $((4 * 6 + CONTROLS)) ]
 }
 
 @test "kubehz hosted: curl gets no TLS log or trace variable and writes no TLS key log" {
   _need_real_curl
   _hosted_setup
-  _tls_case _hosted_flow 5 _hosted_one
+  _tls_case _hosted_flow 6 _hosted_one
 }
 
 # The kubeconfig download goes to a temp file beside the kubeconfig, which
@@ -1903,6 +1915,7 @@ _hosted_setup() {
   printf 'old\n' > "${kc}"
   jq '."GET /api/clusters/cl-1/kubeconfig" = {"code": 500, "body": "no"}' "${STUB_ROUTES}" > "${STUB_ROUTES}.new"
   mv -- "${STUB_ROUTES}.new" "${STUB_ROUTES}"
+  _hosted_list '[]'
   ( umask 022 && kubehz::provision_hosted d.example "${YAML}" ) > "${o}" 2> "${e}" || rc=$?
   [ "${rc}" -ne 0 ]
   grep -qF 'Failed to download kubeconfig for hosted cluster cl-1' "${e}"
@@ -1910,6 +1923,7 @@ _hosted_setup() {
   [ -z "$(find "${PATH_BASE}/.kubeconfig" -name 'd.example.yaml.*')" ]
   [ "$(cat "${CURL_MODES}")" = 600 ]
   _routes
+  _hosted_list '[]'
   : > "${CURL_MODES}"
   rc=0
   ( umask 022 && kubehz::provision_hosted d.example "${YAML}" ) > "${o}" 2> "${e}" || rc=$?

@@ -9,6 +9,7 @@
 
 import ^utils/verbose
 import ^utils/http
+import ^libs/kubehz/node
 
 # ── Hosted provisioning ──────────────────────────────────
 
@@ -147,6 +148,13 @@ kubehz::render_capacity_rejection() {
 # A spec with no spec.kubernetes.version is refused first, before any
 # request: the platform needs the version and refuses a create without it
 # (HTTP 400, a missing field). Go twin: ProvisionHosted.
+# One cluster for one domain: the api does not refuse a second create for
+# a domain, and lo keeps no cluster id. So before the create, lo reads the
+# cluster list (kubehz::_hosted_listed) and stops when the list shows a
+# cluster of the domain that the create sends (spec.cluster.domain), or
+# when lo cannot read the list. A create that left this machine and got
+# no answer can have made the cluster: lo reads the list again before it
+# prints anything (kubehz::_hosted_create_unknown).
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
 kubehz::provision_hosted() {
   local domain="${1}" cluster_yaml="${2}"
@@ -170,6 +178,15 @@ kubehz::provision_hosted() {
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   kubehz::_private_target "${kubeconfig_path}" > /dev/null || return 1
 
+  # The domain of the create (the payload's domain): the list rows carry it.
+  local create_domain list_rc=0
+  create_domain=$(yq -r '.spec.cluster.domain' "${cluster_yaml}")
+  kubehz::_hosted_listed "${api_url}" "${create_domain}" || list_rc=$?
+  case "${list_rc}" in
+    0) kubehz::_hosted_exists "${create_domain}"; return 1 ;;
+    1) kubehz::_hosted_list_unread "${create_domain}"; return 1 ;;
+  esac
+
   local payload
   payload=$(kubehz::build_cluster_payload "${cluster_yaml}")
 
@@ -182,16 +199,25 @@ kubehz::provision_hosted() {
   # -q first and the subshell with http::tls_log_vars_unset: curl reads no
   # config file of the user and gets no TLS log or trace control
   # (utils/http.sh).
-  local raw response http_code
+  # A curl failure before the send (node::curl_sent_nothing) made no
+  # cluster. After the send, the api can have made one although no answer
+  # came back.
+  local raw response http_code curl_rc=0
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
     http::tls_log_vars_unset &&
       curl -q -K - -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
         -H "Content-Type: application/json" \
         -d "${payload}"
-  ) ) || {
-    error "Failed to create hosted cluster via kubehz API (network error)"
+  ) ) || curl_rc=$?
+  if (( curl_rc != 0 )); then
+    if node::curl_sent_nothing "${curl_rc}"; then
+      error "Failed to create hosted cluster via kubehz API (network error)"
+      echo "  The request did not reach the api, so no cluster was created." >&2
+    else
+      kubehz::_hosted_create_unknown "${api_url}" "${create_domain}" "no answer"
+    fi
     return 1
-  }
+  fi
   http_code="${raw##*$'\n'}"
   response="${raw%$'\n'*}"
 
@@ -201,6 +227,21 @@ kubehz::provision_hosted() {
     kubehz::render_capacity_rejection "${response}"
     return 1
   fi
+
+  # A gateway in front of the api answers 502 or 504 when the api does not
+  # answer in time, and 503 when it cannot reach the api. That answer
+  # carries no code of the api, and the api can still make the cluster.
+  # The api's own 502 (HOSTED_BACKEND_ERROR) and 503 (AT_CAPACITY) carry a
+  # code. Go twin: gatewayAnswer.
+  case "${http_code}" in
+    502|503|504)
+      local code
+      code=$(jq -r '.data.code // .code // empty' <<<"${response}" 2>/dev/null) || code=""
+      if [[ -z "${code}" ]]; then
+        kubehz::_hosted_create_unknown "${api_url}" "${create_domain}" "HTTP ${http_code}"
+        return 1
+      fi ;;
+  esac
 
   # Any other non-2xx: surface the api's own message + help when it carries them
   # (the {code,message,help} envelope — help is the actionable half).
@@ -263,6 +304,118 @@ kubehz::provision_hosted() {
       echo "[kubehz] warning: could not mirror the kubeconfig to .kubeconfig/${cluster_name}.yaml — the bootstrap step will report it missing" >&2
     fi
   fi
+}
+
+# kubehz::_hosted_listed <api_url> <domain>: what the cluster list of the
+# account (GET /api/clusters, the route of `lo kubehz cluster list`) says
+# about the clusters of <domain>. The list holds each cluster that is not
+# deleted, also one whose create kubehz still checks. Prints nothing.
+#   rc 0: the list shows a cluster of <domain>. KUBEHZ_HOSTED_LIST_ID is
+#         the id of the oldest one when it has the api's shape, else "".
+#   rc 2: the list shows no cluster of <domain>.
+#   rc 1: lo cannot read the list: the request failed, the api refused
+#         it, the answer holds no list, or the list is a part of the
+#         clusters (the total of the answer is larger) and shows no
+#         cluster of <domain>. KUBEHZ_HOSTED_LIST_CAUSE says why, and
+#         KUBEHZ_HOSTED_LIST_SCOPE is 1 when the api refused the list for
+#         a missing scope of the token.
+# -q first and the subshell with http::tls_log_vars_unset: curl reads no
+# config file of the user and gets no TLS log or trace control
+# (utils/http.sh). Go twin: hostedListed.
+kubehz::_hosted_listed() {
+  local api_url="${1}" domain="${2}" raw status body code listed rows id total n
+  local LC_ALL=C
+  KUBEHZ_HOSTED_LIST_ID=""
+  KUBEHZ_HOSTED_LIST_CAUSE=""
+  KUBEHZ_HOSTED_LIST_SCOPE=0
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null
+  ) ) || {
+    KUBEHZ_HOSTED_LIST_CAUSE="no answer"
+    return 1
+  }
+  status="${raw##*$'\n'}"
+  body="${raw%$'\n'*}"
+  if [[ "${status}" != 2* ]]; then
+    code=$(jq -r '.data.code // .code // empty' <<<"${body}" 2>/dev/null) || code=""
+    [[ "${code}" =~ ^[A-Z0-9_]{1,64}$ ]] || code=""
+    [[ "${code}" != TOKEN_SCOPE_MISSING ]] || KUBEHZ_HOSTED_LIST_SCOPE=1
+    KUBEHZ_HOSTED_LIST_CAUSE="HTTP ${status}${code:+ ${code}}"
+    return 1
+  fi
+  # `.data? // .`: the envelope of the api, or a bare body (the Go twin's
+  # envelope). Only an array is a list.
+  listed=$(jq -c '(.data? // .) | if type == "array" then . else empty end' <<<"${body}" 2>/dev/null) || listed=""
+  rows=""
+  [[ -z "${listed}" ]] || rows=$(jq -c --arg d "${domain}" \
+    '[.[] | objects | select(.domain == $d)] | sort_by(.createdAt)' <<<"${listed}" 2>/dev/null) || rows=""
+  if [[ -z "${rows}" ]]; then
+    KUBEHZ_HOSTED_LIST_CAUSE="an answer without a list"
+    return 1
+  fi
+  if [[ "${rows}" != "[]" ]]; then
+    id=$(jq -r '.[0].id | if type == "string" then . else "" end' <<<"${rows}" 2>/dev/null) || id=""
+    [[ "${id}" =~ ^cl-[A-Za-z0-9-]{1,64}$ ]] || id=""
+    KUBEHZ_HOSTED_LIST_ID="${id}"
+    return 0
+  fi
+  total=$(jq -r '.meta.pagination.total // 0' <<<"${body}" 2>/dev/null) || total=0
+  [[ "${total}" =~ ^[0-9]{1,18}$ ]] || total=0
+  n=$(jq -r 'length' <<<"${listed}" 2>/dev/null) || n=0
+  if (( 10#${total} > n )); then
+    KUBEHZ_HOSTED_LIST_CAUSE="it shows ${n} of $(( 10#${total} )) clusters"
+    return 1
+  fi
+  return 2
+}
+
+# kubehz::_hosted_list_unread <domain>: stop a create when lo cannot read
+# the cluster list (kubehz::_hosted_listed rc 1): lo cannot tell whether
+# the account has a cluster of <domain>. Go twin: hostedListUnread.
+kubehz::_hosted_list_unread() {
+  error "kubehz: lo cannot read the cluster list (${KUBEHZ_HOSTED_LIST_CAUSE}), so it cannot check for a cluster of ${1}. No cluster was created."
+  if (( KUBEHZ_HOSTED_LIST_SCOPE )); then
+    echo "  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens)." >&2
+    return 0
+  fi
+  echo "  Run the command again when lo can read the list." >&2
+}
+
+# kubehz::_hosted_exists <domain>: stop a create when the list shows a
+# cluster of <domain> (kubehz::_hosted_listed rc 0). Go twin: hostedExists.
+kubehz::_hosted_exists() {
+  local domain="${1}"
+  if [[ -z "${KUBEHZ_HOSTED_LIST_ID}" ]]; then
+    error "kubehz: your account already has a cluster for ${domain}, so lo did not create another one."
+    echo "  See your clusters with:  lo kubehz cluster list" >&2
+    return 0
+  fi
+  error "kubehz: your account already has cluster ${KUBEHZ_HOSTED_LIST_ID} for ${domain}, so lo did not create another one."
+  echo "  See the cluster with:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_ID}" >&2
+}
+
+# kubehz::_hosted_create_unknown <api_url> <domain> <cause>: end a create
+# whose result is open: the request left this machine, but no answer of
+# the api came back (<cause>: "no answer", or the status of a gateway
+# that answered for the api). The api can have made the cluster, so lo
+# reads the list again before it prints anything. Go twin: createUnknown.
+kubehz::_hosted_create_unknown() {
+  local api_url="${1}" domain="${2}" cause="${3}" rc=0
+  kubehz::_hosted_listed "${api_url}" "${domain}" || rc=$?
+  error "kubehz: the result of the create for ${domain} is unknown (${cause}). Possibly, kubehz made the cluster."
+  if (( rc == 1 )); then
+    echo "  lo cannot read the cluster list either (${KUBEHZ_HOSTED_LIST_CAUSE})." >&2
+  elif (( rc == 0 )) && [[ -n "${KUBEHZ_HOSTED_LIST_ID}" ]]; then
+    echo "  The cluster list shows cluster ${KUBEHZ_HOSTED_LIST_ID} for ${domain}:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_ID}" >&2
+  elif (( rc == 0 )); then
+    echo "  The cluster list shows a cluster for ${domain}:  lo kubehz cluster list" >&2
+  else
+    echo "  The cluster list shows no cluster for ${domain} now." >&2
+  fi
+  echo "  If kubehz is still checking the create, it keeps or removes the cluster in about 3 minutes." >&2
+  echo "  Do not run lo provision again before that." >&2
+  echo "  Then run it again only if lo kubehz cluster list shows no cluster for ${domain}." >&2
 }
 
 # kubehz::_hosted_kubeconfig_get <api_url> <cluster_id>: the kubeconfig of

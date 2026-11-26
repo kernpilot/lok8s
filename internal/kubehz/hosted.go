@@ -234,6 +234,14 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 // spec.kubernetes.version is refused first, before any request: the
 // platform needs the version and refuses a create without it (HTTP 400,
 // a missing field).
+//
+// One cluster for one domain: the api does not refuse a second create
+// for a domain, and lo keeps no cluster id. So before the create, lo
+// reads the cluster list (hostedListed) and stops when the list shows a
+// cluster of the domain that the create sends (spec.cluster.domain), or
+// when lo cannot read the list. A create that left this machine and got
+// no answer can have made the cluster: lo reads the list again before it
+// prints anything (createUnknown).
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
 	if loadSpec(clusterYAML).kubernetesVersion() == "" {
 		c.errorf("%s", missingVersionLine(clusterYAML))
@@ -250,6 +258,17 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		c.errorf("%s", err)
 		return ErrHandled
 	}
+	// The domain of the create (the payload's domain): the list rows
+	// carry it.
+	createDomain := loadSpec(clusterYAML).Raw("spec", "cluster", "domain")
+	switch l := c.hostedListed(ctx, apiURL, createDomain); {
+	case l.cause != "":
+		c.hostedListUnread(l, createDomain)
+		return ErrHandled
+	case l.found:
+		c.hostedExists(l, createDomain)
+		return ErrHandled
+	}
 	payload := buildClusterPayload(clusterYAML)
 	if payload == nil {
 		payload = []byte{}
@@ -257,13 +276,27 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 	c.debugf("Creating hosted cluster for %s", domain)
 
 	// Both body and status: a 503 AT_CAPACITY body is the whole point.
-	res, err := c.fetchStatus(ctx, "POST", apiURL+"/api/clusters", withBearer(c.getenv("KUBEHZ_TOKEN")), payload)
+	// requestSent: a failure before the send made no cluster. After the
+	// send, the api can have made one although no answer came back.
+	res, sent, err := c.requestSent(ctx, "POST", apiURL+"/api/clusters", withBearer(c.getenv("KUBEHZ_TOKEN")), payload)
 	if err != nil {
-		c.errorf("Failed to create hosted cluster via kubehz API (network error)")
+		if !sent {
+			c.errorf("Failed to create hosted cluster via kubehz API (network error)")
+			c.echoErr("  The request did not reach the api, so no cluster was created.")
+			return ErrHandled
+		}
+		c.createUnknown(ctx, apiURL, createDomain, "no answer")
 		return ErrHandled
 	}
 	if res.Status == 503 && apiCode(res.Body) == "AT_CAPACITY" {
 		c.renderCapacityRejection(cfg, res.Body)
+		return ErrHandled
+	}
+	// A gateway in front of the api answers 502 or 504 when the api does
+	// not answer in time, and 503 when it cannot reach the api. That answer
+	// carries no code of the api, and the api can still make the cluster.
+	if gatewayAnswer(res) {
+		c.createUnknown(ctx, apiURL, createDomain, "HTTP "+strconv.Itoa(res.Status))
 		return ErrHandled
 	}
 	if !is2xx(res.Status) {
@@ -323,6 +356,110 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		}
 	}
 	return nil
+}
+
+// gatewayAnswer tells whether a refusal of the create came from a gateway
+// in front of the api, not from the api: a 502, 503 or 504 without a
+// code of the api. The api's own 502 (HOSTED_BACKEND_ERROR) and 503
+// (AT_CAPACITY) carry a code.
+func gatewayAnswer(res *httpResult) bool {
+	return (res.Status == 502 || res.Status == 503 || res.Status == 504) && apiCode(res.Body) == ""
+}
+
+// hostedList is what the cluster list says about one domain
+// (hostedListed). cause is not "" when lo cannot read the list. Else
+// found tells whether the list shows a cluster of the domain, and id is
+// the id of the oldest one when it has the api's shape (kindCluster),
+// "" otherwise. scope is true when the api refused the list for a
+// missing scope of the token.
+type hostedList struct {
+	found bool
+	id    string
+	cause string
+	scope bool
+}
+
+// hostedListed reads the cluster list of the account (GET
+// /api/clusters, the route of `lo kubehz cluster list`) and finds the
+// clusters of domain. The list holds each cluster that is not deleted,
+// also one whose create kubehz still checks. lo cannot read the list
+// when the request fails, when the api refuses it, when the answer holds
+// no list, and when the list is a part of the clusters (the total of
+// the answer is larger) and shows no cluster of the domain. Bash:
+// kubehz::_hosted_listed.
+func (c *Context) hostedListed(ctx context.Context, apiURL, domain string) hostedList {
+	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	if err != nil {
+		return hostedList{cause: "no answer"}
+	}
+	if !is2xx(res.Status) {
+		code := apiCode(res.Body)
+		if !apiCodeRe.MatchString(code) {
+			code = ""
+		}
+		return hostedList{cause: "HTTP " + strconv.Itoa(res.Status) + optSuffix(" ", code), scope: code == "TOKEN_SCOPE_MISSING"}
+	}
+	v, _ := parseJSON(res.Body)
+	list, ok := envelope(v).([]any)
+	if !ok {
+		return hostedList{cause: "an answer without a list"}
+	}
+	if rs := domainRows(list, domain); len(rs) > 0 {
+		id := jstrOr(rs[0], "", "id")
+		if !kindCluster.id.MatchString(id) {
+			id = ""
+		}
+		return hostedList{found: true, id: id}
+	}
+	if total := jnum(jget(v, "meta", "pagination", "total")); total > len(list) {
+		return hostedList{cause: "it shows " + strconv.Itoa(len(list)) + " of " + strconv.Itoa(total) + " clusters"}
+	}
+	return hostedList{}
+}
+
+// hostedListUnread stops a create when lo cannot read the cluster list:
+// lo cannot tell whether the account has a cluster of domain.
+func (c *Context) hostedListUnread(l hostedList, domain string) {
+	c.errorf("kubehz: lo cannot read the cluster list (%s), so it cannot check for a cluster of %s. No cluster was created.", l.cause, domain)
+	if l.scope {
+		c.echoErr("  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens).")
+		return
+	}
+	c.echoErr("  Run the command again when lo can read the list.")
+}
+
+// hostedExists stops a create when the list shows a cluster of domain.
+func (c *Context) hostedExists(l hostedList, domain string) {
+	if l.id == "" {
+		c.errorf("kubehz: your account already has a cluster for %s, so lo did not create another one.", domain)
+		c.echoErr("  See your clusters with:  lo kubehz cluster list")
+		return
+	}
+	c.errorf("kubehz: your account already has cluster %s for %s, so lo did not create another one.", l.id, domain)
+	c.echoErr("  See the cluster with:  lo kubehz cluster get %s", l.id)
+}
+
+// createUnknown ends a create whose result is open: the request left this
+// machine, but no answer of the api came back (cause: "no answer", or
+// the status of a gateway that answered for the api). The api can have
+// made the cluster, so lo reads the list again before it prints
+// anything. Bash: kubehz::_hosted_create_unknown.
+func (c *Context) createUnknown(ctx context.Context, apiURL, domain, cause string) {
+	l := c.hostedListed(ctx, apiURL, domain)
+	c.errorf("kubehz: the result of the create for %s is unknown (%s). Possibly, kubehz made the cluster.", domain, cause)
+	switch {
+	case l.cause != "":
+		c.echoErr("  lo cannot read the cluster list either (%s).", l.cause)
+	case l.id != "":
+		c.echoErr("  The cluster list shows cluster %s for %s:  lo kubehz cluster get %s", l.id, domain, l.id)
+	case l.found:
+		c.echoErr("  The cluster list shows a cluster for %s:  lo kubehz cluster list", domain)
+	default:
+		c.echoErr("  The cluster list shows no cluster for %s now.", domain)
+	}
+	c.echoErr("  If kubehz is still checking the create, it keeps or removes the cluster in about 3 minutes.")
+	c.echoErr("  Do not run lo provision again before that.")
+	c.echoErr("  Then run it again only if lo kubehz cluster list shows no cluster for %s.", domain)
 }
 
 // privateFileError is a refusal of writePrivateFile; its text is the

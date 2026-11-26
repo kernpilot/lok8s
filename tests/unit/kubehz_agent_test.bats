@@ -408,6 +408,7 @@ file: "off"'
 TOKEN_SCOPE_MISSING|This endpoint requires the 'clusters:write' scope|The agent key can read but not write. Use an agent key with the role editor or admin.
 AGENT_KEY_OUT_OF_SCOPE|tenant-wide|api help
 AGENT_KEY_SPEND_CAP|This agent key spent 1200 of its 1000 cents this month|Delete what the agent key created, or ask a tenant owner for a key with a higher spend cap. The count starts again on the first day of the month (UTC).
+CLUSTER_CREATE_UNCONFIRMED|The create of this cluster is not confirmed yet|The platform is still checking the create of this cluster. In about 3 minutes it keeps or removes the cluster. Do not create the cluster again. Run the command again after that.
 SPACE_LIMITS_ABOVE_FREE|too big|api help
 SPACE_LIMITS_ABOVE_SHARED|too big|Lower --nodes, --namespaces or --object-cap-kib. A value you leave out takes the platform default.
 NO_SHARD_AVAILABLE|full|This is a platform capacity limit, not an account limit. Try again later, or name another region with --region.

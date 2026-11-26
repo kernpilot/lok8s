@@ -93,9 +93,17 @@ curl_respond() {
     # deletes it.
     */v1/ssh_keys\?name=*) out='{"ssh_keys":[{"id":7,"labels":{"lok8s.dev/kubehz-claim":"4832b62ed035fb411ffefd346ab61e77"}}]}' ;;
     */api/credentials) out='{"data":{"validation":{"writable":true}}}' ;;
+    # A hosted create reads the list first. With CREATED_MARK set, the
+    # list shows no cluster until the create made that file.
     */api/clusters\?perPage=500)
-      out='{"ok":true,"data":[{"id":"cl-1","domain":"d.example","createdAt":"2026-01-01T00:00:00Z","status":"active","connected":true}]}' ;;
-    */api/clusters) out='{"id":"cl-1"}'; code=201 ;;
+      if [[ -n "${CREATED_MARK:-}" && ! -e "${CREATED_MARK}" ]]; then
+        out='{"ok":true,"data":[]}'
+      else
+        out='{"ok":true,"data":[{"id":"cl-1","domain":"d.example","createdAt":"2026-01-01T00:00:00Z","status":"active","connected":true}]}'
+      fi ;;
+    */api/clusters)
+      out='{"id":"cl-1"}'; code=201
+      [[ -z "${CREATED_MARK:-}" ]] || : > "${CREATED_MARK}" ;;
     */kubeconfig) out='apiVersion: v1' ;;
     */agent-token) out='{"rotated":true,"clusterId":"cl-1"}' ;;
     */assessment) out='{"data":{}}' ;;
@@ -398,6 +406,7 @@ YAML
   # A hosted create needs a version (provision_hosted refuses a spec without one).
   printf '  kubernetes:\n    version: v1.31.10\n' >> "${yaml}"
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.example"
+  export CREATED_MARK="${BATS_TEST_TMPDIR}/created"
 
   run kubehz::provision_hosted d.example "${yaml}"
   assert_success
@@ -406,6 +415,8 @@ YAML
 
   assert_argv_clean
   [ "$(req_count "POST https://api.kubehz.example/api/clusters | user= | headers=Content-Type: application/json; Authorization: Bearer ${KUBEHZ_TOKEN}")" = 1 ]
+  # The list before the create, and the lookup of the destroy.
+  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500 | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 2 ]
   [ "$(req_count "GET https://api.kubehz.example/api/clusters/cl-1 ")" -ge 1 ]
   [ "$(req_count "GET https://api.kubehz.example/api/clusters/cl-1/kubeconfig")" = 1 ]
   [ "$(req_count "DELETE https://api.kubehz.example/api/clusters/cl-1")" = 1 ]

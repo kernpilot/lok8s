@@ -219,6 +219,11 @@ _PAYLOAD_UNSET='{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner
 
 # ── provision_hosted ─────────────────────────────────────
 
+# _hosted_no_cluster: the cluster list shows no cluster of the domain
+# (kubehz::_hosted_listed rc 2). For the tests of the create after the
+# list; the list has its own tests below.
+_hosted_no_cluster() { kubehz::_hosted_listed() { return 2; }; }
+
 @test "provision_hosted: creates cluster, waits, and downloads kubeconfig" {
   local _curl_calls=()
   curl() {
@@ -276,6 +281,7 @@ clusters:
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  _hosted_no_cluster
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
   export KUBEHZ_TOKEN="test-token"
@@ -316,6 +322,7 @@ clusters:
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  _hosted_no_cluster
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
   export KUBEHZ_TOKEN="test-token"
@@ -397,6 +404,7 @@ clusters:
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  _hosted_no_cluster
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
   export KUBEHZ_TOKEN="test-token"
@@ -456,6 +464,7 @@ clusters:
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  _hosted_no_cluster
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
   export KUBEHZ_TOKEN="test-token"
@@ -516,6 +525,7 @@ clusters:
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  _hosted_no_cluster
 
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
   export KUBEHZ_TOKEN="test-token"
@@ -524,6 +534,210 @@ clusters:
   assert_failure
   assert_output --partial "HTTP 502"
   assert_output --partial "Failed to schedule the hosted control plane"
+}
+
+# ── provision_hosted: one cluster for one domain ─────────
+# The list before the create (kubehz::_hosted_listed), the stop on a
+# cluster of the domain, and the lost answer of a create. Real jq and yq
+# read a real spec. The curl stub answers by the request: the list from
+# LIST_STATUS/LIST_BODY (the second read from LIST2_*), the create from
+# CREATE_RC (a curl exit code) or CREATE_STATUS/CREATE_BODY. Each call goes
+# to CALLS. Go twins: TestProvisionHostedStopsOnAClusterOfTheDomain and
+# the tests after it (internal/kubehz/hosted_test.go).
+
+_hosted_list_setup() {
+  command -v yq &>/dev/null || skip "yq not available"
+  command -v jq &>/dev/null || skip "jq not available"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/node"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev" KUBEHZ_TOKEN="test-token"
+  export CALLS="${BATS_TEST_TMPDIR}/calls" LIST_STATUS=200 LIST_BODY='{"ok":true,"data":[]}'
+  export LIST2_STATUS="" LIST2_BODY="" CREATE_RC=0 CREATE_STATUS=201 CREATE_BODY='{"data":{"id":"cl-1","status":"Running"}}'
+  : > "${CALLS}"
+  SPEC="${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  printf 'kind: KubeOne\nmetadata:\n  name: test.kubehz.dev\nspec:\n  cluster:\n    domain: test.kubehz.dev\n  kubernetes:\n    version: v1.31.10\n  kubehz:\n    hosting: hosted\n' > "${SPEC}"
+  curl() {
+    local a="$*"
+    case "${a}" in
+      *"/api/clusters?perPage=500"*)
+        echo "list ${a##* }" >> "${CALLS}"
+        if [[ -n "${LIST2_STATUS}" ]] && (( $(grep -c '^list ' "${CALLS}") > 1 )); then
+          [[ "${LIST2_STATUS}" != fail ]] || return 52
+          printf '%s\n%s' "${LIST2_BODY}" "${LIST2_STATUS}"
+          return 0
+        fi
+        [[ "${LIST_STATUS}" != fail ]] || return 52
+        printf '%s\n%s' "${LIST_BODY}" "${LIST_STATUS}" ;;
+      *"-X POST"*)
+        echo "create" >> "${CALLS}"
+        (( CREATE_RC == 0 )) || return "${CREATE_RC}"
+        printf '%s\n%s' "${CREATE_BODY}" "${CREATE_STATUS}" ;;
+      *"/kubeconfig"*) echo "get kubeconfig" >> "${CALLS}"; printf 'kc\n' ;;
+      *) echo "get ${a##* }" >> "${CALLS}"; printf '{"data":{"status":"Running"}}' ;;
+    esac
+  }
+  export -f curl
+  kubehz::wait_for_cluster() { echo "wait" >> "${CALLS}"; }
+}
+
+# _listed <status|fail> <body>: one read of the list, as rc|id|cause|scope.
+_listed() {
+  local rc=0
+  export LIST_STATUS="${1}" LIST_BODY="${2}"
+  kubehz::_hosted_listed "${LOK8S_KUBEHZ_API_URL}" test.kubehz.dev || rc=$?
+  printf '%s|%s|%s|%s\n' "${rc}" "${KUBEHZ_HOSTED_LIST_ID}" "${KUBEHZ_HOSTED_LIST_CAUSE}" "${KUBEHZ_HOSTED_LIST_SCOPE}"
+}
+
+@test "kubehz::_hosted_listed: the oldest cluster of the domain, none, and each list it cannot read" {
+  _hosted_list_setup
+  local rows='{"id":"cl-other","domain":"other.example.com","createdAt":"2026-01-01T00:00:00Z"},{"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-03-01T00:00:00Z"},{"id":"cl-old","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"}'
+  assert_equal "$(_listed 200 '{"ok":true,"data":['"${rows}"'],"meta":{"pagination":{"total":3}}}')" "0|cl-old||0"
+  # An id in another shape is a server string that lo does not repeat.
+  assert_equal "$(_listed 200 '{"ok":true,"data":[{"id":"cl-\u001b[2J","domain":"test.kubehz.dev"}]}')" "0|||0"
+  assert_equal "$(_listed 200 '{"ok":true,"data":[{"domain":"test.kubehz.dev"}]}')" "0|||0"
+  assert_equal "$(_listed 200 '[{"id":"cl-bare","domain":"test.kubehz.dev"}]')" "0|cl-bare||0"
+  assert_equal "$(_listed 200 '{"ok":true,"data":[]}')" "2|||0"
+  assert_equal "$(_listed 200 '{"ok":true,"data":[{"id":"cl-1a","domain":"other.example.com"},7],"meta":{"pagination":{"total":2}}}')" "2|||0"
+  assert_equal "$(_listed 500 '{"ok":false,"data":{"code":"INTERNAL_ERROR","message":"boom"}}')" "1||HTTP 500 INTERNAL_ERROR|0"
+  assert_equal "$(_listed 403 '{"ok":false,"data":{"code":"TOKEN_SCOPE_MISSING"}}')" "1||HTTP 403 TOKEN_SCOPE_MISSING|1"
+  assert_equal "$(_listed 502 '{"data":{"code":"x\u001b[2J"}}')" "1||HTTP 502|0"
+  assert_equal "$(_listed 200 '{"ok":true,"data":{"id":"cl-1"}}')" "1||an answer without a list|0"
+  assert_equal "$(_listed 200 '{"ok":true,"data":null}')" "1||an answer without a list|0"
+  assert_equal "$(_listed 200 '<html>proxy</html>')" "1||an answer without a list|0"
+  assert_equal "$(_listed 200 '{"ok":true,"data":[{"id":"cl-2b","domain":"other.example.com"}],"meta":{"pagination":{"total":612}}}')" "1||it shows 1 of 612 clusters|0"
+  assert_equal "$(_listed fail '')" "1||no answer|0"
+}
+
+@test "provision_hosted: a cluster of the domain in the list stops the create" {
+  _hosted_list_setup
+  export LIST_BODY='{"ok":true,"data":[{"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-03-01T00:00:00Z"},{"id":"cl-old","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"}]}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_failure
+  assert_output "[error] kubehz: your account already has cluster cl-old for test.kubehz.dev, so lo did not create another one.
+  See the cluster with:  lo kubehz cluster get cl-old"
+  assert_equal "$(cat "${CALLS}")" "list https://api.kubehz.dev/api/clusters?perPage=500"
+  [[ ! -e "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]]
+
+  : > "${CALLS}"
+  export LIST_BODY='{"ok":true,"data":[{"id":"../x","domain":"test.kubehz.dev"}]}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_failure
+  assert_output "[error] kubehz: your account already has a cluster for test.kubehz.dev, so lo did not create another one.
+  See your clusters with:  lo kubehz cluster list"
+  refute grep -q '^create' "${CALLS}"
+}
+
+@test "provision_hosted: the domain of the create is spec.cluster.domain, and a list without it lets the create go" {
+  _hosted_list_setup
+  printf 'kind: KubeOne\nmetadata:\n  name: test.kubehz.dev\nspec:\n  cluster:\n    domain: api.test.kubehz.dev\n  kubernetes:\n    version: v1.31.10\n  kubehz:\n    hosting: hosted\n' > "${SPEC}"
+  export LIST_BODY='{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev"},{"id":"cl-2b","domain":"other.example.com"}],"meta":{"pagination":{"total":2}}}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_success
+  grep -qx 'create' "${CALLS}"
+  [[ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]]
+}
+
+@test "provision_hosted: a list that lo cannot read stops the create" {
+  _hosted_list_setup
+  export LIST_STATUS=403 LIST_BODY='{"ok":false,"data":{"code":"TOKEN_SCOPE_MISSING","message":"This endpoint requires the read scope"}}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_failure
+  assert_output "[error] kubehz: lo cannot read the cluster list (HTTP 403 TOKEN_SCOPE_MISSING), so it cannot check for a cluster of test.kubehz.dev. No cluster was created.
+  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens)."
+  refute grep -q '^create' "${CALLS}"
+
+  export LIST_STATUS=fail
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_failure
+  assert_output "[error] kubehz: lo cannot read the cluster list (no answer), so it cannot check for a cluster of test.kubehz.dev. No cluster was created.
+  Run the command again when lo can read the list."
+  refute grep -q '^create' "${CALLS}"
+}
+
+# _hosted_unknown_tail: the end of each create whose result is open.
+_hosted_unknown_tail() {
+  printf '%s\n' "  If kubehz is still checking the create, it keeps or removes the cluster in about 3 minutes." \
+    "  Do not run lo provision again before that." \
+    "  Then run it again only if lo kubehz cluster list shows no cluster for test.kubehz.dev."
+}
+
+@test "provision_hosted: a create with no answer reads the list again and names what it shows" {
+  _hosted_list_setup
+  local row='{"ok":true,"data":[{"id":"cl-1a2b3c4d","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"}]}' line
+  line="[error] kubehz: the result of the create for test.kubehz.dev is unknown (no answer). Possibly, kubehz made the cluster."
+  # 52: curl got an empty reply, after the send.
+  export CREATE_RC=52 LIST2_STATUS=200 LIST2_BODY="${row}"
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_failure
+  assert_output "${line}
+  The cluster list shows cluster cl-1a2b3c4d for test.kubehz.dev:  lo kubehz cluster get cl-1a2b3c4d
+$(_hosted_unknown_tail)"
+  assert_equal "$(grep -c '^list ' "${CALLS}")" 2
+  refute grep -q '^wait' "${CALLS}"
+
+  : > "${CALLS}"
+  export LIST2_BODY='{"ok":true,"data":[{"id":"../x","domain":"test.kubehz.dev"}]}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_output "${line}
+  The cluster list shows a cluster for test.kubehz.dev:  lo kubehz cluster list
+$(_hosted_unknown_tail)"
+
+  : > "${CALLS}"
+  export LIST2_BODY='{"ok":true,"data":[]}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_output "${line}
+  The cluster list shows no cluster for test.kubehz.dev now.
+$(_hosted_unknown_tail)"
+
+  : > "${CALLS}"
+  export LIST2_STATUS=500 LIST2_BODY='{"ok":false}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_output "${line}
+  lo cannot read the cluster list either (HTTP 500).
+$(_hosted_unknown_tail)"
+}
+
+@test "provision_hosted: the answer of a gateway in front of the api leaves the create open, the api's own 502 does not" {
+  _hosted_list_setup
+  export LIST2_STATUS=200 LIST2_BODY='{"ok":true,"data":[]}'
+  local gw body
+  # gw, not status: run sets status.
+  for gw in 502 503 504; do
+    for body in 'upstream request timeout' '{"ok":false}'; do
+      : > "${CALLS}"
+      export CREATE_STATUS="${gw}" CREATE_BODY="${body}"
+      run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+      assert_failure
+      assert_output "[error] kubehz: the result of the create for test.kubehz.dev is unknown (HTTP ${gw}). Possibly, kubehz made the cluster.
+  The cluster list shows no cluster for test.kubehz.dev now.
+$(_hosted_unknown_tail)"
+      assert_equal "$(grep -c '^list ' "${CALLS}")" 2
+    done
+  done
+
+  : > "${CALLS}"
+  export CREATE_STATUS=502 CREATE_BODY='{"ok":false,"data":{"code":"HOSTED_BACKEND_ERROR","message":"The answer of the backend was lost","help":"kubehz checks the create."}}'
+  run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+  assert_failure
+  assert_output "[error] Failed to create hosted cluster via kubehz API (HTTP 502): The answer of the backend was lost
+  kubehz checks the create."
+  assert_equal "$(grep -c '^list ' "${CALLS}")" 1
+}
+
+@test "provision_hosted: a create that did not leave this machine made no cluster, and lo does not read the list again" {
+  _hosted_list_setup
+  local rc
+  # 7: curl could not connect, so it sent nothing (node::curl_sent_nothing).
+  for rc in 6 7 35 60; do
+    : > "${CALLS}"
+    export CREATE_RC="${rc}"
+    run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
+    assert_failure
+    assert_output "[error] Failed to create hosted cluster via kubehz API (network error)
+  The request did not reach the api, so no cluster was created."
+    assert_equal "$(grep -c '^list ' "${CALLS}")" 1
+  done
 }
 
 # ── destroy_hosted ───────────────────────────────────────
@@ -830,6 +1044,7 @@ EOF
 
 _hosted_kc_harness() {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  _hosted_no_cluster
   export LOK8S_KUBEHZ_API_URL="https://api.test" KUBEHZ_TOKEN="t"
   curl() {
     if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then echo "kc-bytes"; return 0; fi
