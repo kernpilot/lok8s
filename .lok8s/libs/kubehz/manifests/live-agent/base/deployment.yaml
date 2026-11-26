@@ -11,10 +11,18 @@ metadata:
     app.kubernetes.io/part-of: kubehz
     app.kubernetes.io/component: live-view
 spec:
-  # Single replica for the pilot. HA (multiple replicas with a leader-elected
-  # Lease in kubehz-system) is a follow-up tracked in the upstream kubehz-agent
-  # repo. Strategy Recreate avoids two agents briefly double-reporting during a
-  # rollout.
+  # Single replica by default. More than one is safe at the managed tier only.
+  # There the agent acts only while it holds the Lease
+  # kubehz-system/kubehz-live-agent (its Role is in ../managed), so one replica
+  # at most patches a MachineDeployment or deletes a Machine. The holder also
+  # sends the heartbeats, and the other replicas stand by. A holder whose
+  # heartbeats fail for 5 minutes gives up the Lease. At the registered tier
+  # (this base alone) no replica may read the Lease, so no election runs and
+  # every replica sends heartbeats: keep one replica there.
+  # Strategy Recreate still avoids two agents briefly double-reporting during
+  # a rollout. On shutdown the agent stops acting and releases the Lease
+  # before it exits; the default 30 s terminationGracePeriodSeconds covers
+  # that.
   replicas: 1
   strategy:
     type: Recreate
@@ -74,17 +82,26 @@ spec:
           # where the bytes come from, not which bytes.
           #
           # Never a moving tag (`latest`, `main`): a digest is the only ref
-          # `cosign verify` and a rollback can reason about. Release artifacts
-          # (install.yaml on the GitHub Release) carry the released digest;
-          # this committed default tracks the last known-good main build.
+          # `cosign verify` and a rollback can reason about. This is the
+          # digest of the kubehz-agent release that UPSTREAM.sha256 names
+          # (digest.txt on that GitHub Release; its install.yaml has the same).
           #
           # THE SINGLE SOURCE OF TRUTH for the digest. Nothing else in this
           # kustomization repeats it.
-          image: ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa
+          image: ghcr.io/kernpilot/kubehz-agent@sha256:54bba61ef3e7900f8cd7af8439e3a2164b7968024c336a9d836c269598b24080
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
                 name: kubehz-live-agent-config
+          env:
+            # The replica's own name, for the acting Lease's holderIdentity:
+            # `kubectl get lease -n kubehz-system kubehz-live-agent` then names
+            # the pod that may act. Nothing else reads it, and it never leaves
+            # the cluster.
+            - name: KUBEHZ_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           # No ports: the agent is OUTBOUND-ONLY. It opens connections to the
           # apiserver (watch) and kubehz-api (heartbeat POST); nothing dials in,
           # so there is no containerPort and no readiness/liveness HTTP probe.

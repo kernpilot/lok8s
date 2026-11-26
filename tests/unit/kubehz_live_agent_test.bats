@@ -1287,13 +1287,26 @@ _stub_kubectl_warns() {
   assert_success
   # Self-healing deletes a Machine and lets the MachineSet rebuild it — the
   # sharpest permission the agent holds, and the reason the overlay is opt-in.
-  assert_line "cluster.k8s.io|machines|get,list,watch,delete"
+  # Every read of the agent is one list per pass, so no get and no watch.
+  assert_line "cluster.k8s.io|machines|list,delete"
   # Scaling + worker upgrades: patch, never update/create/delete.
-  assert_line "cluster.k8s.io|machinedeployments|get,list,watch,patch"
+  assert_line "cluster.k8s.io|machinedeployments|list,patch"
   # The eviction unwedge: pods DELETE only, no other verb, no other resource.
   assert_line "|pods|delete"
-  # The six base rules ride along unchanged; the overlay adds exactly three.
-  [ "${#lines[@]}" -eq 9 ]
+  # The acting Lease: create, then get and update on its one name (the test
+  # below pins the name).
+  assert_line "coordination.k8s.io|leases|create"
+  assert_line "coordination.k8s.io|leases|get,update"
+  # The six base rules ride along unchanged; the overlay adds exactly five.
+  [ "${#lines[@]}" -eq 11 ]
+}
+
+@test "rbac: the Lease get and update are scoped by name to the acting Lease" {
+  run bash -c "command kustomize build '${LIVE_DIR}/managed' | command yq -r 'select(.kind==\"Role\" and .metadata.name==\"kubehz-live-agent-lease\") | .metadata.namespace + \"|\" + ([.rules[] | ((.resourceNames // [\"*\"]) | join(\",\")) + \"=\" + (.verbs | join(\",\"))] | join(\";\"))'"
+  assert_success
+  # create cannot carry a name (the object does not exist yet); get and update
+  # name the one Lease, so no other Lease in kubehz-system is in reach.
+  assert_output "kubehz-system|*=create;kubehz-live-agent=get,update"
 }
 
 @test "rbac: the Secret read is scoped by name to the agent's own identity Secret" {
@@ -1379,7 +1392,7 @@ _bindings() {
   [ "${#lines[@]}" -eq 2 ]
 }
 
-@test "rbac: the MANAGED overlay adds exactly two bindings, both to its own Roles" {
+@test "rbac: the MANAGED overlay adds exactly three bindings, all to its own Roles" {
   run _bindings "${LIVE_DIR}/managed"
   assert_success
   assert_line "ClusterRoleBinding|-/kubehz-live-agent|ClusterRole/kubehz-live-agent|ServiceAccount/kubehz-system/kubehz-live-agent"
@@ -1388,7 +1401,9 @@ _bindings() {
   # kube-system — cluster-wide is a different permission entirely.
   assert_line "RoleBinding|kube-system/kubehz-live-agent-machinedeployments|Role/kubehz-live-agent-machinedeployments|ServiceAccount/kubehz-system/kubehz-live-agent"
   assert_line "ClusterRoleBinding|-/kubehz-live-agent-eviction-unwedge|ClusterRole/kubehz-live-agent-eviction-unwedge|ServiceAccount/kubehz-system/kubehz-live-agent"
-  [ "${#lines[@]}" -eq 4 ]
+  # The acting Lease, in the agent's own namespace.
+  assert_line "RoleBinding|kubehz-system/kubehz-live-agent-lease|Role/kubehz-live-agent-lease|ServiceAccount/kubehz-system/kubehz-live-agent"
+  [ "${#lines[@]}" -eq 5 ]
 }
 
 # A `.rules` list is not the only place a ClusterRole's permissions can come
@@ -1405,7 +1420,7 @@ _bindings() {
 # ClusterRole may carry these four keys and no fifth, whatever RBAC grows next.
 @test "rbac: no Role or ClusterRole may carry a field beyond its own rules" {
   local pair overlay expected line
-  for pair in base:2 managed:4; do
+  for pair in base:2 managed:5; do
     overlay="${pair%%:*}"
     expected="${pair##*:}"
     run bash -c "command kustomize build '${LIVE_DIR}/${overlay}' | command yq -r 'select(.kind==\"ClusterRole\" or .kind==\"Role\") | .metadata.name + \"|\" + ([keys[]] | sort | join(\",\"))' | command grep -v '^---\$'"
@@ -1467,6 +1482,13 @@ _bindings() {
 
 # ══ 6. The image (digest-pinning discipline) ══════════════════════════════
 
+# The exact digest, pinned: the kubehz-agent v0.2.0 release (digest.txt at
+# https://github.com/kernpilot/kubehz-agent/releases/tag/v0.2.0). The RBAC
+# above is pinned rule for rule; the image the RBAC was reviewed against is
+# pinned the same way, so a digest bump and its RBAC re-read land together.
+# A re-pin updates this line in the same change as deployment.yaml.
+PINNED_AGENT_IMAGE='ghcr.io/kernpilot/kubehz-agent@sha256:54bba61ef3e7900f8cd7af8439e3a2164b7968024c336a9d836c269598b24080'
+
 @test "image: the live agent is pinned to a public GHCR digest, never a tag" {
   run bash -c "command kustomize build '${LIVE_DIR}/base' | command yq -r 'select(.kind==\"Deployment\") | .spec.template.spec.containers[0].image'"
   assert_success
@@ -1477,12 +1499,16 @@ _bindings() {
   # A digest is the only ref cosign verification and a rollback can reason about.
   refute_output --partial ":latest"
   refute_output --partial ":main"
-  # The exact digest, pinned: the kubehz-agent v0.1.0 release (digest.txt at
-  # https://github.com/kernpilot/kubehz-agent/releases/tag/v0.1.0). The RBAC
-  # above is pinned rule for rule; the image the RBAC was reviewed against is
-  # pinned the same way, so a digest bump and its RBAC re-read land together.
-  # A re-pin updates this line in the same change as deployment.yaml.
-  assert_output 'ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa'
+  assert_output "${PINNED_AGENT_IMAGE}"
+}
+
+@test "image: the managed overlay runs the same pinned digest as the base" {
+  # The managed overlay renders the base, but an `images:` entry in its own
+  # kustomization.yaml would replace the digest. The tier that acts must run
+  # the image that its RBAC was reviewed against.
+  run bash -c "command kustomize build '${LIVE_DIR}/managed' | command yq -r 'select(.kind==\"Deployment\") | .spec.template.spec.containers[0].image'"
+  assert_success
+  assert_output "${PINNED_AGENT_IMAGE}"
 }
 
 # ══ 7. The pod spec (what the agent may do ON THE NODE) ═══════════════════
@@ -1540,8 +1566,11 @@ _podspec() {
     assert_line "containers.0.securityContext.runAsUser=65532"
     assert_line "containers.0.securityContext.capabilities.drop.0=ALL"
 
-    # The rest: config source, image, pull policy, resource envelope.
+    # The rest: config source, the pod name for the Lease holder, image, pull
+    # policy, resource envelope.
     assert_line "containers.0.envFrom.0.configMapRef.name=kubehz-live-agent-config"
+    assert_line "containers.0.env.0.name=KUBEHZ_POD_NAME"
+    assert_line "containers.0.env.0.valueFrom.fieldRef.fieldPath=metadata.name"
     assert_line --regexp '^containers\.0\.image=ghcr\.io/kernpilot/kubehz-agent@sha256:[0-9a-f]{64}$'
     assert_line "containers.0.imagePullPolicy=IfNotPresent"
     assert_line "containers.0.resources.requests.cpu=25m"
@@ -1561,13 +1590,13 @@ _podspec() {
     assert_line "affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.preference.matchExpressions.0.key=node-role.kubernetes.io/control-plane"
     assert_line "affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.preference.matchExpressions.0.operator=DoesNotExist"
 
-    # THE GUARD. Thirty-seven leaves, and the thirty-seven above are all of
+    # THE GUARD. Thirty-nine leaves, and the thirty-nine above are all of
     # them. A second container, a second volume, an added env var, `hostPID:
     # true`, `hostNetwork: true`, `hostIPC: true`, `privileged: true`, a
-    # hostPath — every one of those is a thirty-eighth line, and fails here
+    # hostPath — every one of those is a fortieth line, and fails here
     # without anyone having had to predict which one it would be.
-    [ "${#lines[@]}" -eq 37 ] || fail \
-      "${overlay}: the pod spec has ${#lines[@]} leaf fields, expected 37 — a field was added or removed:"$'\n'"${output}"
+    [ "${#lines[@]}" -eq 39 ] || fail \
+      "${overlay}: the pod spec has ${#lines[@]} leaf fields, expected 39 — a field was added or removed:"$'\n'"${output}"
   done
 }
 
