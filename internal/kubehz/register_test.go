@@ -7,6 +7,7 @@ package kubehz
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -20,11 +21,20 @@ import (
 	"time"
 )
 
+// registryListFixture holds one cluster of test.kubehz.dev. Two clusters
+// of one domain stop deregister and destroy (severalClustersFixture).
 const registryListFixture = `{"ok":true,"data":[
+  {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-03-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+],"meta":{"pagination":{"page":1,"perPage":500,"total":2}}}`
+
+// severalClustersFixture holds two clusters of test.kubehz.dev, the
+// newest first (the order of the api).
+const severalClustersFixture = `{"ok":true,"data":[
   {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-03-01T00:00:00Z"},
   {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
   {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
-],"meta":{"page":1,"perPage":500,"total":3}}`
+],"meta":{"pagination":{"page":1,"perPage":500,"total":3}}}`
 
 // ── register_cluster ─────────────────────────────────────
 
@@ -668,7 +678,7 @@ func TestEnsureClaimKeyRefusesPlainHTTPHcloudBase(t *testing.T) {
 
 // ── deregister_cluster ───────────────────────────────────
 
-func TestDeregisterResolvesOldestAndDeletesByID(t *testing.T) {
+func TestDeregisterResolvesTheClusterAndDeletesByID(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.env["KUBEHZ_TOKEN"] = "test-token"
@@ -682,8 +692,26 @@ func TestDeregisterResolvesOldestAndDeletesByID(t *testing.T) {
 			t.Fatal("query-string DELETE (route does not exist)")
 		}
 	}
-	if r := h.lastReq("GET", "/api/clusters"); r.Query != "perPage=500" || r.Auth != "Bearer test-token" {
+	if r := h.lastReq("GET", "/api/clusters"); r.Query != "perPage=500&domain=test.kubehz.dev" || r.Auth != "Bearer test-token" {
 		t.Fatalf("list: %+v", r)
+	}
+}
+
+func TestDeregisterSeveralClustersRemovesNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.handle("GET /api/clusters", 200, severalClustersFixture)
+	h.handle("DELETE /api/clusters/cl-old", 200, `{"ok":true}`)
+	h.handle("DELETE /api/clusters/cl-new", 200, `{"ok":true}`)
+	mustErr(t, h.ctx.DeregisterCluster(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", ""))
+	mustContain(t, h.output(), "[error] kubehz: your account has 2 clusters for test.kubehz.dev, so lo removed none of the registrations.\n"+
+		"  lo removes a registration only when the account has one cluster for the domain.\n"+
+		"  - cluster cl-old\n"+
+		"  - cluster cl-new\n"+
+		"  Select the cluster in the dashboard and remove it there.\n")
+	mustNotContain(t, h.output(), "removed from the platform")
+	if h.anyReq("DELETE", "/api/clusters") {
+		t.Fatal("DELETE must not run with more than one cluster for the domain")
 	}
 }
 
@@ -748,15 +776,134 @@ func TestDeregisterRetiresHcloudClaimKey(t *testing.T) {
 
 // ── resolve_cluster_id ───────────────────────────────────
 
-func TestResolveClusterIDPageCapWarning(t *testing.T) {
+// A part of the list cannot tell how many clusters the domain has, also
+// when it holds a cluster of the domain.
+func TestResolveClusterIDPartialListIsAnError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body, warn string }{
+		{"no row", `{"ok":true,"data":[],"meta":{"pagination":{"total":600}}}`, "shows 0 of 600 clusters"},
+		{"a row of the domain", `{"ok":true,"data":[{"id":"cl-old","domain":"test.kubehz.dev"}],"meta":{"pagination":{"total":600}}}`, "shows 1 of 600 clusters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.handle("GET /api/clusters", 200, tc.body)
+			id, err := h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
+			if err == nil || errors.Is(err, errNotRegistered) || id != "" {
+				t.Fatalf("id %q, err = %v, want a plain error", id, err)
+			}
+			if _, ok := errors.AsType[*manyClustersError](err); ok {
+				t.Fatalf("err = %v", err)
+			}
+			mustContain(t, h.output(), "[warn] kubehz: the cluster list "+tc.warn+", so lo cannot tell how many clusters test.kubehz.dev has.")
+		})
+	}
+	h := newHarness(t)
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[{"id":"cl-old","domain":"test.kubehz.dev"}],"meta":{"pagination":{"total":1}}}`)
+	id, err := h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
+	mustOK(t, err, h.output())
+	if id != "cl-old" {
+		t.Fatalf("id = %q", id)
+	}
+}
+
+// The id goes into a URL path: lo takes only a cluster id.
+func TestResolveClusterIDTakesOnlyAClusterID(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, row string }{
+		{"not cl-", `{"id":"A1","domain":"test.kubehz.dev"}`},
+		{"a path", `{"id":"cl-../../admin","domain":"test.kubehz.dev"}`},
+		{"a new line", `{"id":"cl-a\ncl-b","domain":"test.kubehz.dev"}`},
+		{"too long", `{"id":"cl-` + strings.Repeat("a", 65) + `","domain":"test.kubehz.dev"}`},
+		{"a number", `{"id":7,"domain":"test.kubehz.dev"}`},
+		{"no id", `{"domain":"test.kubehz.dev"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.handle("GET /api/clusters", 200, `{"ok":true,"data":[`+tc.row+`]}`)
+			id, err := h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
+			if err == nil || errors.Is(err, errNotRegistered) || id != "" {
+				t.Fatalf("id %q, err = %v, want a plain error", id, err)
+			}
+			mustContain(t, h.output(), "[warn] kubehz: the cluster of test.kubehz.dev in the registry has an id that lo does not take.")
+		})
+	}
+	h := newHarness(t)
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[{"id":"cl-`+strings.Repeat("a", 64)+`","domain":"test.kubehz.dev"}]}`)
+	id, err := h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
+	mustOK(t, err, h.output())
+	if id != "cl-"+strings.Repeat("a", 64) {
+		t.Fatalf("id = %q", id)
+	}
+}
+
+func TestResolveClusterIDSeveralClusters(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[],"meta":{"pagination":{"total":600}}}`)
-	_, err := h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
-	if !errors.Is(err, errNotRegistered) {
-		t.Fatalf("err = %v", err)
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-03-01T00:00:00Z"},
+  {"id":"A1","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"},
+  "not a row",
+  {"id":"cl-old","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}
+]}`)
+	id, err := h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
+	many, ok := errors.AsType[*manyClustersError](err)
+	if !ok || id != "cl-old" || !slices.Equal(many.ids, []string{"cl-old", "", "cl-new"}) {
+		t.Fatalf("id %q, err = %v (%+v)", id, err, many)
 	}
-	mustContain(t, h.output(), "tenant has 600 clusters (first 500 checked)")
+	// The oldest row has an id that lo does not take.
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-03-01T00:00:00Z"},
+  {"id":"A1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}
+]}`)
+	id, err = h.ctx.ResolveClusterID(t.Context(), "test.kubehz.dev", h.apiURL())
+	many, ok = errors.AsType[*manyClustersError](err)
+	if !ok || id != "" || !slices.Equal(many.ids, []string{"", "cl-new"}) {
+		t.Fatalf("id %q, err = %v (%+v)", id, err, many)
+	}
+}
+
+// lo sends ?domain= only for a domain of the shape that the api takes.
+func TestResolveClusterIDSendsTheDomainFilter(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ domain, query string }{
+		{"test.kubehz.dev", "perPage=500&domain=test.kubehz.dev"},
+		{"Test.kubehz.dev", "perPage=500"},
+		{"a&b=c.example", "perPage=500"},
+		{"localhost", "perPage=500"},
+	} {
+		t.Run(tc.domain, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.handle("GET /api/clusters", 200, `{"ok":true,"data":[]}`)
+			_, err := h.ctx.ResolveClusterID(t.Context(), tc.domain, h.apiURL())
+			if !errors.Is(err, errNotRegistered) {
+				t.Fatalf("err = %v", err)
+			}
+			if r := h.lastReq("GET", "/api/clusters"); r == nil || r.Query != tc.query {
+				t.Fatalf("list: %+v", r)
+			}
+		})
+	}
+}
+
+func TestEchoClusterIDsNamesTenAtMost(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	ids := []string{""}
+	for i := 1; i < 12; i++ {
+		ids = append(ids, fmt.Sprintf("cl-%02d", i))
+	}
+	h.ctx.echoClusterIDs(ids)
+	want := "  - a cluster\n"
+	for i := 1; i < 10; i++ {
+		want += fmt.Sprintf("  - cluster cl-%02d\n", i)
+	}
+	want += "  - and 2 more\n"
+	if h.output() != want {
+		t.Fatalf("output:\n%s\nwant:\n%s", h.output(), want)
+	}
 }
 
 // keep os imported for the base64 helpers' file-free tests

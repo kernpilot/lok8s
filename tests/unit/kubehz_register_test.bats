@@ -344,17 +344,29 @@ teardown() {
 # Shared list fixture: newest-first (the api's order), TWO rows for the
 # domain plus an unrelated tenant sibling. Oldest-first resolution must pick
 # cl-old — the row the server binds agent identity to — never .data[0].
+# One cluster of test.kubehz.dev. Two clusters of one domain stop
+# deregister and destroy (_deregister_several_fixture).
 _deregister_list_fixture() {
+  cat <<'EOF'
+{"ok":true,"data":[
+  {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-03-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+],"meta":{"pagination":{"page":1,"perPage":500,"total":2}}}
+EOF
+}
+
+# Two clusters of test.kubehz.dev, the newest first (the order of the api).
+_deregister_several_fixture() {
   cat <<'EOF'
 {"ok":true,"data":[
   {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-03-01T00:00:00Z"},
   {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
   {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
-],"meta":{"page":1,"perPage":500,"total":3}}
+],"meta":{"pagination":{"page":1,"perPage":500,"total":3}}}
 EOF
 }
 
-@test "deregister_cluster: resolves the id and DELETEs /api/clusters/<id> (oldest row)" {
+@test "deregister_cluster: resolves the id and DELETEs /api/clusters/<id> (one row of the domain)" {
   curl() {
     if [[ " $* " == *" DELETE "* ]]; then
       [[ "$*" != *"?domain="* ]] \
@@ -363,7 +375,7 @@ EOF
         || { echo "DELETE wrong id/path: $*" >&2; return 1; }
       printf '{"ok":true,"data":{"deleted":true,"id":"cl-old"}}\n200'
     else
-      [[ "$*" == *"/api/clusters?perPage=500"* ]] \
+      [[ "$*" == *" https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev" ]] \
         || { echo "unexpected GET: $*" >&2; return 1; }
       _deregister_list_fixture
     fi
@@ -379,6 +391,33 @@ EOF
   assert_success
   assert_output --partial "removed from the platform"
   assert_output --partial "cl-old"
+}
+
+@test "deregister_cluster: several clusters of the domain: removes none and names them" {
+  export DELETE_MARK="${BATS_TEST_TMPDIR}/deleted"
+  curl() {
+    if [[ " $* " == *" DELETE "* ]]; then
+      : > "${DELETE_MARK}"
+      printf '{"ok":true}\n200'
+    else
+      _deregister_several_fixture
+    fi
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  run kubehz::deregister_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "[error] kubehz: your account has 2 clusters for test.kubehz.dev, so lo removed none of the registrations.
+  lo removes a registration only when the account has one cluster for the domain.
+  - cluster cl-old
+  - cluster cl-new
+  Select the cluster in the dashboard and remove it there."
+  [ ! -e "${DELETE_MARK}" ]
 }
 
 @test "deregister_cluster: no row for the domain reports not-registered (no DELETE)" {
@@ -531,9 +570,165 @@ EOF
   run kubehz::status
   assert_success
   assert_output --partial "Status:  Running (id: cl-old)"
-  assert_output --partial "Beat:    2026-08-19T10:00:00Z (connected)"
+  assert_output --partial "Beat:    2026-08-19T10:00:00Z (connected)
+Note:    your account has 2 clusters for test.kubehz.dev. lo shows the oldest. See them with:  lo kubehz cluster list"
   # The envelope has no .status — "unknown" would mean we read the wrong level.
   refute_output --partial "Status:  unknown"
+}
+
+# The list holds the status that kubehz stored for a hosted cluster; the
+# status line shows the live status of the detail route.
+_status_hosted_case() {
+  # $1 list row, $2 detail body ("" = the read fails), $3 the line.
+  export STUB_ROW="${1}" STUB_DETAIL="${2}" CALLS="${BATS_TEST_TMPDIR}/calls"
+  : > "${CALLS}"
+  curl() {
+    local url="${*: -1}"
+    printf '%s\n' "${url}" >> "${CALLS}"
+    case "${url}" in
+      *"/api/clusters?perPage=500&domain=test.kubehz.dev")
+        printf '{"ok":true,"data":[%s]}\n200' "${STUB_ROW}" ;;
+      */api/clusters/cl-old)
+        [[ -n "${STUB_DETAIL}" ]] || return 22
+        printf '%s' "${STUB_DETAIL}" ;;
+      *) echo "unexpected curl: $*" >&2; return 1 ;;
+    esac
+  }
+  export -f curl
+  run kubehz::status
+  assert_success
+  assert_output --partial "${3}"
+  refute_output --partial "Note:"
+}
+
+@test "status: a hosted row shows the live status of the detail route" {
+  _status_yq_mock
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local hosted='{"id":"cl-old","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}'
+
+  _status_hosted_case "${hosted}" '{"ok":true,"data":{"id":"cl-old","status":"Running"}}' $'Status:  Running (id: cl-old)\n'
+  _status_hosted_case "${hosted}" '{"id":"cl-old","status":"Paused"}' $'Status:  Paused (id: cl-old)\n'
+  _status_hosted_case "${hosted}" '{"ok":true,"data":{"status":"\u001b[2JRunning"}}' $'Status:  unknown (id: cl-old)\n'
+  _status_hosted_case "${hosted}" '' 'Status:  Creating (id: cl-old, from the list: lo could not read the live status)'
+  _status_hosted_case "${hosted}" '{"ok":true,"data":{"id":"cl-old"}}' 'Status:  Creating (id: cl-old, from the list: lo could not read the live status)'
+  _status_hosted_case "${hosted}" '<html>' 'Status:  Creating (id: cl-old, from the list: lo could not read the live status)'
+  # An id that is not a cluster id goes into no path; a self-hosted row has
+  # no live read.
+  _status_hosted_case '{"id":"A1","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}' '{"status":"Running"}' $'Status:  Creating (id: A1)\n'
+  run grep -c '/api/clusters/' "${CALLS}"
+  assert_output "0"
+  _status_hosted_case '{"id":"cl-old","domain":"test.kubehz.dev","hosting":"self","status":"Creating"}' '{"status":"Running"}' $'Status:  Creating (id: cl-old)\n'
+  run grep -c '/api/clusters/' "${CALLS}"
+  assert_output "0"
+}
+
+@test "status: a part of the list is unknown, not not registered" {
+  _status_yq_mock
+  curl() {
+    printf '{"ok":true,"data":[{"id":"cl-other","domain":"other.example.com"}],"meta":{"pagination":{"total":%s}}}\n200' "${STUB_TOTAL}"
+  }
+  export -f curl
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  STUB_TOTAL=600 run kubehz::status
+  assert_success
+  assert_output --partial "Status:  unknown (the cluster list shows 1 of 600 clusters)"
+  refute_output --partial "not registered"
+  STUB_TOTAL=1 run kubehz::status
+  assert_success
+  assert_output --partial "Status:  not registered (no cluster for test.kubehz.dev"
+}
+
+# ── resolve_cluster_id: the result codes ─────────────────
+
+_resolve_case() {
+  # $1 body: the result of the lookup of test.kubehz.dev.
+  export STUB_BODY="${1}"
+  curl() { printf '%s' "${STUB_BODY}"; }
+  export -f curl
+  run kubehz::resolve_cluster_id "test.kubehz.dev" "https://api.kubehz.dev"
+}
+
+@test "resolve_cluster_id: a part of the list is an error, also with a row of the domain" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="test-token"
+  _resolve_case '{"ok":true,"data":[],"meta":{"pagination":{"total":600}}}'
+  [ "${status}" -eq 1 ]
+  assert_output "[warn] kubehz: the cluster list shows 0 of 600 clusters, so lo cannot tell how many clusters test.kubehz.dev has."
+  _resolve_case '{"ok":true,"data":[{"id":"cl-old","domain":"test.kubehz.dev"}],"meta":{"pagination":{"total":600}}}'
+  [ "${status}" -eq 1 ]
+  assert_output "[warn] kubehz: the cluster list shows 1 of 600 clusters, so lo cannot tell how many clusters test.kubehz.dev has."
+  _resolve_case '{"ok":true,"data":[{"id":"cl-old","domain":"test.kubehz.dev"}],"meta":{"pagination":{"total":1}}}'
+  assert_success
+  assert_output "cl-old"
+  # An empty answer is no JSON.
+  _resolve_case ''
+  [ "${status}" -eq 1 ]
+}
+
+@test "resolve_cluster_id: one row whose id is not a cluster id is an error (rc 1)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="test-token"
+  local row long
+  long=$(printf 'a%.0s' {1..65})
+  for row in '"id":"A1"' '"id":"cl-../../admin"' '"id":"cl-a\ncl-b"' "\"id\":\"cl-${long}\"" '"id":7' '"id":"cl-ä1"'; do
+    _resolve_case "{\"ok\":true,\"data\":[{${row},\"domain\":\"test.kubehz.dev\"}]}"
+    [ "${status}" -eq 1 ] || { echo "row ${row}: rc ${status}, output ${output}" >&2; return 1; }
+    assert_output "[warn] kubehz: the cluster of test.kubehz.dev in the registry has an id that lo does not take."
+  done
+  _resolve_case '{"ok":true,"data":[{"domain":"test.kubehz.dev"}]}'
+  [ "${status}" -eq 1 ]
+  _resolve_case "{\"ok\":true,\"data\":[{\"id\":\"cl-${long%a}\",\"domain\":\"test.kubehz.dev\"}]}"
+  assert_success
+  assert_output "cl-${long%a}"
+}
+
+@test "resolve_cluster_id: several rows print each id, the oldest first (rc 3)" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="test-token"
+  _resolve_case '{"ok":true,"data":[
+    {"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-03-01T00:00:00Z"},
+    {"id":"A1","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"},
+    "not a row",
+    {"id":"cl-old","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
+  [ "${status}" -eq 3 ]
+  assert_output $'cl-old\n-\ncl-new'
+  # The newest row has an id that lo does not take: it still counts.
+  _resolve_case '{"ok":true,"data":[
+    {"id":7,"domain":"test.kubehz.dev","createdAt":"2026-03-01T00:00:00Z"},
+    {"id":"cl-old","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
+  [ "${status}" -eq 3 ]
+  assert_output $'cl-old\n-'
+}
+
+@test "resolve_cluster_id: sends ?domain= only for a domain of the shape the api takes" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export KUBEHZ_TOKEN="test-token" URL_LOG="${BATS_TEST_TMPDIR}/urls"
+  curl() { printf '%s\n' "${*: -1}" >> "${URL_LOG}"; printf '%s' '{"ok":true,"data":[]}'; }
+  export -f curl
+  local d
+  for d in test.kubehz.dev Test.kubehz.dev 'a&b=c.example' localhost; do
+    run kubehz::resolve_cluster_id "${d}" "https://api.kubehz.dev"
+    [ "${status}" -eq 2 ]
+  done
+  run cat "${URL_LOG}"
+  assert_output "https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev
+https://api.kubehz.dev/api/clusters?perPage=500
+https://api.kubehz.dev/api/clusters?perPage=500
+https://api.kubehz.dev/api/clusters?perPage=500"
+}
+
+@test "cluster_ids_print: names ten clusters at most" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  local -a ids=(-)
+  local i want=$'  - a cluster\n'
+  for i in 01 02 03 04 05 06 07 08 09 10 11; do ids+=("cl-${i}"); done
+  for i in 01 02 03 04 05 06 07 08 09; do want+="  - cluster cl-${i}"$'\n'; done
+  want+="  - and 2 more"
+  run kubehz::_cluster_ids_print "${ids[@]}"
+  assert_success
+  assert_output "${want}"
 }
 
 @test "status: no row for the domain prints not registered" {
@@ -1651,7 +1846,7 @@ _claim_sandbox() {
           printf '%s' "${CLAIM_KEYS}"
         fi
         ;;
-      */api/clusters\?perPage=500) _deregister_list_fixture ;;
+      */api/clusters\?perPage=500\&domain=test.kubehz.dev) _deregister_list_fixture ;;
       */agent-token)
         printf 'AGENT %s\n' "$(printf '%s' "${CURL_BODY}" | jq -c .)" >> "${CLAIM_CALLS}"
         printf '{"rotated":true}\n200'

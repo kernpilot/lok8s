@@ -525,6 +525,19 @@ type hostedList struct {
 // then names the field.
 var clusterDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
+// clusterListURL is the cluster list of the account (GET /api/clusters)
+// with the exact ?domain= filter of the api. lo sends the filter only for
+// a domain of clusterDomainRe. Each reader compares the domain of each
+// row too: an api that ignores the filter sends all clusters. Bash:
+// kubehz::_cluster_list_url (kubehz::_hosted_listed keeps its own copy).
+func clusterListURL(apiURL, domain string) string {
+	url := apiURL + "/api/clusters?perPage=500"
+	if len(domain) <= 253 && clusterDomainRe.MatchString(domain) {
+		url += "&domain=" + domain
+	}
+	return url
+}
+
 // hostedListed reads the cluster list of the account (GET
 // /api/clusters, the route of `lo kubehz cluster list`) and finds the
 // clusters of domain. The list holds each cluster that is not deleted,
@@ -536,11 +549,7 @@ var clusterDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.
 // answer is larger): then lo cannot tell how many clusters the domain
 // has. Bash: kubehz::_hosted_listed.
 func (c *Context) hostedListed(ctx context.Context, apiURL, domain string) hostedList {
-	url := apiURL + "/api/clusters?perPage=500"
-	if len(domain) <= 253 && clusterDomainRe.MatchString(domain) {
-		url += "&domain=" + domain
-	}
-	res, err := c.fetchStatus(ctx, "GET", url, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	res, err := c.fetchStatus(ctx, "GET", clusterListURL(apiURL, domain), withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return hostedList{cause: "no answer"}
 	}
@@ -824,6 +833,15 @@ func (c *Context) DestroyHosted(ctx context.Context, cfg *Config, domain, cluste
 	}
 
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
+	// More than one cluster for the domain: lo cannot tell which one to
+	// delete, and deletes none of them (no flag selects one).
+	if many, ok := errors.AsType[*manyClustersError](err); ok {
+		c.errorf("kubehz: your account has %d clusters for %s, so lo deleted none of them.", len(many.ids), domain)
+		c.echoErr("  lo deletes a cluster only when the account has one cluster for the domain. The local kubeconfigs stay.")
+		c.echoClusterIDs(many.ids)
+		c.echoErr("  Select the cluster in the dashboard and delete it there.")
+		return ErrHandled
+	}
 	if err != nil && !errors.Is(err, errNotRegistered) {
 		c.errorf("kubehz: cannot read the cluster registry at %s — nothing was deleted for %s and the local kubeconfigs are kept. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry.", apiURL, domain)
 		return ErrHandled

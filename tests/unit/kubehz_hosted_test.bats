@@ -1021,12 +1021,13 @@ $(_hosted_unknown_tail)"
 # ── destroy_hosted ───────────────────────────────────────
 #
 # Pins the REAL contract: resolve the id from the tenant registry
-# (kubehz::resolve_cluster_id — client-side domain filter, oldest-first),
-# then DELETE /api/clusters/<id>. Real jq — the resolution logic under test
-# IS the jq filter. A query-string DELETE, or a delete on an unresolved id,
-# fails the test.
+# (kubehz::resolve_cluster_id — the ?domain= filter and a client-side
+# domain filter), then DELETE /api/clusters/<id>. Real jq — the resolution
+# logic under test IS the jq filter. A query-string DELETE, a delete on an
+# unresolved id, and a delete with more than one cluster for the domain
+# fail the test.
 
-@test "destroy_hosted: resolves the id (oldest row, not .data[0]) and DELETEs by id" {
+@test "destroy_hosted: resolves the id of the one row of the domain (not .data[0]) and DELETEs by id" {
   yq() { echo ""; }
   export -f yq
   curl() {
@@ -1037,13 +1038,13 @@ $(_hosted_unknown_tail)"
         || { echo "DELETE wrong id/path: $*" >&2; return 1; }
       printf '{"ok":true,"data":{"deleted":true,"id":"cl-old"}}\n200'
     else
-      [[ "$*" == *"/api/clusters?perPage=500"* ]] \
+      [[ "$*" == *" https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev" ]] \
         || { echo "unexpected GET: $*" >&2; return 1; }
-      # Newest-first list, two rows for the domain: .data[0] is the WRONG
-      # cluster (the bug this pins against).
+      # Newest-first list of an api that ignores ?domain=: .data[0] is the
+      # WRONG cluster (the bug this pins against).
       cat <<'EOF'
 {"ok":true,"data":[
-  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-02-01T00:00:00Z"},
   {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
 ]}
 EOF
@@ -1065,6 +1066,43 @@ EOF
 
   # Verify kubeconfig was cleaned up
   [ ! -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+}
+
+@test "destroy_hosted: several clusters of the domain: deletes none, names them, keeps the kubeconfig" {
+  yq() { echo ""; }
+  export -f yq
+  export DELETE_MARK="${BATS_TEST_TMPDIR}/deleted"
+  curl() {
+    if [[ " $* " == *" DELETE "* ]]; then
+      : > "${DELETE_MARK}"
+      printf '{"ok":true}\n200'
+    else
+      cat <<'EOF'
+{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+]}
+EOF
+    fi
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+
+  run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "[error] kubehz: your account has 2 clusters for test.kubehz.dev, so lo deleted none of them.
+  lo deletes a cluster only when the account has one cluster for the domain. The local kubeconfigs stay.
+  - cluster cl-old
+  - cluster cl-new
+  Select the cluster in the dashboard and delete it there."
+  [ ! -e "${DELETE_MARK}" ]
+  [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
 }
 
 @test "destroy_hosted: REFUSES when the registry lookup fails (no delete, kubeconfig kept)" {
@@ -1090,6 +1128,32 @@ EOF
   assert_output --partial "nothing was deleted"
   # The cluster may still exist — its credentials must survive the refusal.
   [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+}
+
+# A lookup that does not run (a missing command, rc 127) or ends with
+# another code is no answer: destroy deletes nothing on a guessed id.
+@test "destroy_hosted: a lookup result other than 0, 2 or 3 deletes nothing" {
+  yq() { echo ""; }
+  export -f yq
+  export DELETE_MARK="${BATS_TEST_TMPDIR}/deleted"
+  curl() { [[ " $* " != *" DELETE "* ]] || : > "${DELETE_MARK}"; printf '{"ok":true}\n200'; }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+
+  local rc
+  for rc in 127 4; do
+    eval "kubehz::resolve_cluster_id() { return ${rc}; }"
+    run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+    assert_failure
+    assert_output --partial "cannot read the cluster registry"
+    [ ! -e "${DELETE_MARK}" ]
+    [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+  done
 }
 
 @test "destroy_hosted: no row for the domain stays idempotent (nothing to destroy)" {
@@ -2521,11 +2585,14 @@ same"
 
 @test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
   _hosted_kc_harness
+  # The lookup lives in libs/kubehz/main. Without it the lookup is a
+  # missing command (rc 127), and destroy must refuse that too.
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   yq() { case "$2" in '.metadata.name'*) echo "shortname" ;; *) echo "1" ;; esac; }
   # The harness curl answers the CREATE route; destroy resolves through the
   # registry list and DELETEs by id — answer those two.
   curl() {
-    if [[ "$*" == *"/api/clusters?perPage=500"* ]]; then
+    if [[ "$*" == *"/api/clusters?perPage=500&domain=test.kubehz.dev" ]]; then
       echo '{"ok":true,"data":[{"id":"cl-1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
     elif [[ " $* " == *" DELETE "* ]]; then
       printf '{"ok":true,"data":{"deleted":true,"id":"cl-1"}}\n200'

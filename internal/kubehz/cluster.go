@@ -117,16 +117,17 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 		return nil
 	}
 
-	// Query the tenant registry for the live row: filter the rows
-	// client-side and read the ROW's fields (status, lastHeartbeat,
-	// connected) — never the pagination envelope's.
+	// Query the tenant registry for the live row: send the ?domain= filter
+	// (clusterListURL), filter the rows client-side too and read the ROW's
+	// fields (status, lastHeartbeat, connected) — never the pagination
+	// envelope's.
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
 	}
 	if !c.credentialOK("KUBEHZ_TOKEN") {
 		return ErrHandled
 	}
-	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	res, err := c.fetchStatus(ctx, "GET", clusterListURL(apiURL, domain), withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		c.echo("Status:  unknown (API unreachable: %s)", apiURL)
 		return nil
@@ -137,22 +138,41 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 	}
 
 	// Oldest-first: the server binds agent identity to the OLDEST active row.
-	var row any
-	if v, ok := parseJSON(res.Body); ok {
-		if rs := domainRows(v, domain); len(rs) > 0 {
-			row = rs[0]
-		}
+	v, ok := parseJSON(res.Body)
+	var rs []any
+	if ok {
+		rs = domainRows(v, domain)
 	}
-	if row == nil {
+	if len(rs) == 0 {
+		// A part of the list does not show that the domain has no cluster.
+		if total, n := jnum(jget(v, "meta", "pagination", "total")), len(rows(v)); ok && total > n {
+			c.echo("Status:  unknown (the cluster list shows %d of %d clusters)", n, total)
+			return nil
+		}
 		c.echo("Status:  not registered (no cluster for %s in this tenant's registry)", domain)
 		return nil
 	}
+	row := rs[0]
 
 	statusVal := jstrOr(row, "unknown", "status")
 	clusterID := jstrOr(row, "-", "id")
 	lastBeat := jstrOr(row, "", "lastHeartbeat")
 	connected := jstrOr(row, "", "connected")
-	c.echo("Status:  %s (id: %s)", statusVal, clusterID)
+	// The list holds the status that kubehz stored for a hosted cluster
+	// (Creating, also for a cluster that runs). The detail route has the
+	// live status, as in lo provision (liveStatus).
+	fromList := ""
+	if hr := readHostedRow(row); hr.hosting == "hosted" && hr.id != "" {
+		if live, read := c.liveStatus(ctx, apiURL, hr.id); read {
+			statusVal = live
+			if !hostedWordRe.MatchString(live) {
+				statusVal = "unknown"
+			}
+		} else {
+			fromList = ", from the list: lo could not read the live status"
+		}
+	}
+	c.echo("Status:  %s (id: %s%s)", statusVal, clusterID, fromList)
 	if lastBeat != "" {
 		switch connected {
 		case "true":
@@ -164,6 +184,9 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 		}
 	} else {
 		c.echo("Beat:    none yet — deploy the heartbeat agent (see docs/guide/kubehz.md)")
+	}
+	if len(rs) > 1 {
+		c.echo("Note:    your account has %d clusters for %s. lo shows the oldest. See them with:  lo kubehz cluster list", len(rs), domain)
 	}
 	return nil
 }
@@ -251,7 +274,7 @@ func (c *Context) Assess(ctx context.Context, domain string) error {
 	if !c.credentialOK("KUBEHZ_TOKEN") {
 		return ErrHandled
 	}
-	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
+	clusterID, err := c.resolveOldest(ctx, domain, apiURL)
 	if err != nil {
 		c.errorf("kubehz: no cluster found for %s — is it registered + claimed, and is KUBEHZ_TOKEN set?", domain)
 		return ErrHandled
@@ -559,7 +582,7 @@ func (c *Context) ReEnroll(ctx context.Context, domain string) error {
 	sum := sha256.Sum256([]byte(agentToken))
 	tokenHash := hex.EncodeToString(sum[:])
 
-	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
+	clusterID, err := c.resolveOldest(ctx, domain, apiURL)
 	if err != nil {
 		c.errorf("kubehz: no cluster found for %s — is it registered + claimed, and does KUBEHZ_TOKEN belong to the owning tenant?", domain)
 		return ErrHandled

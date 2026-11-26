@@ -160,6 +160,15 @@ node::preflight() {
       error "kubehz: the registry holds no cluster for ${domain}."
       echo "  Name the cluster directly with:  --cluster-id cl-xxxxxxxx" >&2
       return 1 ;;
+    3)
+      # More than one cluster for the domain: --cluster-id selects one.
+      local -a many_ids=()
+      mapfile -t many_ids <<<"${NODE_CLUSTER_ID}"
+      NODE_CLUSTER_ID=""
+      error "kubehz: the registry holds ${#many_ids[@]} clusters for ${domain}."
+      kubehz::_cluster_ids_print "${many_ids[@]}"
+      echo "  Name the cluster directly with:  --cluster-id cl-xxxxxxxx" >&2
+      return 1 ;;
     *)
       error "kubehz: the cluster registry did not answer (${api_url})."
       echo "  Check KUBEHZ_TOKEN and the network, then try again." >&2

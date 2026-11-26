@@ -416,10 +416,10 @@ YAML
 
   assert_argv_clean
   [ "$(req_count "POST https://api.kubehz.example/api/clusters | user= | headers=Content-Type: application/json; Authorization: Bearer ${KUBEHZ_TOKEN}")" = 1 ]
-  # The list before the create (with the domain filter), and the lookup
-  # of the destroy.
-  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500&domain=d.example | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 1 ]
-  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500 | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 1 ]
+  # The list before the create and the lookup of the destroy, both with
+  # the domain filter.
+  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500&domain=d.example | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 2 ]
+  [ "$(req_count "GET https://api.kubehz.example/api/clusters?perPage=500 | user= | headers=Authorization: Bearer ${KUBEHZ_TOKEN} |")" = 0 ]
   [ "$(req_count "GET https://api.kubehz.example/api/clusters/cl-1 ")" -ge 1 ]
   [ "$(req_count "GET https://api.kubehz.example/api/clusters/cl-1/kubeconfig")" = 1 ]
   [ "$(req_count "DELETE https://api.kubehz.example/api/clusters/cl-1")" = 1 ]

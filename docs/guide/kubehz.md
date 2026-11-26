@@ -532,7 +532,7 @@ fingerprints are properties of a control plane you do not run.
 |------|---------|---------|
 | `--pool` | the one pool this cluster's nodes share | The `kind: static` pool to join. Name it for the first node of a pool, or when the cluster holds more than one. |
 | `--name` | this machine's short hostname, lowercased | The node name. A DNS label: lowercase letters, digits and dashes. |
-| `--cluster-id` | the active domain's cluster | The platform cluster id (`cl-…`). Set it to reach a cluster your local specs do not describe. |
+| `--cluster-id` | the active domain's cluster | The platform cluster id (`cl-…`). Set it to reach a cluster your local specs do not describe. Set it also when your account has more than one cluster for the domain. |
 | `--node-ip` | (none) | The address other nodes reach this machine on. Add it when the machine's default-route address is not the one the cluster can dial. |
 | `--kubelet-version` | read from this machine | The kubelet version to declare. The platform refuses a version more than two minors behind the control plane. |
 | `--print-only` | off | Mint the ticket, print the command, and run nothing. |
@@ -1386,6 +1386,23 @@ look the cluster up through the tenant registry, so both need
 `KUBEHZ_TOKEN` set to a `clusters:write` token of the owning tenant.
 Without it, `status` reports the HTTP refusal and `deregister` refuses
 without deleting anything.
+
+lo finds the cluster by its domain. It sends the domain filter of the api
+and also compares the domain of each cluster itself. When your account has
+more than one cluster for the domain:
+
+- `deregister`, and `lo destroy` of a hosted cluster, stop and delete
+  nothing. They name the clusters. Delete the cluster that you want to
+  remove in the dashboard.
+- The `lo kubehz node` commands stop and name the clusters. Select one with
+  `--cluster-id`.
+- `assess` and `re-enroll` warn, name the clusters and use the oldest. The
+  server binds the agent to the oldest active cluster of a domain.
+- `status` shows the oldest cluster and a note with the number of clusters.
+
+For a hosted cluster, `status` reads the live status of the cluster,
+because the list keeps the status of the create. When lo cannot read the
+live status, it shows the status of the list and says so.
 
 ### `KUBEHZ_TOKEN`: claim at provision time
 

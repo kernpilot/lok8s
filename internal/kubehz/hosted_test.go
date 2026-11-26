@@ -1133,12 +1133,12 @@ func TestProvisionHostedCreateNotSent(t *testing.T) {
 	}
 }
 
-func TestDestroyHostedResolvesOldestAndDeletes(t *testing.T) {
+func TestDestroyHostedResolvesTheClusterAndDeletes(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	spec := hostedSpec(h, "test.kubehz.dev")
 	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[
-  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-02-01T00:00:00Z"},
   {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
 ]}`)
 	h.handle("DELETE /api/clusters/cl-old", 200, `{"ok":true,"data":{"deleted":true,"id":"cl-old"}}`)
@@ -1149,8 +1149,41 @@ func TestDestroyHostedResolvesOldestAndDeletes(t *testing.T) {
 	if _, err := os.Stat(kc); err == nil {
 		t.Fatal("kubeconfig not cleaned up")
 	}
-	if h.anyReq("DELETE", "/api/clusters/cl-new") {
-		t.Fatal("deleted the NEWEST cluster")
+	if !h.anyReq("DELETE", "/api/clusters/cl-old") || h.anyReq("DELETE", "/api/clusters/cl-other") {
+		t.Fatalf("deletes: %+v", h.reqs())
+	}
+	if r := h.lastReq("GET", "/api/clusters"); r == nil || r.Query != "perPage=500&domain=test.kubehz.dev" {
+		t.Fatalf("list: %+v", r)
+	}
+}
+
+// More than one cluster for the domain: lo deletes none of them and keeps
+// the local kubeconfigs.
+func TestDestroyHostedSeveralClustersDeletesNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+]}`)
+	h.handle("DELETE /api/clusters/cl-old", 200, `{"ok":true}`)
+	h.handle("DELETE /api/clusters/cl-new", 200, `{"ok":true}`)
+	kc := filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")
+	_ = os.MkdirAll(filepath.Dir(kc), 0o755)
+	_ = os.WriteFile(kc, []byte("kc"), 0o600)
+	mustErr(t, h.ctx.DestroyHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+	mustContain(t, h.output(), "[error] kubehz: your account has 2 clusters for test.kubehz.dev, so lo deleted none of them.\n"+
+		"  lo deletes a cluster only when the account has one cluster for the domain. The local kubeconfigs stay.\n"+
+		"  - cluster cl-old\n"+
+		"  - cluster cl-new\n"+
+		"  Select the cluster in the dashboard and delete it there.\n")
+	mustNotContain(t, h.output(), "cannot read the cluster registry")
+	if h.anyReq("DELETE", "/api/clusters") {
+		t.Fatal("DELETE must not run with more than one cluster for the domain")
+	}
+	if _, err := os.Stat(kc); err != nil {
+		t.Fatal("the local kubeconfig must stay")
 	}
 }
 

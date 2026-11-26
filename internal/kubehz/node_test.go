@@ -275,6 +275,27 @@ func TestNodePreflightClusterID(t *testing.T) {
 	mustContain(t, h.output(), "No cluster.lok8s.yaml for domain: nowhere.example.org")
 }
 
+// More than one cluster for the domain: the node commands stop and name
+// the clusters. --cluster-id selects one.
+func TestNodePreflightSeveralClustersStops(t *testing.T) {
+	t.Parallel()
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[
+  {"id":"cl-1234abcd","domain":"acme.example.org","createdAt":"2026-01-01T00:00:00Z"},
+  {"id":"cl-5678efab","domain":"acme.example.org","createdAt":"2026-02-01T00:00:00Z"}
+]}`)
+	_, id, err := h.ctx.nodePreflight(t.Context(), "acme.example.org", "join a node", "")
+	mustErr(t, err)
+	if id != "" {
+		t.Fatalf("id = %q", id)
+	}
+	mustContain(t, h.output(), "[error] kubehz: the registry holds 2 clusters for acme.example.org.\n"+
+		"  - cluster cl-1234abcd\n"+
+		"  - cluster cl-5678efab\n"+
+		"  Name the cluster directly with:  --cluster-id cl-xxxxxxxx\n")
+	mustNotContain(t, h.output(), "did not answer")
+}
+
 // ── join ─────────────────────────────────────────────────
 
 func TestNodeJoinDefaultsNameToShortHostname(t *testing.T) {

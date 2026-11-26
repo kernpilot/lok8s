@@ -1724,7 +1724,8 @@ _register_body() {
   [ "$(grep -c '^POST /api/clusters/register bearer bind=no$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^POST /api/clusters/register none bind=yes$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^POST /api/credentials bearer$' "${STUB_LOG}")" -eq 4 ]
-  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 16 ]
+  [ "$(grep -c '^GET /api/clusters?perPage=500&domain=d.example bearer$' "${STUB_LOG}")" -eq 16 ]
+  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 0 ]
   [ "$(grep -c '^GET /api/clusters/cl-1/assessment bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^POST /api/clusters/cl-1/agent-token bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^DELETE /api/clusters/cl-1 bearer$' "${STUB_LOG}")" -eq 4 ]
@@ -1882,8 +1883,8 @@ _hosted_setup() {
   _hosted_setup
   _curlrc_case _hosted_flow 2
   grep -qx 'kind: Config' "${BATS_TEST_TMPDIR}/ref.out"
-  [ "$(grep -c '^GET /api/clusters?perPage=500&domain=d.example bearer$' "${STUB_LOG}")" -eq 4 ]
-  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^GET /api/clusters?perPage=500&domain=d.example bearer$' "${STUB_LOG}")" -eq 8 ]
+  [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 0 ]
   [ "$(grep -c '^POST /api/clusters bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters/cl-1 bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters/cl-1/kubeconfig bearer$' "${STUB_LOG}")" -eq 4 ]

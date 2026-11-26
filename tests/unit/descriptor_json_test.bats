@@ -107,12 +107,15 @@ EOF
       [ -z "${out}" ] || { echo "shape ${body}: expected no output, got '${out}'" >&2; return 1; }
     fi
   done <<'SHAPES'
-{"data":[{"id":"A1","domain":"test.kubehz.dev"}]}|A1
-{"data":{"id":"B2","domain":"test.kubehz.dev"}}|B2
-[{"id":"C3","domain":"test.kubehz.dev"}]|C3
-{"id":"D4","domain":"test.kubehz.dev"}|D4
+{"data":[{"id":"cl-a1","domain":"test.kubehz.dev"}]}|cl-a1
+{"data":{"id":"cl-b2","domain":"test.kubehz.dev"}}|cl-b2
+[{"id":"cl-c3","domain":"test.kubehz.dev"}]|cl-c3
+{"id":"cl-d4","domain":"test.kubehz.dev"}|cl-d4
+{"data":[1,"x",null,{"id":"cl-e5","domain":"test.kubehz.dev"}]}|cl-e5
 {"data":[]}|
 {}|
 []|
+{"data":"x"}|
+{"data":[1]}|
 SHAPES
 }

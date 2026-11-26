@@ -120,7 +120,12 @@ _stub_curl() {
       return 0
     fi
     # GET /api/clusters (registry list) — two rows so the client-side domain
-    # filter is what picks the right one (never .data[0]).
+    # filter is what picks the right one (never .data[0]). STUB_LIST_BODY
+    # replaces the list.
+    if [[ -n "${STUB_LIST_BODY:-}" ]]; then
+      printf '%s' "${STUB_LIST_BODY}"
+      return 0
+    fi
     printf '%s' '{"data":[{"id":"cl-999","domain":"other.kubehz.dev"},{"id":"cl-123","domain":"test.kubehz.dev"}]}'
   }
   export -f curl
@@ -332,6 +337,64 @@ _stub_curl() {
   run kubehz::re-enroll
   assert_failure
   assert_output --partial "must use HTTPS"
+}
+
+# The warning of assess and re-enroll for more than one cluster of the
+# domain: they use the oldest, as the server does.
+_several_list='{"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
+_oldest_warn='[warn] kubehz: your account has 2 clusters for test.kubehz.dev. lo uses the oldest, cl-old.
+  The server binds the agent to the oldest active cluster of a domain.
+  - cluster cl-old
+  - cluster cl-new'
+
+@test "re-enroll: several clusters of the domain: warns and uses the oldest" {
+  _stub_config
+  _stub_kubectl
+  _stub_curl
+  export STUB_LIST_BODY="${_several_list}"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export domain="test.kubehz.dev" DOMAIN_NAME="test.kubehz.dev"
+  export KUBEHZ_TOKEN="khzt_bats"
+
+  run kubehz::re-enroll
+  assert_success
+  assert_output --partial "${_oldest_warn}"
+  assert_output --partial "agent token re-enrolled for test.kubehz.dev (cl-old)"
+}
+
+@test "assess: several clusters of the domain: warns and uses the oldest; a bad oldest id stops" {
+  _stub_config
+  export ASSESS_LOG="${BATS_TEST_TMPDIR}/assess"
+  curl() {
+    local url="${*: -1}"
+    case "${url}" in
+      */assessment) printf '%s\n' "${url}" >> "${ASSESS_LOG}"; printf '%s' '{"data":{"assessment":null}}' ;;
+      *) printf '%s' "${STUB_LIST_BODY}" ;;
+    esac
+  }
+  export -f curl
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+
+  export domain="test.kubehz.dev" DOMAIN_NAME="test.kubehz.dev"
+  export KUBEHZ_TOKEN="khzt_bats"
+
+  STUB_LIST_BODY="${_several_list}" run kubehz::assess
+  assert_success
+  assert_output --partial "${_oldest_warn}"
+  run cat "${ASSESS_LOG}"
+  assert_output "https://api.kubehz.dev/api/clusters/cl-old/assessment"
+
+  rm -- "${ASSESS_LOG}"
+  STUB_LIST_BODY='{"data":[
+    {"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"},
+    {"id":"A1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}' run kubehz::assess
+  assert_failure
+  assert_output --partial "no cluster found for test.kubehz.dev"
+  refute_output --partial "lo uses the oldest"
+  [ ! -e "${ASSESS_LOG}" ]
 }
 
 @test "re-enroll: an unresolvable cluster id fails with registry guidance" {

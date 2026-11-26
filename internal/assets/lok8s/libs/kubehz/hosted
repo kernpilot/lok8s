@@ -412,6 +412,8 @@ kubehz::_hosted_listed() {
   KUBEHZ_HOSTED_LIST_UNREAD=()
   KUBEHZ_HOSTED_LIST_CAUSE=""
   KUBEHZ_HOSTED_LIST_SCOPE=0
+  # The rule of kubehz::_cluster_list_url (libs/kubehz/main), here again:
+  # the hosted tests load this file alone.
   url="${api_url}/api/clusters?perPage=500"
   if (( ${#domain} <= 253 )) && [[ "${domain}" =~ ${domain_re} ]]; then
     url+="&domain=${domain}"
@@ -1117,19 +1119,29 @@ kubehz::destroy_hosted() {
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
   http::credential_ok KUBEHZ_TOKEN || return 1
 
-  # Resolve through kubehz::resolve_cluster_id (client-side domain filter,
-  # oldest-first). The old inline lookup GETed /api/clusters?domain=… — a
-  # server filter the api does not guarantee — and took .data[0] from the
+  # Resolve through kubehz::resolve_cluster_id (the ?domain= filter and a
+  # client-side domain filter). The old inline lookup took .data[0] from the
   # newest-first list: with more than one cluster on the tenant it deleted
   # the NEWEST cluster, not the named domain's. resolve rc 2 = the registry
   # answered without a row for the domain (already removed — destroy stays
-  # idempotent); rc 1 = the lookup itself failed, and a delete on a guessed
-  # id is the wrong-cluster bug again — refuse and delete nothing. Both
-  # halves of issue #65 stay closed: a lookup failure is REPORTED, never
-  # rendered as "nothing to destroy" while the cluster runs and bills.
+  # idempotent); rc 3 = more than one cluster for the domain: lo cannot
+  # tell which one to delete, and deletes none of them (no flag selects
+  # one); any other rc = the lookup itself failed, and a delete on a
+  # guessed id is the wrong-cluster bug again — refuse and delete nothing.
+  # Both halves of issue #65 stay closed: a lookup failure is REPORTED,
+  # never rendered as "nothing to destroy" while the cluster runs and bills.
   local cluster_id="" resolve_rc=0
   cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
-  if (( resolve_rc == 1 )); then
+  if (( resolve_rc == 3 )); then
+    local -a many_ids=()
+    mapfile -t many_ids <<<"${cluster_id}"
+    error "kubehz: your account has ${#many_ids[@]} clusters for ${domain}, so lo deleted none of them."
+    echo "  lo deletes a cluster only when the account has one cluster for the domain. The local kubeconfigs stay." >&2
+    kubehz::_cluster_ids_print "${many_ids[@]}"
+    echo "  Select the cluster in the dashboard and delete it there." >&2
+    return 1
+  fi
+  if (( resolve_rc != 0 && resolve_rc != 2 )); then
     error "kubehz: cannot read the cluster registry at ${api_url} — nothing was deleted for ${domain} and the local kubeconfigs are kept. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
     return 1
   fi
