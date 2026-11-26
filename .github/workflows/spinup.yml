@@ -12,7 +12,7 @@
 # Do not claim with that ticket. The runner does not keep the bind secret
 # (clusters/<domain>/.kubehz-bind), so the agent that you deploy later
 # registers the cluster again, and a registration claimed with the ticket of
-# the run never gets a heartbeat. The job summary gives the steps: deploy the
+# the run gets no heartbeat. The job summary gives the steps: deploy the
 # agent (`lo kubehz deploy`), then claim with `lo kubehz claim-code`.
 #
 # It needs exactly ONE secret: HCLOUD_TOKEN (your Hetzner Cloud API token, used by
@@ -233,14 +233,20 @@ jobs:
             echo ""
             echo "To claim it, deploy the kubehz agent in it with your kubeconfig of the cluster"
             echo "(\`lo kubehz deploy\`), then run \`lo kubehz claim-code\`. Sign in to the kubehz dashboard, open"
-            echo "the **Claim** page, pick the **Claim code** tab and paste the code. The agent makes the code on"
-            echo "its first run: if \`lo kubehz claim-code\` prints nothing, wait a few minutes and run it again."
+            echo "the **Claim** page, pick the **One-time code** tab and paste the code. The agent makes the code"
+            echo "on its first run: if \`lo kubehz claim-code\` reports that there is no claim code yet, wait a few"
+            echo "minutes and run it again."
+            echo ""
+            echo "The registration of the agent counts against the limit of five pending registrations per domain."
+            echo "At the limit, the agent cannot register, and the dashboard does not find its claim code. The agent"
+            echo "tries again on each run, so the claim works after an older registration expires (by default"
+            echo "after about 14 days)."
             echo ""
             if [[ "${REGISTRATION}" == claim-key ]]; then
               echo "Do not claim the cluster with the claim ticket of this run. The runner does not keep the bind"
-              echo "secret of the registration (\`clusters/<domain>/.kubehz-bind\`), so the agent registers the"
+              echo "secret of the registration (\`clusters/${DOMAIN}/.kubehz-bind\`), so the agent registers the"
               echo "cluster again, as a new pending registration. A registration that you claim with the ticket of"
-              echo "this run never gets a heartbeat, and the dashboard never shows it as connected."
+              echo "this run gets no heartbeat, and the dashboard never shows it as connected."
               echo ""
               echo "The claim ticket is the MD5 fingerprint of the SSH key \`${CLAIM_KEY}\`. It is in the Hetzner"
               echo "Console of the project of your \`HCLOUD_TOKEN\`: **Security → SSH keys**, the key \`${CLAIM_KEY}\`."

@@ -681,8 +681,9 @@ func TestSpinupStepsKeepTheTicketOut(t *testing.T) {
 	if sum.If != "always() && steps.provision.outputs.registration != ''" {
 		t.Errorf("the summary step runs if %q", sum.If)
 	}
-	claimSteps := []string{"(`lo kubehz deploy`), then run `lo kubehz claim-code`.", "pick the **Claim code** tab and paste the code."}
-	ticketClaim := []string{"Claim the cluster soon", "open the **Claim** page and paste the"}
+	claimSteps := []string{"(`lo kubehz deploy`), then run `lo kubehz claim-code`.", "pick the **One-time code** tab and paste the code.",
+		"The registration of the agent counts against the limit of five pending registrations per domain."}
+	ticketClaim := []string{"Claim the cluster soon", "open the **Claim** page and paste the", "**Claim code** tab"}
 	for _, c := range []struct {
 		name       string
 		claimKey   bool
@@ -693,7 +694,8 @@ func TestSpinupStepsKeepTheTicketOut(t *testing.T) {
 	}{
 		{"claim key", true, 0, map[string]string{"registration": "claim-key", "claim_key": "kubehz-claim-test.kubehz.dev"},
 			append([]string{"the MD5 fingerprint of the SSH key `kubehz-claim-test.kubehz.dev`", "**Security → SSH keys**, the key `kubehz-claim-test.kubehz.dev`.",
-				"The tickets of earlier runs keep working until someone claims them", "Do not claim the cluster with the claim ticket of this run."}, claimSteps...),
+				"The tickets of earlier runs keep working until someone claims them", "Do not claim the cluster with the claim ticket of this run.",
+				"(`clusters/test.kubehz.dev/.kubehz-bind`)"}, claimSteps...),
 			ticketClaim},
 		{"claim key, then the provision fails", true, 3, map[string]string{"registration": "claim-key", "claim_key": "kubehz-claim-test.kubehz.dev"},
 			append([]string{"the MD5 fingerprint of the SSH key `kubehz-claim-test.kubehz.dev`", "Do not claim the cluster with the claim ticket of this run."}, claimSteps...),
@@ -757,9 +759,7 @@ func TestSpinupStepsKeepTheTicketOut(t *testing.T) {
 				mustContain(t, summary, s)
 			}
 			for _, s := range c.mustNotSay {
-				if strings.Contains(summary, s) {
-					t.Errorf("the job summary says %q:\n%s", s, summary)
-				}
+				mustNotContain(t, summary, s)
 			}
 		})
 	}

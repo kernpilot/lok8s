@@ -925,17 +925,25 @@ private. CI needs no platform token.
 From CI, do not claim with the ticket. The runner does not keep the bind secret
 of the registration (`clusters/<domain>/.kubehz-bind`). So the agent that you
 deploy later registers the cluster again, as a new pending registration, and a
-registration that you claim with the ticket of the run never gets a heartbeat.
+registration that you claim with the ticket of the run gets no heartbeat.
 
 Claim the new registration instead:
 
 1. Deploy the agent with your kubeconfig of the cluster: `lo kubehz deploy`.
 2. Run `lo kubehz claim-code`. The agent makes the code on its first run. If
-   the command prints nothing, wait a few minutes and run it again.
-3. Sign in to the dashboard, open the **Claim** page, pick the **Claim code**
-   tab and paste the code.
+   the command reports that there is no claim code yet, wait a few minutes and
+   run it again.
+3. Sign in to the dashboard, open the **Claim** page, pick the **One-time
+   code** tab and paste the code.
 
 The job summary of the workflow gives the same steps.
+
+The registration of the agent counts against the same limit of five pending
+registrations per domain as the registrations of the runs (see below). At the
+limit, the agent cannot register, and the dashboard does not find its claim
+code. The agent tries again on each run, so the claim works after an older
+registration expires. To free a place sooner, claim an older registration with
+its ticket, then delete that cluster in your account.
 
 A public repository shows its job logs and job summaries to everyone, so the
 workflow keeps the ticket out of them:
@@ -965,8 +973,8 @@ for any encoding: a ticket split over two lines, or in another form, would
 pass it.
 
 Each run that registers a claim key with success adds a new pending
-registration with its own ticket, and lo replaces the claim key in Hetzner with the key of that run. A registration can
-also fail. At registration, the platform refuses a new pending registration
+registration with its own ticket, and lo replaces the claim key in Hetzner
+with the key of that run. A registration can also fail. At registration, the platform refuses a new pending registration
 when the domain already has five. That is a check at registration time, not a
 hard limit on the number of pending registrations. The tickets of earlier runs
 keep working until someone claims them, or until the cleanup removes their
