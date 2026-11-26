@@ -1901,7 +1901,7 @@ lo kubehz [flags]
 * [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
 * [lo kubehz deploy](#lo-kubehz-deploy)	 - Deploy the in-cluster agent (spec.kubehz.agent)
 * [lo kubehz deregister](#lo-kubehz-deregister)	 - Remove cluster from kubehz
-* [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target)
+* [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet
 * [lo kubehz join](#lo-kubehz-join)	 - Mint a node join ticket (hosting: shared)
 * [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 * [lo kubehz re-enroll](#lo-kubehz-re-enroll)	 - Re-enroll a regenerated in-cluster agent token with the platform
@@ -2166,7 +2166,7 @@ lo kubehz deregister [flags]
 
 ## lo kubehz handover
 
-Control-plane handover (receive/preseed on the eject target)
+Control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet
 
 ```
 lo kubehz handover [flags]
@@ -2188,12 +2188,12 @@ lo kubehz handover [flags]
 ### SEE ALSO
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
-* [lo kubehz handover preseed](#lo-kubehz-handover-preseed)	 - Pre-seed exported PKI onto a kubeone node before kubeone apply
-* [lo kubehz handover receive](#lo-kubehz-handover-receive)	 - Restore an exported control plane onto THIS node (kubeadm path)
+* [lo kubehz handover preseed](#lo-kubehz-handover-preseed)	 - Pre-seed exported PKI onto a kubeone node before kubeone apply; kubehz cannot start an eject yet
+* [lo kubehz handover receive](#lo-kubehz-handover-receive)	 - Restore an exported control plane onto THIS node (kubeadm path); kubehz cannot start an eject yet
 
 ## lo kubehz handover preseed
 
-Pre-seed exported PKI onto a kubeone node before kubeone apply
+Pre-seed exported PKI onto a kubeone node before kubeone apply; kubehz cannot start an eject yet
 
 ```
 lo kubehz handover preseed --bundle <path> --node <ip> [flags]
@@ -2220,11 +2220,11 @@ lo kubehz handover preseed --bundle <path> --node <ip> [flags]
 
 ### SEE ALSO
 
-* [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target)
+* [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet
 
 ## lo kubehz handover receive
 
-Restore an exported control plane onto THIS node (kubeadm path)
+Restore an exported control plane onto THIS node (kubeadm path); kubehz cannot start an eject yet
 
 ```
 lo kubehz handover receive --bundle <path> [--snapshot <file>] [--single-node] [--force] [flags]
@@ -2249,7 +2249,7 @@ lo kubehz handover receive --bundle <path> [--snapshot <file>] [--single-node] [
 
 ### SEE ALSO
 
-* [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target)
+* [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target); kubehz cannot start an eject yet
 
 ## lo kubehz join
 

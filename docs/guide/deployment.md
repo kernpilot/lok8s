@@ -920,7 +920,9 @@ to `registered` or `managed`), `lo provision` registers it as **pending**. With
 `HCLOUD_TOKEN`, lo uploads a claim key, `kubehz-claim-<domain>`, to your Hetzner
 Cloud project. The MD5 fingerprint of that key is a **one-time claim ticket**.
 Sign in to the dashboard, open the **Claim** page and paste the ticket: the
-cluster is then yours. Any signed-in user who has the ticket can claim the
+cluster is then yours. A new user signs up on
+[kubehz.cloud](https://kubehz.cloud) first. In the preview kubehz caps the number
+of new accounts, so sign-up can need an invite code. Any signed-in user who has the ticket can claim the
 cluster, so keep it private. CI needs no platform token.
 
 A public repository shows its job logs and job summaries to everyone, so the
