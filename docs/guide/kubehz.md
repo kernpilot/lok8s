@@ -646,7 +646,9 @@ is deployed. `lo kubehz register` does the same on its own. Both post to
 - **`HCLOUD_TOKEN` (the usual path for a self-hosted cluster at Hetzner).**
   lo uploads the claim key `kubehz-claim-<domain>` to your Hetzner Cloud
   project. The fingerprint of that key is the one-time claim ticket: paste it
-  into the dashboard **Claim** page. See
+  on the **SSH fingerprint** tab of the dashboard **Claim** page. From CI,
+  claim with the claim code instead, because the runner does not keep the bind
+  secret. See
   [Claiming a registered cluster](./deployment.md#claiming-a-registered-cluster).
 - **`KUBEHZ_TOKEN`.** lo registers the cluster directly in your account. See
   [claim at provision time](#kubehz-token-claim-at-provision-time). When both
@@ -945,8 +947,9 @@ paste it into the dashboard while signed in.
      -o jsonpath='{.data.claim-code}' | base64 -d
    ```
 
-3. **Paste it** into the dashboard **Claim** page while signed in. The platform
-   attributes the cluster to your account and consumes the code (single-use).
+3. **Paste it** on the **One-time code** tab of the dashboard **Claim** page
+   while signed in. The platform attributes the cluster to your account and
+   consumes the code (single-use).
 
 In this flow, the claim code is the *only* secret that transits your browser,
 and only once. The **agent-token** (the credential that authenticates

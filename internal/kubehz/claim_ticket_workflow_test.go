@@ -669,7 +669,9 @@ func fileExists(path string) bool {
 // of the provision step (its log, the tee file, GITHUB_OUTPUT), and the
 // summary names the claim key but never the ticket. A provision that fails
 // after the registration still writes the outputs, and the step still
-// fails with the status of lo.
+// fails with the status of lo. The summary tells the user to claim with the
+// claim code of the agent: the runner keeps no bind secret, so a claim with
+// the ticket of the run gets a registration that never connects.
 func TestSpinupStepsKeepTheTicketOut(t *testing.T) {
 	prov := workflowStepNamed(t, "spinup.yml", "spinup", "Provision & register")
 	if n := strings.Count(prov.Run, "/tmp/provision.log"); n != 2 {
@@ -679,20 +681,28 @@ func TestSpinupStepsKeepTheTicketOut(t *testing.T) {
 	if sum.If != "always() && steps.provision.outputs.registration != ''" {
 		t.Errorf("the summary step runs if %q", sum.If)
 	}
+	claimSteps := []string{"(`lo kubehz deploy`), then run `lo kubehz claim-code`.", "pick the **One-time code** tab and paste the code.",
+		"The registration of the agent counts against the limit of five pending registrations per domain."}
+	ticketClaim := []string{"Claim the cluster soon", "open the **Claim** page and paste the", "**Claim code** tab"}
 	for _, c := range []struct {
-		name     string
-		claimKey bool
-		rc       int
-		outputs  map[string]string
-		mustSay  []string
+		name       string
+		claimKey   bool
+		rc         int
+		outputs    map[string]string
+		mustSay    []string
+		mustNotSay []string
 	}{
 		{"claim key", true, 0, map[string]string{"registration": "claim-key", "claim_key": "kubehz-claim-test.kubehz.dev"},
-			[]string{"the MD5 fingerprint of the SSH key `kubehz-claim-test.kubehz.dev`", "**Security → SSH keys**, the key `kubehz-claim-test.kubehz.dev`.",
-				"The tickets of earlier runs keep working until someone claims them"}},
+			append([]string{"the MD5 fingerprint of the SSH key `kubehz-claim-test.kubehz.dev`", "**Security → SSH keys**, the key `kubehz-claim-test.kubehz.dev`.",
+				"The tickets of earlier runs keep working until someone claims them", "Do not claim the cluster with the claim ticket of this run.",
+				"(`clusters/test.kubehz.dev/.kubehz-bind`)"}, claimSteps...),
+			ticketClaim},
 		{"claim key, then the provision fails", true, 3, map[string]string{"registration": "claim-key", "claim_key": "kubehz-claim-test.kubehz.dev"},
-			[]string{"the MD5 fingerprint of the SSH key `kubehz-claim-test.kubehz.dev`"}},
+			append([]string{"the MD5 fingerprint of the SSH key `kubehz-claim-test.kubehz.dev`", "Do not claim the cluster with the claim ticket of this run."}, claimSteps...),
+			ticketClaim},
 		{"fingerprint announce", false, 0, map[string]string{"registration": "announce", "claim_key": ""},
-			[]string{"This run did not confirm a claim-key upload", "That does not mean that no ticket exists", "`lo kubehz claim-code`"}},
+			append([]string{"This run did not confirm a claim-key upload", "That does not mean that no ticket exists"}, claimSteps...),
+			append([]string{"Do not claim the cluster with the claim ticket of this run."}, ticketClaim...)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -747,6 +757,9 @@ func TestSpinupStepsKeepTheTicketOut(t *testing.T) {
 			mustContain(t, summary, "Your cluster `test.kubehz.dev` is registered with kubehz as **pending**.")
 			for _, s := range c.mustSay {
 				mustContain(t, summary, s)
+			}
+			for _, s := range c.mustNotSay {
+				mustNotContain(t, summary, s)
 			}
 		})
 	}

@@ -919,11 +919,33 @@ When a cluster opts into kubehz dashboard visibility (`spec.kubehz.access` is se
 to `registered` or `managed`), `lo provision` registers it as **pending**. With
 `HCLOUD_TOKEN`, lo uploads a claim key, `kubehz-claim-<domain>`, to your Hetzner
 Cloud project. The MD5 fingerprint of that key is a **one-time claim ticket**.
-A new user signs up on [kubehz.cloud](https://kubehz.cloud) first. For now
-kubehz caps the number of new accounts, so sign-up can need an invite code.
-Sign in to the dashboard, open the **Claim** page and paste the ticket: the
-cluster is then yours. Any signed-in user who has the ticket can claim the
-cluster, so keep it private. CI needs no platform token.
+Any signed-in user who has the ticket can claim the registration, so keep it
+private. CI needs no platform token.
+
+From CI, do not claim with the ticket. The runner does not keep the bind secret
+of the registration (`clusters/<domain>/.kubehz-bind`). So the agent that you
+deploy later registers the cluster again, as a new pending registration, and a
+registration that you claim with the ticket of the run gets no heartbeat.
+
+Claim the new registration instead:
+
+1. Deploy the agent with your kubeconfig of the cluster: `lo kubehz deploy`.
+2. Run `lo kubehz claim-code`. The agent makes the code on its first run. If
+   the command reports that there is no claim code yet, wait a few minutes and
+   run it again.
+3. Sign in to the dashboard, open the **Claim** page, pick the **One-time
+   code** tab and paste the code. A new user signs up on
+   [kubehz.cloud](https://kubehz.cloud) first. For now kubehz caps the number
+   of new accounts, so sign-up can need an invite code.
+
+The job summary of the workflow gives the same steps.
+
+The registration of the agent counts against the same limit of five pending
+registrations per domain as the registrations of the runs (see below). At the
+limit, the agent cannot register, and the dashboard does not find its claim
+code. The agent tries again on each run, so the claim works after an older
+registration expires. To free a place sooner, claim an older registration with
+its ticket, then delete that cluster in your account.
 
 A public repository shows its job logs and job summaries to everyone, so the
 workflow keeps the ticket out of them:
@@ -952,11 +974,9 @@ The log filter covers the ticket as an older `lo`, or `lo` with
 for any encoding: a ticket split over two lines, or in another form, would
 pass it.
 
-Claim the cluster soon. The runner does not keep the bind secret of an earlier
-run (`clusters/<domain>/.kubehz-bind`). So each run that registers a claim key
-with success adds a new pending registration with its own ticket, and lo
-replaces the claim key in Hetzner with the key of that run. A registration can
-also fail. At registration, the platform refuses a new pending registration
+Each run that registers a claim key with success adds a new pending
+registration with its own ticket, and lo replaces the claim key in Hetzner
+with the key of that run. A registration can also fail. At registration, the platform refuses a new pending registration
 when the domain already has five. That is a check at registration time, not a
 hard limit on the number of pending registrations. The tickets of earlier runs
 keep working until someone claims them, or until the cleanup removes their
@@ -984,8 +1004,8 @@ does not take back a copy that someone already read.
 When lo reports a successful legacy registration, it did not confirm a
 claim-key upload, and it printed no ticket. That does not mean that no ticket
 exists: the platform can make one before the upload fails, and the tickets of
-earlier runs stay. The job summary then tells you to claim the cluster with
-the heartbeat agent and `lo kubehz claim-code`.
+earlier runs stay. The claim steps are the same: deploy the agent, then claim
+with `lo kubehz claim-code`.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.

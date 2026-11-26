@@ -7,13 +7,18 @@
 # project. The MD5 fingerprint of that key is a one-time claim ticket: any
 # signed-in kubehz user who has it can claim the cluster. A public repo shows
 # its job logs and summaries to everyone, so this workflow hides the ticket in
-# the log, and no step output, env value or job summary holds it. The job
-# summary tells you where to read it: in your Hetzner Cloud project.
+# the log, and no step output, env value or job summary holds it.
+#
+# Do not claim with that ticket. The runner does not keep the bind secret
+# (clusters/<domain>/.kubehz-bind), so the agent that you deploy later
+# registers the cluster again, and a registration claimed with the ticket of
+# the run gets no heartbeat. The job summary gives the steps: deploy the
+# agent (`lo kubehz deploy`), then claim with `lo kubehz claim-code`.
 #
 # It needs exactly ONE secret: HCLOUD_TOKEN (your Hetzner Cloud API token, used by
 # `lo`/the provider to create the infrastructure and to upload the claim key).
 # No platform/API token is required: you prove ownership later, when you claim
-# the cluster with the ticket while signed in to the dashboard.
+# the cluster with the claim code of its agent while signed in to the dashboard.
 #
 # Usage (as a reusable workflow from another repo):
 #
@@ -197,9 +202,11 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           exit "${rc}"
 
-      # Write the claim steps to the job summary. The summary says where the
-      # claim ticket can be read: in the Hetzner Cloud project. It never holds
-      # the ticket, and the Hetzner token is NEVER printed here.
+      # Write the claim steps to the job summary: deploy the agent, then claim
+      # with its claim code. The summary says where the claim ticket can be
+      # read (in the Hetzner Cloud project) and why the user must not claim
+      # with it. It never holds the ticket, and the Hetzner token is NEVER
+      # printed here.
       - name: Claim instructions
         if: always() && steps.provision.outputs.registration != ''
         env:
@@ -224,29 +231,41 @@ jobs:
             echo ""
             echo "Your cluster \`${DOMAIN}\` is registered with kubehz as **pending**."
             echo ""
+            echo "To claim it, deploy the kubehz agent in it with your kubeconfig of the cluster"
+            echo "(\`lo kubehz deploy\`), then run \`lo kubehz claim-code\`. Sign in to the kubehz dashboard, open"
+            echo "the **Claim** page, pick the **One-time code** tab and paste the code. The agent makes the code"
+            echo "on its first run: if \`lo kubehz claim-code\` reports that there is no claim code yet, wait a few"
+            echo "minutes and run it again."
+            echo ""
+            echo "The registration of the agent counts against the limit of five pending registrations per domain."
+            echo "At the limit, the agent cannot register, and the dashboard does not find its claim code. The agent"
+            echo "tries again on each run, so the claim works after an older registration expires (by default"
+            echo "after about 14 days)."
+            echo ""
             if [[ "${REGISTRATION}" == claim-key ]]; then
-              echo "To claim it, sign in to the kubehz dashboard, open the **Claim** page and paste the"
-              echo "claim ticket: the MD5 fingerprint of the SSH key \`${CLAIM_KEY}\`. It is in the Hetzner"
+              echo "Do not claim the cluster with the claim ticket of this run. The runner does not keep the bind"
+              echo "secret of the registration (\`clusters/${DOMAIN}/.kubehz-bind\`), so the agent registers the"
+              echo "cluster again, as a new pending registration. A registration that you claim with the ticket of"
+              echo "this run gets no heartbeat, and the dashboard never shows it as connected."
+              echo ""
+              echo "The claim ticket is the MD5 fingerprint of the SSH key \`${CLAIM_KEY}\`. It is in the Hetzner"
               echo "Console of the project of your \`HCLOUD_TOKEN\`: **Security → SSH keys**, the key \`${CLAIM_KEY}\`."
               echo "People with access to this Hetzner Cloud project can read it there."
               echo ""
               echo "The ticket is a **one-time claim ticket**: any signed-in kubehz user who has it can claim"
-              echo "this cluster. So this workflow does not show it: the log has a placeholder in its place,"
+              echo "this registration. So this workflow does not show it: the log has a placeholder in its place,"
               echo "and this summary does not hold it. Keep it private: do not paste it into an issue, a chat or a CI log."
               echo ""
-              echo "Claim the cluster soon. The runner does not keep the bind secret of an earlier run"
-              echo "(\`clusters/<domain>/.kubehz-bind\`). So each run that registers a claim key with success adds"
-              echo "a new pending registration with its own ticket, and lo replaces the claim key in Hetzner with"
-              echo "the key of that run. At registration, the platform refuses a new pending registration when the"
-              echo "domain already has five. The tickets of earlier runs keep working until someone claims them, or"
-              echo "until the cleanup removes their registration: by default when it is older than about 14 days"
-              echo "and has had no heartbeat for that time. The cleanup is a policy of the kubehz deployment and can"
-              echo "run late. It is not a promised time at which a ticket stops working."
+              echo "Each run that registers a claim key with success adds a new pending registration with its own"
+              echo "ticket, and lo replaces the claim key in Hetzner with the key of that run. At registration, the"
+              echo "platform refuses a new pending registration when the domain already has five."
+              echo "The tickets of earlier runs keep working until someone claims them, or until the cleanup removes"
+              echo "their registration: by default when it is older than about 14 days and has had no heartbeat for"
+              echo "that time. The cleanup is a policy of the kubehz deployment and can run late. It is not a promised"
+              echo "time at which a ticket stops working."
             else
               echo "This run did not confirm a claim-key upload, so lo used the legacy registration and printed"
               echo "no claim ticket. That does not mean that no ticket exists: the platform can make one before"
-              echo "the upload fails, and the tickets of earlier runs stay. To claim the cluster, deploy the kubehz"
-              echo "agent in it (\`lo kubehz deploy\`), then run \`lo kubehz claim-code\` and paste the code on the"
-              echo "dashboard **Claim** page while you are signed in."
+              echo "the upload fails, and the tickets of earlier runs stay."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
