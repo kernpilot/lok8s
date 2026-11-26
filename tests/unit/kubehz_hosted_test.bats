@@ -217,6 +217,23 @@ _PAYLOAD_UNSET='{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner
   assert_output --partial "failed"
 }
 
+@test "wait_for_cluster: a status read that fails reads as Unknown, and the wait goes on under set -e" {
+  curl() { return 22; }
+  export -f curl
+  sleep() { :; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="test-token"
+  # lo runs under set -euo pipefail: a failed read must not end the run.
+  _wait_errexit() {
+    set -euo pipefail
+    kubehz::wait_for_cluster "https://api.kubehz.dev" "cl-001" 20
+  }
+  run _wait_errexit
+  assert_failure
+  assert_output --partial "Timed out waiting for hosted cluster cl-001 after 20s"
+}
+
 # ── provision_hosted ─────────────────────────────────────
 
 # _hosted_no_cluster: the cluster list shows no cluster of the domain
@@ -625,6 +642,11 @@ _listed() {
   # lo cannot tell that the cluster on the page is the only one.
   assert_equal "$(_listed 200 '{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Running"}],"meta":{"pagination":{"total":2}}}')" "1|||||it shows 1 of 2 clusters|0"
   assert_equal "$(_listed fail '')" "1|||||no answer|0"
+  # A list read clears the mark of an earlier status read that failed.
+  KUBEHZ_HOSTED_LIST_UNREAD=(1)
+  export LIST_STATUS=200 LIST_BODY='{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev"}]}'
+  kubehz::_hosted_listed "${LOK8S_KUBEHZ_API_URL}" test.kubehz.dev
+  assert_equal "${#KUBEHZ_HOSTED_LIST_UNREAD[@]}" 0
 }
 
 @test "kubehz::_hosted_listed: sends ?domain= only for a domain of the shape that the api takes" {
@@ -677,27 +699,58 @@ _hosted_one_row() {
 
 @test "provision_hosted: one cluster of the domain that lo does not use stops the create, and names its id, hosting and status" {
   _hosted_list_setup
-  local get='  See the cluster with:  lo kubehz cluster get cl-1a' running='  lo downloads the kubeconfig only when the status is Running.'
-  local status_read='get https://api.kubehz.dev/api/clusters/cl-1a'
+  local get='  See the cluster with:  lo kubehz cluster get cl-1a'
+  local any='  lo downloads the kubeconfig only when the status is Running, Paused or Updating.'
+  local creating='  The cluster is not ready yet. Run the command again when its status is Running.'
+  local failed='  kubehz reports an error for the cluster. Contact support with the cluster id.'
+  local unread='  lo could not read the status of the cluster. Run the command again.'
+  local confirm='  kubehz is still checking the create of this cluster.
+  Usually, kubehz keeps or removes the cluster in about 3 minutes.
+  When the check fails, kubehz tries again about 15 minutes later.
+  Run the command again after that.'
+  local stop='[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev'
+  local creating_row='{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}'
+  local status_read='get https://api.kubehz.dev/api/clusters/cl-1a' s body
+  local -A step=([Pending-Capacity]="${creating}" [Failed]="${failed}" [Error]="${failed}" [Starting]="${any}")
 
   # The list keeps the status of the create: lo reads the live one.
-  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}'
+  _hosted_one_row "${creating_row}"
   export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Deleting"}}'
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Deleting), so lo did not create another one.
-${running}
+  _hosted_stop "${stop} (hosted, Deleting), so lo did not create another one.
+  kubehz deletes the cluster. After it leaves your cluster list, run the command again: lo then creates a new cluster.
 ${get}"
   assert_equal "$(cat "${CALLS}")" "list https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev
 ${status_read}"
 
+  # The live status decides, not the status of the list.
+  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Running","createUnconfirmedAt":null}'
+  export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Creating"}}'
+  _hosted_stop "${stop} (hosted, Creating), so lo did not create another one.
+${creating}
+${get}"
+
+  for s in "${!step[@]}"; do
+    _hosted_one_row "${creating_row}"
+    export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"'"${s}"'"}}'
+    _hosted_stop "${stop} (hosted, ${s}), so lo did not create another one.
+${step[${s}]}
+${get}"
+  done
+
   _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}'
   export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Running"}}'
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Running, create not confirmed), so lo did not create another one.
-  kubehz is still checking the create of this cluster.
-  Usually, kubehz keeps or removes the cluster in about 3 minutes.
-  When the check fails, kubehz tries again about 15 minutes later.
-  Run the command again after that.
+  _hosted_stop "${stop} (hosted, Running, create not confirmed), so lo did not create another one.
+${confirm}
 ${get}"
   assert_equal "$(grep -c "^${status_read}$" "${CALLS}")" 1
+
+  # A create that is not confirmed and a status read that fails.
+  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}'
+  export STATUS_RC=22
+  _hosted_stop "${stop} (hosted, status not read, create not confirmed), so lo did not create another one.
+${confirm}
+${get}"
+  export STATUS_RC=0
 
   _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"self","status":"Running"}'
   _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (self-hosted, Running), so lo did not create another one.
@@ -711,20 +764,31 @@ ${get}"
 ${get}"
   refute grep -q "^${status_read}$" "${CALLS}"
 
-  # The status read fails (curl -f: 22).
-  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}'
+  # lo cannot read the status: the read fails (curl -f: 22), or the answer
+  # holds no status or is not JSON.
+  _hosted_one_row "${creating_row}"
   export STATUS_RC=22
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Unknown), so lo did not create another one.
-${running}
+  _hosted_stop "${stop} (hosted, status not read), so lo did not create another one.
+${unread}
 ${get}"
   export STATUS_RC=0
-
-  # A status that is not one word is a server string that lo does not repeat.
-  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}'
-  export STATUS_BODY='{"ok":true,"data":{"status":"Running\u001b[2J"}}'
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, unknown), so lo did not create another one.
-${running}
+  for body in '{"ok":true,"data":{"id":"cl-1a"}}' '{"ok":true,"data":{"status":null}}' '<html>proxy</html>'; do
+    _hosted_one_row "${creating_row}"
+    export STATUS_BODY="${body}"
+    _hosted_stop "${stop} (hosted, status not read), so lo did not create another one.
+${unread}
 ${get}"
+  done
+
+  # A status that is not one word is a server string that lo does not
+  # repeat; an empty status is one too.
+  for body in '{"ok":true,"data":{"status":"Running\u001b[2J"}}' '{"ok":true,"data":{"status":""}}'; do
+    _hosted_one_row "${creating_row}"
+    export STATUS_BODY="${body}"
+    _hosted_stop "${stop} (hosted, unknown), so lo did not create another one.
+${any}
+${get}"
+  done
 
   # An id in another shape: lo does not repeat it and reads no status.
   _hosted_one_row '{"id":"cl-\u001b[2J","domain":"test.kubehz.dev","hosting":"hosted","status":"Running"}'
@@ -763,7 +827,7 @@ ${head}"
   _hosted_stop "${want}"
 }
 
-@test "provision_hosted: the one ready hosted cluster of the domain gets its kubeconfig and the mirror, and no create" {
+@test "provision_hosted: the one hosted cluster of the domain that is Running, Paused or Updating gets its kubeconfig and the mirror, and no create" {
   _hosted_list_setup
   printf 'kind: KubeOne\nmetadata:\n  name: mirror-name\nspec:\n  cluster:\n    domain: test.kubehz.dev\n  kubernetes:\n    version: v1.31.10\n  kubehz:\n    hosting: hosted\n' > "${SPEC}"
   mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
@@ -782,13 +846,37 @@ get kubeconfig"
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml")" "kc"
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/mirror-name.yaml")" "kc"
 
-  # A failed download fails the run and keeps the old kubeconfig.
+  # A Paused or an Updating cluster gets its kubeconfig too, and a note.
+  local s
+  local -A note=(
+    [Paused]="  The cluster is Paused. The download asks kubehz to resume it.
+  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get cl-1a"
+    [Updating]="  The cluster is Updating: kubectl can fail for a short time, until the update ends."
+  )
+  for s in Paused Updating; do
+    printf 'old\n' > "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+    : > "${CALLS}"
+    export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"'"${s}"'"}}'
+    kubehz::provision_hosted test.kubehz.dev "${SPEC}" > "${out}" 2> "${err}"
+    assert_equal "$(cat "${out}")" "kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, ${s}).
+  lo downloads its kubeconfig and does not create another cluster.
+${note[${s}]}"
+    assert_equal "$(cat "${err}")" ""
+    assert_equal "$(cat "${CALLS}")" "list https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev
+get https://api.kubehz.dev/api/clusters/cl-1a
+get kubeconfig"
+    assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml")" "kc"
+  done
+
+  # A failed download fails the run and keeps the old kubeconfig. The note
+  # of a Paused cluster follows a download only.
   printf 'old\n' > "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
   : > "${CALLS}"
-  export KC_RC=22
+  export KC_RC=22 STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Paused"}}'
   run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
   assert_failure
   assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1a"
+  refute_output --partial "The cluster is Paused"
   refute grep -qE '^(create|wait)$' "${CALLS}"
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml")" "old"
 }

@@ -179,6 +179,11 @@ func TestWaitForCluster(t *testing.T) {
 	h.handle("GET /api/clusters/cl-003", 200, `{"data":{"status":"Creating"}}`)
 	mustErr(t, h.ctx.waitForCluster(t.Context(), h.apiURL(), "cl-003", 30))
 	mustContain(t, h.output(), "Timed out waiting for hosted cluster cl-003 after 30s")
+	// A status read that fails is "Unknown": the wait goes on.
+	h.reset()
+	h.handle("GET /api/clusters/cl-004", 500, `{"ok":false}`)
+	mustErr(t, h.ctx.waitForCluster(t.Context(), h.apiURL(), "cl-004", 30))
+	mustContain(t, h.output(), "Timed out waiting for hosted cluster cl-004 after 30s")
 }
 
 // hostedSpec writes a hosted spec for test.kubehz.dev. It also answers
@@ -651,6 +656,18 @@ func TestProvisionHostedStopsOnAClusterOfTheDomain(t *testing.T) {
 		"  Usually, kubehz keeps or removes the cluster in about 3 minutes.\n" +
 		"  When the check fails, kubehz tries again about 15 minutes later.\n" +
 		"  Run the command again after that.\n"
+	const (
+		getLine  = "  See the cluster with:  lo kubehz cluster get cl-1a\n"
+		anyStep  = "  lo downloads the kubeconfig only when the status is Running, Paused or Updating.\n"
+		creating = "  The cluster is not ready yet. Run the command again when its status is Running.\n"
+		failed   = "  kubehz reports an error for the cluster. Contact support with the cluster id.\n"
+		unread   = "  lo could not read the status of the cluster. Run the command again.\n"
+	)
+	stop := func(state string) string {
+		return "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (" + state + "), so lo did not create another one.\n"
+	}
+	live := func(status string) string { return `{"ok":true,"data":{"id":"cl-1a","status":"` + status + `"}}` }
+	const creatingRow = `{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}`
 	for name, tc := range map[string]struct {
 		row    string
 		status int    // the answer of GET /api/clusters/cl-1a; 0: no read expected
@@ -658,19 +675,31 @@ func TestProvisionHostedStopsOnAClusterOfTheDomain(t *testing.T) {
 		want   string
 	}{
 		// The list keeps the status of the create: lo reads the live one.
-		"a hosted cluster that is not ready": {
-			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}`,
-			200, `{"ok":true,"data":{"id":"cl-1a","status":"Deleting"}}`,
-			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Deleting), so lo did not create another one.\n" +
-				"  lo downloads the kubeconfig only when the status is Running.\n" +
-				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+		"a hosted cluster that kubehz deletes": {
+			creatingRow, 200, live("Deleting"),
+			stop("hosted, Deleting") +
+				"  kubehz deletes the cluster. After it leaves your cluster list, run the command again: lo then creates a new cluster.\n" +
+				getLine,
 		},
+		// The live status decides, not the status of the list.
+		"the list says Running, the live status is Creating": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Running","createUnconfirmedAt":null}`,
+			200, live("Creating"),
+			stop("hosted, Creating") + creating + getLine,
+		},
+		"a cluster that waits for capacity": {creatingRow, 200, live("Pending-Capacity"), stop("hosted, Pending-Capacity") + creating + getLine},
+		"a failed cluster":                  {creatingRow, 200, live("Failed"), stop("hosted, Failed") + failed + getLine},
+		"a cluster with an error":           {creatingRow, 200, live("Error"), stop("hosted, Error") + failed + getLine},
+		"a status that lo has no step for":  {creatingRow, 200, live("Starting"), stop("hosted, Starting") + anyStep + getLine},
 		"a hosted cluster whose create is not confirmed": {
 			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}`,
-			200, `{"ok":true,"data":{"id":"cl-1a","status":"Running"}}`,
-			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Running, create not confirmed), so lo did not create another one.\n" +
-				confirmLines +
-				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+			200, live("Running"),
+			stop("hosted, Running, create not confirmed") + confirmLines + getLine,
+		},
+		"a create that is not confirmed and a status read that fails": {
+			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}`,
+			500, `{"ok":false}`,
+			stop("hosted, status not read, create not confirmed") + confirmLines + getLine,
 		},
 		"a self-hosted cluster": {
 			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"self","status":"Running"}`,
@@ -686,21 +715,17 @@ func TestProvisionHostedStopsOnAClusterOfTheDomain(t *testing.T) {
 				"  It is not a hosted cluster, so lo does not download its kubeconfig.\n" +
 				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
 		},
-		"the status read fails": {
-			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}`,
-			500, `{"ok":false}`,
-			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Unknown), so lo did not create another one.\n" +
-				"  lo downloads the kubeconfig only when the status is Running.\n" +
-				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
-		},
+		// lo cannot read the status: the api refuses the read, or the
+		// answer holds no status or is not JSON.
+		"the status read fails":       {creatingRow, 500, `{"ok":false}`, stop("hosted, status not read") + unread + getLine},
+		"an answer without a status":  {creatingRow, 200, `{"ok":true,"data":{"id":"cl-1a"}}`, stop("hosted, status not read") + unread + getLine},
+		"an answer that is not JSON":  {creatingRow, 200, `<html>proxy</html>`, stop("hosted, status not read") + unread + getLine},
+		"a status of an empty string": {creatingRow, 200, live(""), stop("hosted, unknown") + anyStep + getLine},
 		// A status that is not one word is a server string that lo does
 		// not repeat.
 		"a status lo does not show": {
-			`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}`,
-			200, `{"ok":true,"data":{"status":"Running\u001b[2J"}}`,
-			"[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, unknown), so lo did not create another one.\n" +
-				"  lo downloads the kubeconfig only when the status is Running.\n" +
-				"  See the cluster with:  lo kubehz cluster get cl-1a\n",
+			creatingRow, 200, `{"ok":true,"data":{"status":"Running\u001b[2J"}}`,
+			stop("hosted, unknown") + anyStep + getLine,
 		},
 		// An id in another shape is a server string that lo does not repeat,
 		// and lo reads no status for it.
@@ -812,63 +837,79 @@ func TestProvisionHostedStopsOnMoreThanOneCluster(t *testing.T) {
 	}
 }
 
-// One hosted cluster of the domain with a confirmed create and a ready
-// status: lo creates no cluster. It downloads the kubeconfig and writes
-// the mirror, as after a create, and replaces the old kubeconfig. The list
-// keeps the status of the create ("Creating"): lo reads the live one once.
+// One hosted cluster of the domain with a confirmed create and a live
+// status of Running, Paused or Updating: lo creates no cluster. It
+// downloads the kubeconfig and writes the mirror, as after a create, and
+// replaces the old kubeconfig. The list keeps the status of the create
+// ("Creating"): lo reads the live one once. For Paused and Updating, a
+// note follows the download.
 func TestProvisionHostedUsesTheClusterOfTheDomain(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t)
-	spec := hostedSpec(h, "mirror-name")
-	h.handle("GET /api/clusters", 200, hostedListBody(hostedOtherRow,
-		`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}`))
-	h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"id":"cl-1a","status":"Running"}}`)
-	h.handle("GET /api/clusters/cl-1a/kubeconfig", 200, "apiVersion: v1\nkind: Config\n")
-	h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-2b"}}`)
-	dir := filepath.Join(h.base, ".kubeconfig")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	kc := filepath.Join(dir, "test.kubehz.dev.yaml")
-	if err := os.WriteFile(kc, []byte("old\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
-	want := "kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Running).\n" +
-		"  lo downloads its kubeconfig and does not create another cluster.\n"
-	if got := h.output(); got != want {
-		t.Fatalf("output:\n got %q\nwant %q", got, want)
-	}
-	if got := h.out.String(); got != want {
-		t.Fatalf("stdout:\n got %q\nwant %q", got, want)
-	}
-	if h.anyReq("POST", "/api/clusters") {
-		t.Fatal("a create was sent")
-	}
-	if n := hostedCount(h, "GET", "/api/clusters/cl-1a"); n != 1 {
-		t.Fatalf("the status was read %d times, want 1", n)
-	}
-	for _, f := range []string{kc, filepath.Join(dir, "mirror-name.yaml")} {
-		if got := readFile(t, f); got != "apiVersion: v1\nkind: Config\n" {
-			t.Fatalf("%s: %q", f, got)
-		}
-	}
-	if r := h.lastReq("GET", "/api/clusters/cl-1a/kubeconfig"); r == nil || r.Auth != "Bearer khz_test_token" {
-		t.Fatalf("the download: %+v", r)
+	for status, note := range map[string]string{
+		"Running": "",
+		"Paused": "  The cluster is Paused. The download asks kubehz to resume it.\n" +
+			"  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get cl-1a\n",
+		"Updating": "  The cluster is Updating: kubectl can fail for a short time, until the update ends.\n",
+	} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := hostedSpec(h, "mirror-name")
+			h.handle("GET /api/clusters", 200, hostedListBody(hostedOtherRow,
+				`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}`))
+			h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"id":"cl-1a","status":"`+status+`"}}`)
+			h.handle("GET /api/clusters/cl-1a/kubeconfig", 200, "apiVersion: v1\nkind: Config\n")
+			h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-2b"}}`)
+			dir := filepath.Join(h.base, ".kubeconfig")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			kc := filepath.Join(dir, "test.kubehz.dev.yaml")
+			if err := os.WriteFile(kc, []byte("old\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
+			want := "kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, " + status + ").\n" +
+				"  lo downloads its kubeconfig and does not create another cluster.\n" + note
+			if got := h.output(); got != want {
+				t.Fatalf("output:\n got %q\nwant %q", got, want)
+			}
+			if got := h.out.String(); got != want {
+				t.Fatalf("stdout:\n got %q\nwant %q", got, want)
+			}
+			if h.anyReq("POST", "/api/clusters") {
+				t.Fatal("a create was sent")
+			}
+			if n := hostedCount(h, "GET", "/api/clusters/cl-1a"); n != 1 {
+				t.Fatalf("the status was read %d times, want 1", n)
+			}
+			for _, f := range []string{kc, filepath.Join(dir, "mirror-name.yaml")} {
+				if got := readFile(t, f); got != "apiVersion: v1\nkind: Config\n" {
+					t.Fatalf("%s: %q", f, got)
+				}
+			}
+			if r := h.lastReq("GET", "/api/clusters/cl-1a/kubeconfig"); r == nil || r.Auth != "Bearer khz_test_token" {
+				t.Fatalf("the download: %+v", r)
+			}
+		})
 	}
 }
 
 // A download that fails after lo found the cluster fails the run and
-// keeps the old kubeconfig, as after a create.
+// keeps the old kubeconfig, as after a create. The note of a Paused
+// cluster follows a download only.
 func TestProvisionHostedUsedClusterFailedDownload(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	spec := hostedSpec(h, "test.kubehz.dev")
 	h.handle("GET /api/clusters", 200, hostedListBody(`{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted"}`))
-	h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"status":"Running"}}`)
+	h.handle("GET /api/clusters/cl-1a", 200, `{"ok":true,"data":{"status":"Paused"}}`)
 	h.handle("GET /api/clusters/cl-1a/kubeconfig", 403, `{"ok":false,"data":{"code":"TOKEN_NOT_ALLOWED"}}`)
 	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
 	mustContain(t, h.output(), "[error] Failed to download kubeconfig for hosted cluster cl-1a\n")
+	if strings.Contains(h.output(), "The cluster is Paused") {
+		t.Fatalf("the note of a Paused cluster after a failed download:\n%s", h.output())
+	}
 	if h.anyReq("POST", "/api/clusters") {
 		t.Fatal("a create was sent")
 	}

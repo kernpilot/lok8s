@@ -106,17 +106,33 @@ list`) for the domain of `spec.cluster.domain`. lo sends the domain filter
 of the api and also compares the domain of each cluster itself.
 
 - **No cluster:** lo creates the cluster.
-- **One hosted cluster that is ready:** lo creates no cluster. It downloads
-  the kubeconfig of that cluster to `.kubeconfig/<domain>.yaml`, as after a
-  create. So you can run `lo provision` again to get the kubeconfig again.
-  lo reads the status of the cluster first, because the list keeps the
-  status of the create.
-- **One other cluster:** lo stops, and names the id, the hosting and the
-  status of the cluster. This is a cluster that is not hosted, a cluster
-  that is not `Running` yet (or that kubehz deletes), or a cluster whose
-  create kubehz still checks. Read the cluster with
-  `lo kubehz cluster get <id>` (the command reads `KUBEHZ_API_URL`, see
-  [The environment](#the-environment)).
+- **One hosted cluster that lo can use:** lo creates no cluster. It
+  downloads the kubeconfig of that cluster to `.kubeconfig/<domain>.yaml`,
+  as after a create. So you can run `lo provision` again to get the
+  kubeconfig again. lo reads the live status of the cluster first, because
+  the list keeps the status of the create. lo uses the cluster when its
+  status is `Running`, `Paused` or `Updating`:
+  - `Paused`: the download asks kubehz to resume a cluster that it paused
+    because nobody used it. kubehz does not resume the cluster of a
+    suspended account, after the lease ended or after the contract ended.
+    The status does not show which pause it is, so lo names
+    `lo kubehz cluster get <id>`.
+  - `Updating`: the kubeconfig stays the same across an update, but
+    `kubectl` can fail for a short time until the update ends.
+- **One other cluster:** lo stops. It names the id, the hosting and the
+  status of the cluster, and the next step. This is a cluster that is not
+  hosted, a cluster whose create kubehz still checks, or a cluster with
+  one of these statuses:
+
+  | Status | Next step |
+  |---|---|
+  | `Creating`, `Pending-Capacity` | Run the command again when the status is `Running`. |
+  | `Deleting` | After the cluster leaves your cluster list, run the command again. lo then creates a new cluster. |
+  | `Failed`, `Error` | Contact support with the cluster id. |
+  | status not read | lo could not read the status. Run the command again. |
+
+  Read the cluster with `lo kubehz cluster get <id>` (the command reads
+  `KUBEHZ_API_URL`, see [The environment](#the-environment)).
 - **More than one cluster:** lo stops and names them. It uses a cluster only
   when the account has one cluster for the domain.
 

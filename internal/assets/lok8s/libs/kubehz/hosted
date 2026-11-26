@@ -92,25 +92,32 @@ kubehz::wait_for_cluster() {
 }
 
 # kubehz::_hosted_status <api_url> <cluster_id>: the status of a hosted
-# cluster, read once (GET /api/clusters/{id}, the live phase of the
-# cluster), on stdout. "Unknown" when the read fails or the answer is not
-# JSON. GET /api/clusters/{id} is an enveloped UI route
+# cluster for the wait loop (kubehz::_hosted_status_read), on stdout:
+# "Unknown" when lo cannot read it. Always rc 0: kubehz::wait_for_cluster
+# reads it under set -e. Go twin: clusterStatus.
+kubehz::_hosted_status() {
+  kubehz::_hosted_status_read "${1}" "${2}" || printf 'Unknown\n'
+}
+
+# kubehz::_hosted_status_read <api_url> <cluster_id>: the status of a
+# hosted cluster, read once (GET /api/clusters/{id}, the live phase of the
+# cluster), on stdout. rc 1 and no output when lo cannot read it: the
+# request fails, the api refuses it, or the answer is not JSON or holds no
+# status. GET /api/clusters/{id} is an enveloped UI route
 # ({ok,data,traceId}), so the status is at .data.status; the // .status
 # fallback tolerates a bare body. The answer is read before jq, so the
-# exit code of curl counts also without pipefail.
+# exit code of curl counts also without pipefail. jq -e: a status that is
+# null, false or absent gives no output and a code other than 0.
 # -q first and the subshell with http::tls_log_vars_unset: curl reads no
 # config file of the user and gets no TLS log or trace control
-# (utils/http.sh). Go twin: clusterStatus.
-kubehz::_hosted_status() {
+# (utils/http.sh). Go twin: liveStatus.
+kubehz::_hosted_status_read() {
   local body status_val
   body=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
     http::tls_log_vars_unset &&
       curl -q -K - -fsSL "${1}/api/clusters/${2}" 2>/dev/null
-  )) && [[ -n "${body}" ]] || {
-    printf 'Unknown\n'
-    return 0
-  }
-  status_val=$(jq -r '.data.status // .status // "Unknown"' <<<"${body}" 2>/dev/null) || status_val="Unknown"
+  )) && [[ -n "${body}" ]] || return 1
+  status_val=$(jq -er '.data.status // .status // empty' <<<"${body}" 2>/dev/null) || return 1
   printf '%s\n' "${status_val}"
 }
 
@@ -170,14 +177,16 @@ kubehz::render_capacity_rejection() {
 #   - lo cannot read the list: stop.
 #   - more than one cluster: stop, and name them (kubehz::_hosted_many).
 #   - one hosted cluster with a valid id whose create is confirmed and
-#     whose status is ready: no create. lo downloads its kubeconfig and
-#     writes the mirror, as after a create. So a run of lo provision gets
-#     the kubeconfig of the cluster again.
-#   - one other cluster: stop, and name its id, hosting and status
-#     (kubehz::_hosted_exists).
+#     whose live status is Running, Paused or Updating
+#     (kubehz::_hosted_row_ready): no create. lo downloads its kubeconfig
+#     and writes the mirror, as after a create. So a run of lo provision
+#     gets the kubeconfig of the cluster again. For Paused and Updating, lo
+#     then prints a note (kubehz::_hosted_status_note).
+#   - one other cluster: stop, and name its id, hosting and status, and
+#     the next step (kubehz::_hosted_exists).
 # The list keeps the status that the create wrote for a hosted cluster, so
-# lo reads the live status of the cluster (kubehz::_hosted_status) before
-# it decides. A create that left this machine and got no answer can have
+# lo reads the live status of the cluster (kubehz::_hosted_status_read)
+# before it decides. A create that left this machine and got no answer can have
 # made the cluster: lo reads the list again before it prints anything
 # (kubehz::_hosted_create_unknown).
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
@@ -216,8 +225,11 @@ kubehz::provision_hosted() {
         kubehz::_hosted_many "${create_domain}"
         return 1
       fi
+      # The live status replaces the status of the list. A read that fails
+      # leaves no status, and KUBEHZ_HOSTED_LIST_UNREAD[0] says so.
       if [[ -n "${KUBEHZ_HOSTED_LIST_IDS[0]}" && "${KUBEHZ_HOSTED_LIST_HOSTINGS[0]}" == hosted ]]; then
-        KUBEHZ_HOSTED_LIST_STATUSES[0]=$(kubehz::_hosted_status "${api_url}" "${KUBEHZ_HOSTED_LIST_IDS[0]}")
+        KUBEHZ_HOSTED_LIST_STATUSES[0]=$(kubehz::_hosted_status_read "${api_url}" "${KUBEHZ_HOSTED_LIST_IDS[0]}") \
+          || KUBEHZ_HOSTED_LIST_UNREAD[0]=1
       fi
       if ! kubehz::_hosted_row_ready 0; then
         kubehz::_hosted_exists "${create_domain}"
@@ -225,8 +237,9 @@ kubehz::provision_hosted() {
       fi
       echo "kubehz: your account already has cluster ${KUBEHZ_HOSTED_LIST_IDS[0]} for ${create_domain} ($(kubehz::_hosted_row_state 0))."
       echo "  lo downloads its kubeconfig and does not create another cluster."
-      kubehz::_hosted_kubeconfig "${api_url}" "${KUBEHZ_HOSTED_LIST_IDS[0]}" "${domain}" "${kubeconfig_path}" "${cluster_yaml}"
-      return
+      kubehz::_hosted_kubeconfig "${api_url}" "${KUBEHZ_HOSTED_LIST_IDS[0]}" "${domain}" "${kubeconfig_path}" "${cluster_yaml}" || return 1
+      kubehz::_hosted_status_note 0
+      return 0
       ;;
     *) kubehz::_hosted_list_unread "${create_domain}"; return 1 ;;
   esac
@@ -396,6 +409,7 @@ kubehz::_hosted_listed() {
   KUBEHZ_HOSTED_LIST_HOSTINGS=()
   KUBEHZ_HOSTED_LIST_STATUSES=()
   KUBEHZ_HOSTED_LIST_UNCONFIRMED=()
+  KUBEHZ_HOSTED_LIST_UNREAD=()
   KUBEHZ_HOSTED_LIST_CAUSE=""
   KUBEHZ_HOSTED_LIST_SCOPE=0
   url="${api_url}/api/clusters?perPage=500"
@@ -460,13 +474,17 @@ kubehz::_hosted_listed() {
 
 # kubehz::_hosted_row_ready <index>: whether lo can download the
 # kubeconfig of a row of kubehz::_hosted_listed: a hosted cluster with an
-# id, a confirmed create and a ready status. Go twin: hostedRow.ready.
+# id, a confirmed create and a live status of Running (or ready, Ready),
+# Paused or Updating. Paused: the download asks kubehz to resume a cluster
+# that it paused because nobody used it. Updating: the kubelogin file
+# stays the same across an update. Go twins: hostedRow.ready and
+# kubeconfigStatus.
 kubehz::_hosted_row_ready() {
   local i="${1}"
   [[ -n "${KUBEHZ_HOSTED_LIST_IDS[i]}" && "${KUBEHZ_HOSTED_LIST_HOSTINGS[i]}" == hosted \
     && "${KUBEHZ_HOSTED_LIST_UNCONFIRMED[i]}" == 0 ]] || return 1
   case "${KUBEHZ_HOSTED_LIST_STATUSES[i]}" in
-    Running|ready|Ready) return 0 ;;
+    Running|ready|Ready|Paused|Updating) return 0 ;;
   esac
   return 1
 }
@@ -482,11 +500,16 @@ kubehz::_hosted_hosting_name() {
 }
 
 # kubehz::_hosted_row_state <index>: the hosting and the status of a row,
-# as lo prints them. Go twin: hostedRow.state.
+# as lo prints them. "status not read" when the live read failed
+# (KUBEHZ_HOSTED_LIST_UNREAD). Go twin: hostedRow.state.
 kubehz::_hosted_row_state() {
   local LC_ALL=C i="${1}" s status_word
   status_word="${KUBEHZ_HOSTED_LIST_STATUSES[i]}"
-  [[ "${status_word}" =~ ^[A-Za-z][A-Za-z0-9-]{0,31}$ ]] || status_word="unknown"
+  if [[ "${KUBEHZ_HOSTED_LIST_UNREAD[i]:-0}" != 0 ]]; then
+    status_word="status not read"
+  elif ! [[ "${status_word}" =~ ^[A-Za-z][A-Za-z0-9-]{0,31}$ ]]; then
+    status_word="unknown"
+  fi
   s="$(kubehz::_hosted_hosting_name "${i}"), ${status_word}"
   [[ "${KUBEHZ_HOSTED_LIST_UNCONFIRMED[i]}" == 0 ]] || s+=", create not confirmed"
   printf '%s' "${s}"
@@ -524,10 +547,41 @@ kubehz::_hosted_exists() {
     echo "  Usually, kubehz keeps or removes the cluster in about 3 minutes." >&2
     echo "  When the check fails, kubehz tries again about 15 minutes later." >&2
     echo "  Run the command again after that." >&2
+  elif [[ "${KUBEHZ_HOSTED_LIST_UNREAD[0]:-0}" != 0 ]]; then
+    echo "  lo could not read the status of the cluster. Run the command again." >&2
   else
-    echo "  lo downloads the kubeconfig only when the status is Running." >&2
+    case "${KUBEHZ_HOSTED_LIST_STATUSES[0]}" in
+      Creating|Pending-Capacity)
+        echo "  The cluster is not ready yet. Run the command again when its status is Running." >&2 ;;
+      Deleting)
+        echo "  kubehz deletes the cluster. After it leaves your cluster list, run the command again: lo then creates a new cluster." >&2 ;;
+      Failed|Error)
+        echo "  kubehz reports an error for the cluster. Contact support with the cluster id." >&2 ;;
+      *)
+        echo "  lo downloads the kubeconfig only when the status is Running, Paused or Updating." >&2 ;;
+    esac
   fi
   echo "  See the cluster with:  lo kubehz cluster get ${id}" >&2
+}
+
+# kubehz::_hosted_status_note <index>: the note after the download of the
+# kubeconfig of a cluster that the account has already, when its live
+# status is Paused or Updating. The download resumes a cluster that kubehz
+# paused because nobody used it. It resumes none of a suspended account,
+# none after the lease ended and none after the contract ended (kubehz-api
+# clusters/[id]/kubeconfig.get.ts and utils/idle-reap.ts), and the status
+# does not tell lo which pause it is. Go twin: hostedStatusNote.
+kubehz::_hosted_status_note() {
+  local i="${1}"
+  case "${KUBEHZ_HOSTED_LIST_STATUSES[i]}" in
+    Paused)
+      echo "  The cluster is Paused. The download asks kubehz to resume it."
+      echo "  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get ${KUBEHZ_HOSTED_LIST_IDS[i]}"
+      ;;
+    Updating)
+      echo "  The cluster is Updating: kubectl can fail for a short time, until the update ends."
+      ;;
+  esac
 }
 
 # kubehz::_hosted_many <domain>: stop a create when the list shows more
