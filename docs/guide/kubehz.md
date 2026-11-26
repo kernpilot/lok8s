@@ -13,8 +13,10 @@ managed-Kubernetes platform for Hetzner. lok8s supports two ways to use it:
   which writes a hosted cluster spec (see [`lo init`](../reference/cli.md#lo-init)).
 
 Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). For now
-kubehz caps the number of new accounts, so sign-up can need an invite code. At sign-up you confirm that kubehz is still in development. Features and
-limits can change or break, and there is no service guarantee (SLA) yet.
+kubehz caps the number of open sign-ups. When the cap is full, an invite code
+still admits a new account. At sign-up you confirm that kubehz is still in
+development. Features and limits can change or break, and there is no service
+guarantee (SLA) yet.
 
 ::: tip No lock-in
 The integration is strictly opt-in. lok8s works fully without kubehz: the
@@ -47,7 +49,7 @@ Two independent axes:
 | | `shared` | kubehz runs a shared control plane and you get namespaces on it, with nodes you register yourself. In the preview, no other customer uses the control plane that your Spaces run on. Requires `apiUrl` and `kind: Kubehz`. See [Spaces](#spaces). |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats: read-only dashboard visibility. |
-| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)**: the platform enforces the tier once you claim the cluster. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. **Acting also needs `agent: operator`**: the default CronJob agent reports, it does not act. Today the platform switches on worker scaling only. Self-healing and worker upgrades are not switched on yet. |
+| | `managed` | Everything `registered` does, plus kubehz's management features (healing policies, capacity watches, desired-state management) driven from the dashboard. **Subscription-gated (Supporter+)**: the platform enforces the tier once you claim the cluster. Acting is pull-based: the in-cluster agent fetches desired state and applies it locally with the cluster's own credentials; the platform never pushes into your cluster, and per-feature execution switches let you keep acting off. **Acting also needs `agent: operator`**: the default CronJob agent reports, it does not act. Today the platform switches on worker scaling only. It does not switch on self-healing and worker upgrades yet. |
 
 Plus two more keys:
 
@@ -80,9 +82,9 @@ limit, the step and the cap live in the dashboard.
 No usage charge applies to an hour that starts before the later of two dates.
 The first date is the billing start that the platform announces: until then,
 the launch trial runs. The second date is the end of the first 14 days of your
-account. The platform announces the billing start by e-mail at least 30 days
-ahead. Until then, the dashboard shows your use and what it would cost, but
-kubehz invoices nothing.
+account. The platform announces the billing start by e-mail to every account
+at least 30 days ahead. Until then, the dashboard shows your current use and
+what it would cost, but kubehz invoices no usage.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with
@@ -154,18 +156,22 @@ How an upgrade lands depends on who owns the machines:
 each block is consumed: for **hosted** clusters and pools, the platform API
 validates its own payloads; for **self-hosted** clusters the block is the
 declared input for the managed-tier agent's upgrade walk. The agent will
-read it locally once the platform switches upgrade execution on, so your
-cluster's upgrade behavior will never depend on the platform being reachable. Until then the
-block is declarative only. `lo` does not catch calendar validity beyond
+read it locally once the platform switches upgrade execution on. Then the
+upgrade behavior of your cluster does not depend on the platform being
+reachable. Until then the block is declarative only. `lo` does not catch calendar validity beyond
 the shape (a February 30th) today.
 
 ## Spaces
 
 `hosting: shared` is the third shape: kubehz runs a shared control plane, you
 get namespaces on it, and **you register your own machines** as the nodes your
-workloads run on. In the preview, no other customer uses the control plane that
-your Spaces run on (see below). There is no control plane to
-provision, so the driver is thin: `kind: Kubehz`.
+workloads run on. There is no control plane to provision, so the driver is
+thin: `kind: Kubehz`.
+
+Spaces are in **preview**. A rule that starts with "in the preview" on this
+page holds while Spaces are in preview, and it can change after that. One of
+them: no other customer uses the control plane that your Spaces run on (see
+below).
 
 ```yaml
 # clusters/acme.example.org/cluster.lok8s.yaml
@@ -360,8 +366,8 @@ Every refusal says whether something changed:
 
 ### Limits, and whose problem each one is
 
-A space runs inside four independent budgets, and the error codes keep them
-apart deliberately:
+A space runs inside four independent budgets. Two of them answer with the
+same code (`403 QUOTA_EXCEEDED`), and the message tells them apart:
 
 - **Your space's own three numbers**: `limits.nodes`, `limits.namespaces`
   and `limits.objectCapKiB`. Exceeding one answers `403 QUOTA_EXCEEDED` and
@@ -381,8 +387,9 @@ apart deliberately:
 - **The control planes your account holds** (preview): at most two. A new
   Space goes on a control plane that your account holds, or claims a new one.
   When that would be a third one, the create answers `403 QUOTA_EXCEEDED` with
-  the count. A delete does not free a control plane. Retry when one of yours
-  has room again, or contact support.
+  the count. A delete does not give a control plane back, but a Space that you
+  delete frees room on its control plane for your next Space. Retry when one
+  of yours has room again, or contact support.
 - **The platform's capacity**: how much a shared control plane can carry.
   When the platform is the limit you get `409 SHARD_AT_CAPACITY` (a node
   join the current plane genuinely cannot take) or `409 NO_SHARD_AVAILABLE`
@@ -971,7 +978,7 @@ Dashboard visibility comes from an in-cluster agent. lok8s ships two, and
 | What it is | A shell script in a stock `alpine/k8s` image | The Go agent from the public [kubehz-agent](https://github.com/kernpilot/kubehz-agent) repo |
 | Cadence | Every 5 minutes | Within seconds of a change, and at least every minute |
 | Reports | Node status, control-plane component health, certificate expiry, the 24 h [assessment](#assessment-and-handover) | Node status with capacity and instance type, control-plane component health, certificate expiry, pod counts by phase, warning events, machine-controller failures, your addon inventory |
-| Can act | No | Yes: worker scaling, when the platform authorizes it. Self-healing and worker upgrades are not switched on yet |
+| Can act | No | Yes: worker scaling, when the platform authorizes it. The platform does not switch on self-healing and worker upgrades yet |
 | Costs | ~50 m CPU for a few seconds every 5 minutes | ~25 m CPU and 64 Mi resident, always on |
 
 Deploy either one with:
