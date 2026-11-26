@@ -99,26 +99,51 @@ func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, 
 	return ErrHandled
 }
 
-// clusterStatus reads the status of a hosted cluster once (GET
-// /api/clusters/{id}, the live phase of the cluster): "Unknown" when the
-// read fails. Bash: kubehz::_hosted_status.
+// clusterStatus is the status of a hosted cluster for the wait loop
+// (liveStatus): "Unknown" when lo cannot read it. Bash:
+// kubehz::_hosted_status.
 func (c *Context) clusterStatus(ctx context.Context, apiURL, clusterID string) string {
+	if s, ok := c.liveStatus(ctx, apiURL, clusterID); ok {
+		return s
+	}
+	return "Unknown"
+}
+
+// liveStatus reads the status of a hosted cluster once (GET
+// /api/clusters/{id}, the live phase of the cluster). ok is false when lo
+// cannot read it: the request fails, the api refuses it, or the answer is
+// not JSON or holds no status. Bash: kubehz::_hosted_status_read.
+func (c *Context) liveStatus(ctx context.Context, apiURL, clusterID string) (string, bool) {
 	body, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
-		return "Unknown"
+		return "", false
 	}
 	// Enveloped UI route: .data.status, with a bare-body fallback.
 	v, ok := parseJSON(body)
 	if !ok {
-		return "Unknown"
+		return "", false
 	}
-	return jstr(jalt("Unknown", jget(v, "data", "status"), jget(v, "status")))
+	s := jalt(nil, jget(v, "data", "status"), jget(v, "status"))
+	if s == nil {
+		return "", false
+	}
+	return jstr(s), true
 }
 
-// clusterReady tells whether a status of a hosted cluster lets lo download
-// the kubeconfig.
+// clusterReady tells whether a status of a new hosted cluster ends the
+// wait for it (waitForCluster).
 func clusterReady(status string) bool {
 	return status == "Running" || status == "ready" || status == "Ready"
+}
+
+// kubeconfigStatus tells whether lo downloads the kubeconfig of a cluster
+// that the account has already, by its live status: a ready status
+// (clusterReady), Paused (a download with the clusters:write scope asks
+// kubehz to resume a cluster that it paused because nobody used it) or
+// Updating (the kubelogin file stays the same across an update).
+// hostedStatusNote names the two.
+func kubeconfigStatus(status string) bool {
+	return clusterReady(status) || status == "Paused" || status == "Updating"
 }
 
 var digitsRe = regexp.MustCompile(`^[0-9]+$`)
@@ -257,14 +282,16 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 //   - lo cannot read the list: stop.
 //   - more than one cluster: stop, and name them (hostedMany).
 //   - one hosted cluster with a valid id whose create is confirmed and
-//     whose status is ready: no create. lo downloads its kubeconfig and
+//     whose live status is Running, Paused or Updating
+//     (kubeconfigStatus): no create. lo downloads its kubeconfig and
 //     writes the mirror, as after a create. So a run of lo provision
-//     gets the kubeconfig of the cluster again.
-//   - one other cluster: stop, and name its id, hosting and status
-//     (hostedExists).
+//     gets the kubeconfig of the cluster again. For Paused and Updating,
+//     lo then prints a note (hostedStatusNote).
+//   - one other cluster: stop, and name its id, hosting and status, and
+//     the next step (hostedExists).
 //
 // The list keeps the status that the create wrote for a hosted cluster,
-// so lo reads the live status of the cluster (clusterStatus) before it
+// so lo reads the live status of the cluster (liveStatus) before it
 // decides. A create that left this machine and got no answer can have
 // made the cluster: lo reads the list again before it prints anything
 // (createUnknown).
@@ -296,8 +323,12 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return ErrHandled
 	case len(l.rows) == 1:
 		r := l.rows[0]
+		// The live status replaces the status of the list. A read that
+		// fails leaves no status, and statusUnread says so.
 		if r.id != "" && r.hosting == "hosted" {
-			r.status = c.clusterStatus(ctx, apiURL, r.id)
+			var read bool
+			r.status, read = c.liveStatus(ctx, apiURL, r.id)
+			r.statusUnread = !read
 		}
 		if !r.ready() {
 			c.hostedExists(r, createDomain)
@@ -305,7 +336,11 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		}
 		c.echo("kubehz: your account already has cluster %s for %s (%s).", r.id, createDomain, r.state())
 		c.echo("  lo downloads its kubeconfig and does not create another cluster.")
-		return c.hostedKubeconfig(ctx, apiURL, r.id, domain, kubeconfigPath, clusterYAML)
+		if err := c.hostedKubeconfig(ctx, apiURL, r.id, domain, kubeconfigPath, clusterYAML); err != nil {
+			return err
+		}
+		c.hostedStatusNote(r)
+		return nil
 	}
 	payload := buildClusterPayload(clusterYAML)
 	if payload == nil {
@@ -378,11 +413,12 @@ func (c *Context) hostedKubeconfig(ctx context.Context, apiURL, clusterID, domai
 	// A failed download leaves the old kubeconfig as it was: the file is
 	// written only after the whole answer is here (bash: the download goes
 	// into the temp file of kubehz::_write_private).
-	kc, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
-	if err != nil {
-		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
+	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters/"+clusterID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	if err != nil || !is2xx(res.Status) {
+		c.kubeconfigRefused(res, err, clusterID)
 		return ErrHandled
 	}
+	kc := res.Body
 	if err := writePrivateFile(ctx, kubeconfigPath, kc); err != nil {
 		if refused, ok := errors.AsType[privateFileError](err); ok {
 			c.errorf("%s", refused)
@@ -403,6 +439,33 @@ func (c *Context) hostedKubeconfig(ctx context.Context, apiURL, clusterID, domai
 	return nil
 }
 
+// kubeconfigRefused stops a kubeconfig download without a 2xx answer. It
+// names the cause (no answer, or the HTTP status and the code of the api)
+// and, for a code that lo knows, the next step. The cluster exists, so
+// the next step never creates one. Bash: kubehz::_hosted_kubeconfig and
+// kubehz::_hosted_kubeconfig_next.
+func (c *Context) kubeconfigRefused(res *httpResult, err error, clusterID string) {
+	if err != nil {
+		c.errorf("Failed to download kubeconfig for hosted cluster %s (no answer)", clusterID)
+		return
+	}
+	code := apiCode(res.Body)
+	if !apiCodeRe.MatchString(code) {
+		code = ""
+	}
+	c.errorf("Failed to download kubeconfig for hosted cluster %s (HTTP %d%s)", clusterID, res.Status, optSuffix(" ", code))
+	switch code {
+	case "TOKEN_NOT_ALLOWED":
+		// An api that refuses the kubeconfig route to each API token.
+		c.echoErr("  This api gives the kubeconfig only to a dashboard sign-in, not to an API token. Download it in the dashboard.")
+		c.echoErr("  The cluster exists: do not create it again.")
+	case "TOKEN_SCOPE_MISSING":
+		c.echoErr("  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens).")
+	case "KUBECONFIG_NOT_READY":
+		c.echoErr("  Run the command again when the status is Running.")
+	}
+}
+
 // gatewayAnswer tells whether a refusal of the create came from a gateway
 // in front of the api, not from the api: a 502, 503 or 504 without a
 // code of the api. The api's own 502 (HOSTED_BACKEND_ERROR) and 503
@@ -415,10 +478,12 @@ func gatewayAnswer(res *httpResult) bool {
 // is a server string: id is "" when it does not have the api's shape
 // (kindCluster), hosting and status are "" when they are not one word
 // (hostedWordRe). unconfirmed is true when createUnconfirmedAt is not
-// null: kubehz still checks the create.
+// null: kubehz still checks the create. For a hosted cluster with an id,
+// ProvisionHosted puts the live status in status (liveStatus), which lo
+// compares whole, and sets statusUnread when it cannot read it.
 type hostedRow struct {
-	id, hosting, status string
-	unconfirmed         bool
+	id, hosting, status       string
+	unconfirmed, statusUnread bool
 }
 
 var hostedWordRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,31}$`)
@@ -439,9 +504,10 @@ func readHostedRow(r any) hostedRow {
 }
 
 // ready tells whether lo can download the kubeconfig of the row: a
-// hosted cluster with an id, a confirmed create and a ready status.
+// hosted cluster with an id, a confirmed create and a live status that
+// lets lo download it (kubeconfigStatus).
 func (r hostedRow) ready() bool {
-	return r.id != "" && r.hosting == "hosted" && !r.unconfirmed && clusterReady(r.status)
+	return r.id != "" && r.hosting == "hosted" && !r.unconfirmed && kubeconfigStatus(r.status)
 }
 
 // hostingName is the hosting of a row as lo prints it.
@@ -457,10 +523,14 @@ func (r hostedRow) hostingName() string {
 
 // state is the hosting and the status of a row, as lo prints them.
 func (r hostedRow) state() string {
-	s := r.hostingName() + ", " + r.status
-	if !hostedWordRe.MatchString(r.status) {
-		s = r.hostingName() + ", unknown"
+	status := r.status
+	switch {
+	case r.statusUnread:
+		status = "status not read"
+	case !hostedWordRe.MatchString(status):
+		status = "unknown"
 	}
+	s := r.hostingName() + ", " + status
 	if r.unconfirmed {
 		s += ", create not confirmed"
 	}
@@ -484,6 +554,19 @@ type hostedList struct {
 // then names the field.
 var clusterDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
+// clusterListURL is the cluster list of the account (GET /api/clusters)
+// with the exact ?domain= filter of the api. lo sends the filter only for
+// a domain of clusterDomainRe. Each reader compares the domain of each
+// row too: an api that ignores the filter sends all clusters. Bash:
+// kubehz::_cluster_list_url (kubehz::_hosted_listed keeps its own copy).
+func clusterListURL(apiURL, domain string) string {
+	url := apiURL + "/api/clusters?perPage=500"
+	if len(domain) <= 253 && clusterDomainRe.MatchString(domain) {
+		url += "&domain=" + domain
+	}
+	return url
+}
+
 // hostedListed reads the cluster list of the account (GET
 // /api/clusters, the route of `lo kubehz cluster list`) and finds the
 // clusters of domain. The list holds each cluster that is not deleted,
@@ -495,11 +578,7 @@ var clusterDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.
 // answer is larger): then lo cannot tell how many clusters the domain
 // has. Bash: kubehz::_hosted_listed.
 func (c *Context) hostedListed(ctx context.Context, apiURL, domain string) hostedList {
-	url := apiURL + "/api/clusters?perPage=500"
-	if len(domain) <= 253 && clusterDomainRe.MatchString(domain) {
-		url += "&domain=" + domain
-	}
-	res, err := c.fetchStatus(ctx, "GET", url, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	res, err := c.fetchStatus(ctx, "GET", clusterListURL(apiURL, domain), withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return hostedList{cause: "no answer"}
 	}
@@ -554,10 +633,36 @@ func (c *Context) hostedExists(r hostedRow, domain string) {
 		c.echoErr("  Usually, kubehz keeps or removes the cluster in about 3 minutes.")
 		c.echoErr("  When the check fails, kubehz tries again about 15 minutes later.")
 		c.echoErr("  Run the command again after that.")
+	case r.statusUnread:
+		c.echoErr("  lo could not read the status of the cluster. Run the command again.")
+	case r.status == "Creating" || r.status == "Pending-Capacity":
+		c.echoErr("  The cluster is not ready yet. Run the command again when its status is Running.")
+	case r.status == "Deleting":
+		c.echoErr("  kubehz deletes the cluster. After it leaves your cluster list, run the command again: lo then creates a new cluster.")
+	case r.status == "Failed" || r.status == "Error":
+		c.echoErr("  kubehz reports an error for the cluster. Contact support with the cluster id.")
 	default:
-		c.echoErr("  lo downloads the kubeconfig only when the status is Running.")
+		c.echoErr("  lo downloads the kubeconfig only when the status is Running, Paused or Updating.")
 	}
 	c.echoErr("  See the cluster with:  lo kubehz cluster get %s", r.id)
+}
+
+// hostedStatusNote follows the download of the kubeconfig of a cluster
+// that the account has already, when its live status is Paused or
+// Updating. A download resumes a cluster that kubehz paused because nobody
+// used it, but only a download by a person or with the clusters:write
+// scope: the api does not count the download of a read-only token as
+// activity. The api also resumes none of a suspended account, none after
+// the lease ended and none after the contract ended, and the status does
+// not tell lo which pause it is. Bash: kubehz::_hosted_status_note.
+func (c *Context) hostedStatusNote(r hostedRow) {
+	switch r.status {
+	case "Paused":
+		c.echo("  The cluster is Paused. The download asks kubehz to resume it only when KUBEHZ_TOKEN has the clusters:write scope.")
+		c.echo("  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get %s", r.id)
+	case "Updating":
+		c.echo("  The cluster is Updating: kubectl can fail for a short time, until the update ends.")
+	}
 }
 
 // hostedManyShown is the number of clusters that hostedMany names.
@@ -758,6 +863,15 @@ func (c *Context) DestroyHosted(ctx context.Context, cfg *Config, domain, cluste
 	}
 
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
+	// More than one cluster for the domain: lo cannot tell which one to
+	// delete, and deletes none of them (no flag selects one).
+	if many, ok := errors.AsType[*manyClustersError](err); ok {
+		c.errorf("kubehz: your account has %d clusters for %s, so lo deleted none of them.", len(many.ids), domain)
+		c.echoErr("  lo deletes a cluster only when the account has one cluster for the domain. The local kubeconfigs stay.")
+		c.echoClusterIDs(many.ids)
+		c.echoErr("  Select the cluster in the dashboard and delete it there.")
+		return ErrHandled
+	}
 	if err != nil && !errors.Is(err, errNotRegistered) {
 		c.errorf("kubehz: cannot read the cluster registry at %s — nothing was deleted for %s and the local kubeconfigs are kept. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry.", apiURL, domain)
 		return ErrHandled

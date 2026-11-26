@@ -364,19 +364,40 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 // carries no row for the domain.
 var errNotRegistered = errors.New("kubehz: no cluster registered for domain")
 
+// manyClustersError is resolve_cluster_id's rc 3: the registry holds more
+// than one cluster for the domain. ids holds the id of each cluster, the
+// oldest first, and "" for an id that lo does not take (kindCluster.id).
+type manyClustersError struct {
+	domain string
+	ids    []string
+}
+
+func (e *manyClustersError) Error() string {
+	return fmt.Sprintf("kubehz: %d clusters registered for %s", len(e.ids), e.domain)
+}
+
 // ResolveClusterID ports kubehz::resolve_cluster_id: the platform cluster
-// id (cl-<uuid8>) for a domain from the tenant's registry. The list
-// route has an exact ?domain= filter, but this lookup does not send it,
-// and an older api ignores it: the rows are filtered CLIENT-SIDE,
+// id (cl-<uuid8>) for a domain from the tenant's registry. lo sends the
+// exact ?domain= filter of the list route (clusterListURL), and filters
+// the rows CLIENT-SIDE too: an older api ignores the filter. The rows go
 // oldest-first (the server binds agent identity to the OLDEST active row).
-// A failed list request is a plain error; a list without a row for the
-// domain is errNotRegistered — deregister/destroy branch on the distinction
-// so a lookup FAILURE is never reported as "not registered".
+//   - A failed list request, a list that is not JSON, a list that is a
+//     part of the clusters (the total of the answer is larger), and one
+//     row whose id is not a cluster id: a plain error. The id goes into a
+//     URL path (DELETE /api/clusters/<id>), so lo takes only the shape
+//     kindCluster.id.
+//   - No row for the domain: errNotRegistered.
+//   - More than one row: the id of the oldest row (or "") and a
+//     *manyClustersError. Deregister, destroy and the node commands stop;
+//     assess and re-enroll use the oldest (resolveOldest).
+//
+// Deregister/destroy branch on the distinction so a lookup FAILURE is
+// never reported as "not registered".
 func (c *Context) ResolveClusterID(ctx context.Context, domain, apiURL string) (string, error) {
 	if !c.credentialOK("KUBEHZ_TOKEN") {
 		return "", ErrHandled
 	}
-	body, err := c.fetch(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
+	body, err := c.fetch(ctx, "GET", clusterListURL(apiURL, domain), withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return "", err
 	}
@@ -384,21 +405,60 @@ func (c *Context) ResolveClusterID(ctx context.Context, domain, apiURL string) (
 	if !ok {
 		return "", errors.New("kubehz: registry list is not JSON")
 	}
-	clusterID := ""
-	if rs := domainRows(v, domain); len(rs) > 0 {
-		clusterID = jstrOr(rs[0], "", "id")
+	// A part of the list cannot tell how many clusters the domain has: an
+	// api that ignores ?domain= sends 500 clusters at most.
+	if total, n := jnum(jget(v, "meta", "pagination", "total")), len(rows(v)); total > n {
+		c.warnf("kubehz: the cluster list shows %d of %d clusters, so lo cannot tell how many clusters %s has.", n, total, domain)
+		return "", errors.New("kubehz: the registry list is a part of the clusters")
 	}
-	// A >500-cluster tenant pages past the cap; a truncated list must not
-	// read as "not registered" silently.
-	if clusterID == "" {
-		if total := jnum(jget(v, "meta", "pagination", "total")); total > 500 {
-			c.warnf("kubehz: tenant has %d clusters (first 500 checked) — the domain may sit past the page cap", total)
+	rs := domainRows(v, domain)
+	ids := make([]string, len(rs))
+	for i, r := range rs {
+		if id, _ := jget(r, "id").(string); kindCluster.id.MatchString(id) {
+			ids[i] = id
 		}
 	}
-	if clusterID == "" {
+	switch {
+	case len(ids) == 0:
 		return "", errNotRegistered
+	case len(ids) > 1:
+		return ids[0], &manyClustersError{domain: domain, ids: ids}
+	case ids[0] == "":
+		c.warnf("kubehz: the cluster of %s in the registry has an id that lo does not take.", domain)
+		return "", errors.New("kubehz: the registry row has no cluster id")
 	}
-	return clusterID, nil
+	return ids[0], nil
+}
+
+// resolveOldest is ResolveClusterID for assess and re-enroll. With more
+// than one cluster for the domain, lo warns, names the clusters and uses
+// the oldest: the server binds the agent to it. Bash: kubehz::_resolve_oldest.
+func (c *Context) resolveOldest(ctx context.Context, domain, apiURL string) (string, error) {
+	id, err := c.ResolveClusterID(ctx, domain, apiURL)
+	many, ok := errors.AsType[*manyClustersError](err)
+	if !ok || id == "" {
+		return id, err
+	}
+	c.warnf("kubehz: your account has %d clusters for %s. lo uses the oldest, %s.", len(many.ids), domain, id)
+	c.echoErr("  The server binds the agent to the oldest active cluster of a domain.")
+	c.echoClusterIDs(many.ids)
+	return id, nil
+}
+
+// echoClusterIDs names the clusters of a domain on stderr, the oldest
+// first, at most hostedManyShown of them. Bash: kubehz::_cluster_ids_print.
+func (c *Context) echoClusterIDs(ids []string) {
+	for i, id := range ids {
+		if i == hostedManyShown {
+			c.echoErr("  - and %d more", len(ids)-hostedManyShown)
+			return
+		}
+		if id == "" {
+			c.echoErr("  - a cluster")
+			continue
+		}
+		c.echoErr("  - cluster %s", id)
+	}
 }
 
 // DeregisterCluster ports kubehz::deregister_cluster: resolve the platform
@@ -415,9 +475,16 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 		rc = ErrHandled
 	} else {
 		clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
+		many, isMany := errors.AsType[*manyClustersError](err)
 		switch {
 		case errors.Is(err, errNotRegistered):
 			c.echo("kubehz: no cluster is registered for %s — nothing to remove on the platform.", domain)
+		case isMany:
+			c.errorf("kubehz: your account has %d clusters for %s, so lo removed none of the registrations.", len(many.ids), domain)
+			c.echoErr("  lo removes a registration only when the account has one cluster for the domain.")
+			c.echoClusterIDs(many.ids)
+			c.echoErr("  Select the cluster in the dashboard and remove it there.")
+			rc = ErrHandled
 		case err != nil:
 			c.errorf("kubehz: cannot read the cluster registry at %s — the registration for %s was not removed. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry.", apiURL, domain)
 			rc = ErrHandled

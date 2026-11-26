@@ -1004,6 +1004,16 @@ kubehz::deregister_cluster() {
     cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || resolve_rc=$?
     if (( resolve_rc == 2 )); then
       echo "kubehz: no cluster is registered for ${domain} — nothing to remove on the platform."
+    elif (( resolve_rc == 3 )); then
+      # More than one cluster for the domain: lo cannot tell which one to
+      # remove, and removes none of them (no flag selects one).
+      local -a many_ids=()
+      mapfile -t many_ids <<<"${cluster_id}"
+      error "kubehz: your account has ${#many_ids[@]} clusters for ${domain}, so lo removed none of the registrations."
+      echo "  lo removes a registration only when the account has one cluster for the domain." >&2
+      kubehz::_cluster_ids_print "${many_ids[@]}"
+      echo "  Select the cluster in the dashboard and remove it there." >&2
+      rc=1
     elif (( resolve_rc != 0 )); then
       error "kubehz: cannot read the cluster registry at ${api_url} — the registration for ${domain} was not removed. Set KUBEHZ_TOKEN to a clusters:write token of the owning tenant, then retry."
       rc=1
@@ -1173,12 +1183,12 @@ kubehz::status() {
   fi
 
   # Query the tenant registry for the live row. The list route has an exact
-  # ?domain= filter that this read does not send (an older api ignores it),
+  # ?domain= filter (kubehz::_cluster_list_url; an older api ignores it),
   # and answers the pagination envelope {ok, data: […]}: the old
   # code read `.status` off that ENVELOPE, so this line printed
   # "Status: unknown" for every registered cluster. Filter the rows
-  # client-side (the resolve_cluster_id / space_lookup idiom) and read the
-  # ROW's fields (ClusterSchema: status, lastHeartbeat, connected).
+  # client-side too (the resolve_cluster_id / space_lookup idiom) and read
+  # the ROW's fields (ClusterSchema: status, lastHeartbeat, connected).
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
@@ -1186,10 +1196,11 @@ kubehz::status() {
   # -q first and the subshell with http::tls_log_vars_unset: curl reads no
   # config file of the user and gets no TLS log or trace control
   # (utils/http.sh).
-  local raw http_code response
+  local raw http_code response list_url
+  list_url=$(kubehz::_cluster_list_url "${api_url}" "${domain}")
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
     http::tls_log_vars_unset &&
-      curl -q -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null
+      curl -q -K - -sSL -w $'\n%{http_code}' "${list_url}" 2>/dev/null
   ) ) || {
     echo "Status:  unknown (API unreachable: ${api_url})"
     return 0
@@ -1203,21 +1214,50 @@ kubehz::status() {
 
   # Oldest-first, same as resolve_cluster_id: the server binds agent
   # identity to the OLDEST active row for a domain.
-  local row
+  # `objects`: a value that is not an object is no row (the Go twin's
+  # domainRows).
+  local row rows_n
   row=$(jq -c --arg d "${domain}" \
-    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
+    '([.data? // . | if type == "array" then . else [.] end | .[] | objects | select(.domain == $d)]
       | sort_by(.createdAt) | first) // empty' <<<"${response}" 2>/dev/null) || row=""
   if [[ -z "${row}" ]]; then
+    # A part of the list does not show that the domain has no cluster.
+    local total n
+    total=$(jq -r '.meta.pagination.total // 0' <<<"${response}" 2>/dev/null) || total=0
+    [[ "${total}" =~ ^[0-9]{1,18}$ ]] || total=0
+    n=$(jq -r '.data? // . | if type == "array" then length else 1 end' <<<"${response}" 2>/dev/null) || n=""
+    if [[ "${n}" =~ ^[0-9]{1,18}$ ]] && (( 10#${total} > 10#${n} )); then
+      echo "Status:  unknown (the cluster list shows ${n} of $(( 10#${total} )) clusters)"
+      return 0
+    fi
     echo "Status:  not registered (no cluster for ${domain} in this tenant's registry)"
     return 0
   fi
+  rows_n=$(jq -r --arg d "${domain}" \
+    '[.data? // . | if type == "array" then . else [.] end | .[] | objects | select(.domain == $d)] | length' \
+    <<<"${response}" 2>/dev/null) || rows_n=0
+  [[ "${rows_n}" =~ ^[0-9]{1,18}$ ]] || rows_n=0
 
-  local status_val cluster_id last_beat connected
+  local status_val cluster_id last_beat connected hosting_val live from_list=""
   status_val=$(jq -r '.status // "unknown"' <<<"${row}")
   cluster_id=$(jq -r '.id // "-"' <<<"${row}")
   last_beat=$(jq -r '.lastHeartbeat // empty' <<<"${row}")
   connected=$(jq -r '.connected // empty' <<<"${row}")
-  echo "Status:  ${status_val} (id: ${cluster_id})"
+  hosting_val=$(jq -r 'if (.hosting | type) == "string" then .hosting else "" end' <<<"${row}")
+  # The list holds the status that kubehz stored for a hosted cluster
+  # (Creating, also for a cluster that runs). The detail route has the live
+  # status, as in lo provision (kubehz::_hosted_status_read). Only a cluster
+  # id goes into the path. Go twin: the liveStatus branch of Status.
+  local LC_ALL=C
+  if [[ "${hosting_val}" == "hosted" && "${cluster_id}" =~ ^cl-[A-Za-z0-9-]{1,64}$ ]]; then
+    if live=$(kubehz::_hosted_status_read "${api_url}" "${cluster_id}"); then
+      [[ "${live}" =~ ^[A-Za-z][A-Za-z0-9-]{0,31}$ ]] || live="unknown"
+      status_val="${live}"
+    else
+      from_list=", from the list: lo could not read the live status"
+    fi
+  fi
+  echo "Status:  ${status_val} (id: ${cluster_id}${from_list})"
   if [[ -n "${last_beat}" ]]; then
     case "${connected}" in
       true)  echo "Beat:    ${last_beat} (connected)" ;;
@@ -1226,6 +1266,9 @@ kubehz::status() {
     esac
   else
     echo "Beat:    none yet — deploy the heartbeat agent (see docs/guide/kubehz.md)"
+  fi
+  if (( 10#${rows_n} > 1 )); then
+    echo "Note:    your account has $(( 10#${rows_n} )) clusters for ${domain}. lo shows the oldest. See them with:  lo kubehz cluster list"
   fi
 }
 
@@ -1307,7 +1350,7 @@ kubehz::assess() {
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   local cluster_id
-  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
+  cluster_id=$(kubehz::_resolve_oldest "${domain}" "${api_url}") || {
     error "kubehz: no cluster found for ${domain} — is it registered + claimed, and is KUBEHZ_TOKEN set?"
     return 1
   }
@@ -1459,42 +1502,141 @@ kubehz::claim-code() {
 # does not send it, and an older api ignores it: so filter CLIENT-SIDE.
 # .data[0] would silently pick the tenant's newest cluster on multi-cluster
 # tenants. Requires KUBEHZ_TOKEN (the id is only visible to the owning
-# tenant). Prints the id; on failure prints nothing and returns 1 (the list
-# request failed) or 2 (the list answered, but carries no row for the
-# domain). Callers that only need "no id" treat any non-zero rc as failure;
-# deregister/destroy branch on the distinction so a lookup FAILURE is never
-# reported as "not registered".
+# tenant). lo sends the exact ?domain= filter of the list route
+# (kubehz::_cluster_list_url) and filters the rows client-side too: an
+# older api ignores the filter. The result:
+#   rc 0  one row for the domain: prints its id.
+#   rc 1  prints nothing: the list request failed, the answer is not JSON,
+#         the list is a part of the clusters (the total of the answer is
+#         larger), or the one row has an id that is not a cluster id. The
+#         id goes into a URL path (DELETE /api/clusters/<id>), so lo takes
+#         only the shape ^cl-[A-Za-z0-9-]{1,64}$.
+#   rc 2  prints nothing: the list answered, but carries no row for the
+#         domain.
+#   rc 3  more than one row: prints the id of each, one for each line, the
+#         oldest first, and "-" for an id that lo does not take ($(...)
+#         drops an empty last line). Deregister, destroy and the node
+#         commands stop; assess and re-enroll use the oldest
+#         (kubehz::_resolve_oldest).
+# Deregister/destroy branch on the distinction so a lookup FAILURE is never
+# reported as "not registered". Go twin: ResolveClusterID.
 # Usage: kubehz::resolve_cluster_id <domain> <api_url>
 kubehz::resolve_cluster_id() {
-  local domain="${1}" api_url="${2}" response cluster_id
+  # +x +i: a caller that exports a variable of the same name, or declares
+  # it an integer, gets no value into a child and no arithmetic of a line.
+  local +x +i domain="${1}" api_url="${2}" url response total n lines line id || return 1
+  local +x +i -a ids=() || return 1
+  local LC_ALL=C
   http::credential_ok KUBEHZ_TOKEN || return 1
+  url=$(kubehz::_cluster_list_url "${api_url}" "${domain}")
   # -q first and the subshell with http::tls_log_vars_unset: curl reads no
   # config file of the user and gets no TLS log or trace control
   # (utils/http.sh).
   response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
     http::tls_log_vars_unset &&
-      curl -q -K - -fsSL "${api_url}/api/clusters?perPage=500" 2>/dev/null
+      curl -q -K - -fsSL "${url}" 2>/dev/null
   ) ) || return 1
-  # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
-  # is served newest-first, but the server binds agent identity (heartbeat,
-  # desired) to the OLDEST active row for a domain — picking the newest armed
-  # the WRONG cluster when a duplicate registration existed (review r1
-  # medium). Oldest-first matches the server's binding.
   # `.data?` (not `.data // .`): `//` does not rescue a jq ERROR, and `.data`
   # on a bare-list body aborts the whole program before the alternative runs
   # (the trap the old hosted-destroy lookup documented). `?` suppresses it.
-  cluster_id=$(jq -r --arg d "${domain}" \
-    '([.data? // . | if type == "array" then . else [.] end | .[] | select(.domain == $d)]
-      | sort_by(.createdAt) | first | .id) // empty' <<<"${response}" 2>/dev/null) || return 1
-  # A >500-cluster tenant pages past the cap; a truncated list must not read
-  # as "not registered" silently.
-  local total
+  # An empty body is no JSON: jq prints nothing, and n is not a number.
+  n=$(jq -r '.data? // . | if type == "array" then length else 1 end' <<<"${response}" 2>/dev/null) || return 1
+  [[ "${n}" =~ ^[0-9]+$ ]] || return 1
+  # A part of the list cannot tell how many clusters the domain has: an
+  # older api that ignores ?domain= sends 500 clusters at most.
   total=$(jq -r '.meta.pagination.total // 0' <<<"${response}" 2>/dev/null) || total=0
-  if [[ -z "${cluster_id}" ]] && (( total > 500 )); then
-    warn "kubehz: tenant has ${total} clusters (first 500 checked) — the domain may sit past the page cap"
+  [[ "${total}" =~ ^[0-9]{1,18}$ ]] || total=0
+  if (( 10#${total} > 10#${n} )); then
+    warn "kubehz: the cluster list shows ${n} of $(( 10#${total} )) clusters, so lo cannot tell how many clusters ${domain} has."
+    return 1
   fi
-  [[ -n "${cluster_id}" ]] || return 2
-  echo "${cluster_id}"
+  # sort_by(createdAt) ascending: the list is served newest-first, but the
+  # server binds agent identity (heartbeat, desired) to the OLDEST active
+  # row for a domain. One line for each row of <domain>: "id:" and the id.
+  # safe gives "" for an id that is not a string or that holds a character
+  # other than a letter, a digit or "-" (a new line too), so each row is one
+  # line, also a row with an empty id. `objects`: a value that is not an
+  # object is no row (the Go twin's domainRows).
+  lines=$(jq -r --arg d "${domain}" '
+    def safe: if type == "string" and (test("[^A-Za-z0-9-]") | not) then . else "" end;
+    [.data? // . | if type == "array" then . else [.] end | .[] | objects | select(.domain == $d)]
+      | sort_by(.createdAt) | .[] | "id:" + (.id | safe)' <<<"${response}" 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    [[ "${line}" == id:* ]] || continue
+    id="${line#id:}"
+    [[ "${id}" =~ ^cl-[A-Za-z0-9-]{1,64}$ ]] || id="-"
+    ids+=("${id}")
+  done <<<"${lines}"
+  (( ${#ids[@]} > 0 )) || return 2
+  if (( ${#ids[@]} > 1 )); then
+    printf '%s\n' "${ids[@]}"
+    return 3
+  fi
+  if [[ "${ids[0]}" == "-" ]]; then
+    warn "kubehz: the cluster of ${domain} in the registry has an id that lo does not take."
+    return 1
+  fi
+  printf '%s\n' "${ids[0]}"
+}
+
+# kubehz::_cluster_list_url <api_url> <domain>: the cluster list of the
+# account (GET /api/clusters) with the exact ?domain= filter of the api.
+# lo sends the filter only for a domain of the shape that the api takes (a
+# lowercase FQDN of RFC 1123 labels, 253 characters at most), which needs
+# no escape. Each reader compares the domain of each row too: an api that
+# ignores the filter sends all clusters. kubehz::_hosted_listed keeps its
+# own copy of this rule (the hosted tests load that file alone). Go twin:
+# clusterListURL.
+kubehz::_cluster_list_url() {
+  local LC_ALL=C
+  local +x +i url domain_re || return 1
+  domain_re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+  url="${1}/api/clusters?perPage=500"
+  if (( ${#2} <= 253 )) && [[ "${2}" =~ ${domain_re} ]]; then
+    url+="&domain=${2}"
+  fi
+  printf '%s\n' "${url}"
+}
+
+# kubehz::_cluster_ids_print <id>...: name the clusters of a domain on
+# stderr, the oldest first, at most 10 of them. "-" stands for an id that
+# lo does not take. Go twin: echoClusterIDs.
+kubehz::_cluster_ids_print() {
+  local +x +i n="${#}" i=0 id || return 1
+  for id in "$@"; do
+    if (( i == 10 )); then
+      echo "  - and $(( n - 10 )) more" >&2
+      return 0
+    fi
+    i=$(( i + 1 ))
+    if [[ "${id}" == "-" ]]; then
+      echo "  - a cluster" >&2
+    else
+      echo "  - cluster ${id}" >&2
+    fi
+  done
+}
+
+# kubehz::_resolve_oldest <domain> <api_url>: kubehz::resolve_cluster_id
+# for assess and re-enroll. With more than one cluster for the domain, lo
+# warns, names the clusters and prints the id of the oldest: the server
+# binds the agent to it. rc 1 when the oldest has an id that lo does not
+# take. Go twin: resolveOldest.
+kubehz::_resolve_oldest() {
+  local +x +i out rc=0 || return 1
+  local +x +i -a ids=() || return 1
+  out=$(kubehz::resolve_cluster_id "${1}" "${2}") || rc=$?
+  if (( rc == 3 )); then
+    mapfile -t ids <<<"${out}"
+    [[ "${ids[0]:--}" != "-" ]] || return 1
+    warn "kubehz: your account has ${#ids[@]} clusters for ${1}. lo uses the oldest, ${ids[0]}."
+    echo "  The server binds the agent to the oldest active cluster of a domain." >&2
+    kubehz::_cluster_ids_print "${ids[@]}"
+    printf '%s\n' "${ids[0]}"
+    return 0
+  fi
+  (( rc == 0 )) || return "${rc}"
+  printf '%s\n' "${out}"
 }
 
 # ── Mode-3 claim nonce (challenge-response) ──────────────
@@ -1874,7 +2016,7 @@ kubehz::re-enroll() {
   # heartbeat, which also accepts the domain) — resolve it from the registry
   # the way `lo kubehz assess` does.
   local cluster_id
-  cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
+  cluster_id=$(kubehz::_resolve_oldest "${domain}" "${api_url}") || {
     error "kubehz: no cluster found for ${domain} — is it registered + claimed, and does KUBEHZ_TOKEN belong to the owning tenant?"
     return 1
   }

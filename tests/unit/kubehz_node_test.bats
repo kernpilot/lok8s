@@ -173,6 +173,7 @@ _stub_curl() {
         # The tenant registry (?perPage=500). LAST of the GET arms: `case`
         # takes the first match, and this glob also covers the nodes route.
         answer='{"ok":true,"data":[{"id":"cl-1234abcd","domain":"acme.example.org","createdAt":"2026-01-01T00:00:00Z"}]}'
+        [[ -z "${STUB_LIST_BODY:-}" ]] || answer="${STUB_LIST_BODY}"
         status="200" ;;
       "POST /api/clusters/cl-1234abcd/nodes/join-token")
         answer="${STUB_MINT_BODY}"; status="${STUB_MINT_CODE}" ;;
@@ -424,6 +425,23 @@ _stub_all() {
   assert_failure
   assert_output --partial "holds no cluster for other.example.org"
   assert_output --partial "--cluster-id cl-xxxxxxxx"
+}
+
+@test "preflight: several clusters of the domain stop and are named" {
+  _stub_config
+  _stub_curl
+  export STUB_LIST_BODY='{"ok":true,"data":[
+    {"id":"cl-5678efab","domain":"acme.example.org","createdAt":"2026-02-01T00:00:00Z"},
+    {"id":"cl-1234abcd","domain":"acme.example.org","createdAt":"2026-01-01T00:00:00Z"}]}'
+
+  run node::preflight "acme.example.org" "join a node"
+  assert_failure
+  assert_output "[error] kubehz: the registry holds 2 clusters for acme.example.org.
+  - cluster cl-1234abcd
+  - cluster cl-5678efab
+  Name the cluster directly with:  --cluster-id cl-xxxxxxxx"
+  node::preflight "acme.example.org" "join a node" 2>/dev/null || true
+  [ -z "${NODE_CLUSTER_ID}" ]
 }
 
 @test "preflight: a domain with no spec file is named in the refusal" {

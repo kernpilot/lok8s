@@ -217,6 +217,23 @@ _PAYLOAD_UNSET='{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner
   assert_output --partial "failed"
 }
 
+@test "wait_for_cluster: a status read that fails reads as Unknown, and the wait goes on under set -e" {
+  curl() { return 22; }
+  export -f curl
+  sleep() { :; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="test-token"
+  # lo runs under set -euo pipefail: a failed read must not end the run.
+  _wait_errexit() {
+    set -euo pipefail
+    kubehz::wait_for_cluster "https://api.kubehz.dev" "cl-001" 20
+  }
+  run _wait_errexit
+  assert_failure
+  assert_output --partial "Timed out waiting for hosted cluster cl-001 after 20s"
+}
+
 # ── provision_hosted ─────────────────────────────────────
 
 # _hosted_no_cluster: the cluster list shows no cluster of the domain
@@ -234,12 +251,14 @@ _hosted_no_cluster() { kubehz::_hosted_listed() { return 2; }; }
         printf '%s\n%s\n' '{"ok":true,"data":{"id":"cl-hosted-001","status":"Creating"}}' '201'
         ;;
       *api/clusters/cl-hosted-001/kubeconfig*)
+        # The kubeconfig and the trailing HTTP-status line (-w).
         echo "apiVersion: v1
 kind: Config
 clusters:
 - cluster:
     server: https://hosted.kubehz.dev:6443
   name: hosted"
+        printf '\n200'
         ;;
       *api/clusters/cl-hosted-001*)
         echo '{"id":"cl-hosted-001","status":"Running"}'
@@ -579,7 +598,7 @@ _hosted_list_setup() {
       *"/kubeconfig"*)
         echo "get kubeconfig" >> "${CALLS}"
         (( KC_RC == 0 )) || return "${KC_RC}"
-        printf 'kc\n' ;;
+        printf 'kc\n\n200' ;;
       *)
         echo "get ${a##* }" >> "${CALLS}"
         (( STATUS_RC == 0 )) || return "${STATUS_RC}"
@@ -625,6 +644,11 @@ _listed() {
   # lo cannot tell that the cluster on the page is the only one.
   assert_equal "$(_listed 200 '{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Running"}],"meta":{"pagination":{"total":2}}}')" "1|||||it shows 1 of 2 clusters|0"
   assert_equal "$(_listed fail '')" "1|||||no answer|0"
+  # A list read clears the mark of an earlier status read that failed.
+  KUBEHZ_HOSTED_LIST_UNREAD=(1)
+  export LIST_STATUS=200 LIST_BODY='{"ok":true,"data":[{"id":"cl-1a","domain":"test.kubehz.dev"}]}'
+  kubehz::_hosted_listed "${LOK8S_KUBEHZ_API_URL}" test.kubehz.dev
+  assert_equal "${#KUBEHZ_HOSTED_LIST_UNREAD[@]}" 0
 }
 
 @test "kubehz::_hosted_listed: sends ?domain= only for a domain of the shape that the api takes" {
@@ -677,27 +701,58 @@ _hosted_one_row() {
 
 @test "provision_hosted: one cluster of the domain that lo does not use stops the create, and names its id, hosting and status" {
   _hosted_list_setup
-  local get='  See the cluster with:  lo kubehz cluster get cl-1a' running='  lo downloads the kubeconfig only when the status is Running.'
-  local status_read='get https://api.kubehz.dev/api/clusters/cl-1a'
+  local get='  See the cluster with:  lo kubehz cluster get cl-1a'
+  local any='  lo downloads the kubeconfig only when the status is Running, Paused or Updating.'
+  local creating='  The cluster is not ready yet. Run the command again when its status is Running.'
+  local failed='  kubehz reports an error for the cluster. Contact support with the cluster id.'
+  local unread='  lo could not read the status of the cluster. Run the command again.'
+  local confirm='  kubehz is still checking the create of this cluster.
+  Usually, kubehz keeps or removes the cluster in about 3 minutes.
+  When the check fails, kubehz tries again about 15 minutes later.
+  Run the command again after that.'
+  local stop='[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev'
+  local creating_row='{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}'
+  local status_read='get https://api.kubehz.dev/api/clusters/cl-1a' s body
+  local -A step=([Pending-Capacity]="${creating}" [Failed]="${failed}" [Error]="${failed}" [Starting]="${any}")
 
   # The list keeps the status of the create: lo reads the live one.
-  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":null}'
+  _hosted_one_row "${creating_row}"
   export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Deleting"}}'
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Deleting), so lo did not create another one.
-${running}
+  _hosted_stop "${stop} (hosted, Deleting), so lo did not create another one.
+  kubehz deletes the cluster. After it leaves your cluster list, run the command again: lo then creates a new cluster.
 ${get}"
   assert_equal "$(cat "${CALLS}")" "list https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev
 ${status_read}"
 
+  # The live status decides, not the status of the list.
+  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Running","createUnconfirmedAt":null}'
+  export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Creating"}}'
+  _hosted_stop "${stop} (hosted, Creating), so lo did not create another one.
+${creating}
+${get}"
+
+  for s in "${!step[@]}"; do
+    _hosted_one_row "${creating_row}"
+    export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"'"${s}"'"}}'
+    _hosted_stop "${stop} (hosted, ${s}), so lo did not create another one.
+${step[${s}]}
+${get}"
+  done
+
   _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}'
   export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Running"}}'
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Running, create not confirmed), so lo did not create another one.
-  kubehz is still checking the create of this cluster.
-  Usually, kubehz keeps or removes the cluster in about 3 minutes.
-  When the check fails, kubehz tries again about 15 minutes later.
-  Run the command again after that.
+  _hosted_stop "${stop} (hosted, Running, create not confirmed), so lo did not create another one.
+${confirm}
 ${get}"
   assert_equal "$(grep -c "^${status_read}$" "${CALLS}")" 1
+
+  # A create that is not confirmed and a status read that fails.
+  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createUnconfirmedAt":"2026-11-26T10:00:00Z"}'
+  export STATUS_RC=22
+  _hosted_stop "${stop} (hosted, status not read, create not confirmed), so lo did not create another one.
+${confirm}
+${get}"
+  export STATUS_RC=0
 
   _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"self","status":"Running"}'
   _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (self-hosted, Running), so lo did not create another one.
@@ -711,20 +766,31 @@ ${get}"
 ${get}"
   refute grep -q "^${status_read}$" "${CALLS}"
 
-  # The status read fails (curl -f: 22).
-  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}'
+  # lo cannot read the status: the read fails (curl -f: 22), or the answer
+  # holds no status or is not JSON.
+  _hosted_one_row "${creating_row}"
   export STATUS_RC=22
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, Unknown), so lo did not create another one.
-${running}
+  _hosted_stop "${stop} (hosted, status not read), so lo did not create another one.
+${unread}
 ${get}"
   export STATUS_RC=0
-
-  # A status that is not one word is a server string that lo does not repeat.
-  _hosted_one_row '{"id":"cl-1a","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}'
-  export STATUS_BODY='{"ok":true,"data":{"status":"Running\u001b[2J"}}'
-  _hosted_stop "[error] kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, unknown), so lo did not create another one.
-${running}
+  for body in '{"ok":true,"data":{"id":"cl-1a"}}' '{"ok":true,"data":{"status":null}}' '<html>proxy</html>'; do
+    _hosted_one_row "${creating_row}"
+    export STATUS_BODY="${body}"
+    _hosted_stop "${stop} (hosted, status not read), so lo did not create another one.
+${unread}
 ${get}"
+  done
+
+  # A status that is not one word is a server string that lo does not
+  # repeat; an empty status is one too.
+  for body in '{"ok":true,"data":{"status":"Running\u001b[2J"}}' '{"ok":true,"data":{"status":""}}'; do
+    _hosted_one_row "${creating_row}"
+    export STATUS_BODY="${body}"
+    _hosted_stop "${stop} (hosted, unknown), so lo did not create another one.
+${any}
+${get}"
+  done
 
   # An id in another shape: lo does not repeat it and reads no status.
   _hosted_one_row '{"id":"cl-\u001b[2J","domain":"test.kubehz.dev","hosting":"hosted","status":"Running"}'
@@ -763,7 +829,7 @@ ${head}"
   _hosted_stop "${want}"
 }
 
-@test "provision_hosted: the one ready hosted cluster of the domain gets its kubeconfig and the mirror, and no create" {
+@test "provision_hosted: the one hosted cluster of the domain that is Running, Paused or Updating gets its kubeconfig and the mirror, and no create" {
   _hosted_list_setup
   printf 'kind: KubeOne\nmetadata:\n  name: mirror-name\nspec:\n  cluster:\n    domain: test.kubehz.dev\n  kubernetes:\n    version: v1.31.10\n  kubehz:\n    hosting: hosted\n' > "${SPEC}"
   mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
@@ -782,13 +848,37 @@ get kubeconfig"
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml")" "kc"
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/mirror-name.yaml")" "kc"
 
-  # A failed download fails the run and keeps the old kubeconfig.
+  # A Paused or an Updating cluster gets its kubeconfig too, and a note.
+  local s
+  local -A note=(
+    [Paused]="  The cluster is Paused. The download asks kubehz to resume it only when KUBEHZ_TOKEN has the clusters:write scope.
+  A suspended account, an ended lease or an ended contract keeps it paused. See it with:  lo kubehz cluster get cl-1a"
+    [Updating]="  The cluster is Updating: kubectl can fail for a short time, until the update ends."
+  )
+  for s in Paused Updating; do
+    printf 'old\n' > "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+    : > "${CALLS}"
+    export STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"'"${s}"'"}}'
+    kubehz::provision_hosted test.kubehz.dev "${SPEC}" > "${out}" 2> "${err}"
+    assert_equal "$(cat "${out}")" "kubehz: your account already has cluster cl-1a for test.kubehz.dev (hosted, ${s}).
+  lo downloads its kubeconfig and does not create another cluster.
+${note[${s}]}"
+    assert_equal "$(cat "${err}")" ""
+    assert_equal "$(cat "${CALLS}")" "list https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev
+get https://api.kubehz.dev/api/clusters/cl-1a
+get kubeconfig"
+    assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml")" "kc"
+  done
+
+  # A failed download fails the run and keeps the old kubeconfig. The note
+  # of a Paused cluster follows a download only.
   printf 'old\n' > "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
   : > "${CALLS}"
-  export KC_RC=22
+  export KC_RC=22 STATUS_BODY='{"ok":true,"data":{"id":"cl-1a","status":"Paused"}}'
   run kubehz::provision_hosted test.kubehz.dev "${SPEC}"
   assert_failure
   assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1a"
+  refute_output --partial "The cluster is Paused"
   refute grep -qE '^(create|wait)$' "${CALLS}"
   assert_equal "$(cat "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml")" "old"
 }
@@ -933,12 +1023,13 @@ $(_hosted_unknown_tail)"
 # ── destroy_hosted ───────────────────────────────────────
 #
 # Pins the REAL contract: resolve the id from the tenant registry
-# (kubehz::resolve_cluster_id — client-side domain filter, oldest-first),
-# then DELETE /api/clusters/<id>. Real jq — the resolution logic under test
-# IS the jq filter. A query-string DELETE, or a delete on an unresolved id,
-# fails the test.
+# (kubehz::resolve_cluster_id: the ?domain= filter and a client-side
+# domain filter), then DELETE /api/clusters/<id>. Real jq — the resolution
+# logic under test IS the jq filter. A query-string DELETE, a delete on an
+# unresolved id, and a delete with more than one cluster for the domain
+# fail the test.
 
-@test "destroy_hosted: resolves the id (oldest row, not .data[0]) and DELETEs by id" {
+@test "destroy_hosted: resolves the id of the one row of the domain (not .data[0]) and DELETEs by id" {
   yq() { echo ""; }
   export -f yq
   curl() {
@@ -949,13 +1040,13 @@ $(_hosted_unknown_tail)"
         || { echo "DELETE wrong id/path: $*" >&2; return 1; }
       printf '{"ok":true,"data":{"deleted":true,"id":"cl-old"}}\n200'
     else
-      [[ "$*" == *"/api/clusters?perPage=500"* ]] \
+      [[ "$*" == *" https://api.kubehz.dev/api/clusters?perPage=500&domain=test.kubehz.dev" ]] \
         || { echo "unexpected GET: $*" >&2; return 1; }
-      # Newest-first list, two rows for the domain: .data[0] is the WRONG
-      # cluster (the bug this pins against).
+      # Newest-first list of an api that ignores ?domain=: .data[0] is the
+      # WRONG cluster (the bug this pins against).
       cat <<'EOF'
 {"ok":true,"data":[
-  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-other","domain":"other.example.com","status":"Running","createdAt":"2026-02-01T00:00:00Z"},
   {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
 ]}
 EOF
@@ -977,6 +1068,43 @@ EOF
 
   # Verify kubeconfig was cleaned up
   [ ! -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+}
+
+@test "destroy_hosted: several clusters of the domain: deletes none, names them, keeps the kubeconfig" {
+  yq() { echo ""; }
+  export -f yq
+  export DELETE_MARK="${BATS_TEST_TMPDIR}/deleted"
+  curl() {
+    if [[ " $* " == *" DELETE "* ]]; then
+      : > "${DELETE_MARK}"
+      printf '{"ok":true}\n200'
+    else
+      cat <<'EOF'
+{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","status":"Creating","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"cl-old","domain":"test.kubehz.dev","status":"Running","createdAt":"2026-01-01T00:00:00Z"}
+]}
+EOF
+    fi
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+
+  run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "[error] kubehz: your account has 2 clusters for test.kubehz.dev, so lo deleted none of them.
+  lo deletes a cluster only when the account has one cluster for the domain. The local kubeconfigs stay.
+  - cluster cl-old
+  - cluster cl-new
+  Select the cluster in the dashboard and delete it there."
+  [ ! -e "${DELETE_MARK}" ]
+  [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
 }
 
 @test "destroy_hosted: REFUSES when the registry lookup fails (no delete, kubeconfig kept)" {
@@ -1002,6 +1130,32 @@ EOF
   assert_output --partial "nothing was deleted"
   # The cluster may still exist — its credentials must survive the refusal.
   [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+}
+
+# A lookup that does not run (a missing command, rc 127) or ends with
+# another code is no answer: destroy deletes nothing on a guessed id.
+@test "destroy_hosted: a lookup result other than 0, 2 or 3 deletes nothing" {
+  yq() { echo ""; }
+  export -f yq
+  export DELETE_MARK="${BATS_TEST_TMPDIR}/deleted"
+  curl() { [[ " $* " != *" DELETE "* ]] || : > "${DELETE_MARK}"; printf '{"ok":true}\n200'; }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+
+  local rc
+  for rc in 127 4; do
+    eval "kubehz::resolve_cluster_id() { return ${rc}; }"
+    run kubehz::destroy_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+    assert_failure
+    assert_output --partial "cannot read the cluster registry"
+    [ ! -e "${DELETE_MARK}" ]
+    [ -f "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]
+  done
 }
 
 @test "destroy_hosted: no row for the domain stays idempotent (nothing to destroy)" {
@@ -1091,6 +1245,11 @@ EOF
   kubeone::validate_credentials() { :; }
   export -f kubeone::validate_credentials
 
+  # The check of spec.auditLog (step 1b of driver::provision) lives in the
+  # config file of the driver, which this test does not load.
+  kubeone::_audit_log_read() { :; }
+  export -f kubeone::_audit_log_read
+
   kubeone::extract_vars() { :; }
   export -f kubeone::extract_vars
 
@@ -1121,9 +1280,11 @@ EOF
   }
   export -f kubeone::kubeconfig_path
 
-  # Stub provider::provision — libs/provision would normally load a
+  # Stub provider::provision: libs/provision would normally load a
   # provider before driver::provision runs, so we satisfy the contract.
-  provider::provision() { :; }
+  # The spy line shows that the self-hosted branch reached the provider.
+  # Its rc 1 ends the run there: the steps after it are not under test.
+  provider::provision() { echo "spy: provider::provision"; return 1; }
   export -f provider::provision
   # Other kubeone internals that get called once the self-hosted
   # branch proceeds — stub to no-ops for this unit test.
@@ -1138,7 +1299,9 @@ EOF
   # provision_hosted guard — don't care if later kubeone/real-network
   # steps succeed.
   run driver::provision "test.kubehz.dev"
+  assert_output --partial "spy: provider::provision"
   refute_output --partial "KubeOne driver requires spec.provider"
+  refute_output --partial "command not found"
   refute_output --partial "hosted"
 }
 
@@ -1237,7 +1400,7 @@ _hosted_kc_harness() {
   _hosted_no_cluster
   export LOK8S_KUBEHZ_API_URL="https://api.test" KUBEHZ_TOKEN="t"
   curl() {
-    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then echo "kc-bytes"; return 0; fi
+    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then printf 'kc-bytes\n\n200'; return 0; fi
     printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
   }
   export -f curl
@@ -1272,6 +1435,121 @@ _hosted_kc_harness() {
 # <file> in <dir> (the name <file>.XXXXXX), one per line.
 _hosted_temps() {
   find "${1}" -maxdepth 1 -name "${2}.*" -print
+}
+
+# A refused download names the cause and the next step, and writes no
+# byte of the error body. Go twin: TestHostedKubeconfigNamesTheCause.
+@test "hosted kubeconfig: a refused download names the cause and the next step" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="t"
+  yq() { echo "test.kubehz.dev"; }
+  export -f yq
+  curl() {
+    [[ "${STUB_KC_STATUS}" != fail ]] || return 7
+    printf '%s\n%s' "${STUB_KC_BODY}" "${STUB_KC_STATUS}"
+  }
+  export -f curl
+  local kc="${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" head="[error] Failed to download kubeconfig for hosted cluster cl-1"
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  _kc_case() {
+    export STUB_KC_STATUS="${1}" STUB_KC_BODY="${2}"
+    printf 'old\n' > "${kc}"
+    run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+    assert_failure
+    assert_output "${3}"
+    [ "$(cat "${kc}")" = old ]
+    [ -z "$(find "${BATS_TEST_TMPDIR}/.kubeconfig" -name 'test.kubehz.dev.yaml.*')" ]
+  }
+  _kc_case 403 '{"ok":false,"data":{"code":"TOKEN_NOT_ALLOWED","message":"no"}}' "${head} (HTTP 403 TOKEN_NOT_ALLOWED)
+  This api gives the kubeconfig only to a dashboard sign-in, not to an API token. Download it in the dashboard.
+  The cluster exists: do not create it again."
+  _kc_case 403 '{"code":"TOKEN_SCOPE_MISSING"}' "${head} (HTTP 403 TOKEN_SCOPE_MISSING)
+  KUBEHZ_TOKEN needs the read scope and the clusters:write scope. Mint a token with both in the dashboard (Access -> API Tokens)."
+  _kc_case 409 '{"ok":false,"data":{"code":"KUBECONFIG_NOT_READY"}}' "${head} (HTTP 409 KUBECONFIG_NOT_READY)
+  Run the command again when the status is Running."
+  _kc_case 500 '{"ok":false,"data":{"code":"no\u001b[2Jcode"}}' "${head} (HTTP 500)"
+  _kc_case 503 '{"ok":false,"data":{"code":"KUBECONFIG_BACKEND_UNAVAILABLE"}}' "${head} (HTTP 503 KUBECONFIG_BACKEND_UNAVAILABLE)"
+  _kc_case 404 '<html>' "${head} (HTTP 404)"
+  _kc_case fail '' "${head} (no answer)"
+  # An answer without a status line is no answer.
+  _kc_case '' 'apiVersion: v1' "${head} (no answer)"
+  # A 2xx answer: the body whole, and no cause.
+  export STUB_KC_STATUS=200 STUB_KC_BODY=$'apiVersion: v1\nkind: Config\n'
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+  assert_success
+  [ "$(cat "${kc}")" = $'apiVersion: v1\nkind: Config' ]
+  [ "$(wc -c < "${kc}")" -eq 28 ]
+}
+
+# lo now reads the answer into a local. The kubelogin file holds no
+# credential, but a caller's set -x shows no byte of it all the same. A
+# refusal of the private file names no cause of the request: not of an
+# earlier download (the path is a directory, so no request goes out), and
+# not "no answer" after a complete download (the rename fails).
+@test "hosted kubeconfig: a caller's trace shows no byte of the file, and a file refusal names no old cause" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="t"
+  yq() { echo "test.kubehz.dev"; }
+  curl() { printf 'kc-canary-7f3a\n\n200'; }
+  export -f yq curl
+  local kc="${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  _traced() { set -x; kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null; }
+  run _traced
+  assert_success
+  assert_output --partial "+ kubehz::_hosted_kubeconfig "
+  refute_output --partial "kc-canary-7f3a"
+  [ "$(cat "${kc}")" = kc-canary-7f3a ]
+
+  local dir="${BATS_TEST_TMPDIR}/.kubeconfig/dir.yaml"
+  mkdir -p "${dir}"
+  KUBEHZ_KC_CAUSE="HTTP 403 TOKEN_NOT_ALLOWED" KUBEHZ_KC_CODE="TOKEN_NOT_ALLOWED"
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${dir}" /dev/null
+  assert_failure
+  assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1"
+  refute_output --partial "for hosted cluster cl-1 ("
+  refute_output --partial "This api gives"
+
+  curl() { printf 'kc-new\n\n200'; }
+  kubehz::_publish_private() { return 1; }
+  export -f curl
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+  assert_failure
+  assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1"
+  refute_output --partial "for hosted cluster cl-1 ("
+  [ "$(cat "${kc}")" = kc-canary-7f3a ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}/.kubeconfig" test.kubehz.dev.yaml)" ]
+}
+
+# A write error of the kubeconfig (here /dev/full, as on a full disk)
+# fails the download, and the old file stays. Before, the getter ignored
+# the error of printf, and lo renamed a short or empty temp file over the
+# old kubeconfig. The line names no cause of the request: the api
+# answered. Go twin: writePrivateFile checks the Write and the Close.
+@test "hosted kubeconfig: a write error keeps the old file" {
+  [[ -w /dev/full ]] || skip "this system has no /dev/full"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  export KUBEHZ_TOKEN="t"
+  yq() { echo "test.kubehz.dev"; }
+  curl() { printf 'kc-new\n\n200'; }
+  export -f yq curl
+  local kc="${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml"
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  printf 'old\n' > "${kc}"
+
+  _kc_to_full() { kubehz::_hosted_kubeconfig_get "$@" > /dev/full; }
+  run _kc_to_full "https://api.kubehz.dev" cl-1
+  assert_failure
+  assert_output --partial "write error"
+
+  eval "$(declare -f kubehz::_hosted_kubeconfig_get | sed '1s/^kubehz::_hosted_kubeconfig_get /_kc_get_real /')"
+  kubehz::_hosted_kubeconfig_get() { _kc_get_real "$@" > /dev/full; }
+  run kubehz::_hosted_kubeconfig "https://api.kubehz.dev" cl-1 test.kubehz.dev "${kc}" /dev/null
+  assert_failure
+  assert_output --partial "[error] Failed to download kubeconfig for hosted cluster cl-1"
+  refute_output --partial "for hosted cluster cl-1 ("
+  [ "$(cat "${kc}")" = old ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}/.kubeconfig" test.kubehz.dev.yaml)" ]
 }
 
 @test "provision_hosted: a failed download keeps the old kubeconfig and leaves no temp file" {
@@ -1315,18 +1593,18 @@ _hosted_temps() {
   [ "$(cat "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = kc-bytes ]
 }
 
-# The mode is checked while the content is written too (the stdout of the
-# download): a write in place through the link would write into the old
-# 0644 file, and a chmod after it would make the end mode 0600 all the same.
+# The mode is checked while the download runs too: the temp file beside
+# the target is there, 0600, before lo writes the answer into it. A write
+# in place through the link would write into the old 0644 file, and a
+# chmod after it would make the end mode 0600 all the same.
 @test "provision_hosted: a symlinked kubeconfig keeps the link and gets the new content, mode 0600" {
-  [[ -e "/proc/${BASHPID}/fd/1" ]] || skip "no /proc/<pid>/fd"
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
-  export KC_MODES="${BATS_TEST_TMPDIR}/modes"
+  export KC_MODES="${BATS_TEST_TMPDIR}/modes" KC_REAL="${PATH_BASE}/real"
   curl() {
     if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then
-      stat -L -c %a "/proc/${BASHPID}/fd/1" >> "${KC_MODES}"
-      echo "kc-bytes"
+      find "${KC_REAL}" -maxdepth 1 -name 'test.kubehz.dev.yaml.*' -exec stat -c %a {} + >> "${KC_MODES}"
+      printf 'kc-bytes\n\n200'
       return 0
     fi
     printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
@@ -2433,11 +2711,14 @@ same"
 
 @test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
   _hosted_kc_harness
+  # The lookup lives in libs/kubehz/main. Without it the lookup is a
+  # missing command (rc 127), and destroy must refuse that too.
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   yq() { case "$2" in '.metadata.name'*) echo "shortname" ;; *) echo "1" ;; esac; }
   # The harness curl answers the CREATE route; destroy resolves through the
   # registry list and DELETEs by id — answer those two.
   curl() {
-    if [[ "$*" == *"/api/clusters?perPage=500"* ]]; then
+    if [[ "$*" == *"/api/clusters?perPage=500&domain=test.kubehz.dev" ]]; then
       echo '{"ok":true,"data":[{"id":"cl-1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}]}'
     elif [[ " $* " == *" DELETE "* ]]; then
       printf '{"ok":true,"data":{"deleted":true,"id":"cl-1"}}\n200'

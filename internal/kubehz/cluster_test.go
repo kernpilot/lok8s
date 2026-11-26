@@ -44,9 +44,72 @@ func TestStatusReadsRowNotEnvelope(t *testing.T) {
 ],"meta":{"page":1,"perPage":500,"total":3}}`)
 	mustOK(t, h.ctx.Status(t.Context(), "test.kubehz.dev"), h.output())
 	mustContain(t, h.output(), "Agent:   cronjob (cronjob/kubehz-heartbeat — every 5 minutes)")
-	mustContain(t, h.output(), "Status:  Running (id: cl-old)")
-	mustContain(t, h.output(), "Beat:    2026-08-19T10:00:00Z (connected)")
+	mustContain(t, h.output(), "Status:  Running (id: cl-old)\n")
+	mustContain(t, h.output(), "Beat:    2026-08-19T10:00:00Z (connected)\n"+
+		"Note:    your account has 2 clusters for test.kubehz.dev. lo shows the oldest. See them with:  lo kubehz cluster list\n")
 	mustNotContain(t, h.output(), "Status:  unknown")
+	// A row that is not hosted: no read of the detail route.
+	if h.anyReq("GET", "/api/clusters/") {
+		t.Fatalf("requests: %+v", h.reqs())
+	}
+	if r := h.lastReq("GET", "/api/clusters"); r == nil || r.Query != "perPage=500&domain=test.kubehz.dev" {
+		t.Fatalf("list: %+v", r)
+	}
+}
+
+// The list holds the status that kubehz stored for a hosted cluster; lo
+// status prints the live status of the detail route.
+func TestStatusHostedReadsTheLiveStatus(t *testing.T) {
+	t.Parallel()
+	const one = `{"ok":true,"data":[{"id":"cl-old","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating","createdAt":"2026-01-01T00:00:00Z"}]}`
+	for _, tc := range []struct {
+		name, list   string
+		code         int
+		detail, want string
+	}{
+		{"live Running", one, 200, `{"ok":true,"data":{"id":"cl-old","status":"Running"}}`, "Status:  Running (id: cl-old)\n"},
+		{"live Paused, bare body", one, 200, `{"id":"cl-old","status":"Paused"}`, "Status:  Paused (id: cl-old)\n"},
+		{"live not a word", one, 200, `{"ok":true,"data":{"status":"\u001b[2JRunning"}}`, "Status:  unknown (id: cl-old)\n"},
+		{"read fails", one, 500, `{}`, "Status:  Creating (id: cl-old, from the list: lo could not read the live status)\n"},
+		{"no live status", one, 200, `{"ok":true,"data":{"id":"cl-old"}}`, "Status:  Creating (id: cl-old, from the list: lo could not read the live status)\n"},
+		{"not JSON", one, 200, `<html>`, "Status:  Creating (id: cl-old, from the list: lo could not read the live status)\n"},
+		{"id is not a cluster id", `{"ok":true,"data":[{"id":"A1","domain":"test.kubehz.dev","hosting":"hosted","status":"Creating"}]}`, 200, `{"status":"Running"}`, "Status:  Creating (id: A1)\n"},
+		{"self-hosted", `{"ok":true,"data":[{"id":"cl-old","domain":"test.kubehz.dev","hosting":"self","status":"Creating"}]}`, 200, `{"status":"Running"}`, "Status:  Creating (id: cl-old)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			registeredSpec(h)
+			h.handle("GET /api/clusters", 200, tc.list)
+			h.handle("GET /api/clusters/cl-old", tc.code, tc.detail)
+			h.handle("GET /api/clusters/A1", tc.code, tc.detail)
+			mustOK(t, h.ctx.Status(t.Context(), "test.kubehz.dev"), h.output())
+			mustContain(t, h.output(), tc.want)
+			mustNotContain(t, h.output(), "Note:")
+			if h.anyReq("GET", "/api/clusters/A1") {
+				t.Fatal("an id that is not a cluster id must not go into a path")
+			}
+			if strings.Contains(tc.name, "self") && h.anyReq("GET", "/api/clusters/cl-old") {
+				t.Fatal("a self-hosted row has no live read")
+			}
+		})
+	}
+}
+
+// A part of the list does not show that the domain has no cluster.
+func TestStatusPartialListIsUnknown(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	registeredSpec(h)
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[{"id":"cl-other","domain":"other.example.com"}],"meta":{"pagination":{"total":600}}}`)
+	mustOK(t, h.ctx.Status(t.Context(), "test.kubehz.dev"), h.output())
+	mustContain(t, h.output(), "Status:  unknown (the cluster list shows 1 of 600 clusters)\n")
+	mustNotContain(t, h.output(), "not registered")
+
+	h.reset()
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[{"id":"cl-other","domain":"other.example.com"}],"meta":{"pagination":{"total":1}}}`)
+	mustOK(t, h.ctx.Status(t.Context(), "test.kubehz.dev"), h.output())
+	mustContain(t, h.output(), "Status:  not registered (no cluster for test.kubehz.dev")
 }
 
 func TestStatusNoRow(t *testing.T) {
@@ -262,6 +325,21 @@ func TestReEnrollHashesAndReportsRotated(t *testing.T) {
 	}
 }
 
+func TestReEnrollSeveralClustersUsesTheOldest(t *testing.T) {
+	h := newHarness(t)
+	reEnrollSpec(h, h.apiURL())
+	h.handle("GET /api/clusters", 200, severalClustersFixture)
+	kubectlStub(h, false, false)
+	h.handle("POST /api/clusters/cl-old/agent-token", 200, `{"rotated":true,"clusterId":"cl-old"}`)
+	h.handle("POST /api/clusters/cl-new/agent-token", 200, `{"rotated":true,"clusterId":"cl-new"}`)
+	mustOK(t, h.ctx.ReEnroll(t.Context(), "test.kubehz.dev"), h.output())
+	mustContain(t, h.output(), oldestWarn)
+	mustContain(t, h.output(), "agent token re-enrolled for test.kubehz.dev (cl-old)")
+	if h.anyReq("POST", "/api/clusters/cl-new/") {
+		t.Fatalf("requests: %+v", h.reqs())
+	}
+}
+
 func TestReEnrollAlreadyLive(t *testing.T) {
 	h := newHarness(t)
 	reEnrollSpec(h, h.apiURL())
@@ -361,5 +439,41 @@ func TestAssessSharedAndFetch(t *testing.T) {
 	mustContain(t, h.output(), "No assessment recorded")
 	if r := h.lastReq("GET", "/assessment"); r.Auth != "Bearer test-token" {
 		t.Fatalf("assessment auth: %+v", r)
+	}
+	mustNotContain(t, h.output(), "[warn]")
+}
+
+// The warning of assess and re-enroll for more than one cluster of the
+// domain: they use the oldest.
+const oldestWarn = "[warn] kubehz: your account has 2 clusters for test.kubehz.dev. lo uses the oldest, cl-old.\n" +
+	"  The server binds the agent to the oldest active cluster of a domain.\n" +
+	"  - cluster cl-old\n" +
+	"  - cluster cl-new\n"
+
+func TestAssessSeveralClustersUsesTheOldest(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	registeredSpec(h)
+	h.handle("GET /api/clusters", 200, severalClustersFixture)
+	h.handle("GET /api/clusters/cl-old/assessment", 200, `{"data":{"assessment":null}}`)
+	h.handle("GET /api/clusters/cl-new/assessment", 200, `{"data":{"assessment":null}}`)
+	mustOK(t, h.ctx.Assess(t.Context(), "test.kubehz.dev"), h.output())
+	mustContain(t, h.output(), oldestWarn)
+	mustContain(t, h.output(), "No assessment recorded")
+	if !h.anyReq("GET", "/api/clusters/cl-old/assessment") || h.anyReq("GET", "/api/clusters/cl-new/assessment") {
+		t.Fatalf("requests: %+v", h.reqs())
+	}
+
+	// The oldest cluster has an id that lo does not take: lo stops.
+	h.reset()
+	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[
+  {"id":"cl-new","domain":"test.kubehz.dev","createdAt":"2026-02-01T00:00:00Z"},
+  {"id":"A1","domain":"test.kubehz.dev","createdAt":"2026-01-01T00:00:00Z"}
+]}`)
+	mustErr(t, h.ctx.Assess(t.Context(), "test.kubehz.dev"))
+	mustContain(t, h.output(), "no cluster found for test.kubehz.dev")
+	mustNotContain(t, h.output(), "lo uses the oldest")
+	if h.anyReq("GET", "/assessment") {
+		t.Fatalf("requests: %+v", h.reqs())
 	}
 }

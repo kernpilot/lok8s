@@ -197,7 +197,7 @@ setup() {
     } >> "${CALL_LOG}"
     case "${CURL_URL}" in
       */api/clusters/register) printf '%s\n200' '{"id":"cl-9","claimed":true}' ;;
-      *'/api/clusters?perPage=500') printf '%s\n' '{"data":[]}' ;;
+      *'/api/clusters?perPage=500&domain=acme.example.org') printf '%s\n' '{"data":[]}' ;;
       *) return 7 ;;
     esac
   }
